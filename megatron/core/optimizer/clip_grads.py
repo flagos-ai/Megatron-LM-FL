@@ -47,6 +47,8 @@ from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
 from ..transformer.module import param_is_not_shared
 from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
 
+from flagscale.train.hetero.p2p_communication import get_device_type_for_comm
+
 
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
@@ -93,9 +95,20 @@ def get_grad_norm_fp32(
             torch.distributed.all_reduce(
                 total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=data_parallel_group
             )
-        torch.distributed.all_reduce(
-            total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=grad_stats_parallel_group
-        )
+
+        # Take max across all model-parallel GPUs.
+        # For cpu comminication
+        tensor_device = get_device_type_for_comm(grad_stats_parallel_group)
+        total_norm_cuda.to(tensor_device)
+        if isinstance(grad_stats_parallel_group, list):
+            for group in grad_stats_parallel_group:
+                torch.distributed.all_reduce(
+                    total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=group
+                )
+        else:
+            torch.distributed.all_reduce(
+                total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=grad_stats_parallel_group
+            )
         total_norm = total_norm_cuda[0].item()
 
     else:
@@ -127,9 +140,19 @@ def get_grad_norm_fp32(
             torch.distributed.all_reduce(
                 total_norm, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
             )
-        torch.distributed.all_reduce(
-            total_norm, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
-        )
+
+        # For cpu comminication
+        tensor_device = get_device_type_for_comm(grad_stats_parallel_group)
+        total_norm.to(tensor_device)
+        if isinstance(grad_stats_parallel_group, list):
+            for group in grad_stats_parallel_group:
+                torch.distributed.all_reduce(
+                    total_norm, op=torch.distributed.ReduceOp.SUM, group=group
+                )
+        else:
+            torch.distributed.all_reduce(
+                total_norm, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
+            )
         total_norm = total_norm.item() ** (1.0 / norm_type)
 
     return total_norm
@@ -238,9 +261,21 @@ def count_zeros_fp32(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
         )
     # Sum across all model-parallel GPUs.
-    torch.distributed.all_reduce(
-        total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
-    )
+    comm_device = get_device_type_for_comm(grad_stats_parallel_group)
+    if comm_device == "cpu":
+        total_num_zeros = total_num_zeros.cpu()
+
+    if isinstance(grad_stats_parallel_group, list):
+        original_total_num_zeros = total_num_zeros.clone().detach()
+        for group in grad_stats_parallel_group:
+            total_num_zeros.data = original_total_num_zeros.data.clone()
+            torch.distributed.all_reduce(
+                total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
+            )
+    else:
+        torch.distributed.all_reduce(
+            total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
+        )
 
     total_num_zeros = total_num_zeros.item()
 

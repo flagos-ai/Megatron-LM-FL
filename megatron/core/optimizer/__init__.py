@@ -143,12 +143,19 @@ def _get_param_groups(
             else:
                 wd_mult = 0.0
 
+            # NOTE(lizhiyu): hack for qwen2.5vl
+            is_vision_model_param = False
+            if "vision_model" in name:
+                is_vision_model_param = True
+            else:
+                is_vision_model_param = False
+
             # Create config_tuple that is hash-able. Remove timers object before
             # creating config_tuple.
             config_for_param_copy = copy.deepcopy(config_for_param)
             config_for_param_copy.timers = None
             config_tuple = astuple(config_for_param_copy)
-            key = (wd_mult, is_expert_parallel, config_tuple)
+            key = (wd_mult, is_expert_parallel, is_vision_model_param, config_tuple)
             if key not in params_map:
                 params_map[key] = []
             params_map[key].append(param)
@@ -171,7 +178,7 @@ def _get_param_groups(
 
     param_groups = []
     for key in params_key:
-        wd_mult, is_expert_parallel, _ = key
+        wd_mult, is_expert_parallel, is_vision_model_param, _ = key
         params = params_map[key] if key in params_map else []
         config, uses_default_config = None, True
         if key not in configs_map:
@@ -188,11 +195,12 @@ def _get_param_groups(
             'is_expert_parallel': is_expert_parallel,
             'is_decoupled_lr': False,  # For backwards compatibility.
             'default_config': uses_default_config,
+            'is_vision_model_param': is_vision_model_param,
         }
 
         # Stick relevant fields into param_group from config object.
         if config is not None:
-            param_group['max_lr'] = config.lr
+            param_group['max_lr'] = config.max_lr if not is_vision_model_param else config.max_lr * config.vision_ration # NOTE(lizhiyu): change the ration here
             param_group['min_lr'] = config.min_lr
             # TODO: Add other relevant arguments (e.g., weight decay, optimizer)
             # here as well.
@@ -499,6 +507,10 @@ def get_megatron_optimizer(
     intra_dp_cp_group = process_groups['intra_dp_cp_group']
     intra_expt_dp_group = process_groups['intra_expt_dp_group']
     mp_group = process_groups['mp_group']
+    ########## FlagScale Begin ##########
+    mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
+    model_parallel_rank = mp_group[0].rank()
+    ########## FlagScale End ##########
     expt_tp_pp_group = process_groups['expt_tp_pp_group']
     intra_dp_cp_group_gloo = process_groups['intra_dp_cp_group_gloo']
     intra_expt_dp_group_gloo = process_groups['intra_expt_dp_group_gloo']
@@ -606,7 +618,11 @@ def get_megatron_optimizer(
                 param_to_param_group[param_name] = param_group_id
             param_group_id += 1
     if len(moe_param_groups) > 0:
-        expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
+        if not isinstance(expt_tp_pp_group, list):
+            expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
+        else:
+            model_parallel_rank = expt_tp_pp_group[0].rank()
+
         # Pass Gloo process groups into optimizer only if needed.
         if use_gloo_process_groups:
             expt_data_parallel_group_gloo = intra_expt_dp_group_gloo

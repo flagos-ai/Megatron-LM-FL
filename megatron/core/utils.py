@@ -524,6 +524,10 @@ def get_pg_size(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 1
+    ######### FlagScale Begin #########
+    if isinstance(group, list):
+        return group[0].size()
+    ######### FlagScale End #########
     return group.size()
 
 
@@ -538,6 +542,10 @@ def get_pg_rank(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 0
+    ########### FlagScale Begin #########
+    if isinstance(group, list):
+        return group[0].rank()
+    ########### FlagScale End #########
     return group.rank()
 
 

@@ -192,6 +192,13 @@ class OptimizerConfig:
 
     config_logger_dir: str = ""
     """When non-empty, dumps entry-point configs to config_logger_dir"""
+    
+    ########## FlagScale Begin ##########
+    ################
+    # Grouped learning rate for multi-model training.
+    ################
+    vision_ration: float = 1.0
+    ########## FlagScale End ##########
 
     def __post_init__(self):
         """Check the validity of the config."""

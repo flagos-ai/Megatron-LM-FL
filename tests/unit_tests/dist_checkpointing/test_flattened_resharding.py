@@ -28,6 +28,9 @@ from tests.unit_tests.test_utilities import Utils
 
 
 class TestFlattenedResharding:
+    def setup_class(cls):
+        Utils.initialize_distributed()
+
     def setup_method(self, method):
         pass
 

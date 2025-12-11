@@ -448,6 +448,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
+        use_transformer_engine_fl,
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
@@ -466,6 +467,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
+        ctx.use_transformer_engine_fl = use_transformer_engine_fl
 
         if sequence_parallel:
             dim_size = list(input.size())
@@ -557,18 +559,23 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                     weight.main_grad = weight.get_main_grad()
                     torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
-                    if weight.main_grad.dtype == torch.float32:
-                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
-                            total_input, grad_output, weight.main_grad
-                        )
-                    elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
-                        fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
-                            total_input, grad_output, weight.main_grad
-                        )
+                    if not ctx.use_transformer_engine_fl:
+                        if weight.main_grad.dtype == torch.float32:
+                            fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
+                                total_input, grad_output, weight.main_grad
+                            )
+                        elif weight.main_grad.dtype in (torch.float16, torch.bfloat16):
+                            fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp16(
+                                total_input, grad_output, weight.main_grad
+                            )
+                        else:
+                            raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
                     else:
-                        raise RuntimeError(
-                            "Unsupported gradient type for gradient accumulation fusion"
-                        )
+                        if weight.main_grad.dtype in (torch.float32, torch.float16, torch.bfloat16):
+                            grad_weight = torch.matmul(grad_output.t(), total_input)
+                            weight.main_grad += grad_weight.view_as(weight.main_grad)
+                        else:
+                            raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
 
             if hasattr(weight, "grad_added_to_main_grad"):
                 # When overlap_grad_reduce is True, need to ensure that backward hooks
@@ -610,12 +617,12 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
-            return (sub_grad_input, grad_weight, grad_bias, None, None, None, None, None, None)
+            return (sub_grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None)
 
         if ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None, None
 
 
 def linear_with_grad_accumulation_and_async_allreduce(
@@ -629,6 +636,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
     wgrad_deferral_limit: Optional[int] = 0,
     async_grad_allreduce: Optional[bool] = None,
     tp_group: Optional[torch.distributed.ProcessGroup] = None,
+    use_transformer_engine_fl: Optional[bool] = False,
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -714,6 +722,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
+        use_transformer_engine_fl,
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -941,6 +950,8 @@ class ColumnParallelLinear(torch.nn.Module):
         if not weight.requires_grad:
             return linear_with_frozen_weight(input, weight, *args, **kwargs)
         else:
+            if self.config.use_transformer_engine_fl:
+                kwargs['use_transformer_engine_fl'] = True
             return linear_with_grad_accumulation_and_async_allreduce(input, weight, *args, **kwargs)
 
     def forward(
