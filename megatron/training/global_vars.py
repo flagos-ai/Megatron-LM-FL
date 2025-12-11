@@ -240,7 +240,7 @@ def _set_wandb_writer(args):
             # settings were.
             with open(wandb_config['kitchen_config_file'], "r") as f:
                 wandb_config['kitchen_config_file_contents'] = f.read()
-       save_dir = os.path.join(save_dir, "rank-{}".format(rank))
+        save_dir = os.path.join(save_dir, "rank-{}".format(rank))
         os.makedirs(save_dir, exist_ok=True)
 
         wandb_id = f"{args.wandb_exp_name}-rank-{rank}"
