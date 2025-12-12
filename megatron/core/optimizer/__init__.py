@@ -200,7 +200,7 @@ def _get_param_groups(
 
         # Stick relevant fields into param_group from config object.
         if config is not None:
-            param_group['max_lr'] = config.max_lr if not is_vision_model_param else config.max_lr * config.vision_ration # NOTE(lizhiyu): change the ration here
+            param_group['max_lr'] = config.lr if not is_vision_model_param else config.lr * config.vision_ration # NOTE(lizhiyu): change the ration here
             param_group['min_lr'] = config.min_lr
             # TODO: Add other relevant arguments (e.g., weight decay, optimizer)
             # here as well.
