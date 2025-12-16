@@ -124,6 +124,9 @@ def initialize_megatron(
         result_rejected_tracker_filename=args.result_rejected_tracker_filename,
     )
 
+    if args.auto_skip_spiky_loss:
+        set_get_spiky_loss_detector(args=args)
+
     # torch.distributed initialization
     def finish_mpu_init():
         args = get_args()
