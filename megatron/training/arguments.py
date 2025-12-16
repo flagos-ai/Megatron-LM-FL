@@ -436,6 +436,8 @@ def validate_args(args, defaults={}):
                     args.pipeline_model_parallel_size), flush=True)
 
         # Checks.
+        if args.expert_tensor_parallel_size is None:
+            args.expert_tensor_parallel_size = args.tensor_model_parallel_size
 
     if args.hierarchical_context_parallel_sizes:
         from numpy import prod
@@ -444,8 +446,6 @@ def validate_args(args, defaults={}):
         assert args.hierarchical_context_parallel_sizes is not None, \
         "--hierarchical-context-parallel-sizes must be set when a2a+p2p is used in cp comm"
 
-    if args.expert_tensor_parallel_size is None:
-        args.expert_tensor_parallel_size = args.tensor_model_parallel_size
 
     # Deprecated arguments.
     assert args.batch_size is None, '--batch-size argument is no longer ' \
