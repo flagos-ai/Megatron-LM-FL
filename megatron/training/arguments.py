@@ -99,7 +99,6 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
     parser = _add_auto_tuner_args(parser)
     parser = _add_auto_skip_spiky_loss(parser)
     parser = _add_peft_args(parser)
-    parser = _add_transformer_engine_fl_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -1379,14 +1378,6 @@ def validate_args(args, defaults={}):
         assert args.num_experts is None, "PEFT is not tested with MoE currently"
         assert args.recompute_method is None and args.recompute_granularity is None and args.recompute_num_layers is None, "PEFT will raise comfilcts with recompute currently"
         assert args.ckpt_format == 'torch', "PEFT is only tested with torch format checkpoint"
-
-    if args.use_transformer_engine_fl:
-        assert not args.add_bias_linear, "Do not support linear with bias in TransformerEngine-TL Now"
-        assert args.context_parallel_size == 1, "DotProductAttention in TransformerEngine-FL, do not support context parallel now"
-        assert not args.tp_comm_overlap, "Do not support gemm/sp comm in TransformerEngine-FL now"
-        args.distributed_backend = 'flagcx'
-        args.use_flag_gems = True
-
 
     # Print arguments.
     _print_args("arguments", args)
@@ -3776,22 +3767,6 @@ def _add_peft_args(parser):
     group.add_argument('--lora-out-init-method', type=str, default='zero',
         choices=['normal', 'kaiming', 'xavier', 'zero'],
         help='Init method of lora b')
-    return parser
-
-def _add_transformer_engine_fl_args(parser):
-    group = parser.add_argument_group(title="flag engine")
-    group.add_argument('--use-transformer-engine-fl', action='store_true',
-                       help='Enable transformer engine fl for training')
-    group.add_argument('--use-flag-gems', action='store_true',
-                       help='Enable flag gems for training')
-    group.add_argument('--flag-gems-log-path', type=str, default=None,
-                       help='Path of flag gems logging')
-    group.add_argument(
-        '--flag-gems-unused',
-        nargs='*',
-        default=None,
-        help='Flag Gems unused ops list'
-    )
     return parser
 ########## FlagScale End ##########
 
