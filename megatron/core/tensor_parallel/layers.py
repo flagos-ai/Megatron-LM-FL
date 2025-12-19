@@ -566,7 +566,9 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                             total_input, grad_output, weight.main_grad
                         )
                     else:
-                        raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                        raise RuntimeError(
+                            "Unsupported gradient type for gradient accumulation fusion"
+                        )
 
             if hasattr(weight, "grad_added_to_main_grad"):
                 # When overlap_grad_reduce is True, need to ensure that backward hooks
