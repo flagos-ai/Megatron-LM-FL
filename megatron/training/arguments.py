@@ -67,7 +67,6 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
     parser = _add_autoresume_args(parser)
     parser = _add_biencoder_args(parser)
     parser = _add_vision_args(parser)
-    parser = _add_mtp_args(parser)
     parser = _add_moe_args(parser)
     parser = _add_mla_args(parser)
     parser = _add_heterogeneous_args(parser)
@@ -95,10 +94,6 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
                                      allow_abbrev=False)
 
     parser = add_megatron_arguments(parser)
-    parser = _add_hetero_args(parser)
-    parser = _add_auto_tuner_args(parser)
-    parser = _add_auto_skip_spiky_loss(parser)
-    parser = _add_peft_args(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
@@ -3286,19 +3281,6 @@ def _add_biencoder_args(parser):
     return parser
 
 
-def _add_mtp_args(parser):
-    # add args for Multi-token Prediction module
-    group = parser.add_argument_group(title="mtp")
-
-    # general mtp arguements
-    group.add_argument('--num-mtp-predictor', type=int, default=0,
-                       help='num of multi token predictors')
-    group.add_argument('--mtp-loss-coeff', type=float, default=0.3,
-                       help='Scaling coefficient for mtp loss: 0.3 is recommended in DeepSeekV3.')
-
-    return parser
-
-
 def _add_vision_args(parser):
     group = parser.add_argument_group(title="vision")
 
@@ -3698,75 +3680,4 @@ def _add_sft_args(parser):
     group.add_argument('--sft-tokenizer-prompt-format', type=str, default="nemotron-h-aligned", 
                        help='SFT prompt format.')
     return parser
-
-########## FlagScale Begin ##########
-def _add_hetero_args(parser):
-    group = parser.add_argument_group(title="heterogeneous training")
-
-    group.add_argument('--enable-hetero', action="store_true", 
-                       help='the mode of heterogeneous training')
-    group.add_argument('--hetero-device-types', nargs='*', type=str, default=None, 
-                       help='the list of device types: device_type_0 device_type_1 ...')
-    group.add_argument('--hetero-current-device-type', type=str, default=None, 
-                       help='the current device type')
-    group.add_argument('--hetero-pipeline-layer-split', nargs='*', type=int, default=None,
-                       help='Incompatible with --num-layers-per-virtual-pipeline-stage for now.'
-                       'hetero-pipeline-layer-split must be in the form: layers_0 layers_1 ... layers_n. The number of the list should be equal to pipeline-model-parallel-size.')
-    group.add_argument('--hetero-process-meshes', nargs='*', type=int, default=None,
-                       help='Use this arg to set TP-CP-DP-PP of each process mesh.'
-                       'This argument must be in the form: TP0, CP0, DP0, PP0, TP1, CP0, DP1, PP1...TPN, CPN, DPN, PPN. CP and TP size can be different, sum of PP should match pipeline-model-parallel-size, DP size should be the same.')
-    group.add_argument('--expert-tensor-parallel-size-per-process-mesh', nargs='*', type=int, default=None,
-                       help='The number of tensor parallel experts for each process-mesh. The number of the list should be equal to the number of process-meshes.')
-    group.add_argument('--hetero-use-cpu-communication', action='store_true', help='Use CPU for communication for heterogeneous communication.')
-    
-    return parser
-
-
-def _add_auto_tuner_args(parser):
-    group = parser.add_argument_group(title="auto tuner")
-
-    group.add_argument('--auto-tune', action='store_true',
-                       help='use auto tuner')
-
-    return parser
-
-
-def _add_auto_skip_spiky_loss(parser):
-    group = parser.add_argument_group(title='auto skip spiky loss')
-    
-    group.add_argument('--auto-skip-spiky-loss', action='store_true',
-                       help='Automatically skip spiky loss iterations.')
-    group.add_argument('--spiky-loss-threshold', type=float, default=0.2,
-                          help='Threshold for skipping spiky loss iterations.')
-    return parser
-
-
-def _add_peft_args(parser):
-    group = parser.add_argument_group(title='peft')
-
-    group.add_argument('--peft-type', type=str, default=None,
-        help='PEFT type')
-    group.add_argument(
-        '--lora-target-modules',
-        nargs='*',
-        choices=['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2', 'linear_q_proj', 'linear_q_down_proj', 'linear_q_up_proj', 'linear_kv_proj', 'linear_kv_down_proj', 'linear_kv_up_proj'],
-        default=['linear_qkv', 'linear_proj', 'linear_fc1', 'linear_fc2'],
-        help='LoRA target modules list. Valid choices: linear_qkv, linear_proj, '
-            'linear_fc1, linear_fc2. Default selects all.'
-    )
-    group.add_argument('--lora-dim', type=int, default=8)
-    group.add_argument('--lora-alpha', type=int, default=16)
-    group.add_argument('--lora-dropout', type=float, default=0.0,
-                       help='Dropout prob of lora linear')
-    group.add_argument('--lora-dropout-position', type=str, default='pre',
-                       choices=['pre', 'post'],
-                       help='Dropout position of lora linear')
-    group.add_argument('--lora-in-init-method', type=str, default='xavier',
-        choices=['normal', 'kaiming', 'xavier', 'zero'],
-        help='Init method of lora a')
-    group.add_argument('--lora-out-init-method', type=str, default='zero',
-        choices=['normal', 'kaiming', 'xavier', 'zero'],
-        help='Init method of lora b')
-    return parser
-########## FlagScale End ##########
 
