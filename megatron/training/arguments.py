@@ -348,6 +348,10 @@ def validate_args(args, defaults={}):
 
     # FlagScale begin
     enable_hetero = defaults.get("enable_hetero", False)
+    standalone_embedding_stage = defaults.get("standalone_embedding_stage", False)
+    multiple_of = defaults.get("multiple_of", None)
+    hidden_dim_multiplier = defaults.get("hidden_dim_multiplier", None)
+
 
     # Temporary
     assert args.non_persistent_ckpt_type in ['global', 'local', None], \
@@ -385,7 +389,7 @@ def validate_args(args, defaults={}):
         # Pipeline model parallel size.
         args.transformer_pipeline_model_parallel_size = (
             args.pipeline_model_parallel_size - 1
-            if args.standalone_embedding_stage else
+            if standalone_embedding_stage else
             args.pipeline_model_parallel_size
         )
 
@@ -835,14 +839,14 @@ def validate_args(args, defaults={}):
     if args.ffn_hidden_size is None:
         if args.swiglu:
             # Ref: https://github.com/facebookresearch/llama/blob/main/llama/model.py#L161-L162
-            if args.multiple_of is not None:
+            if multiple_of is not None:
                 hidden_dim = int(4 * args.hidden_size * 2 / 3)
-                if args.hidden_dim_multiplier is not None:
-                    assert args.hidden_dim_multiplier > 0, \
+                if hidden_dim_multiplier is not None:
+                    assert hidden_dim_multiplier > 0, \
                         'multiplier for hidden dim should be greater than zero'
-                    hidden_dim = int(hidden_dim * args.hidden_dim_multiplier)
-                args.ffn_hidden_size = args.multiple_of * \
-                    ((hidden_dim + args.multiple_of - 1) // args.multiple_of)
+                    hidden_dim = int(hidden_dim * hidden_dim_multiplier)
+                args.ffn_hidden_size = multiple_of * \
+                    ((hidden_dim + multiple_of - 1) // multiple_of)
             else:
                 # reduce the dimnesion for MLP since projections happens on
                 # two linear layers. this keeps the number of paramters in

@@ -88,6 +88,9 @@ def initialize_megatron(
     ## FlagScale Begin: Pre Validate Arguments ##
     fs_argument = FSTrainArguments(args)
     args_defaults["enable_hetero"] = args.enable_hetero
+    args_defaults["standalone_embedding_stage"] = args.standalone_embedding_stage
+    args_defaults["multiple_of"] = args.multiple_of
+    args_defaults["hidden_dim_multiplier"] = args.hidden_dim_multiplier
     fs_argument.pre_validate_args()
 
     if args.yaml_cfg is not None:
