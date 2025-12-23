@@ -87,6 +87,7 @@ def initialize_megatron(
 
     ## FlagScale Begin: Pre Validate Arguments ##
     fs_argument = FSTrainArguments(args)
+    args_defaults["enable_hetero"] = args.enable_hetero
     fs_argument.pre_validate_args()
 
     if args.yaml_cfg is not None:

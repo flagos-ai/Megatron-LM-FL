@@ -346,6 +346,9 @@ def tuple_type(x):
 
 def validate_args(args, defaults={}):
 
+    # FlagScale begin
+    enable_hetero = defaults.get("enable_hetero", False)
+
     # Temporary
     assert args.non_persistent_ckpt_type in ['global', 'local', None], \
         'Currently only global and local checkpoints are supported'
@@ -371,7 +374,7 @@ def validate_args(args, defaults={}):
     if args.attention_backend == AttnBackend.local:
         assert args.spec[0] == 'local' , '--attention-backend local is only supported with --spec local'
     
-    if not args.enable_hetero:
+    if not enable_hetero:
         total_model_size = args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
 
         # Total model size.
@@ -557,7 +560,7 @@ def validate_args(args, defaults={}):
         if args.virtual_pipeline_model_parallel_size == 1:
             args.virtual_pipeline_model_parallel_size = None
     elif args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
-        assert args.enable_hetero is False, 'num_layers_per_virtual_pipeline_stage is not supported with heterogeneous parallelism for now'
+        assert enable_hetero is False, 'num_layers_per_virtual_pipeline_stage is not supported with heterogeneous parallelism for now'
         if args.num_virtual_stages_per_pipeline_rank is None:
             assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, \
                 'please use --num-virtual-stages-per-pipeline-rank to specify virtual pipeline parallel degree when enable uneven pipeline parallelism'
@@ -599,7 +602,7 @@ def validate_args(args, defaults={}):
                 if args.account_for_loss_in_pipeline_split:
                     num_layers += 1
 
-                if args.enable_hetero is False:
+                if enable_hetero is False:
                     assert num_layers % args.transformer_pipeline_model_parallel_size == 0, \
                         'Number of layers should be divisible by the pipeline-model-parallel size'
     
