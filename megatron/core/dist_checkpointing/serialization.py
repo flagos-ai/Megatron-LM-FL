@@ -8,7 +8,6 @@ Additionally, `load` expects the sharded state dict argument as a guidance for
 loading the sharded tensors.
 """
 
-import os
 import logging
 from pathlib import Path
 from typing import Callable, Dict, Optional, Set, Tuple, Union
