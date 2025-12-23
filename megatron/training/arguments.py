@@ -1239,141 +1239,6 @@ def validate_args(args, defaults={}):
             args.recompute_granularity != 'full'
         ), 'recompute_granularity must not be full when CUDA Graphs are enabled.'
 
-    # DualPipeV related
-    if args.use_dualpipev:
-        assert args.pipeline_model_parallel_size > 1, (
-            "DualPipeV can only be used for pipeline scheduling in MoE models, "
-        "thus requiring both pipeline parallelism and expert parallelism."
-        )
-        assert args.expert_model_parallel_size > 1, (
-            "DualPipeV can only be used for pipeline scheduling in MoE models, "
-        "thus requiring both pipeline parallelism and expert parallelism."
-        )
-
-        middle_stage_layers = args.num_layers
-        num_middle_stages = args.pipeline_model_parallel_size
-        if args.decoder_first_pipeline_num_layers is not None:
-            middle_stage_layers = middle_stage_layers - args.decoder_first_pipeline_num_layers
-            num_middle_stages = num_middle_stages - 1
-            assert args.decoder_first_pipeline_num_layers % 2 == 0, (
-                "The first pipeline stage must contain an even number of Transformer layers, "
-                "so that DualPipeV can split it into two model chunks."
-            )
-        if args.decoder_last_pipeline_num_layers is not None:
-            middle_stage_layers = middle_stage_layers - args.decoder_last_pipeline_num_layers
-            num_middle_stages = num_middle_stages - 1
-            assert args.decoder_last_pipeline_num_layers % 2 == 0, (
-                "The last pipeline stage must contain an even number of Transformer layers, "
-                "so that DualPipeV can split it into two model chunks."
-            )
-        if num_middle_stages > 0:
-            assert middle_stage_layers > 0, "Layers can not be empty"
-            assert middle_stage_layers % num_middle_stages == 0, "Layers must be even split"
-            num_layers_in_middle_stages = middle_stage_layers // num_middle_stages
-            assert num_layers_in_middle_stages % 2 == 0, (
-                "The middle pipeline stage must contain an even number of Transformer layers, "
-                "so that DualPipeV can split it into two model chunks."
-            )
-
-        assert args.moe_shared_expert_overlap is False, (
-                " DualPipeV does not support simultaneous use with moe_shared_expert_overlap currently."
-        )
-
-        if args.moe_fb_overlap:
-            assert args.overlap_grad_reduce is False and args.overlap_param_gather is False, (
-                " DualPipeV configured with moe_fb_overlap is incompatible with either overlap_grad_reduce or overlap_param_gather. "
-                " When moe_fb_overlap is enabled, DualPipeV activates the DW-split mechanism provided by Transformer Engine, "
-                " which causes all param.grad attributes to be None during the backward-for-inputs phase. "
-                " This absence of gradient tensors violates the assumptions of both overlap_grad_reduce and overlap_param_gather, precipitating an assertion failure within DDP."
-            )
-            assert not args.moe_use_legacy_grouped_gemm, \
-                'delay_wgrad_compute is not supported with legacy groupedgemm implementation'
-            assert args.transformer_impl == 'transformer_engine', \
-                'delay_wgrad_compute is only supported with transformer_engine implementation'
-
-        assert args.untie_embeddings_and_output_weights is True, (
-            " DualPipeV is not supported with shared embedding and lm head"
-        )
-        assert args.mtp_num_layers is None, (
-            "DualPipeV is not supported with multi-token-predictor currently"
-        )
-
-    if args.peft_type is not None:
-        assert args.transformer_impl == 'transformer_engine', \
-            'PEFT is only supported with transformer_engine implementation'
-        if args.num_experts is not None and args.moe_shared_expert_intermediate_size is not None:
-            assert not args.moe_shared_expert_overlap, \
-                'PEFT is incompatible with moe_shared_expert_overlap'
-        assert args.num_experts is None, "PEFT is not tested with MoE currently"
-        assert args.recompute_method is None and args.recompute_granularity is None and args.recompute_num_layers is None, "PEFT will raise comfilcts with recompute currently"
-        assert args.ckpt_format == 'torch', "PEFT is only tested with torch format checkpoint"
-
-    # DualPipeV related
-    if args.use_dualpipev:
-        assert args.pipeline_model_parallel_size > 1, (
-            "DualPipeV can only be used for pipeline scheduling in MoE models, "
-        "thus requiring both pipeline parallelism and expert parallelism."
-        )
-        assert args.expert_model_parallel_size > 1, (
-            "DualPipeV can only be used for pipeline scheduling in MoE models, "
-        "thus requiring both pipeline parallelism and expert parallelism."
-        )
-
-        middle_stage_layers = args.num_layers
-        num_middle_stages = args.pipeline_model_parallel_size
-        if args.decoder_first_pipeline_num_layers is not None:
-            middle_stage_layers = middle_stage_layers - args.decoder_first_pipeline_num_layers
-            num_middle_stages = num_middle_stages - 1
-            assert args.decoder_first_pipeline_num_layers % 2 == 0, (
-                "The first pipeline stage must contain an even number of Transformer layers, "
-                "so that DualPipeV can split it into two model chunks."
-            )
-        if args.decoder_last_pipeline_num_layers is not None:
-            middle_stage_layers = middle_stage_layers - args.decoder_last_pipeline_num_layers
-            num_middle_stages = num_middle_stages - 1
-            assert args.decoder_last_pipeline_num_layers % 2 == 0, (
-                "The last pipeline stage must contain an even number of Transformer layers, "
-                "so that DualPipeV can split it into two model chunks."
-            )
-        if num_middle_stages > 0:
-            assert middle_stage_layers > 0, "Layers can not be empty"
-            assert middle_stage_layers % num_middle_stages == 0, "Layers must be even split"
-            num_layers_in_middle_stages = middle_stage_layers // num_middle_stages
-            assert num_layers_in_middle_stages % 2 == 0, (
-                "The middle pipeline stage must contain an even number of Transformer layers, "
-                "so that DualPipeV can split it into two model chunks."
-            )
-
-        assert args.moe_shared_expert_overlap is False, (
-                " DualPipeV does not support simultaneous use with moe_shared_expert_overlap currently."
-        )
-
-        if args.moe_fb_overlap:
-            assert args.overlap_grad_reduce is False and args.overlap_param_gather is False, (
-                " DualPipeV configured with moe_fb_overlap is incompatible with either overlap_grad_reduce or overlap_param_gather. "
-                " When moe_fb_overlap is enabled, DualPipeV activates the DW-split mechanism provided by Transformer Engine, "
-                " which causes all param.grad attributes to be None during the backward-for-inputs phase. "
-                " This absence of gradient tensors violates the assumptions of both overlap_grad_reduce and overlap_param_gather, precipitating an assertion failure within DDP."
-            )
-            assert not args.moe_use_legacy_grouped_gemm, \
-                'delay_wgrad_compute is not supported with legacy groupedgemm implementation'
-            assert args.transformer_impl == 'transformer_engine', \
-                'delay_wgrad_compute is only supported with transformer_engine implementation'
-
-        assert args.untie_embeddings_and_output_weights is True, (
-            " DualPipeV is not supported with shared embedding and lm head"
-        )
-        assert args.mtp_num_layers is None, (
-            "DualPipeV is not supported with multi-token-predictor currently"
-        )
-
-    if args.peft_type is not None:
-        assert args.transformer_impl == 'transformer_engine', \
-            'PEFT is only supported with transformer_engine implementation'
-        assert args.num_experts is None, "PEFT is not tested with MoE currently"
-        assert args.recompute_method is None and args.recompute_granularity is None and args.recompute_num_layers is None, "PEFT will raise comfilcts with recompute currently"
-        assert args.ckpt_format == 'torch', "PEFT is only tested with torch format checkpoint"
-
     # Print arguments.
     _print_args("arguments", args)
 
@@ -1811,8 +1676,6 @@ def _add_network_size_args(parser):
                        help='Which normalization technique to use.')
     group.add_argument('--norm-epsilon', type=float, default=1e-5,
                        help='Epsilon for layer norm and RMS norm.')
-    group.add_argument('--norm-init-weight', type=float, default=None,
-                       help="Norm weight initialization.")
     group.add_argument('--apply-layernorm-1p', action='store_true',
                        help='Adjust LayerNorm weights such that they are centered '
                        'around zero. This improves numerical stability.')
@@ -1836,10 +1699,6 @@ def _add_network_size_args(parser):
     group.add_argument('--glu-linear-offset', type=float, default=0.0,
                        help='Offset term in the GLU activation function: activation_func(x[0]) * (x[1] + offset). '
                             'Only used when gated_linear_unit is True')
-    group.add_argument('--multiple-of', type=int, default=None,
-                       help='Multiplier for setting Feed-Forward Network hidden size when swiglu.')
-    group.add_argument('--hidden-dim-multiplier', type=float, default=None,
-                       help='Custom Multiplier for setting Feed-Forward Network hidden dim when swiglu.')
     group.add_argument('--onnx-safe', type=bool, required=False,
                        help='Use workarounds for known problems with '
                        'Torch ONNX exporter')
@@ -2251,25 +2110,6 @@ def _add_training_args(parser):
                        '"shared_experts": recompute the shared experts in the MoE layer.'
                        '"moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing, '
                        '"core_attn", "mlp", "moe", and "shared_experts" use normal checkpointing.')
-    group.add_argument('--recompute-granularity-per-stage-micro-batch', nargs='*', type=str, default=None,
-                       help='used with recompute-granularity=full, setting recompute granularity'
-                       'of each stage and each micro-batch. This argument must be a two-dimension list, '
-                       'the sum of the first item of all the sub-lists should be equal to pipeline-model-parallel-size.'
-                       'Every sub-list is in the form: n0, flag0, n1, flag1,... except the first item, which is the stage number.'
-                       'The sum of n0, n1, ... should be equal to nums-micro-batch.'
-                       'granularity flag: 0 means turning off full recompute, 1 means turning on')
-    group.add_argument('--recompute-method-per-stage-micro-batch', nargs='*', type=str, default=None,
-                       help='used with recompute-granularity=full, setting recompute method '
-                       'of each stage and each micro-batch. This argument must be a two-dimension list, '
-                       'the sum of the first item of all the sub-lists should be equal to pipeline-model-parallel-size.'
-                       'Every sub-list is in the form: n0, flag0, n1, flag1,... except the first item, which is the stage number.'
-                       'The sum of n0, n1, ... should be equal to nums-micro-batch.'
-                       'method: 0 means uniform, 1 means block')
-    group.add_argument('--recompute-num-layers-per-stage-micro-batch', nargs='*', type=str, default=None,
-                       help='used with recompute-granularity=full, setting recompute num layers '
-                       'of each stage and each micro-batch. This argument must be a two-dimension list, '
-                       'Every sub-list is in the form: n0, num_laryers0, n1, num_laryers1,... except the first item, which is the stage number.'
-                       'The sum of n0, n1, ... should be equal to nums-micro-batch. ')
     group.add_argument('--cpu-offloading-num-layers', type=int, default=0,
                        help='The number of Transformer layers to offload to CPU.')
     group.add_argument('--no-clone-scatter-output-in-embedding', action='store_false',
@@ -2358,10 +2198,6 @@ def _add_training_args(parser):
                        help='Total number of samples to train over all '
                        'training runs. Note that either train-iters or '
                        'train-samples should be provided.')
-    group.add_argument('--skip-samples-range', nargs='+', type=int, default=None,
-                       help='Range of samples to skip during training.')
-    group.add_argument('--skip-iters-range', nargs='+', type=int, default=None,
-                       help='Range of iterations to skip during training.')
     group.add_argument('--log-interval', type=int, default=100,
                        help='Report loss and timing interval.')
     group.add_argument('--exit-interval', type=int, default=None,
@@ -2492,10 +2328,6 @@ def _add_training_args(parser):
                        help='The communicator group names to use high priority streams.')
     group.add_argument('--use-te-activation-func', action='store_true',
                        help='Use activation function kernel from Transformer Engine in MLP module.')
-    group.add_argument('--use-dualpipev', action='store_true',
-                       help='Use DualPipeV pipeline schedule method')
-    group.add_argument('--moe-fb-overlap', action='store_true',
-                       help='DualPipeV overlapping of moe a2a communication and forward/backward computation')
 
     return parser
 
@@ -2559,21 +2391,6 @@ def _add_learning_rate_args(parser):
     group.add_argument('--lr-wsd-decay-style', type=str, default='exponential',
                        choices=['exponential', 'linear', 'cosine', 'minus_sqrt'],
                        help='Decay style for the annealing phase of WSD'),
-    ## stablelm2-scheduler consists of multiple stages
-    group.add_argument('--lr-decay-stablelm2-cosine-samples', type=int, default=0,
-                       help='Samples number of cosine scheduler including warmup samples, used in stablelm2 scheduler.')
-    group.add_argument('--lr-decay-stablelm2-cosine-max-lr', type=float, default=None,
-                       help='Maximum lr of cosine scheduler, used in stablelm2 scheduler.')
-    group.add_argument('--lr-decay-stablelm2-cosine-period-samples', type=int, default=0,
-                       help='Period of cosine scheduler, used in stablelm2 scheduler.')
-    group.add_argument('--lr-decay-stablelm2-rsqrt-samples', type=int, default=0,
-                       help='Samples number of rsqrt scheduler used in stablelm2 scheduler.')
-    group.add_argument('--lr-decay-stablelm2-decay-samples', type=int, default=0,
-                       help='Samples number of decay scheduler used in stablelm2 scheduler.')
-    group.add_argument('--lr-decay-stablelm2-alpha', type=float, default=1.0,
-                       help='Numerator used in stablelm2 scheduler.')
-    group.add_argument('--lr-decay-stablelm2-beta', type=float, default=0.0,
-                       help='Denominator used in stablelm2 scheduler.')
     group.add_argument('--lr-decay-iters', type=int, default=None,
                        help='number of iterations to decay learning rate over,'
                        ' If None defaults to `--train-iters`')
@@ -2634,8 +2451,6 @@ def _add_checkpointing_args(parser):
     group.add_argument('--save-retain-interval', type=int, default=None,
                        help='Number of iterations between retained checkpoints (other'
                        'checkpoints _except the last checkpoint_ are automatically deleted).')
-    group.add_argument('--rampup-save-interval', type=int, default=None,
-                       help='Number of iterations between checkpoint saves.in the ramup phase.')
     group.add_argument('--no-save-optim', action='store_true', default=None,
                        help='Do not save current optimizer.')
     group.add_argument('--no-save-rng', action='store_true', default=None,
@@ -2685,8 +2500,6 @@ def _add_checkpointing_args(parser):
     group.add_argument('--no-use-tokenizer-model-from-checkpoint-args', action='store_false',
                        dest='use_tokenizer_model_from_checkpoint_args',
                        help='If set, do not use tokenizer model path from checkpoint')
-    group.add_argument('--save-when-num-microbatches-change', action='store_true',
-                       help='Save param name to index maps only')
     group.add_argument('--exit-on-missing-checkpoint', action='store_true',
                        help="If '--load' is set, but checkpoint is not found "
                        "(e.g., path typo), then exit instead of random "
@@ -2903,11 +2716,6 @@ def _add_distributed_args(parser):
                        'complete it instead. Also turns on '
                        '--use-cpu-initialization flag. This is for '
                        'external DDP manager.' )
-    group.add_argument('--standalone-embedding-stage', action='store_true',
-                       default=False, help='If set, *input* embedding layer '
-                       'is placed on its own pipeline stage, without any '
-                       'transformer layers. (For T5, this flag currently only '
-                       'affects the encoder embedding.)')
     group.add_argument('--account-for-embedding-in-pipeline-split', action='store_true',
                        default=False, help='If set, *input* embedding layer will be treated as a standard transformer'
                        'layer in the context of partition and placement for pipeline parallelism.')
@@ -2952,10 +2760,6 @@ def _add_distributed_args(parser):
                        help='If set, keep the fp8 transpose cache when using Megatron FSDP.')
     group.add_argument('--enable-full-sharding-in-hsdp', action='store_true',
                        help='If set, enable full sharding in megatron-fsdp Hybrid Sharded Data Parallel (HSDP) mode.')
-    group.add_argument('--use-partial-reduce-for-shared-embedding', action='store_true',
-                       help='Use partial reduce for shared word embedding.')
-    group.add_argument('--no-shared-fs', action='store_true', 
-                       help='Indicate whether not running on a shared file system.')
     group.add_argument('--num-distributed-optimizer-instances', type=int, default=1,
                        help='Number of Distributed Optimizer copies across Data Parallel domain.')
     group.add_argument('--use-torch-fsdp2', action='store_true',
@@ -3014,9 +2818,6 @@ def _add_validation_args(parser):
     group.add_argument('--eval-interval', type=int, default=1000,
                        help='Interval between running evaluation on '
                        'validation set.')
-    group.add_argument('--extra-eval-interval', type=int, default=None,
-                       help='Interval between running evaluation on '
-                       'extra validation sets.')
     group.add_argument("--test-mode", action="store_true", help='Run all real-time test alongside the experiment.')
     group.add_argument('--skip-train', action='store_true',
                        default=False, help='If set, bypass the training loop, '
@@ -3035,8 +2836,6 @@ def _add_tokenizer_args(parser):
                        'automatically calculated from vocab-size.')
     group.add_argument('--vocab-file', type=str, default=None,
                        help='Path to the vocab file.')
-    group.add_argument('--special-tokens-file', type=str, default=None,
-                       help='Path to the BPE special tokens file.')
     group.add_argument('--merge-file', type=str, default=None,
                        help='Path to the BPE merge file.')
     group.add_argument('--vocab-extra-ids', type=int, default=0,
@@ -3064,8 +2863,6 @@ def _add_tokenizer_args(parser):
                                 'Qwen2TokenizerFS',
                                 'Qwen2VLTokenizer',],
                        help='What type of tokenizer to use.')
-    group.add_argument('--tokenizer-path', type=str, default=None,
-                       help='Path to the huggingface tokenizer.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')
     group.add_argument('--tokenizer-metadata', type=str, default=None,
@@ -3106,11 +2903,6 @@ def _add_data_args(parser):
     group.add_argument('--valid-data-path', nargs='*', default=None,
                        help='The weight and prefix list for an independent validation dataset. '
                        'Follows the same pattern rules as --data-path.')
-    group.add_argument('--extra-valid-data-path', nargs='*', default=None,
-                       help='The weight, prefix list for an independent extra validation dataset. '
-                       'The accepted format is a list of weight, prefix and tag, '
-                       'e.g. weight1 prefix1 tag1 weight2 prefix2 tag2. '
-                       'The weight1 means the number of tokens in the prefix1 dataset. ')
     group.add_argument('--test-data-path', nargs='*', default=None,
                        help='The weight and prefix list for an independent test dataset. '
                        'Follows the same pattern rules as --data-path.')
@@ -3159,17 +2951,11 @@ def _add_data_args(parser):
                        'end-of-document token.')
     group.add_argument('--eod-mask-loss', action='store_true',
                        help='Mask loss for the end of document tokens.')
-    group.add_argument('--finetune-dataset-type', type=str, default=None,
-                       choices=['CPT', None],
-                       help='datasets type during finetunning.')
     group.add_argument('--no-create-attention-mask-in-dataloader', action='store_false',
                        help='If set, do not create attention_masks in dataloader.',
                        dest='create_attention_mask_in_dataloader')
     group.add_argument('--num-dataset-builder-threads', type=int, default=1,
                        help='Number of parallel threads per rank for dataset builder')
-    group.add_argument('--apply-sft-dataset-separated-loss-mask-if-existed', action='store_true',
-                       help='If set, use sft dataset with separated loss mask files, '
-                       'if _loss_mask_document.bin and _loss_mask_document.idx existed.')
     group.add_argument('--object-storage-cache-path', type=str, default=None,
                        help='Path to cache index files when using s3 or msc dataloader')
     group.add_argument('--mid-level-dataset-surplus', type=float, default=0.005,
@@ -3351,8 +3137,6 @@ def _add_vision_args(parser):
                        help='Whether to layer normalize the q and k attention embeddings.')
     group.add_argument('--qk-l2-norm', action='store_true',
                        help='Use llama 4 qk l2 norm')
-    group.add_argument('--qk-layernorm-hidden-dim', action='store_true',
-                       help='Whether to layer normalize the q and k attention embeddings on hidden dimension rather than head dimension')
 
     return parser
 
@@ -3680,4 +3464,3 @@ def _add_sft_args(parser):
     group.add_argument('--sft-tokenizer-prompt-format', type=str, default="nemotron-h-aligned", 
                        help='SFT prompt format.')
     return parser
-

@@ -85,17 +85,17 @@ def initialize_megatron(
     if args.async_save and args.use_persistent_ckpt_worker:
         init_persistent_async_worker()
 
-    if args.hetero_process_meshes is not None:
-        fs_argument = FSTrainArguments(args)
-        fs_argument.pre_validate_args()
+    ## FlagScale Begin: Pre Validate Arguments ##
+    fs_argument = FSTrainArguments(args)
+    fs_argument.pre_validate_args()
 
     if args.yaml_cfg is not None:
         args = validate_yaml(args, args_defaults)
     else:
         validate_args(args, args_defaults)
 
-    if args.hetero_process_meshes is not None:
-        fs_argument.post_validate_args()
+    ## FlagScale End: Post Validate Arguments ##
+    fs_argument.post_validate_args()
 
     # set global args, build tokenizer, and set adlr-autoresume,
     # tensorboard-writer, and timers.
