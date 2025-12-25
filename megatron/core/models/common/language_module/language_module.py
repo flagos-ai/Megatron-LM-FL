@@ -25,6 +25,7 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version, make_tp_sharded_tensor_for_checkpoint
+from plugins import plugin_method
 
 
 class LanguageModule(MegatronModule):
@@ -56,6 +57,7 @@ class LanguageModule(MegatronModule):
         self.vp_stage = None
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 
+    @plugin_method
     def _is_in_embd_group(self):
         if self.embd_group is None:
             return False
@@ -79,28 +81,6 @@ class LanguageModule(MegatronModule):
                     )
                 else:
                     return True
-        ######### FlagScale Begin #########
-        else:
-            if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
-                self.embd_group[0]
-            ):
-                if (
-                    torch.distributed.get_rank()
-                    == torch.distributed.get_process_group_ranks(self.embd_group[0])[0]
-                ):
-                    return is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(
-                        self.pp_group
-                    )
-                elif (
-                    torch.distributed.get_rank()
-                    == torch.distributed.get_process_group_ranks(self.embd_group[0])[-1]
-                ):
-                    return is_vp_last_stage(self.vp_stage, self.vp_size) and is_pp_last_stage(
-                        self.pp_group
-                    )
-                else:
-                    return True
-            ######### FlagScale End #########
         return False
 
     # pylint: disable=line-too-long
