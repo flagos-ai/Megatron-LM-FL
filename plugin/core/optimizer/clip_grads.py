@@ -1,61 +1,56 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+"""
+Plugin implementation for megatron.core.optimizer.clip_grads.
 
-"""Gradient clipping."""
+This file mirrors the path structure of the original file:
+- Original: megatron/core/optimizer/clip_grads.py
+- Plugin:   plugins/core/optimizer/clip_grads.py
+"""
 
 from typing import List, Optional, Union
 
 import torch
 from torch import inf
 
+from plugin.decorators import plugin_implementation
+from megatron.core.utils import get_data_parallel_group_if_dtensor
+from megatron.core.utils import to_local_if_dtensor
+from megatron.core.transformer.module import param_is_not_shared
+from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
+
 try:
     from transformer_engine.pytorch.optimizers import (
         multi_tensor_applier,
         multi_tensor_l2norm,
-        multi_tensor_scale,
     )
-
     l2_norm_impl = multi_tensor_l2norm
-    multi_tensor_scale_impl = multi_tensor_scale
 except ImportError:
     try:
         import amp_C
         from apex.multi_tensor_apply import multi_tensor_applier
-
         l2_norm_impl = amp_C.multi_tensor_l2norm
-        multi_tensor_scale_impl = amp_C.multi_tensor_scale
     except ImportError:
-        import warnings
+        from megatron.core.utils import local_multi_tensor_applier as multi_tensor_applier
+        from megatron.core.utils import local_multi_tensor_l2_norm as l2_norm_impl
 
-        warnings.warn(
-            f'Transformer Engine and Apex are not installed. '
-            'Falling back to local implementations of multi_tensor_applier, '
-            'multi_tensor_l2norm, and multi_tensor_scale'
-        )
-
-        from megatron.core.utils import (
-            local_multi_tensor_applier,
-            local_multi_tensor_l2_norm,
-            local_multi_tensor_scale,
-        )
-
-        multi_tensor_applier = local_multi_tensor_applier
-        l2_norm_impl = local_multi_tensor_l2_norm
-        multi_tensor_scale_impl = local_multi_tensor_scale
+try:
+    from plugin.hetero.p2p_communication import get_device_type_for_comm
+except ImportError:
+    # Fallback if flagscale is not available
+    def get_device_type_for_comm(group):
+        return "cuda"
 
 
-from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
-from ..transformer.module import param_is_not_shared
-from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
-from plugin.decorators import plugin_method
-
-
-@plugin_method
+@plugin_implementation("clip_grads", "get_grad_norm_fp32")
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
     norm_type: Union[int, float] = 2,
     grad_stats_parallel_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> float:
     """Calculate the norm of gradients in fp32.
+
+    Plugin implementation that supports:
+    - List-based grad_stats_parallel_group (for heterogeneous mode)
+    - CPU communication support
 
     This is adapted from torch.nn.utils.clip_grad.clip_grad_norm_ and
     added functionality to handle model parallel parameters.
@@ -65,14 +60,14 @@ def get_grad_norm_fp32(
             Tensor that will be used for calculating the grad norm.
         norm_type (float or int): type of the used p-norm. Can be ``'inf'`` for
             infinity norm.
-        grad_stats_parallel_group (group): Process group for reducing the grad norms. This is
+        grad_stats_parallel_group (group or list): Process group(s) for reducing the grad norms. This is
             generally the model-parallel group for non-distributed optimizers, and the entire
-            world for the distributed optimizer.
+            world for the distributed optimizer. Can be a list for heterogeneous mode.
 
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
-    print(f"Megatron-LM-FL Original: get_grad_norm_fp32")
+    print(f"Megatron-LM-FL Plugins: get_grad_norm_fp32")
     if isinstance(grads_for_norm, torch.Tensor):
         grads_for_norm = [grads_for_norm]
 
@@ -95,9 +90,20 @@ def get_grad_norm_fp32(
             torch.distributed.all_reduce(
                 total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=data_parallel_group
             )
-        torch.distributed.all_reduce(
-            total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=grad_stats_parallel_group
-        )
+
+        # Take max across all model-parallel GPUs.
+        # For cpu communication
+        tensor_device = get_device_type_for_comm(grad_stats_parallel_group)
+        total_norm_cuda = total_norm_cuda.to(tensor_device)
+        if isinstance(grad_stats_parallel_group, list):
+            for group in grad_stats_parallel_group:
+                torch.distributed.all_reduce(
+                    total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=group
+                )
+        else:
+            torch.distributed.all_reduce(
+                total_norm_cuda, op=torch.distributed.ReduceOp.MAX, group=grad_stats_parallel_group
+            )
         total_norm = total_norm_cuda[0].item()
 
     else:
@@ -129,62 +135,30 @@ def get_grad_norm_fp32(
             torch.distributed.all_reduce(
                 total_norm, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
             )
-        torch.distributed.all_reduce(
-            total_norm, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
-        )
+
+        # For cpu communication
+        tensor_device = get_device_type_for_comm(grad_stats_parallel_group)
+        total_norm = total_norm.to(tensor_device)
+        if isinstance(grad_stats_parallel_group, list):
+            for group in grad_stats_parallel_group:
+                torch.distributed.all_reduce(
+                    total_norm, op=torch.distributed.ReduceOp.SUM, group=group
+                )
+        else:
+            torch.distributed.all_reduce(
+                total_norm, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
+            )
         total_norm = total_norm.item() ** (1.0 / norm_type)
 
     return total_norm
 
-
-def clip_grad_by_total_norm_fp32(
-    parameters: Union[List[torch.Tensor], torch.Tensor],
-    max_norm: Union[int, float],
-    total_norm: float,
-    use_decoupled_grad: bool = False,
-):
-    """Clips gradient of an iterable of parameters in fp32 by total norm.
-
-    Note that the gradients are modified in place.
-
-    Args:
-        parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
-            single Tensor that will have gradients normalized.
-        max_norm (float or int): max norm of the gradients.
-        total_norm (float): total norm of the gradients.
-        use_decoupled_grad (bool, optional): whether to read grad from ".grad" or ".decoupled_grad",
-            default value is False.
-    """
-    # Grads.
-    params = []
-    grads = []
-    for param in parameters:
-        if use_decoupled_grad:
-            if hasattr(param, "decoupled_grad") and param.decoupled_grad is not None:
-                assert param.decoupled_grad.dtype in [torch.float32, torch.bfloat16]
-                params.append(param)
-                grads.append(to_local_if_dtensor(param.decoupled_grad).detach())
-        else:
-            if param.grad is not None:
-                assert param.grad.type() == 'torch.cuda.FloatTensor'
-                params.append(param)
-                grads.append(to_local_if_dtensor(param.grad).detach())
-
-    # Scale.
-    clip_coeff = max_norm / (total_norm + 1.0e-6)
-    if clip_coeff < 1.0:
-        dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
-        multi_tensor_applier(
-            multi_tensor_scale_impl, dummy_overflow_buf, [grads, grads], clip_coeff
-        )
-
-@plugin_method
+@plugin_implementation("clip_grads", "count_zeros_fp32")
 def count_zeros_fp32(
     parameters: Union[List[torch.Tensor], torch.Tensor],
     grad_stats_parallel_group: torch.distributed.ProcessGroup,
     use_decoupled_grad: bool = False,
 ) -> float:
-    print(f"Megatron-LM-FL Original: count_zeros_fp32 called")
+    print(f"Megatron-LM-FL Plugins: count_zeros_fp32")
     """Counts the number of zeros in gradients associated with the passed-in list of
     parameters.
 
@@ -198,7 +172,7 @@ def count_zeros_fp32(
         use_decoupled_grad (bool, optional) whether to read grad from ".grad" or ".decoupled_grad",
             default value is False.
     """
-    print(f"Megatron-LM-FL Original: count_zeros_fp32")
+
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
 
@@ -241,9 +215,21 @@ def count_zeros_fp32(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
         )
     # Sum across all model-parallel GPUs.
-    torch.distributed.all_reduce(
-        total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
-    )
+    comm_device = get_device_type_for_comm(grad_stats_parallel_group)
+    if comm_device == "cpu":
+        total_num_zeros = total_num_zeros.cpu()
+
+    if isinstance(grad_stats_parallel_group, list):
+        original_total_num_zeros = total_num_zeros.clone().detach()
+        for group in grad_stats_parallel_group:
+            total_num_zeros.data = original_total_num_zeros.data.clone()
+            torch.distributed.all_reduce(
+                total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
+            )
+    else:
+        torch.distributed.all_reduce(
+            total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
+        )
 
     total_num_zeros = total_num_zeros.item()
 

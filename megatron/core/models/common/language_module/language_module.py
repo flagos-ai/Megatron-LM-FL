@@ -25,7 +25,7 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version, make_tp_sharded_tensor_for_checkpoint
-from plugins import plugin_method
+from plugin.decorators import plugin_method
 
 
 class LanguageModule(MegatronModule):
@@ -59,28 +59,28 @@ class LanguageModule(MegatronModule):
 
     @plugin_method
     def _is_in_embd_group(self):
+        print(f"Megatron-LM-FL, original _is_in_embd_group")
         if self.embd_group is None:
             return False
-        if not isinstance(self.embd_group, list):
-            if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
-                self.embd_group
+        if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
+            self.embd_group
+        ):
+            if (
+                torch.distributed.get_rank()
+                == torch.distributed.get_process_group_ranks(self.embd_group)[0]
             ):
-                if (
-                    torch.distributed.get_rank()
-                    == torch.distributed.get_process_group_ranks(self.embd_group)[0]
-                ):
-                    return is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(
-                        self.pp_group
-                    )
-                elif (
-                    torch.distributed.get_rank()
-                    == torch.distributed.get_process_group_ranks(self.embd_group)[-1]
-                ):
-                    return is_vp_last_stage(self.vp_stage, self.vp_size) and is_pp_last_stage(
-                        self.pp_group
-                    )
-                else:
-                    return True
+                return is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(
+                    self.pp_group
+                )
+            elif (
+                torch.distributed.get_rank()
+                == torch.distributed.get_process_group_ranks(self.embd_group)[-1]
+            ):
+                return is_vp_last_stage(self.vp_stage, self.vp_size) and is_pp_last_stage(
+                    self.pp_group
+                )
+            else:
+                return True
         return False
 
     # pylint: disable=line-too-long
@@ -165,6 +165,7 @@ class LanguageModule(MegatronModule):
         loss = loss.transpose(0, 1).contiguous()
         return loss
 
+    @plugin_method
     def setup_embeddings_and_output_layer(self) -> None:
         """Sets up embedding layer in first stage and output layer in last stage.
 
@@ -172,7 +173,7 @@ class LanguageModule(MegatronModule):
         using pipeline parallelism and sharing word embeddings, and sets up param
         attributes on the embedding and output layers.
         """
-
+        print(f"Megatron-LM-FL, original setup_embeddings_and_output_layer")
         # Set `is_embedding_or_output_parameter` attribute.
         if self.pre_process:
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
@@ -189,8 +190,7 @@ class LanguageModule(MegatronModule):
         ):
             return
 
-        # if self.config.pipeline_model_parallel_size == 1: # original code of Megatron
-        if parallel_state.get_pipeline_model_parallel_world_size() == 1:
+        if self.config.pipeline_model_parallel_size == 1:
             # Zero out wgrad if sharing embeddings between two layers on same
             # pipeline stage to make sure grad accumulation into main_grad is
             # correct and does not include garbage values (e.g., from torch.empty).
@@ -235,22 +235,7 @@ class LanguageModule(MegatronModule):
             if self._is_in_embd_group():
                 weight = self.shared_embedding_or_output_weight()
                 weight.data = weight.data.cuda()
-                embedding_group = self.embd_group
-                if not isinstance(embedding_group, list):
-                    torch.distributed.all_reduce(weight.data, group=self.embd_group)
-                else: # for multiple embedding groups in heterogeneous mode
-                    with torch.no_grad():
-                        original_dtype = weight.dtype
-                        if (original_dtype == torch.bfloat16) and torch.distributed.get_backend(group=embedding_group[0])=="cpu:gloo": # gloo backend doesn't support bfloat16
-                            weight = weight.to(torch.float32)
-                            weight.data = weight.data.cpu()
-                        original_weight = weight.clone().detach().data
-                        for group in embedding_group:
-                            weight.data.copy_(original_weight)
-                            torch.distributed.all_reduce(weight.data, group=group)
-                        if original_dtype != weight.dtype:
-                            weight = weight.to(original_dtype)
-                            weight.data = weight.data.cuda()
+                torch.distributed.all_reduce(weight.data, group=self.embd_group)
 
         elif not getattr(LanguageModule, "embedding_warning_printed", False):
             logging.getLogger(__name__).warning(

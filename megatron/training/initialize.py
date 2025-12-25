@@ -197,7 +197,7 @@ def _compile_dependencies():
     # Compile dataset C++ code.
     # =========================
     # TODO: move this to ninja
-    from megatron.core.datasets.utils import is_built_on_zero_rank
+    from plugin.core.datasets.utils import is_built_on_zero_rank
     if is_built_on_zero_rank():
         start_time = time.time()
         print("> compiling dataset index builder ...")

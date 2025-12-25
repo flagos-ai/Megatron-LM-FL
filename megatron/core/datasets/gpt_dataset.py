@@ -13,9 +13,11 @@ from megatron.core.datasets.blended_megatron_dataset_config import BlendedMegatr
 from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.megatron_dataset import MegatronDataset
 from megatron.core.datasets.object_storage_utils import ObjectStorageConfig, is_object_storage_path
-from megatron.core.datasets.utils import Split, is_built_on_zero_rank
+from megatron.core.datasets.utils import Split
 from megatron.core.tokenizers import MegatronTokenizerBase
 from megatron.core.utils import log_single_rank
+
+from plugin.core.datasets.utils import is_built_on_zero_rank
 
 logger = logging.getLogger(__name__)
 

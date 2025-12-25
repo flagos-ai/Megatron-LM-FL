@@ -51,6 +51,8 @@ from .clip_grads import clip_grad_by_total_norm_fp32, count_zeros_fp32, get_grad
 from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
 
+from plugin.decorators import plugin_method
+
 logger = getLogger(__name__)
 
 
@@ -490,8 +492,9 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.param_groups:
             self._copy_model_params_to_main_params(state_dict=state_dict)
 
+    @plugin_method
     def _unscale_main_grads_and_check_for_nan(self):
-
+        print(f"Megatron-LM-FL Original: _unscale_main_grads_and_check_for_nan")
         # Collect main grads.
         if not self.is_stub_optimizer:
             main_grads = self._collect_main_grad_data_for_unscaling()
@@ -506,23 +509,11 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             )
 
         # Update across all model parallel instances.
-        groups = self.get_grad_stats_parallel_group()
-        if isinstance(groups, list):
-            if "cpu:gloo" == torch.distributed.get_backend(groups[0]):
-                self.found_inf = self.found_inf.cpu()
-        else:
-            if "cpu:gloo" == torch.distributed.get_backend(groups):
-                self.found_inf = self.found_inf.cpu()
-        if not isinstance(groups, list):
-            groups = [groups]
-        for group in groups:
-            torch.distributed.all_reduce(
-                self.found_inf,
-                op=torch.distributed.ReduceOp.MAX,
-                group=group
-            )
-        if self.found_inf.device != torch.device('cuda'):
-            self.found_inf = self.found_inf.cuda()
+        torch.distributed.all_reduce(
+            self.found_inf,
+            op=torch.distributed.ReduceOp.MAX,
+            group=self.get_grad_stats_parallel_group(),
+        )
 
         # Check for nan.
         found_inf_flag = self.found_inf.item() > 0
@@ -812,7 +803,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         is_loading: bool = False,
         metadata: Optional[dict] = None,
     ):
-
+        # print(f"Megatron-LM-FL Original: sharded_state_dict called")
         if is_loading:
             self.init_state_fn(self.optimizer, self.config)
 
@@ -1191,9 +1182,11 @@ class ChainedOptimizer(MegatronOptimizer):
         else:
             return [optimizer.state_dict() for optimizer in self.chained_optimizers]
 
+    @plugin_method
     def sharded_state_dict(
         self, model_sharded_state_dict: ShardedStateDict, is_loading: bool = False, convert_to_ep: bool = False, **kwargs
     ):
+        print(f"Megatron-LM-FL Original: sharded_state_dict")
         self.convert_to_ep = convert_to_ep ########## FlagScale Add ########
         metadata = kwargs.get('metadata') or {}
         # ChainedOptimizer should add its prefix to the tensor state keys only if
@@ -1213,106 +1206,34 @@ class ChainedOptimizer(MegatronOptimizer):
                 model_sharded_state_dict, is_loading, **kwargs
             )
         else:
-            ######### FlagScale Begin #########
-            if convert_to_ep and is_loading:
-                logger.info(
-                    "sharded_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
-                 )
-                # convert tp/pp chained_optimizers to ep chained_optimizers
-                sharded_state_dict = {}
-                fake_sharded_state_dict = {
-                    'optimizer': {},
-                    'param_state': {},
-                    'param_state_sharding_type': {},
-                }
-                global_pid = 0
-                mapping_idx = {}
-                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
-                    optim_state_dict = optimizer.sharded_state_dict(
-                        model_sharded_state_dict, is_loading, **kwargs
-                    )
-                    tmp_dict = {}
-                    for local_pid, v in optim_state_dict['param_state'].items():
-                        fake_sharded_state_dict['param_state'][global_pid] = v
-                        tmp_dict[local_pid] = global_pid
-                        global_pid += 1
-                    mapping_idx[optimizer_idx] = tmp_dict
-
-                    fake_sharded_state_dict['optimizer'] = optim_state_dict['optimizer']
-                    fake_sharded_state_dict['param_state_sharding_type'] = optim_state_dict[
-                        'param_state_sharding_type'
-                    ]
-
-                    sharded_state_dict[optimizer_idx] = {}
-                    sharded_state_dict[optimizer_idx]['optimizer'] = copy.deepcopy(
-                        optim_state_dict['optimizer']
-                    )
-                    sharded_state_dict[optimizer_idx]['param_state_sharding_type'] = copy.deepcopy(
-                        optim_state_dict['param_state_sharding_type']
-                    )
-                    sharded_state_dict[optimizer_idx]['len_param_state'] = len(
-                        optim_state_dict['param_state']
-                    )
-                    self.original_sharded_state_dict = sharded_state_dict
-                self.mapping_idx = mapping_idx
-                return fake_sharded_state_dict
-            ######### FlagScale End #########
-            else: # megatron source apply ep
-                self._synchronize_steps()
-                sharded_state_dict = {}
-                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
-                    optim_state_dict = optimizer.sharded_state_dict(
-                        model_sharded_state_dict, is_loading, **kwargs
-                    )
-                    if should_add_prefix:
-                        add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
-                    sharded_state_dict[optimizer_idx] = optim_state_dict
-                return sharded_state_dict
-
-    def load_state_dict(self, state_dict):
-        if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers
-            logger.info(
-                "load_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
-            )
-            new_state_dict = {}
-            for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
-                new_state_dict[optimizer_idx] = {}
-                new_state_dict[optimizer_idx]['optimizer'] = self.original_sharded_state_dict[
-                    optimizer_idx
-                ]['optimizer']
-                new_state_dict[optimizer_idx]['param_state_sharding_type'] = (
-                    self.original_sharded_state_dict[optimizer_idx]['param_state_sharding_type']
-                )
-                len_param_state = self.original_sharded_state_dict[optimizer_idx]['len_param_state']
-                new_state_dict[optimizer_idx]['param_state'] = {}
-                for i in range(len_param_state):
-                    new_state_dict[optimizer_idx]['param_state'][i] = state_dict['param_state'][
-                        self.mapping_idx[optimizer_idx][i]
-                    ]
-            if len(self.chained_optimizers) != len(new_state_dict):
-                raise RuntimeError(
-                    f'Expected {len(self.chained_optimizers)} entries'
-                    f' in state dict, but got {len(new_state_dict)}.'
-                )
-            if isinstance(new_state_dict, dict):
-                new_state_dict = (v for k, v in sorted(new_state_dict.items()))
-            for optimizer, state in zip(self.chained_optimizers, new_state_dict):
-                optimizer.load_state_dict(state)
-        else:  # megatron source apply ep
-            # If there is only one optimizer, we read the state dict as a single optimizer.
-            if len(self.chained_optimizers) == 1:
-                self.chained_optimizers[0].load_state_dict(state_dict)
-                return
-            if len(self.chained_optimizers) != len(state_dict):
-                raise RuntimeError(
-                    f'Expected {len(self.chained_optimizers)} entries'
-                    f' in state dict, but got {len(state_dict)}.'
-                )
-            if isinstance(state_dict, dict):
-                state_dict = (v for k, v in sorted(state_dict.items()))
-            for optimizer, state in zip(self.chained_optimizers, state_dict):
-                optimizer.load_state_dict(state)
             self._synchronize_steps()
+            sharded_state_dict = {}
+            for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                optim_state_dict = optimizer.sharded_state_dict(
+                    model_sharded_state_dict, is_loading, **kwargs
+                )
+                if should_add_prefix:
+                    add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
+                sharded_state_dict[optimizer_idx] = optim_state_dict
+            return sharded_state_dict
+
+    @plugin_method
+    def load_state_dict(self, state_dict):
+        print(f"Megatron-LM-FL Original: load_state_dict")
+        # If there is only one optimizer, we read the state dict as a single optimizer.
+        if len(self.chained_optimizers) == 1:
+            self.chained_optimizers[0].load_state_dict(state_dict)
+            return
+        if len(self.chained_optimizers) != len(state_dict):
+            raise RuntimeError(
+                f'Expected {len(self.chained_optimizers)} entries'
+                f' in state dict, but got {len(state_dict)}.'
+            )
+        if isinstance(state_dict, dict):
+            state_dict = (v for k, v in sorted(state_dict.items()))
+        for optimizer, state in zip(self.chained_optimizers, state_dict):
+            optimizer.load_state_dict(state)
+        self._synchronize_steps()
 
     @torch.no_grad()
     def prepare_grads(self) -> bool:
@@ -1467,7 +1388,7 @@ class ChainedOptimizer(MegatronOptimizer):
 
             # Lazy loading checkpoint, state dict is needed only when DP rank = 0.
             if optimizer.data_parallel_group.rank() == 0 and states is None:
-                states = torch.load(filename, weight_only=False)
+                states = torch.load(filename, weights_only=False)
 
             state_dict = states[idx] if states else None
             optimizer.load_parameter_state_from_dp_zero(
