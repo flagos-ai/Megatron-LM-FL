@@ -787,6 +787,12 @@ class TransformerConfig(ModelParallelConfig):
     lora_out_init_method: Optional[str] = None
     """Lora b init method"""
 
+
+    ####################
+    # TE_FL
+    ####################
+    te_fl_prefer: Optional[str] = 'vendor'
+
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
         See https://docs.python.org/3/library/dataclasses.html#post-init-processing for more
