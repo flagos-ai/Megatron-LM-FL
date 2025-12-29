@@ -44,9 +44,8 @@ from megatron.core.utils import (
 from megatron.legacy.model.module import param_is_not_shared
 
 from plugin.hetero.p2p_communication import get_device_type_for_comm
-from plugin.decorators import plugin_method
 
-@plugin_method
+
 def calc_params_l2_norm(model, force_create_fp32_copy=False):
     """Calculate l2 norm of parameters"""
     args = get_args()
@@ -158,13 +157,45 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
     else:
         moe_norm_2 = torch.zeros_like(norm_2)
 
-    # Reduce norm across model parallel groups (dense and expert).
-    # Dense params should sum across all model-parallel GPUs (tensor + pipeline).
-    dense_reduce_group = mpu.get_model_parallel_group()
-    ranks_in_dense_reduce_group = torch.distributed.get_process_group_ranks(dense_reduce_group)
-    # Expert params should sum across all model-parallel GPUs (expert + tensor + pipeline).
-    expert_reduce_group = mpu.get_expert_tensor_model_pipeline_parallel_group()
-    ranks_in_expert_reduce_group = torch.distributed.get_process_group_ranks(expert_reduce_group)
+    ########## FlagScale Begin ##########
+    # Sum across all model-parallel GPUs(tensor + pipeline).
+    mp_groups = mpu.get_model_parallel_group()
+    comm_device = get_device_type_for_comm(mp_groups)
+    if comm_device == "cpu":
+        norm_2 = norm_2.cpu()
+    if isinstance(mp_groups, list):  # hetero
+        original_norm_2 = norm_2.clone().detach()
+        for mp_group in mp_groups:
+            norm_2.copy_(original_norm_2)
+            torch.distributed.all_reduce(
+                norm_2, op=torch.distributed.ReduceOp.SUM, group=mp_group
+            )
+        if len(moe_params_data) > 0:
+            emp_groups = mpu.get_expert_tensor_model_pipeline_parallel_group()
+            comm_device = get_device_type_for_comm(emp_groups)
+            if comm_device == "cpu":
+                moe_norm_2 = moe_norm_2.cpu()
+
+            assert isinstance(
+                emp_groups, list
+            ), "emp_groups should be a list if mp_groups is a list"
+            original_norm_2 = moe_norm_2.clone().detach()
+            for emp_group in emp_groups:
+                moe_norm_2.copy_(original_norm_2)
+                torch.distributed.all_reduce(
+                    moe_norm_2, op=torch.distributed.ReduceOp.SUM, group=emp_group
+                )
+            norm_2 += moe_norm_2
+    ########## FlagScale End ##########
+    else:  # original code
+
+        # Reduce norm across model parallel groups (dense and expert).
+        # Dense params should sum across all model-parallel GPUs (tensor + pipeline).
+        dense_reduce_group = mpu.get_model_parallel_group()
+        ranks_in_dense_reduce_group = torch.distributed.get_process_group_ranks(dense_reduce_group)
+        # Expert params should sum across all model-parallel GPUs (expert + tensor + pipeline).
+        expert_reduce_group = mpu.get_expert_tensor_model_pipeline_parallel_group()
+        ranks_in_expert_reduce_group = torch.distributed.get_process_group_ranks(expert_reduce_group)
 
     # If dense and expert reduce groups are the same, sum then reduce.
     if ranks_in_dense_reduce_group == ranks_in_expert_reduce_group:
@@ -181,6 +212,10 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
             moe_norm_2, op=torch.distributed.ReduceOp.SUM, group=expert_reduce_group
         )
         norm_2 += moe_norm_2
+
+    if comm_device == "cpu":
+        norm_2 = norm_2.cuda()
+        moe_norm_2 = moe_norm_2.cuda()
 
     return norm_2.item() ** 0.5
 
