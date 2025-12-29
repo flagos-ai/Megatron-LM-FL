@@ -172,6 +172,7 @@ class LanguageModule(MegatronModule):
         using pipeline parallelism and sharing word embeddings, and sets up param
         attributes on the embedding and output layers.
         """
+
         # Set `is_embedding_or_output_parameter` attribute.
         if self.pre_process:
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
