@@ -372,7 +372,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                 # gen dist meta
                 param_world_indexes = param_gbuf_ranges["world_indexes"]
-                tp_split_dim = -1 if getattr(model_param, 'tensor_model_parallel', False) else \
+                tp_split_dim = -1 if not getattr(model_param, 'tensor_model_parallel', False) else \
                     getattr(model_param, 'partition_dim')
                 dist_meta = MuonDistMeta(gbuf_index, bucket_index, model_param.shape, param_world_indexes, tp_split_dim)
                 
