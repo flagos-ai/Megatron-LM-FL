@@ -72,6 +72,7 @@ def get_grad_norm_fp32(
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
+
     if isinstance(grads_for_norm, torch.Tensor):
         grads_for_norm = [grads_for_norm]
 
@@ -196,6 +197,7 @@ def count_zeros_fp32(
         use_decoupled_grad (bool, optional) whether to read grad from ".grad" or ".decoupled_grad",
             default value is False.
     """
+
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
 

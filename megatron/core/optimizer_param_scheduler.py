@@ -149,6 +149,7 @@ class OptimizerParamScheduler:
         Args:
             param_group (dict): parameter group from the optimizer.
         """
+
         max_lr = param_group.get('max_lr', self.max_lr)
         min_lr = param_group.get('min_lr', self.min_lr)
 

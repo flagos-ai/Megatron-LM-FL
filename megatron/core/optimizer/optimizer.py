@@ -494,6 +494,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
 
     @plugin_method
     def _unscale_main_grads_and_check_for_nan(self):
+
         # Collect main grads.
         if not self.is_stub_optimizer:
             main_grads = self._collect_main_grad_data_for_unscaling()
@@ -802,6 +803,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         is_loading: bool = False,
         metadata: Optional[dict] = None,
     ):
+
         if is_loading:
             self.init_state_fn(self.optimizer, self.config)
 
@@ -1180,7 +1182,6 @@ class ChainedOptimizer(MegatronOptimizer):
         else:
             return [optimizer.state_dict() for optimizer in self.chained_optimizers]
 
-    @plugin_method
     def sharded_state_dict(
         self, model_sharded_state_dict: ShardedStateDict, is_loading: bool = False, convert_to_ep: bool = False, **kwargs
     ):
@@ -1190,7 +1191,7 @@ class ChainedOptimizer(MegatronOptimizer):
         # DistributedOptimizer is used (non-empty 'distrib_optim_sharding_type') and uses
         # a non fully-reshardable format. For backward compatibility we also add it
         # if `chained_optim_avoid_prefix` is False.
-        from .distrib_optimizer import DistributedOptimizer
+        from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 
         should_add_prefix = (
             "distrib_optim_sharding_type" in metadata
@@ -1203,16 +1204,61 @@ class ChainedOptimizer(MegatronOptimizer):
                 model_sharded_state_dict, is_loading, **kwargs
             )
         else:
-            self._synchronize_steps()
-            sharded_state_dict = {}
-            for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
-                optim_state_dict = optimizer.sharded_state_dict(
-                    model_sharded_state_dict, is_loading, **kwargs
-                )
-                if should_add_prefix:
-                    add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
-                sharded_state_dict[optimizer_idx] = optim_state_dict
-            return sharded_state_dict
+            ######### FlagScale Begin #########
+            if convert_to_ep and is_loading:
+                logger.info(
+                    "sharded_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
+                    )
+                # convert tp/pp chained_optimizers to ep chained_optimizers
+                sharded_state_dict = {}
+                fake_sharded_state_dict = {
+                    'optimizer': {},
+                    'param_state': {},
+                    'param_state_sharding_type': {},
+                }
+                global_pid = 0
+                mapping_idx = {}
+                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                    optim_state_dict = optimizer.sharded_state_dict(
+                        model_sharded_state_dict, is_loading, **kwargs
+                    )
+                    tmp_dict = {}
+                    for local_pid, v in optim_state_dict['param_state'].items():
+                        fake_sharded_state_dict['param_state'][global_pid] = v
+                        tmp_dict[local_pid] = global_pid
+                        global_pid += 1
+                    mapping_idx[optimizer_idx] = tmp_dict
+
+                    fake_sharded_state_dict['optimizer'] = optim_state_dict['optimizer']
+                    fake_sharded_state_dict['param_state_sharding_type'] = optim_state_dict[
+                        'param_state_sharding_type'
+                    ]
+
+                    sharded_state_dict[optimizer_idx] = {}
+                    sharded_state_dict[optimizer_idx]['optimizer'] = copy.deepcopy(
+                        optim_state_dict['optimizer']
+                    )
+                    sharded_state_dict[optimizer_idx]['param_state_sharding_type'] = copy.deepcopy(
+                        optim_state_dict['param_state_sharding_type']
+                    )
+                    sharded_state_dict[optimizer_idx]['len_param_state'] = len(
+                        optim_state_dict['param_state']
+                    )
+                    self.original_sharded_state_dict = sharded_state_dict
+                self.mapping_idx = mapping_idx
+                return fake_sharded_state_dict
+            ######### FlagScale End #########
+            else: # megatron source apply ep
+                self._synchronize_steps()
+                sharded_state_dict = {}
+                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                    optim_state_dict = optimizer.sharded_state_dict(
+                        model_sharded_state_dict, is_loading, **kwargs
+                    )
+                    if should_add_prefix:
+                        add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
+                    sharded_state_dict[optimizer_idx] = optim_state_dict
+                return sharded_state_dict
 
     @plugin_method
     def load_state_dict(self, state_dict):
