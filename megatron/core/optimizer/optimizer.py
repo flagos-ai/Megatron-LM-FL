@@ -1191,7 +1191,7 @@ class ChainedOptimizer(MegatronOptimizer):
         # DistributedOptimizer is used (non-empty 'distrib_optim_sharding_type') and uses
         # a non fully-reshardable format. For backward compatibility we also add it
         # if `chained_optim_avoid_prefix` is False.
-        from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
+        from .distrib_optimizer import DistributedOptimizer
 
         should_add_prefix = (
             "distrib_optim_sharding_type" in metadata

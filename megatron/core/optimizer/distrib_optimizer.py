@@ -572,7 +572,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         for model_idx, buffers in self.per_model_buffers.items():
             for _ in buffers:
                 self.gbuf_idx_to_model_idx_map[gbuf_idx] = model_idx
-                gbuf_idx = 1
+                gbuf_idx += 1
 
         self.per_model_bucket_groups = {}
         for model_idx, buffers in self.per_model_buffers.items():

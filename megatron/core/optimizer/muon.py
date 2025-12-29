@@ -156,7 +156,7 @@ class Muon(torch.optim.Optimizer):
 
         for group in self.param_groups:
             if 'step' in group:
-                group['step'] = 1
+                group['step'] += 1
             else:
                 group['step'] = 1
 
