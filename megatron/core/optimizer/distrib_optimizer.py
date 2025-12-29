@@ -1135,7 +1135,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             for key in ("param", "exp_avg", "exp_avg_sq")
                         }
 
-                        # Build contiguous DP rank shards (for param  optim states).
+                        # Build contiguous DP rank shards (for param + optim states).
                         for model_param, param_range_map in gbuf_range_map["param_map"].items():
                             tensors = self._get_main_param_and_optimizer_states(model_param)
 
@@ -1193,7 +1193,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                                     recv_tensors_concatenated[:gbuf_world_numel_unpadded]
                                 )
 
-                        offset_in_world_tensors = gbuf_world_numel_unpadded
+                        offset_in_world_tensors += gbuf_world_numel_unpadded
 
                 # Collect world state.
                 dtype_state[dtype] = world_tensors
@@ -1606,7 +1606,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         tensors[state_key] = replace(sharded_metadata, **replace_kwargs)
                         tensors[state_key].validate_metadata_integrity()
                     model_space_state[param_idx] = tensors
-                    param_idx = 1
+                    param_idx += 1
 
         return model_space_state
 
@@ -1835,7 +1835,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             model_param, slice(param_range.start, param_range.end)
                         )
                         state[param_idx] = tensors
-                        param_idx = 1
+                        param_idx += 1
         return state
 
     def load_parameter_state_from_dp_reshardable(self, state_dict):
@@ -1893,7 +1893,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             else:
                                 src_tensors[k] = v
                         self._set_main_param_and_optimizer_states(model_param, src_tensors)
-                        param_idx = 1
+                        param_idx += 1
         if isinstance(self.optimizer, HybridDeviceOptimizer):
             self.optimizer._sync_hdo_state_to_sub_optimizers()
 
@@ -1913,7 +1913,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         start_idx = 0
         for new_numel in new_numels:
             new_tensors.append(unified_tensor[start_idx : (start_idx + new_numel)])
-            start_idx = new_numel
+            start_idx += new_numel
 
         return new_tensors
 
@@ -1987,7 +1987,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             assert (
                                 world_tensor.numel() == gbuf_world_numel_unpadded
                             ), "%d vs. %d." % (world_tensor.numel(), gbuf_world_numel_unpadded)
-                            offset_in_world_tensors = gbuf_world_numel_unpadded
+                            offset_in_world_tensors += gbuf_world_numel_unpadded
 
                             # Pad world_tensor to gbuf_world_numel. Don't pad at the front,
                             # pad at the back.
@@ -2099,7 +2099,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             end = offset_in_world_tensors + gbuf_world_numel_unpadded
                             assert 0 <= start < end <= world_tensors.numel()
                             world_tensor = world_tensors[start:end]
-                            offset_in_world_tensors = gbuf_world_numel_unpadded
+                            offset_in_world_tensors += gbuf_world_numel_unpadded
 
                             # Pad world_tensor to gbuf_world_numel. Don't pad at the front,
                             # pad at the back.
@@ -2161,7 +2161,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 for model_param, (param_world_start, param_world_end, _) in self.buffers[
                     gbuf_idx
                 ].param_index_map.items():
-                    param_idx = 1  # increment even if skip param update
+                    param_idx += 1  # increment even if skip param update
                     if model_param not in all_buckets_param_range_map:
                         continue
                     param_range_map = all_buckets_param_range_map[model_param]
@@ -2296,12 +2296,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         fp8_tensor[fp8_offsets[fp8_idx] : fp8_offsets[fp8_idx + 1]].copy_(
                             tensor[offsets[i] : offsets[i + 1]]
                         )
-                        fp8_idx = 1
+                        fp8_idx += 1
                     else:
                         non_fp8_tensor[
                             non_fp8_offsets[non_fp8_idx] : non_fp8_offsets[non_fp8_idx + 1]
                         ].copy_(tensor[offsets[i] : offsets[i + 1]])
-                        non_fp8_idx = 1
+                        non_fp8_idx += 1
 
                 fp8_state_dict[key] = fp8_tensor
                 non_fp8_state_dict[key] = non_fp8_tensor
@@ -2429,7 +2429,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     shard_fp32_from_fp8.append(None)
                     shard_offsets_in_fp8.append(None)
                     fp8_param_to_idx_map[param] = idx
-                    idx = 1
+                    idx += 1
 
         def get_shard_fp32_from_fp8(shard_main_groups, model_groups):
             """
