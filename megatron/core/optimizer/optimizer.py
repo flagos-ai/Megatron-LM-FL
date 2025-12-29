@@ -494,7 +494,6 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
 
     @plugin_method
     def _unscale_main_grads_and_check_for_nan(self):
-        print(f"Megatron-LM-FL Original: _unscale_main_grads_and_check_for_nan")
         # Collect main grads.
         if not self.is_stub_optimizer:
             main_grads = self._collect_main_grad_data_for_unscaling()
@@ -803,7 +802,6 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
         is_loading: bool = False,
         metadata: Optional[dict] = None,
     ):
-        # print(f"Megatron-LM-FL Original: sharded_state_dict called")
         if is_loading:
             self.init_state_fn(self.optimizer, self.config)
 
@@ -1186,7 +1184,6 @@ class ChainedOptimizer(MegatronOptimizer):
     def sharded_state_dict(
         self, model_sharded_state_dict: ShardedStateDict, is_loading: bool = False, convert_to_ep: bool = False, **kwargs
     ):
-        print(f"Megatron-LM-FL Original: sharded_state_dict")
         self.convert_to_ep = convert_to_ep ########## FlagScale Add ########
         metadata = kwargs.get('metadata') or {}
         # ChainedOptimizer should add its prefix to the tensor state keys only if
@@ -1219,7 +1216,6 @@ class ChainedOptimizer(MegatronOptimizer):
 
     @plugin_method
     def load_state_dict(self, state_dict):
-        print(f"Megatron-LM-FL Original: load_state_dict")
         # If there is only one optimizer, we read the state dict as a single optimizer.
         if len(self.chained_optimizers) == 1:
             self.chained_optimizers[0].load_state_dict(state_dict)

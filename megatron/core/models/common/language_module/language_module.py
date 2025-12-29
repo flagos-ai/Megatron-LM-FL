@@ -59,7 +59,6 @@ class LanguageModule(MegatronModule):
 
     @plugin_method
     def _is_in_embd_group(self):
-        print(f"Megatron-LM-FL, original _is_in_embd_group")
         if self.embd_group is None:
             return False
         if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
@@ -173,7 +172,6 @@ class LanguageModule(MegatronModule):
         using pipeline parallelism and sharing word embeddings, and sets up param
         attributes on the embedding and output layers.
         """
-        print(f"Megatron-LM-FL, original setup_embeddings_and_output_layer")
         # Set `is_embedding_or_output_parameter` attribute.
         if self.pre_process:
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True

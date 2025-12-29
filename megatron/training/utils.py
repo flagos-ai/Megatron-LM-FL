@@ -49,7 +49,6 @@ from plugin.decorators import plugin_method
 @plugin_method
 def calc_params_l2_norm(model, force_create_fp32_copy=False):
     """Calculate l2 norm of parameters"""
-    print(f"Megatron-LM-FL Original, calc_params_l2_norm")
     args = get_args()
     if not isinstance(model, list):
         model = [model]

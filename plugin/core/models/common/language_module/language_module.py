@@ -13,6 +13,8 @@ from megatron.core.models.common.language_module.language_module import Language
 
 from plugin.decorators import plugin_implementation
 
+logger = logging.getLogger(__name__)
+
 @plugin_implementation("LanguageModule", "_is_in_embd_group")
 def _is_in_embd_group(self):
     """
@@ -21,7 +23,7 @@ def _is_in_embd_group(self):
     Supports both single process group and list of process groups
     (for heterogeneous mode).
     """
-    print(f"Megatron-LM-FL Plugins: _is_in_embd_group")
+    logger.debug(f"Megatron-LM-FL Plugins: _is_in_embd_group")
     if self.embd_group is None:
         return False
     
@@ -81,7 +83,7 @@ def setup_embeddings_and_output_layer(self) -> None:
     using pipeline parallelism and sharing word embeddings, and sets up param
     attributes on the embedding and output layers.
     """
-    print(f"Megatron-LM-FL Plugins: setup_embeddings_and_output_layer")
+    logger.debug(f"Megatron-LM-FL Plugins: setup_embeddings_and_output_layer")
     # Set `is_embedding_or_output_parameter` attribute.
     if self.pre_process:
         self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True

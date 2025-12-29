@@ -1,4 +1,4 @@
-from functools import partial
+import logging
 from typing import Callable, List, Optional, Union
 
 import torch
@@ -25,6 +25,8 @@ from megatron.core.distributed.finalize_model_grads import _get_main_grad_attr, 
 from plugin.hetero.p2p_communication import get_device_type_for_comm
 from plugin.decorators import plugin_implementation
 
+logger = logging.getLogger(__name__)
+
 @plugin_implementation("finalize_model_grads", "_allreduce_embedding_grad")
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
@@ -47,7 +49,7 @@ def _allreduce_embedding_grad(
             gradient is ``None``. Defaults to True.
     """
     
-    print(f"Megatron-LM-FL Plugins: _allreduce_embedding_grad")
+    logger.debug(f"Megatron-LM-FL Plugins: _allreduce_embedding_grad")
     embd_group_is_list = isinstance(embd_group, list)
     if (
         not embd_group_is_list and

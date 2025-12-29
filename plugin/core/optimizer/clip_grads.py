@@ -6,6 +6,7 @@ This file mirrors the path structure of the original file:
 - Plugin:   plugins/core/optimizer/clip_grads.py
 """
 
+import logging
 from typing import List, Optional, Union
 
 import torch
@@ -39,6 +40,7 @@ except ImportError:
     def get_device_type_for_comm(group):
         return "cuda"
 
+logger = logging.getLogger(__name__)
 
 @plugin_implementation("clip_grads", "get_grad_norm_fp32")
 def get_grad_norm_fp32(
@@ -67,7 +69,7 @@ def get_grad_norm_fp32(
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
-    print(f"Megatron-LM-FL Plugins: get_grad_norm_fp32")
+    logger.debug(f"Megatron-LM-FL Plugins: get_grad_norm_fp32")
     if isinstance(grads_for_norm, torch.Tensor):
         grads_for_norm = [grads_for_norm]
 
@@ -158,7 +160,7 @@ def count_zeros_fp32(
     grad_stats_parallel_group: torch.distributed.ProcessGroup,
     use_decoupled_grad: bool = False,
 ) -> float:
-    print(f"Megatron-LM-FL Plugins: count_zeros_fp32")
+    logger.debug(f"Megatron-LM-FL Plugins: count_zeros_fp32")
     """Counts the number of zeros in gradients associated with the passed-in list of
     parameters.
 

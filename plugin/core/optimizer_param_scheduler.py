@@ -17,7 +17,7 @@ def get_lr(self, param_group: dict) -> float:
     Args:
         param_group (dict): parameter group from the optimizer.
     """
-    print(f"Megatron-LM-FL Plugins: get_lr")
+    logger.debug(f"Megatron-LM-FL Plugins: get_lr")
     max_lr = param_group.get('max_lr', self.max_lr)
     min_lr = param_group.get('min_lr', self.min_lr)
 

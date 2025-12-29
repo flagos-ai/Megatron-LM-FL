@@ -1,4 +1,5 @@
 import torch
+import logging
 
 try:
     from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_l2norm
@@ -30,12 +31,12 @@ from megatron.legacy.model.module import param_is_not_shared
 
 from plugin.hetero.p2p_communication import get_device_type_for_comm
 from plugin.decorators import plugin_implementation
-
+logger = logging.getLogger(__name__)
 
 @plugin_implementation("utils", "calc_params_l2_norm")
 def calc_params_l2_norm(model, force_create_fp32_copy=False):
     """Calculate l2 norm of parameters"""
-    print(f"Megatron-LM-FL Plugin, calc_params_l2_norm")
+    logger.debug(f"Megatron-LM-FL Plugin, calc_params_l2_norm")
     args = get_args()
     if not isinstance(model, list):
         model = [model]

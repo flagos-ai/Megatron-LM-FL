@@ -225,7 +225,6 @@ def _allreduce_embedding_grad(
         skip_if_none (bool, optional): If True, quietly returns when the parameter or its
             gradient is ``None``. Defaults to True.
     """
-    print(f"Megatron-LM-FL, original _allreduce_embedding_grad")
     if (
         # embd_group can be None in cases there is no embd_group
         # get_pg_size(embd_group) will return 1 and the all-reduce will be skipped.

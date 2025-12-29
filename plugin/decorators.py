@@ -124,7 +124,6 @@ def plugin_method(func: Callable) -> Callable:
             function_name = func.__name__
             method_key = f"{module_name}.{function_name}"
         
-        # print(f"Megatron-LM-FL Decorators PluginMethod: method_key = {method_key}")
         plugin_impl = get_plugin_method(method_key)
         
         # If not found, try to lazy import the plugin module
@@ -186,7 +185,6 @@ def plugin_implementation(class_or_module_name: str, method_or_function_name: st
     """
     def decorator(impl_func: Callable) -> Callable:
         method_key = f"{class_or_module_name}.{method_or_function_name}"
-        # print(f"Megatron-LM-FL Decorators PluginImplementation: method_key = {method_key}")
         register_plugin_method(method_key, impl_func)
         logger.info(f"Registered plugin implementation: {method_key}")
         return impl_func

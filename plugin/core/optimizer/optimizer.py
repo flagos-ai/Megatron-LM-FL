@@ -12,7 +12,7 @@ from plugin.decorators import plugin_implementation
 
 @plugin_implementation("MixedPrecisionOptimizer", "_unscale_main_grads_and_check_for_nan")
 def _unscale_main_grads_and_check_for_nan(self):
-    print(f"Megatron-LM-FL Plugins: _unscale_main_grads_and_check_for_nan")
+    logger.debug(f"Megatron-LM-FL Plugins: _unscale_main_grads_and_check_for_nan")
     # Collect main grads.
     if not self.is_stub_optimizer:
         main_grads = self._collect_main_grad_data_for_unscaling()
@@ -54,7 +54,7 @@ def _unscale_main_grads_and_check_for_nan(self):
 def sharded_state_dict(
     self, model_sharded_state_dict: ShardedStateDict, is_loading: bool = False, convert_to_ep: bool = False, **kwargs
 ):
-    print(f"Megatron-LM-FL Plugins: sharded_state_dict")
+    logger.debug(f"Megatron-LM-FL Plugins: sharded_state_dict")
     self.convert_to_ep = convert_to_ep ########## FlagScale Add ########
     metadata = kwargs.get('metadata') or {}
     # ChainedOptimizer should add its prefix to the tensor state keys only if
@@ -132,7 +132,7 @@ def sharded_state_dict(
 
 @plugin_implementation("ChainedOptimizer", "load_state_dict")
 def load_state_dict(self, state_dict):
-    print(f"Megatron-LM-FL Plugins: load_state_dict")
+    logger.debug(f"Megatron-LM-FL Plugins: load_state_dict")
     if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers
         logger.info(
             "load_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"

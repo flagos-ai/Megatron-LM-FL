@@ -72,7 +72,6 @@ def get_grad_norm_fp32(
     Returns:
         Total norm of the parameters (viewed as a single vector).
     """
-    print(f"Megatron-LM-FL Original: get_grad_norm_fp32")
     if isinstance(grads_for_norm, torch.Tensor):
         grads_for_norm = [grads_for_norm]
 
@@ -184,7 +183,6 @@ def count_zeros_fp32(
     grad_stats_parallel_group: torch.distributed.ProcessGroup,
     use_decoupled_grad: bool = False,
 ) -> float:
-    print(f"Megatron-LM-FL Original: count_zeros_fp32 called")
     """Counts the number of zeros in gradients associated with the passed-in list of
     parameters.
 
@@ -198,7 +196,6 @@ def count_zeros_fp32(
         use_decoupled_grad (bool, optional) whether to read grad from ".grad" or ".decoupled_grad",
             default value is False.
     """
-    print(f"Megatron-LM-FL Original: count_zeros_fp32")
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
 
