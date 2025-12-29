@@ -17,6 +17,12 @@ logger = logging.getLogger(__name__)
 # Key format: "ClassName.method_name" for methods, "module_name.function_name" for functions
 _plugin_registry: dict[str, Callable] = {}
 
+# Cache for plugin implementation lookup results
+# _plugin_impl_cache: stores functions that have plugin implementations
+# _original_impl_cache: stores functions that should use original implementation (no plugin found)
+_plugin_impl_cache: dict[Callable, Callable] = {}
+_original_impl_cache: set[Callable] = set()
+
 
 def register_plugin_method(method_key: str, implementation: Callable) -> None:
     """
@@ -67,29 +73,36 @@ def plugin_method(func: Callable) -> Callable:
     
     No parameters needed - everything is auto-detected!
     """
+    # Save the original qualname at decoration time
+    # This is crucial for inheritance: when a subclass calls a parent's method,
+    # we need the qualname of the method as defined in the parent class, not the subclass
+    # Example: If A defines m1() and B inherits A, B().m1() should use "A.m1" as the key
+    original_qualname = func.__qualname__
+    original_module = func.__module__
+    
     # Determine if this is a method or function at decoration time
     # by inspecting the function signature
     sig = inspect.signature(func)
     params = list(sig.parameters.keys())
     is_method = params and params[0] == 'self'
     
-    # Save the original qualname at decoration time
-    # This is crucial for inheritance: when a subclass calls a parent's method,
-    # we need the qualname of the method as defined in the parent class, not the subclass
-    # Example: If A defines m1() and B inherits A, B().m1() should use "A.m1" as the key
-    original_qualname = func.__qualname__
-    
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
+        # Check cache first - use func as key
+        if func in _plugin_impl_cache:
+            # Plugin implementation found and cached
+            return _plugin_impl_cache[func](*args, **kwargs)
+        elif func in _original_impl_cache:
+            # Already checked, no plugin found - use original implementation
+            return func(*args, **kwargs)
+        
+        # Cache miss: first time calling this function, need to compute method_key and lookup
+        # Compute method_key only when needed (first call)
         if is_method:
-            # It's a method - use the original qualname saved at decoration time
-            # This ensures we get the class where the method is actually defined,
-            # not the class of the instance calling it
-            # Example: If A defines m1() and B inherits A, B().m1() will use "A.m1"
-            qualname = original_qualname
-            if '.' in qualname:
+            # It's a method - use the original qualname
+            if '.' in original_qualname:
                 # Extract class name from qualname (e.g., "A.m1" -> "A", "Outer.Inner.method" -> "Inner")
-                parts = qualname.rsplit('.', 1)
+                parts = original_qualname.rsplit('.', 1)
                 if len(parts) == 2:
                     class_path = parts[0]
                     method_name = parts[1]
@@ -106,13 +119,12 @@ def plugin_method(func: Callable) -> Callable:
             # It's a module-level function
             # Get the module name from the function's module
             # For megatron.core.optimizer.clip_grads, we want "clip_grads"
-            module_parts = func.__module__.split('.')
+            module_parts = original_module.split('.')
             module_name = module_parts[-1] if module_parts else "unknown"
             function_name = func.__name__
             method_key = f"{module_name}.{function_name}"
         
         # print(f"Megatron-LM-FL Decorators PluginMethod: method_key = {method_key}")
-        # Check if plugin implementation exists
         plugin_impl = get_plugin_method(method_key)
         
         # If not found, try to lazy import the plugin module
@@ -120,9 +132,8 @@ def plugin_method(func: Callable) -> Callable:
             try:
                 # Try to import the corresponding plugin module
                 # For megatron.core.distributed.finalize_model_grads -> plugin.core.distributed.finalize_model_grads
-                megatron_module = func.__module__
-                if megatron_module.startswith("megatron."):
-                    plugin_module = megatron_module.replace("megatron.", "plugin.", 1)
+                if original_module.startswith("megatron."):
+                    plugin_module = original_module.replace("megatron.", "plugin.", 1)
                     try:
                         importlib.import_module(plugin_module)
                         # Try again after import
@@ -136,11 +147,15 @@ def plugin_method(func: Callable) -> Callable:
                 # Ignore any errors during lazy import
                 logger.debug(f"Failed to lazy import plugin for {method_key}: {e}")
         
-        # print(f"Megatron-LM-FL Decorators PluginMethod: plugin_impl = {plugin_impl}")
+        # Cache the result
         if plugin_impl is not None:
+            _plugin_impl_cache[func] = plugin_impl
             logger.debug(f"Using plugin implementation for {method_key}")
             return plugin_impl(*args, **kwargs)
         else:
+            # Cache "not found" result to avoid repeated lookup
+            _original_impl_cache.add(func)
+            logger.debug(f"Using original implementation for {method_key}")
             # Use original implementation
             return func(*args, **kwargs)
     
