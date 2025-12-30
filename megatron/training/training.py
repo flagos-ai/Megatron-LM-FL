@@ -1145,6 +1145,12 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
             if hasattr(args, f.name):
                 kwargs[f.name] = getattr(args, f.name)
         config = SGDOptimizerConfig(**kwargs)
+    elif args.optimizer == 'muon':
+        kwargs = {}
+        for f in dataclasses.fields(OptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        config = OptimizerConfig(**kwargs)
     else:
         raise ValueError("Invalid optimizer type!")
 
