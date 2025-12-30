@@ -25,6 +25,7 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version, make_tp_sharded_tensor_for_checkpoint
+from plugin.decorators import plugin_method
 
 
 class LanguageModule(MegatronModule):
@@ -56,6 +57,7 @@ class LanguageModule(MegatronModule):
         self.vp_stage = None
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 
+    @plugin_method
     def _is_in_embd_group(self):
         if self.embd_group is None:
             return False
@@ -162,6 +164,7 @@ class LanguageModule(MegatronModule):
         loss = loss.transpose(0, 1).contiguous()
         return loss
 
+    @plugin_method
     def setup_embeddings_and_output_layer(self) -> None:
         """Sets up embedding layer in first stage and output layer in last stage.
 

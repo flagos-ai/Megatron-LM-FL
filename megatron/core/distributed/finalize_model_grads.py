@@ -30,6 +30,8 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
 )
 
+from plugin.hetero.p2p_communication import get_device_type_for_comm
+from plugin.decorators import plugin_method
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
     if hasattr(param, "main_grad"):
@@ -101,6 +103,11 @@ def _allreduce_conditional_embedding_grads(
     if pp_group is None:
         pp_group = parallel_state.get_pipeline_model_parallel_group()
 
+    ######### FlagScale Begin #########
+    assert not(isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
+    if isinstance(pp_group, list):
+        return
+    ######### FlagScale End #########
     if pp_group.size() > 1 and getattr(config, "has_cond_embedder", False):
         grads_dict = {}
         for model_chunk in model:
@@ -197,6 +204,7 @@ def _allreduce_word_embedding_grads(
     )
 
 
+@plugin_method
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
     embd_group: torch.distributed.ProcessGroup,

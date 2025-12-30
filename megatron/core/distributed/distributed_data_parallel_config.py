@@ -140,6 +140,9 @@ class DistributedDataParallelConfig:
     delay_wgrad_compute: bool = False
     """Delay the weight gradient computation to improve batch-level communication overlapping"""
 
+    use_partial_reduce_for_shared_embedding: bool = False
+    """Whether to use partional reduce for shared embedding."""
+
     def __post_init__(self):
         import os
 

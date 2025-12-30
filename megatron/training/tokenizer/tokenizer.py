@@ -104,6 +104,42 @@ def build_tokenizer(args, **kwargs):
     elif args.tokenizer_type == 'NullMultimodalTokenizer':
         assert args.vocab_size is not None
         tokenizer = _NullMultimodalTokenizer(args.vocab_size)
+    elif args.tokenizer_type == 'AquilaTokenizerFS':
+        assert args.vocab_file is not None
+        assert args.merge_file is not None
+        assert args.special_tokens_file is not None
+        from plugin.training.tokenizer.tokenizer import _AquilaTokenizerFS
+        tokenizer = _AquilaTokenizerFS(args.vocab_file, args.merge_file,
+                                     args.special_tokens_file)
+    elif args.tokenizer_type == "HFTokenizerFS":
+        assert args.tokenizer_path is not None
+        from plugin.training.tokenizer.tokenizer import _HFTokenizerFS
+        tokenizer = _HFTokenizerFS(args.tokenizer_path)
+    elif args.tokenizer_type == "Llama3TokenizerFS":
+        assert args.tokenizer_path is not None
+        from plugin.training.tokenizer.tokenizer import _Llama3TokenizerFS
+        tokenizer = _Llama3TokenizerFS(args.tokenizer_path)
+    elif args.tokenizer_type == "QwenTokenizerFS":
+        assert args.tokenizer_path is not None
+        from plugin.training.tokenizer.tokenizer import _QwenTokenizerFS
+        tokenizer = _QwenTokenizerFS(args.tokenizer_path)
+    elif args.tokenizer_type == "HFTokenizersTokenizerFS":
+        assert args.tokenizer_path is not None
+        from plugin.training.tokenizer.tokenizer import _HFTokenizersTokenizerFS
+        tokenizer = _HFTokenizersTokenizerFS(args.tokenizer_path)
+    elif args.tokenizer_type == "Qwen2TokenizerFS":
+        assert args.tokenizer_path is not None
+        from plugin.training.tokenizer.tokenizer import _Qwen2TokenizerFS
+        tokenizer = _Qwen2TokenizerFS(args.tokenizer_path, args)
+    elif args.tokenizer_type == 'Qwen2VLTokenizer':
+        assert args.tokenizer_path is not None
+        from plugin.training.tokenizer.tokenizer import _Qwen2VLTokenizer
+        tokenizer = _Qwen2VLTokenizer(args.tokenizer_path, args.extra_vocab_size)
+        args.padded_vocab_size = tokenizer.vocab_size # no padding
+    elif args.tokenizer_type == "RWKVTokenizer":
+        assert args.tokenizer_path is not None, "vocab_file must be provided for RWKV tokenizer"
+        from plugin.training.tokenizer.rwkv_tokenization import RWKVTokenizer
+        tokenizer = RWKVTokenizer(args.tokenizer_path)
     else:
         raise NotImplementedError('{} tokenizer is not ' 'implemented.'.format(args.tokenizer_type))
 
@@ -595,6 +631,16 @@ class _Llama2Tokenizer(_SentencePieceTokenizer):
         assert self.tokenizer.vocab_size() == self.tokenizer.get_piece_size()
 
     def tokenize(self, s: str, bos=True, eos=False):
+        '''Default args for text completion, not chat/dialog.'''
+        assert type(s) is str
+        t = self.tokenizer.encode(s)
+        if bos:
+            t = [self.bos_id] + t
+        if eos:
+            t = t + [self.eos_id]
+        return t
+
+    def instruct_tokenize(self, s: str, bos=True, eos=False):
         '''Default args for text completion, not chat/dialog.'''
         assert type(s) is str
         t = self.tokenizer.encode(s)

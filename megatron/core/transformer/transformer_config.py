@@ -324,6 +324,15 @@ class TransformerConfig(ModelParallelConfig):
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
 
+    recompute_granularity_per_stage_micro_batch: list = None
+    """Same as recompute_granularity but for each stage and each micro-batch."""
+
+    recompute_method_per_stage_micro_batch: list = None
+    """Same as recompute_method but for each stage and each micro-batch."""
+
+    recompute_num_layers_per_stage_micro_batch: list = None
+    """Same as recompute_num_layers but for each stage and each micro-batch."""
+
     distribute_saved_activations: Optional[bool] = None
     """If True, distribute recomputed activations across the model parallel group."""
 
@@ -427,6 +436,12 @@ class TransformerConfig(ModelParallelConfig):
     """If set, keep the parameters in fp4 precision to save memory. This option must be used
     together with fp4 mode (i.e., TransformerConfig.fp4 is not None). Note that not all parameters
     will be converted to fp4; for example, biases will remain unchanged."""
+
+    ####################
+    # DualPipeV related
+    ####################
+    use_dualpipev: bool = False
+    moe_fb_overlap: bool = False
 
     fp4_quantizer_factory: Optional[str] = None
     """Python import path to a callable quantizer factory, e.g., package.module.quantizer_factory.
@@ -685,6 +700,9 @@ class TransformerConfig(ModelParallelConfig):
     config_logger_dir: str = ""
     """When non-empty, dumps entry-point configs to config_logger_dir"""
 
+    qk_layernorm_hidden_dim: bool = False
+    """Whether to apply LayerNorm to the query and key embeddings on the hidden dimension rather than head dimension."""
+
     flash_decode: bool = False
     """ Use the optimized flash decoding kernel during inference. """
 
@@ -748,6 +766,32 @@ class TransformerConfig(ModelParallelConfig):
     transformer_impl: str = "transformer_engine"
     """Transformer implementation to use.
     Options are 'transformer_engine' for Transformer Engine and 'local' for MCore."""
+
+    ####################
+    # PEFT
+    ####################
+    peft_type: str = None
+    """Type for finetuning"""
+    lora_target_modules: Optional[List[str]] = None
+    """Lora target modules"""
+    lora_dim: Optional[int] = None
+    """Lora rank."""
+    lora_alpha: Optional[int] = None
+    """Lora scale alpha."""
+    lora_dropout: Optional[float] = None
+    """Lora dropout prob"""
+    lora_dropout_position: Optional[str] = None
+    """Lora dropout pos"""
+    lora_in_init_method: Optional[str] = None
+    """Lora a init method"""
+    lora_out_init_method: Optional[str] = None
+    """Lora b init method"""
+
+
+    ####################
+    # TE_FL
+    ####################
+    te_fl_prefer: Optional[str] = 'vendor'
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
@@ -1606,6 +1650,9 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.add_bias_linear
             assert not self.add_qkv_bias
             assert not self.use_kitchen
+
+        if self.moe_fb_overlap:
+            self.delay_wgrad_compute = True
 
 
 @dataclass

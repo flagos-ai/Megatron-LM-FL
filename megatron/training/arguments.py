@@ -346,6 +346,13 @@ def tuple_type(x):
 
 def validate_args(args, defaults={}):
 
+    # FlagScale begin
+    enable_hetero = defaults.get("enable_hetero", False)
+    standalone_embedding_stage = defaults.get("standalone_embedding_stage", False)
+    multiple_of = defaults.get("multiple_of", None)
+    hidden_dim_multiplier = defaults.get("hidden_dim_multiplier", None)
+
+
     # Temporary
     assert args.non_persistent_ckpt_type in ['global', 'local', None], \
         'Currently only global and local checkpoints are supported'
@@ -368,66 +375,70 @@ def validate_args(args, defaults={}):
             "legacy model format only supports the 'torch' checkpoint format."
     update_use_dist_ckpt(args)
 
-    total_model_size = args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
-
-    # Total model size.
-    assert args.world_size % total_model_size == 0, (
-        f"world size ({args.world_size}) is not divisible by total_model_size ({total_model_size=})"
-    )
-
     if args.attention_backend == AttnBackend.local:
         assert args.spec[0] == 'local' , '--attention-backend local is only supported with --spec local'
+    
+    if not enable_hetero:
+        total_model_size = args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
 
-    # Pipeline model parallel size.
-    args.transformer_pipeline_model_parallel_size = args.pipeline_model_parallel_size
+        # Total model size.
+        assert args.world_size % total_model_size == 0, (
+            f"world size ({args.world_size}) is not divisible by total_model_size ({total_model_size=})"
+        )
 
-    total_model_size = args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
-    args.data_parallel_size = args.world_size // total_model_size
+        # Pipeline model parallel size.
+        args.transformer_pipeline_model_parallel_size = (
+            args.pipeline_model_parallel_size - 1
+            if standalone_embedding_stage else
+            args.pipeline_model_parallel_size
+        )
 
-    # Batch size checks if running RL.
-    if args.perform_rl_step:
-        assert not (args.rl_remove_kv_cache_during_training and args.rl_offload_kv_cache_during_training), \
-            "Cannot use both remove-kv-cache-during-training and offload-kv-cache-during-training"
+        total_model_size = args.tensor_model_parallel_size * args.pipeline_model_parallel_size * args.context_parallel_size
+        args.data_parallel_size = args.world_size // total_model_size
 
-        assert not (args.rl_partial_rollouts and args.rl_remove_kv_cache_during_training), \
-            "Cannot use both partial-rollouts and remove-kv-cache-during-training"
+        # Batch size checks if running RL.
+        if args.perform_rl_step:
+            assert not (args.rl_remove_kv_cache_during_training and args.rl_offload_kv_cache_during_training), \
+                "Cannot use both remove-kv-cache-during-training and offload-kv-cache-during-training"
 
-        args.grpo_samples_per_iteration = args.grpo_prompts_per_step * args.grpo_group_size
-        num_generated_samples_per_inference_iteration = (
-            args.grpo_samples_per_iteration * args.grpo_iterations)
+            assert not (args.rl_partial_rollouts and args.rl_remove_kv_cache_during_training), \
+                "Cannot use both partial-rollouts and remove-kv-cache-during-training"
 
-        # Ensure that the number of prompts we collect is a multiple of the global batch size.
-        # TODO: Make this account for batch size rampup?
-        assert num_generated_samples_per_inference_iteration % args.global_batch_size == 0, \
-            f"grpo_group_size * grpo_prompts_per_step * grpo_iterations should be divisible by global_batch_size"
+            args.grpo_samples_per_iteration = args.grpo_prompts_per_step * args.grpo_group_size
+            num_generated_samples_per_inference_iteration = (
+                args.grpo_samples_per_iteration * args.grpo_iterations)
 
-        # For now only exit/checkpoint on iterations where we generate data. We don't currently
-        # have a way to checkpoint the generated data.
-        num_training_iterations_per_inference_iteration = (
-            num_generated_samples_per_inference_iteration // args.global_batch_size)
-        if args.exit_interval is not None:
-            assert args.exit_interval % num_training_iterations_per_inference_iteration == 0, \
-                f"exit_interval should be divisible by number of global batches per inference iteration."
-        if args.save_interval is not None:
-            assert args.save_interval % num_training_iterations_per_inference_iteration == 0, \
-                f"save_interval should be divisible by number of global batches per inference iteration."
-        if args.rl_use_sequence_packing:
-            assert args.seq_length <= args.rl_sequence_packing_bin_size, \
-                f"rl_sequence_packing_bin_size should be larger than or equal to seq_length"
+            # Ensure that the number of prompts we collect is a multiple of the global batch size.
+            # TODO: Make this account for batch size rampup?
+            assert num_generated_samples_per_inference_iteration % args.global_batch_size == 0, \
+                f"grpo_group_size * grpo_prompts_per_step * grpo_iterations should be divisible by global_batch_size"
 
-    if args.rank == 0:
-        print('using world size: {}, data-parallel size: {}, '
-              'context-parallel size: {}, '
-              'hierarchical context-parallel sizes: {}, '
-              'tensor-model-parallel size: {}, '
-              'pipeline-model-parallel size: {}'.format(
-                  args.world_size, args.data_parallel_size,
-                  args.context_parallel_size,
-                  args.hierarchical_context_parallel_sizes,
-                  args.tensor_model_parallel_size,
-                  args.pipeline_model_parallel_size), flush=True)
+            # For now only exit/checkpoint on iterations where we generate data. We don't currently
+            # have a way to checkpoint the generated data.
+            num_training_iterations_per_inference_iteration = (
+                num_generated_samples_per_inference_iteration // args.global_batch_size)
+            if args.exit_interval is not None:
+                assert args.exit_interval % num_training_iterations_per_inference_iteration == 0, \
+                    f"exit_interval should be divisible by number of global batches per inference iteration."
+            if args.save_interval is not None:
+                assert args.save_interval % num_training_iterations_per_inference_iteration == 0, \
+                    f"save_interval should be divisible by number of global batches per inference iteration."
 
-    # Checks.
+        if args.rank == 0:
+            print('using world size: {}, data-parallel size: {}, '
+                'context-parallel size: {}, '
+                'hierarchical context-parallel sizes: {}, '
+                'tensor-model-parallel size: {}, '
+                'pipeline-model-parallel size: {}'.format(
+                    args.world_size, args.data_parallel_size,
+                    args.context_parallel_size,
+                    args.hierarchical_context_parallel_sizes,
+                    args.tensor_model_parallel_size,
+                    args.pipeline_model_parallel_size), flush=True)
+
+        # Checks.
+        if args.expert_tensor_parallel_size is None:
+            args.expert_tensor_parallel_size = args.tensor_model_parallel_size
 
     if args.hierarchical_context_parallel_sizes:
         from numpy import prod
@@ -436,8 +447,6 @@ def validate_args(args, defaults={}):
         assert args.hierarchical_context_parallel_sizes is not None, \
         "--hierarchical-context-parallel-sizes must be set when a2a+p2p is used in cp comm"
 
-    if args.expert_tensor_parallel_size is None:
-        args.expert_tensor_parallel_size = args.tensor_model_parallel_size
 
     # Deprecated arguments.
     assert args.batch_size is None, '--batch-size argument is no longer ' \
@@ -555,6 +564,7 @@ def validate_args(args, defaults={}):
         if args.virtual_pipeline_model_parallel_size == 1:
             args.virtual_pipeline_model_parallel_size = None
     elif args.num_layers_per_virtual_pipeline_stage is not None or args.num_virtual_stages_per_pipeline_rank is not None:
+        assert enable_hetero is False, 'num_layers_per_virtual_pipeline_stage is not supported with heterogeneous parallelism for now'
         if args.num_virtual_stages_per_pipeline_rank is None:
             assert args.decoder_first_pipeline_num_layers is None and args.decoder_last_pipeline_num_layers is None, \
                 'please use --num-virtual-stages-per-pipeline-rank to specify virtual pipeline parallel degree when enable uneven pipeline parallelism'
@@ -596,8 +606,9 @@ def validate_args(args, defaults={}):
                 if args.account_for_loss_in_pipeline_split:
                     num_layers += 1
 
-                assert num_layers % args.transformer_pipeline_model_parallel_size == 0, \
-                    'Number of layers should be divisible by the pipeline-model-parallel size'
+                if enable_hetero is False:
+                    assert num_layers % args.transformer_pipeline_model_parallel_size == 0, \
+                        'Number of layers should be divisible by the pipeline-model-parallel size'
     
     if args.virtual_pipeline_model_parallel_size is not None:
         if args.overlap_p2p_comm:
@@ -827,12 +838,22 @@ def validate_args(args, defaults={}):
     # Checks.
     if args.ffn_hidden_size is None:
         if args.swiglu:
-            # reduce the dimnesion for MLP since projections happens on
-            # two linear layers. this keeps the number of paramters in
-            # the same ballpark as the counterpart with 4*h size
-            # we keep it a multiple of 64, which means the actual tensor size
-            # will be a multiple of 64 / tp_size
-            args.ffn_hidden_size = int((4 * args.hidden_size * 2 / 3) / 64) * 64
+            # Ref: https://github.com/facebookresearch/llama/blob/main/llama/model.py#L161-L162
+            if multiple_of is not None:
+                hidden_dim = int(4 * args.hidden_size * 2 / 3)
+                if hidden_dim_multiplier is not None:
+                    assert hidden_dim_multiplier > 0, \
+                        'multiplier for hidden dim should be greater than zero'
+                    hidden_dim = int(hidden_dim * hidden_dim_multiplier)
+                args.ffn_hidden_size = multiple_of * \
+                    ((hidden_dim + multiple_of - 1) // multiple_of)
+            else:
+                # reduce the dimnesion for MLP since projections happens on
+                # two linear layers. this keeps the number of paramters in
+                # the same ballpark as the counterpart with 4*h size
+                # we keep it a multiple of 64, which means the actual tensor size
+                # will be a multiple of 64 / tp_size
+                args.ffn_hidden_size = int((4 * args.hidden_size * 2 / 3) / 64) * 64
         else:
             args.ffn_hidden_size = 4 * args.hidden_size
 
@@ -2232,7 +2253,7 @@ def _add_training_args(parser):
                        help='Enable bias only in the QKV linear layers',
                        dest='add_qkv_bias')
     group.add_argument('--optimizer', type=str, default='adam',
-                       choices=['adam', 'sgd'],
+                       choices=['adam', 'sgd', 'muon'],
                        help='Optimizer function')
     group.add_argument('--optimizer-cpu-offload', action='store_true',
                        help='Offload optimizer state to CPU')
@@ -2364,7 +2385,7 @@ def _add_learning_rate_args(parser):
                        'and initial warmup, the learning rate at each '
                        'iteration would be different.')
     group.add_argument('--lr-decay-style', type=str, default='linear',
-                       choices=['constant', 'linear', 'cosine', 'inverse-square-root', 'WSD'],
+                       choices=['constant', 'linear', 'cosine', 'inverse-square-root', 'WSD', 'stablelm2-scheduler'],
                        help='Learning rate decay function.')
     group.add_argument('--lr-wsd-decay-style', type=str, default='exponential',
                        choices=['exponential', 'linear', 'cosine', 'minus_sqrt'],
@@ -2636,7 +2657,7 @@ def _add_distributed_args(parser):
                        default=False, help='if set, overlap pipeline parallel communication in warmup and flush',
                        dest='overlap_p2p_comm_warmup_flush')
     group.add_argument('--distributed-backend', default='nccl',
-                       choices=['nccl', 'gloo'],
+                       choices=['nccl', 'gloo', 'flagcx'],
                        help='Which backend to use for distributed training.')
     group.add_argument('--distributed-timeout-minutes', type=int, default=10,
                        help='Default timeout minutes for torch.distributed.')
@@ -2832,7 +2853,14 @@ def _add_tokenizer_args(parser):
                                 'MultimodalTokenizer',
                                 'NullTokenizer',
                                 'NullMultimodalTokenizer',
-                                'SFTTokenizer'],
+                                'SFTTokenizer',
+                                'AquilaTokenizerFS',
+                                'HFTokenizerFS', 
+                                'HFTokenizersTokenizerFS', 
+                                'Llama3TokenizerFS',
+                                'QwenTokenizerFS',
+                                'Qwen2TokenizerFS',
+                                'Qwen2VLTokenizer',],
                        help='What type of tokenizer to use.')
     group.add_argument('--tokenizer-model', type=str, default=None,
                        help='Sentencepiece tokenizer model.')

@@ -12,6 +12,8 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from plugin.core.transformer.moe.moe_utils import reduce_aux_losses_tracker_across_ranks_hetero
+
 try:
     import transformer_engine as te  # pylint: disable=unused-import
 
@@ -787,6 +789,7 @@ def reduce_aux_losses_tracker_across_ranks(track_names: Optional[List[str]] = No
             )
 
 
+
 def track_moe_metrics(
     loss_scale: float,
     iteration: int,
@@ -799,6 +802,7 @@ def track_moe_metrics(
     num_layers: Optional[int] = None,
     moe_layer_freq: Optional[Union[int, List[int]]] = None,
     mtp_num_layers: Optional[int] = None,
+    enable_hetero=False,
 ):
     """Track the MoE metrics for logging."""
     # Aux loss logging
@@ -813,7 +817,10 @@ def track_moe_metrics(
                     tracker[key]["reduce_group"] = None
                     tracker[key]["avg_group"] = None
                     tracker[key]["reduce_group_has_dp"] = False
-    reduce_aux_losses_tracker_across_ranks(track_names)
+    if not enable_hetero:
+        reduce_aux_losses_tracker_across_ranks(track_names)
+    else:
+        reduce_aux_losses_tracker_across_ranks_hetero(track_names)
 
     # Get number of MoE layers
     if moe_layer_freq is None:

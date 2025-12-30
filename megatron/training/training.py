@@ -84,7 +84,7 @@ except ImportError:
 
 from megatron.core.distributed import finalize_model_grads
 from megatron.core.enums import ModelType
-from megatron.core.optimizer import get_megatron_optimizer, AdamOptimizerConfig, SGDOptimizerConfig, OptimizerConfig, ParamKey
+from megatron.core.optimizer import get_megatron_optimizer, AdamOptimizerConfig, SGDOptimizerConfig, MuonOptimizerConfig, OptimizerConfig, ParamKey
 from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
     destroy_rerun_state_machine,
@@ -1145,6 +1145,12 @@ def get_megatron_optimizer_config(args: Any) -> OptimizerConfig:
             if hasattr(args, f.name):
                 kwargs[f.name] = getattr(args, f.name)
         config = SGDOptimizerConfig(**kwargs)
+    elif args.optimizer == 'muon':
+        kwargs = {}
+        for f in dataclasses.fields(MuonOptimizerConfig):
+            if hasattr(args, f.name):
+                kwargs[f.name] = getattr(args, f.name)
+        config = MuonOptimizerConfig(**kwargs)
     else:
         raise ValueError("Invalid optimizer type!")
 

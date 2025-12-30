@@ -46,8 +46,10 @@ except ImportError:
 from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
 from ..transformer.module import param_is_not_shared
 from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
+from plugin.decorators import plugin_method
 
 
+@plugin_method
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
     norm_type: Union[int, float] = 2,
@@ -176,7 +178,7 @@ def clip_grad_by_total_norm_fp32(
             multi_tensor_scale_impl, dummy_overflow_buf, [grads, grads], clip_coeff
         )
 
-
+@plugin_method
 def count_zeros_fp32(
     parameters: Union[List[torch.Tensor], torch.Tensor],
     grad_stats_parallel_group: torch.distributed.ProcessGroup,

@@ -8,6 +8,7 @@ from typing import Callable, Dict, List, Optional, Tuple, Union
 import torch
 from torch.optim import SGD as CPUSGD
 from torch.optim import AdamW as CPUAdam
+from .muon import Muon
 
 try:
     from transformer_engine.pytorch.optimizers import FusedAdam as Adam
@@ -50,7 +51,7 @@ from .optimizer import (
     MegatronOptimizer,
     param_group_identifier_keys,
 )
-from .optimizer_config import AdamOptimizerConfig, OptimizerConfig, ParamKey, SGDOptimizerConfig
+from .optimizer_config import AdamOptimizerConfig, OptimizerConfig, ParamKey, SGDOptimizerConfig, MuonOptimizerConfig
 
 logger = logging.getLogger(__name__)
 
@@ -110,6 +111,7 @@ def _get_param_groups(
     # Map (wd_mult, is_expert_parallel, param_group_hyperparameters_config) to params.
     params_map = {}
     configs_map = {}
+    muon_params_map = {}
 
     for model_chunk in model_chunks:
         for name, param in model_chunk.named_parameters():
@@ -143,15 +145,35 @@ def _get_param_groups(
             else:
                 wd_mult = 0.0
 
+            # NOTE(lizhiyu): hack for qwen2.5vl
+            is_vision_model_param = False
+            if "vision_model" in name:
+                is_vision_model_param = True
+            else:
+                is_vision_model_param = False
+
+
             # Create config_tuple that is hash-able. Remove timers object before
             # creating config_tuple.
             config_for_param_copy = copy.deepcopy(config_for_param)
             config_for_param_copy.timers = None
             config_tuple = astuple(config_for_param_copy)
-            key = (wd_mult, is_expert_parallel, config_tuple)
-            if key not in params_map:
-                params_map[key] = []
-            params_map[key].append(param)
+
+            bias_flag = name.endswith(".bias")
+            shape_flag = param.dim() == 2
+            embedding_flag = "embedding" in name or "output_layer" in name
+            use_muon = config.optimizer == 'muon'
+            muon_flag = use_muon and shape_flag and (not bias_flag) and (not embedding_flag)
+            if muon_flag:
+                key = (wd_mult, is_expert_parallel, config_tuple)
+                if key not in muon_params_map:
+                    muon_params_map[key] = []
+                muon_params_map[key].append(param)
+            else:
+                key = (wd_mult, is_expert_parallel, is_vision_model_param, config_tuple)
+                if key not in params_map:
+                    params_map[key] = []
+                params_map[key].append(param)
 
             if key in configs_map:
                 assert (config_for_param, uses_default_config) == configs_map[key]
@@ -169,9 +191,21 @@ def _get_param_groups(
             if key not in params_key:
                 params_key.append(key)
 
+    # for muon optimizer
+    # For muon optimizer, we need to add the muon params key to the params_key
+    # so we need to align the param groups across ranks, otherwise we may have
+    # runtime error when loading the checkpoint or numerical error when resuming training.
+    muon_params_key = list(muon_params_map.keys())
+    gathered_muon_params_key = [None for _ in range(torch.distributed.get_world_size())]
+    torch.distributed.all_gather_object(gathered_muon_params_key, muon_params_key)
+    for keys in gathered_muon_params_key:
+        for key in keys:
+            if key not in muon_params_key:
+                muon_params_key.append(key)
+
     param_groups = []
     for key in params_key:
-        wd_mult, is_expert_parallel, _ = key
+        wd_mult, is_expert_parallel, is_vision_model_param, _ = key
         params = params_map[key] if key in params_map else []
         config, uses_default_config = None, True
         if key not in configs_map:
@@ -188,15 +222,38 @@ def _get_param_groups(
             'is_expert_parallel': is_expert_parallel,
             'is_decoupled_lr': False,  # For backwards compatibility.
             'default_config': uses_default_config,
+            'is_vision_model_param': is_vision_model_param,
         }
 
         # Stick relevant fields into param_group from config object.
         if config is not None:
-            param_group['max_lr'] = config.lr
+            param_group['max_lr'] = config.lr if not is_vision_model_param else config.lr * config.vision_ration # NOTE(lizhiyu): change the ration here
             param_group['min_lr'] = config.min_lr
             # TODO: Add other relevant arguments (e.g., weight decay, optimizer)
             # here as well.
         param_groups.append(param_group)
+
+    for key in muon_params_key:
+        wd_mult, is_expert_parallel, _ = key
+        params = muon_params_map[key] if key in muon_params_map else []
+        config, uses_default_config = None, True
+        if key not in configs_map:
+            assert params == []
+        else:
+            config, uses_default_config = configs_map[key]
+            assert config is not None
+
+        param_groups.append(
+            {
+                'params': params,
+                'wd_mult': wd_mult,  # For backwards compatibility.
+                'lr_mult': 1.0,  # For backwards compatibility.
+                'is_expert_parallel': is_expert_parallel,
+                'is_decoupled_lr': False,  # For backwards compatibility.
+                'default_config': uses_default_config,
+                'use_muon': True,
+            }
+        )
 
     return param_groups
 
@@ -377,6 +434,25 @@ def _get_megatron_optimizer_based_on_param_groups(
                 momentum=config.sgd_momentum,
             )
             init_state_fn = None
+        elif config.optimizer == 'muon':
+            optimizer = Muon(param_groups,
+                             lr=config.lr, weight_decay=config.weight_decay,
+                             matched_adamw_rms=config.muon_matched_adamw_rms,
+                             momentum=config.muon_momentum,
+                             nesterov=config.muon_nesterov,
+                             ns_steps=config.muon_ns_steps,
+                             adamw_betas=(config.adam_beta1, config.adam_beta2),
+                             adamw_eps=config.adam_eps)
+
+            def init_state_fn(opt, config=None):
+                for group in opt.param_groups:
+                    for p in group['params']:
+                        if len(opt.state[p]) == 0:
+                            if config is None or not config.use_precision_aware_optimizer:
+                                opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
+                                opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
+                            else:
+                                opt.initialize_state(p)
         else:
             raise Exception('{} optimizer is not supported.'.format(config.optimizer))
     else:
@@ -499,6 +575,10 @@ def get_megatron_optimizer(
     intra_dp_cp_group = process_groups['intra_dp_cp_group']
     intra_expt_dp_group = process_groups['intra_expt_dp_group']
     mp_group = process_groups['mp_group']
+    ########## FlagScale Begin ##########
+    mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
+    model_parallel_rank = mp_group[0].rank()
+    ########## FlagScale End ##########
     expt_tp_pp_group = process_groups['expt_tp_pp_group']
     intra_dp_cp_group_gloo = process_groups['intra_dp_cp_group_gloo']
     intra_expt_dp_group_gloo = process_groups['intra_expt_dp_group_gloo']
@@ -606,7 +686,11 @@ def get_megatron_optimizer(
                 param_to_param_group[param_name] = param_group_id
             param_group_id += 1
     if len(moe_param_groups) > 0:
-        expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
+        if not isinstance(expt_tp_pp_group, list):
+            expt_model_parallel_rank = get_pg_rank(expt_tp_pp_group)
+        else:
+            model_parallel_rank = expt_tp_pp_group[0].rank()
+
         # Pass Gloo process groups into optimizer only if needed.
         if use_gloo_process_groups:
             expt_data_parallel_group_gloo = intra_expt_dp_group_gloo
