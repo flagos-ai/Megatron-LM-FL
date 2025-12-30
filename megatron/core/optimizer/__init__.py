@@ -51,7 +51,7 @@ from .optimizer import (
     MegatronOptimizer,
     param_group_identifier_keys,
 )
-from .optimizer_config import AdamOptimizerConfig, OptimizerConfig, ParamKey, SGDOptimizerConfig
+from .optimizer_config import AdamOptimizerConfig, OptimizerConfig, ParamKey, SGDOptimizerConfig, MuonOptimizerConfig
 
 logger = logging.getLogger(__name__)
 
