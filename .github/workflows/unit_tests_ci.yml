@@ -1,0 +1,29 @@
+name: Unit Tests Only
+
+on:
+  push:
+    branches: [unit_tests]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Self-hosted GPU)
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run unit tests in existing Docker image
+        run: |
+          docker run --rm \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            localhost:5000/megatron-lm-fl:ci \
+            torchrun --nproc_per_node=8 -m pytest tests/unit_tests
