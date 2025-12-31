@@ -32,6 +32,8 @@ jobs:
             localhost:5000/megatron-lm-fl:ci \
             bash -c "
               set -e &&
+              git clone https://github.com/flagos-ai/FlagScale.git /workspace/FlagScale &&
+              export PYTHONPATH=/workspace/FlagScale:\$PYTHONPATH &&
               torchrun --nproc_per_node=8 -m pytest -v tests/unit_tests
             "
 
