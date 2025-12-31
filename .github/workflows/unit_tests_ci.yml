@@ -14,7 +14,7 @@ concurrency:
 jobs:
   unit-tests:
     name: Unit Tests (Self-hosted GPU)
-    runs-on: [self-hosted, Linux, X64, nvidia]
+    runs-on: self-hosted
 
     steps:
       - name: Fix workspace permissions
