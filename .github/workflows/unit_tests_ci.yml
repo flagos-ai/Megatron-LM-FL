@@ -14,16 +14,29 @@ concurrency:
 jobs:
   unit-tests:
     name: Unit Tests (Self-hosted GPU)
-    runs-on: self-hosted
+    runs-on: [self-hosted, Linux, X64, nvidia]
 
     steps:
+      - name: Fix workspace permissions
+        run: |
+          sudo chown -R $(id -u):$(id -g) $GITHUB_WORKSPACE || true
+          sudo chmod -R u+rwX $GITHUB_WORKSPACE || true
+
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Run unit tests in existing Docker image
+      - name: Run unit tests in Docker (torchrun)
         run: |
           docker run --rm \
+            --gpus all \
+            -u $(id -u):$(id -g) \
+            -e HOME=/workspace \
+            -e PYTHONDONTWRITEBYTECODE=1 \
             -v ${{ github.workspace }}:/workspace \
             -w /workspace \
             localhost:5000/megatron-lm-fl:ci \
-            torchrun --nproc_per_node=8 -m pytest tests/unit_tests
+            bash -c "
+              set -e &&
+              torchrun --nproc_per_node=8 -m pytest -v tests/unit_tests
+            "
+
