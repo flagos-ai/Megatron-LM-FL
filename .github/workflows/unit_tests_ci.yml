@@ -34,6 +34,8 @@ jobs:
               set -e &&
               git clone https://github.com/flagos-ai/FlagScale.git /workspace/FlagScale &&
               export PYTHONPATH=/workspace/FlagScale:\$PYTHONPATH &&
+              export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache &&
+              mkdir -p \$TORCHINDUCTOR_CACHE_DIR &&
               torchrun --nproc_per_node=8 -m pytest -v tests/unit_tests
             "
 
