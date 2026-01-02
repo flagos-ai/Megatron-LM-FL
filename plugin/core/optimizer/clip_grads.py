@@ -36,7 +36,6 @@ except ImportError:
 try:
     from plugin.utils import get_device_type_for_comm
 except ImportError:
-    # Fallback if flagscale is not available
     def get_device_type_for_comm(group):
         return "cuda"
 

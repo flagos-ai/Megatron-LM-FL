@@ -1,3 +1,4 @@
+import os
 import torch
 from typing import List, Optional
 from megatron.core import parallel_state

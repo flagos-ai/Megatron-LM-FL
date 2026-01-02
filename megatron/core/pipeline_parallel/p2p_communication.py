@@ -10,7 +10,7 @@ import torch.distributed as dist
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.utils import nvtx_decorator
 
-from flagscale.train.hetero.p2p_communication import recv_forward_hetero, recv_backward_hetero, send_backward_hetero, send_forward_hetero, send_forward_recv_backward_hetero, send_backward_recv_forward_hetero
+from plugin.hetero.p2p_communication import recv_forward_hetero, recv_backward_hetero, send_backward_hetero, send_forward_hetero, send_forward_recv_backward_hetero, send_backward_recv_forward_hetero
 
 # Types
 Shape = Union[List[int], torch.Size]
