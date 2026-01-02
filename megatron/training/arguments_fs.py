@@ -438,7 +438,7 @@ class FSTrainArguments:
 
 def _add_hetero_args(parser):
     """Add heterogeneous training related arguments (FlagScale specific)."""
-    group = parser.add_argument_group(title="heterogeneous training")
+    group = parser.add_argument_group(title="flagscale heterogeneous training")
 
     group.add_argument(
         "--enable-hetero",
@@ -501,7 +501,7 @@ def _add_hetero_args(parser):
 
 def _add_auto_tuner_args(parser):
     """Add auto tuner arguments (FlagScale specific)."""
-    group = parser.add_argument_group(title="auto tuner")
+    group = parser.add_argument_group(title="flagscale auto tuner")
     group.add_argument(
         "--auto-tune",
         action="store_true",
@@ -512,7 +512,7 @@ def _add_auto_tuner_args(parser):
 
 def _add_auto_skip_spiky_loss(parser):
     """Add auto skip spiky loss arguments (FlagScale specific)."""
-    group = parser.add_argument_group(title="auto skip spiky loss")
+    group = parser.add_argument_group(title="flagscale auto skip spiky loss")
     group.add_argument(
         "--auto-skip-spiky-loss",
         action="store_true",
@@ -529,7 +529,7 @@ def _add_auto_skip_spiky_loss(parser):
 
 def _add_peft_args(parser):
     """Add PEFT / LoRA arguments (FlagScale specific)."""
-    group = parser.add_argument_group(title="peft")
+    group = parser.add_argument_group(title="flagscale peft")
 
     group.add_argument(
         "--peft-type",
@@ -599,7 +599,7 @@ def _add_peft_args(parser):
 
 
 def _add_network_size_args(parser):
-    group = parser.add_argument_group(title='network size')
+    group = parser.add_argument_group(title='flagscale network size')
 
     group.add_argument('--norm-init-weight', type=float, default=None,
                        help="Norm weight initialization.")
@@ -611,7 +611,7 @@ def _add_network_size_args(parser):
 
 
 def _add_logging_args(parser):
-    group = parser.add_argument_group(title='logging')
+    group = parser.add_argument_group(title='flagscale logging')
 
     group.add_argument('--wandb-mode', type=str, choices=['online', 'offline', 'disabled'], default='offline',
                        help='Can be "online", "offline" or "disabled". Defaults to "offline".')
@@ -625,7 +625,7 @@ def _add_logging_args(parser):
 
 
 def _add_training_args(parser):
-    group = parser.add_argument_group(title='training')
+    group = parser.add_argument_group(title='flagscale training')
 
     group.add_argument('--recompute-granularity-per-stage-micro-batch', nargs='*', type=str, default=None,
                        help='used with recompute-granularity=full, setting recompute granularity'
@@ -658,7 +658,7 @@ def _add_training_args(parser):
 
 
 def _add_learning_rate_args(parser):
-    group = parser.add_argument_group(title='learning rate')
+    group = parser.add_argument_group(title='flagscale learning rate')
 
     ## stablelm2-scheduler consists of multiple stages
     group.add_argument('--lr-decay-stablelm2-cosine-samples', type=int, default=0,
@@ -679,7 +679,7 @@ def _add_learning_rate_args(parser):
 
 
 def _add_checkpointing_args(parser):
-    group = parser.add_argument_group(title='checkpointing')
+    group = parser.add_argument_group(title='flagscale checkpointing')
     
     group.add_argument('--rampup-save-interval', type=int, default=None,
                        help='Number of iterations between checkpoint saves.in the ramup phase.')
@@ -689,7 +689,7 @@ def _add_checkpointing_args(parser):
 
 
 def _add_distributed_args(parser):
-    group = parser.add_argument_group(title='distributed')
+    group = parser.add_argument_group(title='flagscale distributed')
     
     group.add_argument('--standalone-embedding-stage', action='store_true',
                        default=False, help='If set, *input* embedding layer '
@@ -704,7 +704,7 @@ def _add_distributed_args(parser):
 
 
 def _add_validation_args(parser):
-    group = parser.add_argument_group(title='validation')
+    group = parser.add_argument_group(title='flagscale validation')
 
     group.add_argument('--extra-eval-interval', type=int, default=None,
                        help='Interval between running evaluation on '
@@ -713,7 +713,7 @@ def _add_validation_args(parser):
 
 
 def _add_tokenizer_args(parser):
-    group = parser.add_argument_group(title='tokenizer')
+    group = parser.add_argument_group(title='flagscale tokenizer')
     
     group.add_argument('--special-tokens-file', type=str, default=None,
                        help='Path to the BPE special tokens file.')
@@ -723,7 +723,7 @@ def _add_tokenizer_args(parser):
 
 
 def _add_data_args(parser):
-    group = parser.add_argument_group(title='data')
+    group = parser.add_argument_group(title='flagscale data')
     
     group.add_argument('--extra-valid-data-path', nargs='*', default=None,
                        help='The weight, prefix list for an independent extra validation dataset. '
@@ -740,7 +740,7 @@ def _add_data_args(parser):
 
 
 def _add_vision_args(parser):
-    group = parser.add_argument_group(title='vision')
+    group = parser.add_argument_group(title='flagscale vision')
     
     group.add_argument('--qk-layernorm-hidden-dim', action='store_true',
                        help='Whether to layer normalize the q and k attention embeddings on hidden dimension rather than head dimension')
@@ -748,7 +748,7 @@ def _add_vision_args(parser):
 
 
 def _add_regularization_args(parser):
-    group = parser.add_argument_group(title='regularization')
+    group = parser.add_argument_group(title='flagscale regularization')
 
     group.add_argument('--muon-matched-adamw-rms', type=float, default=0.2,
                        help="The RMS of the matched AdamW's, typically 0.2 ~ 0.4")
@@ -763,7 +763,7 @@ def _add_regularization_args(parser):
 
 
 def _add_flagos_args(parser):
-    group = parser.add_argument_group(title="transformer engine fl")
+    group = parser.add_argument_group(title="flagscale transformer engine fl")
     group.add_argument('--te-fl-prefer', type=str, choices=['flagos', 'vendor', 'reference'], default='vendor',
                        help='Backend selection for transformer engine fl.')
     group.add_argument('--te-fl-per-op', type=str, default=None,
