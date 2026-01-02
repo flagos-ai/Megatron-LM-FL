@@ -32,8 +32,8 @@ from megatron.training.checkpointing import load_args_from_checkpoint
 from megatron.training.global_vars import set_global_variables, set_global_writers
 from megatron.training.yaml_arguments import validate_yaml
 
-from flagscale.train import FSTrainArguments
-from flagscale.train import set_get_spiky_loss_detector
+from megatron.training.arguments_fs import FSTrainArguments
+from megatron.training.global_vars import set_spiky_loss_detector
 from plugin.hetero.parallel_context import set_parallel_context
 
 logger = logging.getLogger(__name__)
@@ -130,7 +130,7 @@ def initialize_megatron(
     )
 
     if args.auto_skip_spiky_loss:
-        set_get_spiky_loss_detector(args=args)
+        set_spiky_loss_detector(args=args)
 
     # torch.distributed initialization
     def finish_mpu_init():

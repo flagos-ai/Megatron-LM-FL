@@ -1676,7 +1676,7 @@ class ParallelContext:
             from megatron.core.datasets.gpt_dataset import GPTDatasetConfig
             from megatron.training import get_tokenizer
             from megatron.core.datasets.utils import get_blend_from_list
-            from flagscale.train.datasets.sft_dataset import SFTDatasetConfig
+            from megatron.training.datasets.sft_dataset_fs import SFTDatasetConfig
 
             if args.apply_sft_dataset_separated_loss_mask_if_existed:
                 tokenizer = get_tokenizer()

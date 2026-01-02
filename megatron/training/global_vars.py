@@ -14,7 +14,9 @@ from megatron.core.num_microbatches_calculator import init_num_microbatches_calc
 from megatron.training.dist_signal_handler import DistributedSignalHandler
 from megatron.training.tokenizer import build_tokenizer
 
+from megatron.training.spiky_loss import SpikyLossDetector
 from plugin.utils import get_device_type_for_comm
+
 
 _GLOBAL_ARGS = None
 _GLOBAL_TOKENIZER = None
@@ -25,6 +27,9 @@ _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 _GLOBAL_ENERGY_MONITOR = None
 _GLOBAL_SIGNAL_HANDLER = None
+
+_GLOBAL_SPIKY_LOSS_DETECTOR = None
+
 
 def get_args():
     """Return arguments."""
@@ -358,3 +363,17 @@ def destroy_global_vars():
 
     global _GLOBAL_SIGNAL_HANDLER
     _GLOBAL_SIGNAL_HANDLER = None
+
+
+
+def get_spiky_loss_detector():
+    """Return spiky loss detector."""
+    _ensure_var_is_initialized(_GLOBAL_SPIKY_LOSS_DETECTOR, "spiky loss detector")
+    return _GLOBAL_SPIKY_LOSS_DETECTOR
+
+
+def set_spiky_loss_detector(args):
+    """Initialize spiky loss detector."""
+    global _GLOBAL_SPIKY_LOSS_DETECTOR
+    _ensure_var_is_not_initialized(_GLOBAL_SPIKY_LOSS_DETECTOR, "spiky loss detector")
+    _GLOBAL_SPIKY_LOSS_DETECTOR = SpikyLossDetector(args.spiky_loss_threshold)

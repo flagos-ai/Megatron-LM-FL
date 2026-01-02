@@ -47,6 +47,7 @@ from megatron.core.quantization.utils import (
     kitchen_quantization_recipe_config,
     load_quantization_recipe,
 )
+from megatron.training.arguments_fs import add_flagscale_arguments
 
 def add_megatron_arguments(parser: argparse.ArgumentParser):
     """"Add Megatron-LM arguments to the given parser."""
@@ -94,6 +95,7 @@ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
                                      allow_abbrev=False)
 
     parser = add_megatron_arguments(parser)
+    parser = add_flagscale_arguments(parser)
 
     # Custom arguments.
     if extra_args_provider is not None:
