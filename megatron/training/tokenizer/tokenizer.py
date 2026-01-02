@@ -16,16 +16,6 @@ from .bert_tokenization import FullTokenizer as FullBertTokenizer
 from .gpt2_tokenization import GPT2Tokenizer, AquilaTokenizer
 from megatron.training.tokenizer.multimodal_tokenizer import MultimodalTokenizer
 from megatron.training.tokenizer.sft_tokenizer import SFTTokenizer
-from megatron.training.tokenizer.tokenizer import (
-    _AquilaTokenizerFS,
-    _HFTokenizerFS,
-    _Llama3TokenizerFS,
-    _QwenTokenizerFS,
-    _HFTokenizersTokenizerFS,
-    _Qwen2TokenizerFS,
-    _Qwen2VLTokenizer,
-)
-from megatron.training.tokenizer.rwkv_tokenization import RWKVTokenizer
 
 
 def build_tokenizer(args, **kwargs):
