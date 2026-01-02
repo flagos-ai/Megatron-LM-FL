@@ -34,7 +34,7 @@ except ImportError:
         from megatron.core.utils import local_multi_tensor_l2_norm as l2_norm_impl
 
 try:
-    from plugin.hetero.p2p_communication import get_device_type_for_comm
+    from plugin.utils import get_device_type_for_comm
 except ImportError:
     # Fallback if flagscale is not available
     def get_device_type_for_comm(group):

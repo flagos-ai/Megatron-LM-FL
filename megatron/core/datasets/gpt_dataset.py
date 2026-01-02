@@ -17,7 +17,7 @@ from megatron.core.datasets.utils import Split
 from megatron.core.tokenizers import MegatronTokenizerBase
 from megatron.core.utils import log_single_rank
 
-from plugin.core.datasets.utils import is_built_on_zero_rank
+from plugin.utils import is_built_on_zero_rank
 
 logger = logging.getLogger(__name__)
 
