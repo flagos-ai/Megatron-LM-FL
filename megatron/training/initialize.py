@@ -33,7 +33,8 @@ from megatron.training.global_vars import set_global_variables, set_global_write
 from megatron.training.yaml_arguments import validate_yaml
 
 from flagscale.train import FSTrainArguments
-from flagscale.train import set_parallel_context, set_get_spiky_loss_detector
+from flagscale.train import set_get_spiky_loss_detector
+from plugin.hetero.parallel_context import set_parallel_context
 
 logger = logging.getLogger(__name__)
 
