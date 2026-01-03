@@ -14,8 +14,8 @@ from megatron.core.model_parallel_config import ModelParallelConfig
 # Types
 Shape = Union[List[int], torch.Size]
 
-from plugin.hetero.parallel_context import get_parallel_context
-from plugin.hetero.parallel_context import ParallelContext
+from megatron.plugin.hetero.parallel_context import get_parallel_context
+from megatron.plugin.hetero.parallel_context import ParallelContext
 
 def is_single_shape(x) -> bool:
     """Check if the input is a single shape."""

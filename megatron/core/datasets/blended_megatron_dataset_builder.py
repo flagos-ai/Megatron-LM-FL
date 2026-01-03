@@ -14,7 +14,7 @@ from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDat
 from megatron.core.datasets.utils import Split, normalize
 from megatron.core.utils import log_single_rank
 
-from plugin.utils import is_built_on_zero_rank
+from megatron.plugin.utils import is_built_on_zero_rank
 
 logger = logging.getLogger(__name__)
 

@@ -9,14 +9,14 @@ from megatron.core.transformer.moe.moe_utils import permute
 from megatron.core.utils import make_sharded_tensor_for_checkpoint, make_viewless_tensor
 from megatron.training import get_args
 
-from plugin.dualpipev.fb_overlap.modules.attention import attention_forward
-from plugin.dualpipev.fb_overlap.modules.token_dispatcher import (
+from megatron.plugin.dualpipev.fb_overlap.modules.attention import attention_forward
+from megatron.plugin.dualpipev.fb_overlap.modules.token_dispatcher import (
     alltoall_token_perm1,
     alltoall_token_perm2,
     alltoall_token_unperm1,
     alltoall_token_unperm2,
 )
-from plugin.dualpipev.fb_overlap.modules.utils import (
+from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     LayerGraph,
     P2PCommOutput,
     P2PCommParams,

@@ -22,8 +22,8 @@ from megatron.core.utils import (
 from megatron.core.distributed.finalize_model_grads import _get_main_grad_attr, _unshard_if_dtensor, _reshard_if_dtensor
 
 
-from plugin.utils import get_device_type_for_comm
-from plugin.decorators import plugin_implementation
+from megatron.plugin.utils import get_device_type_for_comm
+from megatron.plugin.decorators import plugin_implementation
 
 logger = logging.getLogger(__name__)
 

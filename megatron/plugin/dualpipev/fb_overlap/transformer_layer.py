@@ -4,16 +4,16 @@ from contextlib import nullcontext
 
 import torch
 
-from plugin.dualpipev.fb_overlap.modules.utils import LayerGraph, P2PCommParams
-from plugin.dualpipev.fb_overlap.overlap_funcs.bwd import (
+from megatron.plugin.dualpipev.fb_overlap.modules.utils import LayerGraph, P2PCommParams
+from megatron.plugin.dualpipev.fb_overlap.overlap_funcs.bwd import (
     transformer_layer_backward_dense,
     transformer_layer_backward_moe,
 )
-from plugin.dualpipev.fb_overlap.overlap_funcs.fwd import (
+from megatron.plugin.dualpipev.fb_overlap.overlap_funcs.fwd import (
     transformer_layer_forward_dense,
     transformer_layer_forward_moe,
 )
-from plugin.dualpipev.fb_overlap.overlap_funcs.fwdbwd import (
+from megatron.plugin.dualpipev.fb_overlap.overlap_funcs.fwdbwd import (
     transformer_layer_forward_dense_backward_dense_overlapping,
     transformer_layer_forward_dense_backward_moe_overlapping,
     transformer_layer_forward_moe_backward_dense_overlapping,

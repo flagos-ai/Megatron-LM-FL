@@ -125,7 +125,7 @@ def get_forward_backward_func():
     if pipeline_model_parallel_size > 1:
         ######### FlagScale Modify ########
         if parallel_state.get_dualpipev_pipeline_model_parallel_world_size() is not None:
-            from plugin.dualpipev.dualpipev_schedules import forward_backward_pipelining_with_dualpipev
+            from megatron.plugin.dualpipev.dualpipev_schedules import forward_backward_pipelining_with_dualpipev
             forward_backward_func = forward_backward_pipelining_with_dualpipev
         elif parallel_state.get_virtual_pipeline_model_parallel_world_size() is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving

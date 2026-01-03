@@ -8,12 +8,12 @@ from megatron.core.inference.contexts import BaseInferenceContext
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import deprecate_inference_params
 
-from plugin.dualpipev.fb_overlap.modules.utils import (
+from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     ModelGraph,
     detach_tensor,
     run_graph_backward,
 )
-from plugin.dualpipev.fb_overlap.transformer_block import (
+from megatron.plugin.dualpipev.fb_overlap.transformer_block import (
     transformer_block_backward,
     transformer_block_forward,
     transformer_block_forward_backward_overlapping,

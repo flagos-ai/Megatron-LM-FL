@@ -15,7 +15,7 @@ from megatron.training.dist_signal_handler import DistributedSignalHandler
 from megatron.training.tokenizer import build_tokenizer
 
 from megatron.training.spiky_loss import SpikyLossDetector
-from plugin.utils import get_device_type_for_comm
+from megatron.plugin.utils import get_device_type_for_comm
 
 
 _GLOBAL_ARGS = None

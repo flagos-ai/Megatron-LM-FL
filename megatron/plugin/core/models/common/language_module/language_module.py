@@ -11,7 +11,7 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
 
-from plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import plugin_implementation
 
 logger = logging.getLogger(__name__)
 

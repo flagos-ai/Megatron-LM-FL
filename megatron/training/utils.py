@@ -43,7 +43,7 @@ from megatron.core.utils import (
 )
 from megatron.legacy.model.module import param_is_not_shared
 
-from plugin.utils import get_device_type_for_comm
+from megatron.plugin.utils import get_device_type_for_comm
 
 
 def calc_params_l2_norm(model, force_create_fp32_copy=False):

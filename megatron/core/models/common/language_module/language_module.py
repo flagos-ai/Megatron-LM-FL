@@ -25,7 +25,7 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version, make_tp_sharded_tensor_for_checkpoint
-from plugin.decorators import plugin_method
+from megatron.plugin.decorators import plugin_method
 
 
 class LanguageModule(MegatronModule):

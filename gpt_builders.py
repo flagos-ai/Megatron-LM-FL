@@ -27,7 +27,7 @@ def gpt_builder(args, pre_process, post_process, vp_stage=None, config=None, pg_
         if args.yaml_cfg is not None:
             config = core_transformer_config_from_yaml(args, "language_model")
         else:
-            from plugin.hetero.parallel_context import get_parallel_context
+            from megatron.plugin.hetero.parallel_context import get_parallel_context
             para_ctx = get_parallel_context()
             if para_ctx is not None:
                 config = para_ctx.get_transformer_config()

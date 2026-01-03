@@ -25,11 +25,11 @@ from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import get_attr_wrapped_model, get_model_config, get_model_type
 
-from plugin.dualpipev.fb_overlap.gpt_model import (
+from megatron.plugin.dualpipev.fb_overlap.gpt_model import (
     gpt_model_backward,
     gpt_model_forward_backward_overlapping,
 )
-from plugin.dualpipev.fb_overlap.transformer_layer import (
+from megatron.plugin.dualpipev.fb_overlap.transformer_layer import (
     P2PCommParams,
     transformer_layer_forward_backward_overlapping,
 )

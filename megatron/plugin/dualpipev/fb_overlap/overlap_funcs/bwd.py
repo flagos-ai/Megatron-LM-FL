@@ -6,7 +6,7 @@ from megatron.core import parallel_state
 from megatron.core.transformer.moe.moe_utils import permute
 from megatron.training import get_args
 
-from plugin.dualpipev.fb_overlap.modules.utils import (
+from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     async_all_to_all,
     call_attention_backward_dw,
     call_dense_mlp_backward_dw,

@@ -34,7 +34,7 @@ from megatron.training.yaml_arguments import validate_yaml
 
 from megatron.training.arguments_fs import FSTrainArguments
 from megatron.training.global_vars import set_spiky_loss_detector
-from plugin.hetero.parallel_context import set_parallel_context
+from megatron.plugin.hetero.parallel_context import set_parallel_context
 
 logger = logging.getLogger(__name__)
 
@@ -198,7 +198,7 @@ def _compile_dependencies():
     # Compile dataset C++ code.
     # =========================
     # TODO: move this to ninja
-    from plugin.utils import is_built_on_zero_rank
+    from megatron.plugin.utils import is_built_on_zero_rank
     if is_built_on_zero_rank():
         start_time = time.time()
         print("> compiling dataset index builder ...")
