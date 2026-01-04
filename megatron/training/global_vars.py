@@ -5,7 +5,6 @@
 import os
 import sys
 import torch
-import torch.distributed
 
 from megatron.core import Timers
 from megatron.core.config import set_experimental_flag
@@ -13,10 +12,6 @@ from megatron.core.energy_monitor import EnergyMonitor
 from megatron.core.num_microbatches_calculator import init_num_microbatches_calculator, unset_num_microbatches_calculator
 from megatron.training.dist_signal_handler import DistributedSignalHandler
 from megatron.training.tokenizer import build_tokenizer
-
-from megatron.training.spiky_loss import SpikyLossDetector
-from megatron.plugin.utils import get_device_type_for_comm
-
 
 _GLOBAL_ARGS = None
 _GLOBAL_TOKENIZER = None
@@ -27,9 +22,6 @@ _GLOBAL_ADLR_AUTORESUME = None
 _GLOBAL_TIMERS = None
 _GLOBAL_ENERGY_MONITOR = None
 _GLOBAL_SIGNAL_HANDLER = None
-
-_GLOBAL_SPIKY_LOSS_DETECTOR = None
-
 
 def get_args():
     """Return arguments."""
@@ -107,6 +99,9 @@ def set_global_variables(args, build_tokenizer=True):
     )
     if build_tokenizer:
         _ = _build_tokenizer(args)
+    _set_tensorboard_writer(args)
+    _set_wandb_writer(args)
+    _set_one_logger(args)
     _set_adlr_autoresume(args)
     _set_timers(args)
     _set_energy_monitor(args)
@@ -116,42 +111,6 @@ def set_global_variables(args, build_tokenizer=True):
 
     if args.exit_signal_handler:
         _set_signal_handler(args.exit_signal)
-
-
-def set_global_writers(args):
-    """Set tensorboard-writer and wandb writer.
-
-    Note that this function should be called after calling finish_mpu_init.
-    This is because we can know which rank is the last one after the rank mapping in finish_mpu_init.
-    """
-
-    assert args is not None
-
-    _ensure_var_is_initialized(_GLOBAL_ARGS, 'args')
-
-    from .utils import is_last_rank
-    if is_last_rank(): 
-        _set_tensorboard_writer(args)
-        _set_one_logger(args)
-
-    # build wandb writers for all processes in the dp group of the last rank 
-    from megatron.core import mpu 
-    mp_groups = mpu.get_model_parallel_group()
-    if not isinstance(mp_groups, list):
-        mp_groups = [mp_groups]
-    size = torch.distributed.get_world_size(mp_groups[-1])
-    comm_device = get_device_type_for_comm(mp_groups)
-    ranks_tensor = torch.tensor([0 for _ in range(size)], dtype=torch.int, device=comm_device)
-    orig_ranks = torch.tensor([i for i in range(size)], dtype=torch.int, device=comm_device)
-    if is_last_rank():
-        ranks_list = torch.distributed.get_process_group_ranks(mp_groups[-1])
-        ranks_tensor = torch.tensor(ranks_list, dtype=torch.int, device=comm_device)
-    orig_ranks = ranks_tensor.clone().detach()
-    for group in mp_groups:
-        ranks_tensor = orig_ranks.clone()
-        torch.distributed.all_reduce(ranks_tensor, group=group)
-    if torch.distributed.get_rank() in ranks_tensor.tolist(): 
-        _set_wandb_writer(args)
 
 
 def unset_global_variables():
@@ -211,7 +170,7 @@ def _set_tensorboard_writer(args):
                                    'tensorboard writer')
 
     if hasattr(args, 'tensorboard_dir') and \
-       args.tensorboard_dir:
+       args.tensorboard_dir and args.rank == (args.world_size - 1):
         try:
             from torch.utils.tensorboard import SummaryWriter
             print('> setting tensorboard ...')
@@ -228,12 +187,11 @@ def _set_wandb_writer(args):
     global _GLOBAL_WANDB_WRITER
     _ensure_var_is_not_initialized(_GLOBAL_WANDB_WRITER,
                                    'wandb writer')
-    if getattr(args, 'wandb_project', ''):
+    if getattr(args, 'wandb_project', '') and args.rank == (args.world_size - 1):
         if args.wandb_exp_name == '':
             raise ValueError("Please specify the wandb experiment name!")
 
         import wandb
-        rank = torch.distributed.get_rank()
         if args.wandb_save_dir:
             save_dir = args.wandb_save_dir
         else:
@@ -245,29 +203,14 @@ def _set_wandb_writer(args):
             # settings were.
             with open(wandb_config['kitchen_config_file'], "r") as f:
                 wandb_config['kitchen_config_file_contents'] = f.read()
-        save_dir = os.path.join(save_dir, "rank-{}".format(rank))
-        os.makedirs(save_dir, exist_ok=True)
-
-        wandb_id = f"{args.wandb_exp_name}-rank-{rank}"
-        name = f'{args.wandb_exp_name}-rank-{rank}'
-        group = args.wandb_exp_name
         wandb_kwargs = {
-            'id': wandb_id,
             'dir': save_dir,
-            'name': name,
-            'group': group,
+            'name': args.wandb_exp_name,
             'project': args.wandb_project,
-            'mode': args.wandb_mode,
-            'resume': 'auto',
             'config': wandb_config}
         if args.wandb_entity:
             wandb_kwargs['entity'] = args.wandb_entity
-        if args.wandb_entity:
-            wandb_kwargs['entity'] = args.wandb_entity
-
-        if args.wandb_mode == 'online' or args.wandb_api_key:
-            assert args.wandb_api_key, 'wandb_api_key is required for online mode'
-            wandb.login(key=args.wandb_api_key)
+        os.makedirs(wandb_kwargs['dir'], exist_ok=True)
         wandb.init(**wandb_kwargs)
         _GLOBAL_WANDB_WRITER = wandb
 
@@ -363,17 +306,3 @@ def destroy_global_vars():
 
     global _GLOBAL_SIGNAL_HANDLER
     _GLOBAL_SIGNAL_HANDLER = None
-
-
-
-def get_spiky_loss_detector():
-    """Return spiky loss detector."""
-    _ensure_var_is_initialized(_GLOBAL_SPIKY_LOSS_DETECTOR, "spiky loss detector")
-    return _GLOBAL_SPIKY_LOSS_DETECTOR
-
-
-def set_spiky_loss_detector(args):
-    """Initialize spiky loss detector."""
-    global _GLOBAL_SPIKY_LOSS_DETECTOR
-    _ensure_var_is_not_initialized(_GLOBAL_SPIKY_LOSS_DETECTOR, "spiky loss detector")
-    _GLOBAL_SPIKY_LOSS_DETECTOR = SpikyLossDetector(args.spiky_loss_threshold)
