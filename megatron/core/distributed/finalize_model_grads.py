@@ -30,8 +30,7 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
 )
 
-from plugin.hetero.p2p_communication import get_device_type_for_comm
-from plugin.decorators import plugin_method
+from megatron.plugin.decorators import plugin_method
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
     if hasattr(param, "main_grad"):

@@ -1,7 +1,6 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from unittest.mock import patch
-import pytest
 
 import torch
 
@@ -305,7 +304,7 @@ def test_grpo_loss_truncation():
     torch.testing.assert_close(truncated_from_above, torch.tensor([[True, False], [True, False]]))
     torch.testing.assert_close(truncated_from_below, torch.tensor([[False, True], [False, False]]))
 
-@pytest.mark.skipif(True, reason="broken")
+
 @patch('megatron.rl.rl_utils.mpu')
 def test_prepare_data_for_update(mock_mpu):
     """Test that getting logprobs at least does not crash."""

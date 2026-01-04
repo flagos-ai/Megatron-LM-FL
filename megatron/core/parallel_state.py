@@ -13,7 +13,7 @@ import torch
 
 from .utils import GlobalMemoryBuffer, is_torch_min_version
 
-from flagscale.train import get_parallel_context  
+from megatron.plugin.hetero.parallel_context import get_parallel_context  
 
 
 logger = logging.getLogger(__name__)

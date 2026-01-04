@@ -29,11 +29,8 @@ from megatron.training import inprocess_restart
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.async_utils import init_persistent_async_worker
 from megatron.training.checkpointing import load_args_from_checkpoint
-from megatron.training.global_vars import set_global_variables, set_global_writers
+from megatron.training.global_vars import set_global_variables
 from megatron.training.yaml_arguments import validate_yaml
-
-from flagscale.train import FSTrainArguments
-from flagscale.train import set_parallel_context, set_get_spiky_loss_detector
 
 logger = logging.getLogger(__name__)
 
@@ -85,21 +82,10 @@ def initialize_megatron(
     if args.async_save and args.use_persistent_ckpt_worker:
         init_persistent_async_worker()
 
-    ## FlagScale Begin: Pre Validate Arguments ##
-    fs_argument = FSTrainArguments(args)
-    args_defaults["enable_hetero"] = args.enable_hetero
-    args_defaults["standalone_embedding_stage"] = args.standalone_embedding_stage
-    args_defaults["multiple_of"] = args.multiple_of
-    args_defaults["hidden_dim_multiplier"] = args.hidden_dim_multiplier
-    fs_argument.pre_validate_args()
-
     if args.yaml_cfg is not None:
         args = validate_yaml(args, args_defaults)
     else:
         validate_args(args, args_defaults)
-
-    ## FlagScale End: Post Validate Arguments ##
-    fs_argument.post_validate_args()
 
     # set global args, build tokenizer, and set adlr-autoresume,
     # tensorboard-writer, and timers.
@@ -128,9 +114,6 @@ def initialize_megatron(
         result_rejected_tracker_filename=args.result_rejected_tracker_filename,
     )
 
-    if args.auto_skip_spiky_loss:
-        set_get_spiky_loss_detector(args=args)
-
     # torch.distributed initialization
     def finish_mpu_init():
         args = get_args()
@@ -153,9 +136,6 @@ def initialize_megatron(
             from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 
             MoEAuxLossAutoScaler.set_loss_scale(torch.ones(1, device=torch.cuda.current_device()))
-
-        # Set tensorboard writer and wandb writer.
-        set_global_writers(args)
 
     if skip_mpu_initialization:
         return None
@@ -197,8 +177,7 @@ def _compile_dependencies():
     # Compile dataset C++ code.
     # =========================
     # TODO: move this to ninja
-    from plugin.core.datasets.utils import is_built_on_zero_rank
-    if is_built_on_zero_rank():
+    if torch.distributed.get_rank() == 0:
         start_time = time.time()
         print("> compiling dataset index builder ...")
         from megatron.core.datasets.utils import compile_helpers
@@ -367,15 +346,6 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
             'rank': args.rank,
             'timeout': timedelta(minutes=args.distributed_timeout_minutes),
         }
-        
-        if args.enable_hetero and args.hetero_use_cpu_communication:
-            # if not all(device_type == args.hetero_device_types[0] for device_type in args.hetero_device_types):
-            #     init_process_group_kwargs['backend'] = 'gloo'
-            init_process_group_kwargs['backend'] = "cpu:gloo"
-        # TODO: @aoyulong the init_process_group will be hanging if the device_id is set 
-        # if packaging.version.Version(torch.__version__) >= packaging.version.Version("2.3.0"):
-        #     init_process_group_kwargs['device_id'] = device_id
-
         if args.fake_process_group:
             assert is_torch_min_version("2.3.0"), "Fake process group is only supported with PyTorch 2.3.0 and above."
             from torch.testing._internal.distributed.fake_pg import FakeStore
@@ -389,11 +359,6 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
     # Set the tensor model-parallel, pipeline model-parallel, and
     # data-parallel communicators.
     if device_count > 0:
-        # Set the parallel context.
-        if args.enable_hetero:
-            set_parallel_context(args)
-            return
-
         if mpu.model_parallel_is_initialized():
             print("model parallel is already initialized")
         else:
@@ -416,7 +381,6 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 create_gloo_process_groups=args.enable_gloo_process_groups,
                 high_priority_stream_groups=args.high_priority_stream_groups,
                 sharp_enabled_group=args.sharp_enabled_group,
-                create_dualpipev_parallel_size=args.use_dualpipev,
             )
             if args.rank == 0:
                 print(

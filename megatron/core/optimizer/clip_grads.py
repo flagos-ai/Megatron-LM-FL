@@ -46,7 +46,7 @@ except ImportError:
 from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
 from ..transformer.module import param_is_not_shared
 from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
-from plugin.decorators import plugin_method
+from megatron.plugin.decorators import plugin_method
 
 
 @plugin_method

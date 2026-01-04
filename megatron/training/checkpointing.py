@@ -283,14 +283,12 @@ def read_metadata(tracker_filename):
             else:
                 # Set iteration to 0 for release checkpoints
                 iteration = 0
-    # TODO: we use iteration 0 to load checkpoint from other framework.  
-    # We should remove this after we have a better way to load checkpoint from other framework.
-    assert iteration >= 0 or release, 'error parsing metadata file {}'.format(
+    assert iteration > -1 or release, 'error parsing metadata file {}'.format(
         tracker_filename)
 
     # Get the max iteration retrieved across the ranks.
     if torch.distributed.is_initialized():
-        iters_cuda = torch.tensor([iteration], dtype=torch.long, device='cuda' if torch.distributed.get_backend() != 'gloo' else 'cpu')
+        iters_cuda = torch.tensor([iteration], dtype=torch.long, device='cuda')
         torch.distributed.all_reduce(iters_cuda, op=torch.distributed.ReduceOp.MAX)
         max_iter = iters_cuda[0].item()
 
@@ -693,28 +691,6 @@ def save_checkpoint(iteration, model, optimizer, opt_param_scheduler, num_floati
     if not torch.distributed.is_initialized() \
        or is_last_rank():
         def wandb_finalize_fn():
-            ######### FlagScale Begin #########
-            #NOTE(lizhiyu): The tracker file is created by rank 0 but wandb_finalize_fn is called on the last rank.
-            import time as pytime
-
-            tracker_file = get_checkpoint_tracker_filename(save_dir)
-
-            timeout_seconds = 600  # 10 minutes
-            wait_interval_seconds = 5
-            max_retries = timeout_seconds // wait_interval_seconds
-
-            for _ in range(max_retries):
-                if isfile(tracker_file):
-                    with open(tracker_file, 'r') as f:
-                        content = f.read().strip()
-                        if content == str(iteration):
-                            break  # Success
-                print(f'WandB finalization waiting for the tracker file {tracker_file} to update...')
-                pytime.sleep(wait_interval_seconds)
-            else:
-                # This block executes if the loop completes without a `break`.
-                raise RuntimeError(f"Timed out waiting for tracker file {tracker_file} to be updated for iteration {iteration} after {timeout_seconds} seconds.")
-            ######### FlagScale End #########
             wandb_utils.on_save_checkpoint_success(checkpoint_name, get_checkpoint_tracker_filename(save_dir), save_dir, iteration)
         if args.async_save:
             assert async_save_request is not None
@@ -797,7 +773,8 @@ def maybe_save_dataloader_state(train_iterator, iteration, dataloader_save_path)
 
     torch.distributed.barrier(group=mpu.get_data_parallel_group())
 
-    ensure_directory_exists(data_state_save_path)
+    if mpu.get_data_parallel_rank() == 0:
+        ensure_directory_exists(data_state_save_path)
 
     torch.distributed.barrier(group=mpu.get_data_parallel_group())
 
@@ -1291,10 +1268,6 @@ def load_args_from_checkpoint(
             checkpoint_args, 'add_bias_linear', not getattr(checkpoint_args, 'disable_bias_linear')
         )
 
-    # For backward compatibility.
-    if hasattr(checkpoint_args, 'apply_layernorm_rms'):
-        checkpoint_args.normalization = 'RMSNorm'
-
     def _set_arg(arg_name, old_arg_name=None, force=False):
         if not force and getattr(args, arg_name, None) is not None:
             return
@@ -1330,8 +1303,6 @@ def load_args_from_checkpoint(
     _set_arg('add_qkv_bias', force=True)
     _set_arg('squared_relu', force=True)
     _set_arg('swiglu', force=True)
-    _set_arg('multiple_of', force=True)
-    _set_arg('hidden_dim_multiplier', force=True)
     _set_arg('untie_embeddings_and_output_weights', force=True)
     _set_arg('apply_layernorm_1p', force=True)
     _set_arg('normalization', force=True)
@@ -1474,14 +1445,6 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
             run_tp_pp, ckpt_tp_pp
         )
 
-        ########## FlagScale Begin ##########
-        #Add support for changing parallel strategy from tp/pp to ep for ChainedOptimizer when using dist checkpointing
-        convert_to_ep = (
-            getattr(args, 'expert_model_parallel_size', 1) != 1 and
-            getattr(state_dict['args'], 'expert_model_parallel_size', 1) == 1
-        )
-        ########## FlagScale End ##########
-
         # Determine if RNG state will be loaded
         if (ckpt_tp_pp == run_tp_pp and not release and not args.finetune and not args.no_load_rng
                 and not getattr(ckpt_args, 'no_save_rng', False)):
@@ -1517,7 +1480,6 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
                     ckpt_tp_pp != run_tp_pp
                     and sharded_sd_metadata['distrib_optim_sharding_type']
                     not in DistributedOptimizer.checkpoint_fully_reshardable_formats
-                    and convert_to_ep ########## FlagScale Added ##########
                 ):
                     raise RuntimeError(f"{mismatch_msg}: not supported for DistributedOptimizer with sharding type"
                                        f" {sharded_sd_metadata['distrib_optim_sharding_type']}."
@@ -1531,7 +1493,7 @@ def load_checkpoint(ddp_model, optimizer, opt_param_scheduler, load_arg='load', 
             gen_sd_optim = None
             gen_sd_opt_param_scheduler = None
 
-        optim_sd_kwargs = dict(metadata=sharded_sd_metadata, is_loading=True, convert_to_ep=convert_to_ep) ########## FlagScale Added ##########
+        optim_sd_kwargs = dict(metadata=sharded_sd_metadata, is_loading=True)
         model_sd_kwargs = dict(metadata=sharded_sd_metadata)
 
         # Determine if rerun state will be loaded

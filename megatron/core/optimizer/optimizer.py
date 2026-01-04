@@ -51,7 +51,7 @@ from .clip_grads import clip_grad_by_total_norm_fp32, count_zeros_fp32, get_grad
 from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
 
-from plugin.decorators import plugin_method
+from megatron.plugin.decorators import plugin_method
 
 logger = getLogger(__name__)
 

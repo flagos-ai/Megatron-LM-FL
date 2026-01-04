@@ -12,7 +12,6 @@ import time
 import gzip
 import glob
 import torch
-import shutil
 import numpy as np
 import multiprocessing
 try:
@@ -269,12 +268,7 @@ def main():
 
     if args.split_sentences:
         if nltk_available:
-            try:
-                punkt_path = os.environ.get("NLTK_DATA") + "/tokenizers/punkt"
-                if not os.path.exists(punkt_path):
-                    shutil.copytree('/root/nltk_data/tokenizers/punkt', punkt_path)
-            except:
-                nltk.download("punkt", quiet=True, download_dir=os.environ.get("NLTK_DATA"))
+            nltk.download("punkt", quiet=True, download_dir=os.environ.get("NLTK_DATA"))
         else:
             raise Exception(
                 "nltk library required for sentence splitting is not available.")

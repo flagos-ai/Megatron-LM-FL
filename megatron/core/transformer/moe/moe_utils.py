@@ -12,7 +12,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.transformer_config import TransformerConfig
 
-from plugin.core.transformer.moe.moe_utils import reduce_aux_losses_tracker_across_ranks_hetero
+from megatron.plugin.utils import reduce_aux_losses_tracker_across_ranks_hetero
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
