@@ -1668,7 +1668,7 @@ class ParallelContext:
 
         def _build_optimzer_config(args):
             # Use specific optimizer config class based on optimizer type, matching Megatron-LM-FL behavior
-            from megatron.training.training import get_megatron_optimizer_config
+            from megatron.training.utils import get_megatron_optimizer_config
             config, config_overrides = get_megatron_optimizer_config(args)
             return config, config_overrides
 
