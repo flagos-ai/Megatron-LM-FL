@@ -1,5 +1,8 @@
 <div align="center">
 
+<u><strong>Megatron-LM-FL is a fork of Megatron-LM that introduces a plugin-based architecture for supporting diverse AI chips, built on top of [FlagOS](https://github.com/flagos-ai), a unified open-source AI system software stack.</strong></u>
+
+
 Megatron-LM & Megatron Core
 ===========================
 
@@ -10,8 +13,6 @@ Megatron-LM & Megatron Core
 [![license](https://img.shields.io/badge/license-Apache-blue)](./LICENSE)
 
 <div align="left">
-
-<u><strong>Megatron-LM-FL is a fork of Megatron-LM that introduces a plugin-based architecture for supporting diverse AI chips, built on top of [FlagOS](https://github.com/flagos-ai), a unified open-source AI system software stack.</strong></u>
 
 ## ⚡ Quick Start
 
