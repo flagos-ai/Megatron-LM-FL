@@ -74,9 +74,6 @@ class TestBertModel:
 
 
 class TestBERTModelReconfiguration:
-    def setup_class(cls):
-        Utils.initialize_distributed()
-
     def setup_method(self, method):
         pass
 
