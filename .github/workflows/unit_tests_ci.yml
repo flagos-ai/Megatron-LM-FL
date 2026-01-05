@@ -30,13 +30,12 @@ jobs:
             -v ${{ github.workspace }}:/workspace \
             -v /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data \
             -v /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers \
+            -v /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets \
+            -v /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers \
             -w /workspace \
             localhost:5000/megatron-lm-fl:ci \
             bash -c "
               set -e &&
-              mkdir -p /opt/data &&
-              cp -r /home/gitlab-runner/data/Megatron-LM/* /opt/data/ &&
-              cp -r /home/gitlab-runner/tokenizers/Megatron-LM/* /opt/data/ &&
               git clone https://github.com/flagos-ai/FlagScale.git /workspace/FlagScale &&
               export PYTHONPATH=/workspace/FlagScale:\$PYTHONPATH &&
               export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache &&
