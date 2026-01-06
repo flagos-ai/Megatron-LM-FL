@@ -104,9 +104,6 @@ if is_te_min_version("1.9.0.dev0"):
 
 
 class TestExpertLayerReconfiguration:
-    def setup_class(cls):
-        Utils.initialize_distributed()
-
     def setup_method(self, method):
         pass
 

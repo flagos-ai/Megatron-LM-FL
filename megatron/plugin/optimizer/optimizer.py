@@ -7,7 +7,7 @@ from megatron.core.dist_checkpointing.utils import add_prefix_for_sharding
 
 logger = getLogger(__name__)
 
-from plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import plugin_implementation
 
 
 @plugin_implementation("MixedPrecisionOptimizer", "_unscale_main_grads_and_check_for_nan")

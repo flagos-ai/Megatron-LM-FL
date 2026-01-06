@@ -426,9 +426,8 @@ class Float16Module(MegatronModule):
         """
         ######### FlagScale Begin ########
         #TODO: Fix the dualpipev import issue in the latest Megatron codebase
-        # from flagscale.train.dualpipev.dualpipev_schedules import get_dualpipe_chunk
         if self.config.use_dualpipev:
-            from flagscale.train.dualpipev.dualpipev_schedules import get_dualpipe_chunk
+            from megatron.plugin.dualpipev.dualpipev_schedules import get_dualpipe_chunk
             dualpipe_first_stage = parallel_state.is_pipeline_first_stage() and get_dualpipe_chunk() == 0
             if dualpipe_first_stage:
                 inputs = fp32_to_float16(inputs, self.float16_convertor)

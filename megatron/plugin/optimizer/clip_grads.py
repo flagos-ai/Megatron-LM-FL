@@ -12,7 +12,7 @@ from typing import List, Optional, Union
 import torch
 from torch import inf
 
-from plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import plugin_implementation
 from megatron.core.utils import get_data_parallel_group_if_dtensor
 from megatron.core.utils import to_local_if_dtensor
 from megatron.core.transformer.module import param_is_not_shared
@@ -34,9 +34,8 @@ except ImportError:
         from megatron.core.utils import local_multi_tensor_l2_norm as l2_norm_impl
 
 try:
-    from plugin.hetero.p2p_communication import get_device_type_for_comm
+    from megatron.plugin.utils import get_device_type_for_comm
 except ImportError:
-    # Fallback if flagscale is not available
     def get_device_type_for_comm(group):
         return "cuda"
 

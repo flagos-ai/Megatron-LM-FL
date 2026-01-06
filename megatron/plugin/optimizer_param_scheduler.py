@@ -6,7 +6,7 @@ from megatron.core.utils import log_single_rank
 
 logger = logging.getLogger(__name__)
 
-from plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import plugin_implementation
 
 
 @plugin_implementation("OptimizerParamScheduler", "get_lr")

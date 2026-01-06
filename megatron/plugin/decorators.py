@@ -130,9 +130,12 @@ def plugin_method(func: Callable) -> Callable:
         if plugin_impl is None:
             try:
                 # Try to import the corresponding plugin module
-                # For megatron.core.distributed.finalize_model_grads -> plugin.core.distributed.finalize_model_grads
-                if original_module.startswith("megatron."):
-                    plugin_module = original_module.replace("megatron.", "plugin.", 1)
+                # For megatron.core.distributed.finalize_model_grads -> megatron.plugin.distributed.finalize_model_grads
+                # For megatron.core.optimizer.clip_grads -> megatron.plugin.optimizer.clip_grads
+                if original_module.startswith("megatron.core."):
+                    # Replace "megatron.core." with "megatron.plugin."
+                    # e.g., megatron.core.distributed.xxx -> megatron.plugin.distributed.xxx
+                    plugin_module = original_module.replace("megatron.core.", "megatron.plugin.", 1)
                     try:
                         importlib.import_module(plugin_module)
                         # Try again after import

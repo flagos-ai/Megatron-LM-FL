@@ -37,9 +37,6 @@ def initialize_mlp(glu=True):
 
 
 class TestParallelMLPWithGLU:
-    def setup_class(cls):
-        Utils.initialize_distributed()
-
     def setup_method(self, method):
         pass
 
