@@ -21,12 +21,10 @@ Megatron-LM & Megatron Core
 ## ⚡ Quick Start
 
 ```bash
-# 1. Install Megatron Core with required dependencies
-pip install --no-build-isolation megatron-core[mlm,dev]
-
-# 2. Clone repository for examples
-git clone https://github.com/NVIDIA/Megatron-LM.git
-cd Megatron-LM
+# Clone Megatron-LM-FL repository (includes megatron.core and megatron.plugin)
+git clone https://github.com/flagos-ai/Megatron-LM-FL.git
+cd Megatron-LM-FL
+# Install Megatron-LM-FL with required dependencies
 pip install --no-build-isolation .[mlm,dev]
 ```
 
