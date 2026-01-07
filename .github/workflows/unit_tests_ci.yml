@@ -1,0 +1,45 @@
+name: Unit Tests Only
+
+on:
+  push:
+    branches: [unit_tests]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unit-tests:
+    name: Unit Tests (Self-hosted GPU)
+    runs-on: self-hosted
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run unit tests in Docker (torchrun)
+        run: |
+          docker run --rm \
+            --gpus all \
+            -u $(id -u):$(id -g) \
+            -e HOME=/workspace \
+            -e PYTHONDONTWRITEBYTECODE=1 \
+            -v ${{ github.workspace }}:/workspace \
+            -v /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data \
+            -v /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers \
+            -v /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets \
+            -v /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers \
+            -w /workspace \
+            localhost:5000/megatron-lm-fl:ci \
+            bash -c "
+              set -e &&
+              git clone https://github.com/flagos-ai/FlagScale.git /workspace/FlagScale &&
+              export PYTHONPATH=/workspace/FlagScale:\$PYTHONPATH &&
+              export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache &&
+              mkdir -p \$TORCHINDUCTOR_CACHE_DIR &&
+              torchrun --nproc_per_node=8 -m pytest -v tests/unit_tests
+            "
+
