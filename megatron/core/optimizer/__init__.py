@@ -9,6 +9,8 @@ import torch
 from torch.optim import SGD as CPUSGD
 from torch.optim import AdamW as CPUAdam
 from .muon import Muon
+import os
+
 
 try:
     from transformer_engine.pytorch.optimizers import FusedAdam as Adam
@@ -179,81 +181,107 @@ def _get_param_groups(
                 assert (config_for_param, uses_default_config) == configs_map[key]
             else:
                 configs_map[key] = (config_for_param, uses_default_config)
-
+    
     # Distributed checkpoint requires all ranks to have the same param groups,
     # so we need to align the param groups across ranks, otherwise we may have
     # runtime error when loading the checkpoint or numerical error when resuming training.
-    params_key = list(params_map.keys())
-    gathered_params_key = [None for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather_object(gathered_params_key, params_key)
-    for keys in gathered_params_key:
-        for key in keys:
-            if key not in params_key:
-                params_key.append(key)
-
-    # for muon optimizer
-    # For muon optimizer, we need to add the muon params key to the params_key
-    # so we need to align the param groups across ranks, otherwise we may have
-    # runtime error when loading the checkpoint or numerical error when resuming training.
-    muon_params_key = list(muon_params_map.keys())
-    gathered_muon_params_key = [None for _ in range(torch.distributed.get_world_size())]
-    torch.distributed.all_gather_object(gathered_muon_params_key, muon_params_key)
-    for keys in gathered_muon_params_key:
-        for key in keys:
-            if key not in muon_params_key:
-                muon_params_key.append(key)
-
-    param_groups = []
-    for key in params_key:
-        wd_mult, is_expert_parallel, is_vision_model_param, _ = key
-        params = params_map[key] if key in params_map else []
-        config, uses_default_config = None, True
-        if key not in configs_map:
-            assert params == []
-        else:
-            config, uses_default_config = configs_map[key]
-            assert config is not None
+    if os.environ.get("ENABLE_SIMULATOR") == "1":
+        param_groups = []
+        params_key = list(params_map.keys())
+        for key in params_key:
+            wd_mult, is_expert_parallel, is_vision_model_param, _ = key
+            params = params_map[key] if key in params_map else []
+            config, uses_default_config = None, True
+            if key not in configs_map:
+                assert params == []
+            else:
+                config, uses_default_config = configs_map[key]
+                assert config is not None
 
         # TODO: Remove "backwards compatible" fields below eventually.
-        param_group = {
-            'params': params,
-            'wd_mult': wd_mult,  # For backwards compatibility.
-            'lr_mult': 1.0,  # For backwards compatibility.
-            'is_expert_parallel': is_expert_parallel,
-            'is_decoupled_lr': False,  # For backwards compatibility.
-            'default_config': uses_default_config,
-            'is_vision_model_param': is_vision_model_param,
-        }
-
-        # Stick relevant fields into param_group from config object.
-        if config is not None:
-            param_group['max_lr'] = config.lr if not is_vision_model_param else config.lr * config.vision_ration # NOTE(lizhiyu): change the ration here
-            param_group['min_lr'] = config.min_lr
-            # TODO: Add other relevant arguments (e.g., weight decay, optimizer)
-            # here as well.
-        param_groups.append(param_group)
-
-    for key in muon_params_key:
-        wd_mult, is_expert_parallel, _ = key
-        params = muon_params_map[key] if key in muon_params_map else []
-        config, uses_default_config = None, True
-        if key not in configs_map:
-            assert params == []
-        else:
-            config, uses_default_config = configs_map[key]
-            assert config is not None
-
-        param_groups.append(
-            {
+            param_group = {
                 'params': params,
                 'wd_mult': wd_mult,  # For backwards compatibility.
                 'lr_mult': 1.0,  # For backwards compatibility.
                 'is_expert_parallel': is_expert_parallel,
                 'is_decoupled_lr': False,  # For backwards compatibility.
                 'default_config': uses_default_config,
-                'use_muon': True,
+                'is_vision_model_param': is_vision_model_param,
             }
-        )
+            param_groups.append(param_group)
+    
+    else:
+        params_key = list(params_map.keys())
+        gathered_params_key = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered_params_key, params_key)
+        for keys in gathered_params_key:
+            for key in keys:
+                if key not in params_key:
+                    params_key.append(key)
+
+        # for muon optimizer
+        # For muon optimizer, we need to add the muon params key to the params_key
+        # so we need to align the param groups across ranks, otherwise we may have
+        # runtime error when loading the checkpoint or numerical error when resuming training.
+        muon_params_key = list(muon_params_map.keys())
+        gathered_muon_params_key = [None for _ in range(torch.distributed.get_world_size())]
+        torch.distributed.all_gather_object(gathered_muon_params_key, muon_params_key)
+        for keys in gathered_muon_params_key:
+            for key in keys:
+                if key not in muon_params_key:
+                    muon_params_key.append(key)
+
+        param_groups = []
+        for key in params_key:
+            wd_mult, is_expert_parallel, is_vision_model_param, _ = key
+            params = params_map[key] if key in params_map else []
+            config, uses_default_config = None, True
+            if key not in configs_map:
+                assert params == []
+            else:
+                config, uses_default_config = configs_map[key]
+                assert config is not None
+
+            # TODO: Remove "backwards compatible" fields below eventually.
+            param_group = {
+                'params': params,
+                'wd_mult': wd_mult,  # For backwards compatibility.
+                'lr_mult': 1.0,  # For backwards compatibility.
+                'is_expert_parallel': is_expert_parallel,
+                'is_decoupled_lr': False,  # For backwards compatibility.
+                'default_config': uses_default_config,
+                'is_vision_model_param': is_vision_model_param,
+            }
+
+            # Stick relevant fields into param_group from config object.
+            if config is not None:
+                param_group['max_lr'] = config.lr if not is_vision_model_param else config.lr * config.vision_ration # NOTE(lizhiyu): change the ration here
+                param_group['min_lr'] = config.min_lr
+                # TODO: Add other relevant arguments (e.g., weight decay, optimizer)
+               # here as well.
+            param_groups.append(param_group)
+
+        for key in muon_params_key:
+            wd_mult, is_expert_parallel, _ = key
+            params = muon_params_map[key] if key in muon_params_map else []
+            config, uses_default_config = None, True
+            if key not in configs_map:
+                assert params == []
+            else:
+                config, uses_default_config = configs_map[key]
+                assert config is not None
+
+            param_groups.append(
+                {
+                    'params': params,
+                    'wd_mult': wd_mult,  # For backwards compatibility.
+                    'lr_mult': 1.0,  # For backwards compatibility.
+                    'is_expert_parallel': is_expert_parallel,
+                    'is_decoupled_lr': False,  # For backwards compatibility.
+                    'default_config': uses_default_config,
+                    'use_muon': True,
+                }
+            )
 
     return param_groups
 
