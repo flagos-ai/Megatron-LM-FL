@@ -216,6 +216,9 @@ class TransformerConfig(ModelParallelConfig):
     """Number of SMs to use for HybridEP. In pure NVL scenarios, 
     16 SMs can generally achieve good bandwidth."""
 
+    untie_embeddings_and_output_weights: bool = False
+    """The model's input word embedding matrix and the output layer's weight matrix are tied"""
+
     ####################
     # initialization
     ####################
@@ -786,7 +789,6 @@ class TransformerConfig(ModelParallelConfig):
     """Lora a init method"""
     lora_out_init_method: Optional[str] = None
     """Lora b init method"""
-
 
     ####################
     # TE_FL
