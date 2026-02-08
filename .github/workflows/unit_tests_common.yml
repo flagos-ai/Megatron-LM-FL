@@ -1,0 +1,188 @@
+name: Common Unit Tests
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+        description: Platform name (e.g., cuda, default)
+      device:
+        required: true
+        type: string
+        description: Device type (e.g., a100, a800, h100, generic)
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+      ignored_tests:
+        required: false
+        type: string
+        default: ''
+        description: JSON array of test files to ignore (e.g., '["tests/unit_tests/test_a.py", "tests/unit_tests/test_b.py"]')
+
+jobs:
+  unit_test:
+    defaults:
+      run:
+        shell: bash
+    env:
+      PROJECT_ROOT: /workspace/Megatron-LM-FL
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    name: unit-${{ inputs.device }}
+    container:
+      image: ${{ inputs.image }}
+      ports:
+        - 80
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
+          ref: ${{ github.event.pull_request.head.ref || github.ref }}
+          ssh-strict: true
+          ssh-user: git
+          ssh-key: ${{ secrets.RUNNER_SSH_KEY }}
+          persist-credentials: false
+          clean: true
+          sparse-checkout-cone-mode: true
+          fetch-tags: false
+          show-progress: true
+          lfs: false
+
+      - name: Set safe directory
+        run: |
+          git config --global --add safe.directory $PROJECT_ROOT
+
+      - name: Setup Python environment
+        run: |
+          set -euo pipefail
+          cd $PROJECT_ROOT
+
+          PKG_MGR='${{ inputs.pkg_mgr }}'
+          ENV_NAME='${{ inputs.env_name }}'
+          ENV_PATH='${{ inputs.env_path }}'
+
+          echo "Setting up Python environment for unit tests"
+          echo "Package Manager: $PKG_MGR"
+          echo "Environment Name: $ENV_NAME"
+          echo "Environment Path: $ENV_PATH"
+
+          # Activate environment based on package manager
+          case "$PKG_MGR" in
+            conda)
+              if [ -n "$ENV_NAME" ] && [ -n "$ENV_PATH" ]; then
+                source "$ENV_PATH/etc/profile.d/conda.sh"
+                conda activate "$ENV_NAME"
+              fi
+              ;;
+            uv)
+              if [ -n "$ENV_PATH" ] && [ -d "$ENV_PATH" ]; then
+                source "$ENV_PATH/bin/activate"
+              fi
+              ;;
+            pip)
+              echo "Using system Python with pip"
+              ;;
+          esac
+
+          echo "Python location: $(which python)"
+          echo "Python version: $(python --version)"
+
+          # Install package in development mode
+          pip install -e . --no-deps || true
+
+          # Copy test data
+          mkdir -p /opt/data
+          cp -r /home/gitlab-runner/data/Megatron-LM/* /opt/data/ || true
+          cp -r /home/gitlab-runner/tokenizers/Megatron-LM/* /opt/data/ || true
+        timeout-minutes: 30
+
+      - name: Run unit tests
+        id: unit_test
+        run: |
+          set -euo pipefail
+          cd $PROJECT_ROOT
+
+          PLATFORM='${{ inputs.platform }}'
+          DEVICE='${{ inputs.device }}'
+          PKG_MGR='${{ inputs.pkg_mgr }}'
+          ENV_NAME='${{ inputs.env_name }}'
+          ENV_PATH='${{ inputs.env_path }}'
+
+          echo "Running unit tests"
+          echo "Platform: $PLATFORM"
+          echo "Device: $DEVICE"
+          echo "Package Manager: $PKG_MGR"
+          echo "Project root: $PROJECT_ROOT"
+
+          # Activate environment based on package manager
+          case "$PKG_MGR" in
+            conda)
+              if [ -n "$ENV_NAME" ] && [ -n "$ENV_PATH" ]; then
+                source "$ENV_PATH/etc/profile.d/conda.sh"
+                conda activate "$ENV_NAME"
+              fi
+              ;;
+            uv)
+              if [ -n "$ENV_PATH" ] && [ -d "$ENV_PATH" ]; then
+                source "$ENV_PATH/bin/activate"
+              fi
+              ;;
+            pip)
+              echo "ℹ️  Running tests with pip/system Python"
+              ;;
+          esac
+
+          # Display Python environment info
+          echo "Python location: $(which python)"
+          echo "Python version: $(python --version)"
+
+          # Set environment variables
+          export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
+          export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache
+          mkdir -p $TORCHINDUCTOR_CACHE_DIR
+
+          # Build ignore options from ignored_tests input
+          IGNORED_TESTS='${{ inputs.ignored_tests }}'
+          IGNORE_OPTS=""
+          if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
+            echo "Parsing ignored tests list..."
+            # Parse JSON array and build --ignore options
+            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "
+              import sys, json
+              try:
+                  tests = json.load(sys.stdin)
+                  if tests:
+                      print(' '.join(['--ignore=' + t for t in tests]))
+              except:
+                  pass
+              ")
+            if [ -n "$IGNORE_OPTS" ]; then
+              echo "Ignoring tests: $IGNORE_OPTS"
+            fi
+          fi
+
+          # Run unit tests with torchrun
+          torchrun --nproc_per_node=8 -m pytest -v tests/unit_tests $IGNORE_OPTS
+          exit_code=$?
+
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ Unit tests passed for $PLATFORM/$DEVICE"
+          else
+            echo "❌ Unit tests failed for $PLATFORM/$DEVICE (exit code: $exit_code)"
+          fi
+
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          exit $exit_code
+        timeout-minutes: 60
