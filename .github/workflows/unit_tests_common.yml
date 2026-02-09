@@ -110,15 +110,7 @@ jobs:
           if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
             echo "Parsing ignored tests list..."
             # Parse JSON array and build --ignore options
-            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "
-              import sys, json
-              try:
-                  tests = json.load(sys.stdin)
-                  if tests:
-                      print(' '.join(['--ignore=' + t for t in tests]))
-              except:
-                  pass
-              ")
+            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); print(' '.join(['--ignore=' + t for t in tests])) if tests else None")
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
