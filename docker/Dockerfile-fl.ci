@@ -4,7 +4,7 @@
 # Usage: docker run --gpus all --shm-size=500g -it megatron-lm-fl:ci
 
 # Base image: NVIDIA PyTorch NGC Container
-ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.01-py3
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
 FROM ${BASE_IMAGE} AS base
 
 # Disable pip constraints from NGC container
@@ -115,7 +115,8 @@ RUN if [ -n "${HTTPS_PROXY}" ]; then \
     --no-install-package nvidia-cusparse-cu12 \
     --no-install-package nvidia-cusparselt-cu12 \
     --no-install-package nvidia-nccl-cu12 \
-    || true
+    || true && \
+    pip install pytest-mock
 
 # ============================================
 # Stage 5: Copy full project
@@ -127,8 +128,13 @@ WORKDIR ${PROJECT_ROOT}
 RUN pip install -e . --no-deps
 
 # ============================================
-# Labels
+# Stage 6: Download test data
 # ============================================
-LABEL maintainer="Megatron-LM-FL Team"
-LABEL description="CI testing image for Megatron-LM-FL"
-LABEL version="1.0"
+RUN mkdir -p /opt/data && \
+    wget -O /opt/data/datasets.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/datasets.zip && \
+    unzip /opt/data/datasets.zip -d /opt/data && \
+    rm /opt/data/datasets.zip && \
+    wget -O /opt/data/tokenizers.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/tokenizers.zip && \
+    unzip /opt/data/tokenizers.zip -d /opt/data && \
+    rm /opt/data/tokenizers.zip
+

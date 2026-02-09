@@ -68,44 +68,17 @@ jobs:
         run: |
           set -euo pipefail
           cd $PROJECT_ROOT
-
-          PKG_MGR='${{ inputs.pkg_mgr }}'
-          ENV_NAME='${{ inputs.env_name }}'
-          ENV_PATH='${{ inputs.env_path }}'
-
-          echo "Setting up Python environment for unit tests"
-          echo "Package Manager: $PKG_MGR"
-          echo "Environment Name: $ENV_NAME"
-          echo "Environment Path: $ENV_PATH"
-
-          # Activate environment based on package manager
-          case "$PKG_MGR" in
-            conda)
-              if [ -n "$ENV_NAME" ] && [ -n "$ENV_PATH" ]; then
-                source "$ENV_PATH/etc/profile.d/conda.sh"
-                conda activate "$ENV_NAME"
-              fi
-              ;;
-            uv)
-              if [ -n "$ENV_PATH" ] && [ -d "$ENV_PATH" ]; then
-                source "$ENV_PATH/bin/activate"
-              fi
-              ;;
-            pip)
-              echo "Using system Python with pip"
-              ;;
-          esac
-
+    
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
-
+          pip install pytest-mock
           # Install package in development mode
           pip install -e . --no-deps || true
 
           # Copy test data
           mkdir -p /opt/data
-          cp -r /home/gitlab-runner/data/Megatron-LM/* /opt/data/ || true
-          cp -r /home/gitlab-runner/tokenizers/Megatron-LM/* /opt/data/ || true
+          wget -O /opt/data/datasets.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/datasets.zip && unzip /opt/data/datasets.zip -d /opt/data && rm /opt/data/datasets.zip
+          wget -O /opt/data/tokenizers.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/tokenizers.zip && unzip /opt/data/tokenizers.zip -d /opt/data && rm /opt/data/tokenizers.zip
         timeout-minutes: 30
 
       - name: Run unit tests
@@ -116,33 +89,11 @@ jobs:
 
           PLATFORM='${{ inputs.platform }}'
           DEVICE='${{ inputs.device }}'
-          PKG_MGR='${{ inputs.pkg_mgr }}'
-          ENV_NAME='${{ inputs.env_name }}'
-          ENV_PATH='${{ inputs.env_path }}'
 
           echo "Running unit tests"
           echo "Platform: $PLATFORM"
           echo "Device: $DEVICE"
-          echo "Package Manager: $PKG_MGR"
           echo "Project root: $PROJECT_ROOT"
-
-          # Activate environment based on package manager
-          case "$PKG_MGR" in
-            conda)
-              if [ -n "$ENV_NAME" ] && [ -n "$ENV_PATH" ]; then
-                source "$ENV_PATH/etc/profile.d/conda.sh"
-                conda activate "$ENV_NAME"
-              fi
-              ;;
-            uv)
-              if [ -n "$ENV_PATH" ] && [ -d "$ENV_PATH" ]; then
-                source "$ENV_PATH/bin/activate"
-              fi
-              ;;
-            pip)
-              echo "ℹ️  Running tests with pip/system Python"
-              ;;
-          esac
 
           # Display Python environment info
           echo "Python location: $(which python)"
