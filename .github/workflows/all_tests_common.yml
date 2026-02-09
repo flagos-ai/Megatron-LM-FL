@@ -23,6 +23,9 @@ jobs:
       train_test_matrix: ${{ steps.config.outputs.train_test_matrix }}
       ignored_tests: ${{ steps.config.outputs.ignored_tests }}
     steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
       - name: Load platform configuration
         id: config
         run: |
