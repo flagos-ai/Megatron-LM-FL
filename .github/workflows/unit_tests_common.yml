@@ -100,7 +100,7 @@ jobs:
           echo "Python version: $(python --version)"
 
           # Set environment variables
-          export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
+          export PYTHONPATH=$PROJECT_ROOT:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache
           mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
