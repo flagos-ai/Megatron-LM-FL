@@ -71,7 +71,7 @@ jobs:
     
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
-          pip install pytest-mock nltk
+          pip install pytest-mock nltk transformers==4.57.3
           # Install package in development mode
           pip install -e . --no-deps || true
 
