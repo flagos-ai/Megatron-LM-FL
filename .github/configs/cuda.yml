@@ -25,7 +25,7 @@ container_volumes:
   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
 
 # Container options (hardware-specific settings)
-container_options: "--gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535"
+container_options: "--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535"
 
 # Device types to run tests on
 device_types:
