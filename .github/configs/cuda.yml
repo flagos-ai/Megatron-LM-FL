@@ -13,7 +13,7 @@ runner_labels:
   - self-hosted
   - Linux
   - X64
-  - gpus-8
+  - gpu-8
 
 # Container volumes (hardware-specific paths)
 container_volumes:
