@@ -147,7 +147,7 @@ jobs:
           if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
             echo "Parsing ignored tests list..."
             # Parse JSON array and build --ignore options
-            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); print(' '.join(['--ignore=' + t for t in tests])) if tests else None")
+            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); print(' '.join(['--deselect=' + t for t in tests])) if tests else None")
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
@@ -155,7 +155,7 @@ jobs:
 
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=8 -m pytest -v "$TEST_PATH" $IGNORE_OPTS -p no:randomly
+          torchrun --nproc_per_node=8 -m pytest -v $TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
 
           if [ $exit_code -eq 0 ]; then
