@@ -34,8 +34,6 @@ jobs:
     defaults:
       run:
         shell: bash
-    env:
-      PROJECT_ROOT: /workspace/Megatron-LM-FL
     runs-on: ${{ fromJson(inputs.runs_on) }}
     strategy:
       fail-fast: false
@@ -99,16 +97,15 @@ jobs:
           fetch-tags: false
           show-progress: true
           lfs: false
-          path: /workspace/Megatron-LM-FL
 
       - name: Set safe directory
         run: |
-          git config --global --add safe.directory $PROJECT_ROOT
+          git config --global --add safe.directory $GITHUB_WORKSPACE
 
       - name: Setup Python environment
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          cd $PROJECT_ROOT
 
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
@@ -124,9 +121,9 @@ jobs:
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
         id: unit_test
+        working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          cd $PROJECT_ROOT
 
           PLATFORM='${{ inputs.platform }}'
           DEVICE='${{ inputs.device }}'
@@ -137,15 +134,16 @@ jobs:
           echo "Test path: $TEST_PATH"
           echo "Platform: $PLATFORM"
           echo "Device: $DEVICE"
-          echo "Project root: $PROJECT_ROOT"
+          echo "Working directory: $GITHUB_WORKSPACE"
 
           # Display Python environment info
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
           conda activate flagscale-train
+
           # Set environment variables
-          export PYTHONPATH=$PROJECT_ROOT:${PYTHONPATH:-}
-          export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache
+          export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
+          export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
           mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
           # Build ignore options from ignored_tests input
