@@ -55,6 +55,7 @@ test_matrix:
       - tests/unit_tests/test_rl_utils.py
       - tests/unit_tests/models/test_gpt_model.py
       - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py
 
   # functional:
   #   train:
