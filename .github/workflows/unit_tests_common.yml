@@ -125,6 +125,8 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
+          source /root/miniconda3/etc/profile.d/conda.sh
+          conda activate flagscale-train
 
           PLATFORM='${{ inputs.platform }}'
           DEVICE='${{ inputs.device }}'
@@ -140,7 +142,6 @@ jobs:
           # Display Python environment info
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
-          conda activate flagscale-train
 
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
