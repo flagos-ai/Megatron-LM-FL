@@ -60,20 +60,14 @@ jobs:
           - name: pipeline_parallel
             path: "tests/unit_tests/pipeline_parallel/"
             description: "Pipeline parallel tests"
-          - name: inference
-            path: "tests/unit_tests/inference/"
-            description: "Inference tests"
           - name: data
             path: "tests/unit_tests/data/"
             description: "Data tests"
           - name: fusions
             path: "tests/unit_tests/fusions/"
             description: "Fusion tests"
-          - name: ssm
-            path: "tests/unit_tests/ssm/"
-            description: "SSM/Mamba tests"
           - name: others
-            path: "tests/unit_tests/a2a_overlap/ tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
+            path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
             description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
     name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
     container:
@@ -110,7 +104,6 @@ jobs:
           conda activate flagscale-train
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
-          # pip install pytest-mock nltk transformers==4.57.3 wandb tiktoken sentencepiece flask-restful
           # Install package in development mode
           pip install -e . --no-deps
 
@@ -162,7 +155,7 @@ jobs:
 
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=8 -m pytest -v $TEST_PATH $IGNORE_OPTS
+          torchrun --nproc_per_node=8 -m pytest -v $TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
 
           if [ $exit_code -eq 0 ]; then

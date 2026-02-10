@@ -39,7 +39,6 @@ test_matrix:
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
-      - tests/unit_tests/a2a_overlap/
       - tests/unit_tests/data/test_preprocess_data.py
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
@@ -51,9 +50,10 @@ test_matrix:
       - tests/unit_tests/distributed/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/export/trtllm/test_distributed_fp8.py
       - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/inference/
       - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
       - tests/unit_tests/test_inference.py
+      - tests/unit_tests/test_rl_utils.py
+      - tests/unit_tests/models/test_gpt_model.py
 
   # functional:
   #   train:

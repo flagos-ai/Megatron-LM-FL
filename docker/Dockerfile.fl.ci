@@ -139,8 +139,8 @@ ENV MAX_JOBS=4
 RUN pip install transformer-engine[pytorch]==2.9.0 \
     --index-url https://pypi.nvidia.com \
     --extra-index-url https://pypi.org/simple \
-    --force-reinstall
-
+    --no-build-isolation
+    
 # nv-grouped-gemm (build from source)
 RUN pip install nv-grouped-gemm==1.1.4.post6 --no-build-isolation
 
