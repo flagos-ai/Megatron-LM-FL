@@ -99,6 +99,7 @@ jobs:
           fetch-tags: false
           show-progress: true
           lfs: false
+          path: /workspace/Megatron-LM-FL
 
       - name: Set safe directory
         run: |
