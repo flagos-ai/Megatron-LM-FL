@@ -106,6 +106,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
+          source /root/miniconda3/etc/profile.d/conda.sh
           conda activate flagscale-train
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
