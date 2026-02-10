@@ -136,11 +136,14 @@ ENV MAX_JOBS=4
 
 # transformer-engine for CUDA 12 (install from NVIDIA PyPI)
 # This installs the full PyPI package with proper metadata to pass sanity checks
-RUN pip install transformer-engine[pytorch]==2.9.0 \
-    --index-url https://pypi.nvidia.com \
-    --extra-index-url https://pypi.org/simple \
-    --no-build-isolation
-    
+RUN git clone --recursive https://github.com/NVIDIA/TransformerEngine.git && \
+    cd TransformerEngine && \
+    git checkout e9a5fa4e && \
+    # TransformerEngine commit: e9a5fa4e (Thu Sep 4 22:39:53 2025 +0200)
+    /root/.local/bin/uv pip install --no-build-isolation --verbose . && \
+    cd .. && \
+    rm -rf TransformerEngine
+
 # nv-grouped-gemm (build from source)
 RUN pip install nv-grouped-gemm==1.1.4.post6 --no-build-isolation
 

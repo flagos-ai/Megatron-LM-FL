@@ -155,7 +155,7 @@ jobs:
 
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=8 -m pytest -v $TEST_PATH $IGNORE_OPTS -p no:randomly
+          torchrun --nproc_per_node=8 -m pytest -v "$TEST_PATH" $IGNORE_OPTS -p no:randomly
           exit_code=$?
 
           if [ $exit_code -eq 0 ]; then
