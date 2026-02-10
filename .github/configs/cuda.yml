@@ -6,7 +6,7 @@ hardware_name: cuda
 display_name: "CUDA Tests"
 
 # Docker image for this hardware
-ci_image: localhost:5000/megatron-lm-fl:ci
+ci_image: localhost:5000/megatron-lm-fl:cuda12.8.1-cudnn9.15.1-python3.12-torch2.7.1-time2602102101-ci
 
 # Runner labels for this hardware
 runner_labels:
