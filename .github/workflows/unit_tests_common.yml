@@ -141,7 +141,7 @@ jobs:
           # Display Python environment info
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
-
+          conda activate flagscale-train
           # Set environment variables
           export PYTHONPATH=$PROJECT_ROOT:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache
