@@ -59,6 +59,7 @@ test_matrix:
       - tests/unit_tests/transformer/moe/test_aux_loss.py
       - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
       - tests/unit_tests/transformer/moe/test_routers.py
+      - tests/unit_tests/transformer/test_attention.py
   # functional:
   #   train:
   #     - device: a100
