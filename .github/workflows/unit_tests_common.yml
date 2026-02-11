@@ -63,13 +63,8 @@ jobs:
             # For push events, compare with the previous commit
             BASE_REF="HEAD~1"
           fi
-
-          echo "Comparing against: $BASE_REF"
-
           # Get list of changed files
           CHANGED_FILES=$(git diff --name-only $BASE_REF...HEAD 2>/dev/null || git diff --name-only $BASE_REF HEAD)
-          echo "Changed files:"
-          echo "$CHANGED_FILES"
 
           # Function to check if any pattern matches
           check_patterns() {
@@ -82,9 +77,6 @@ jobs:
             done
             echo "false"
           }
-
-          # Define patterns for each test group
-          # Format: "test_path_pattern|source_path_pattern"
 
           # Core tests: root-level test files and core megatron files
           CORE_PATTERNS="^tests/unit_tests/test_.*\.py$ ^megatron/core/[^/]*\.py$ ^megatron/core/__init__\.py$"
@@ -168,19 +160,6 @@ jobs:
           - name: others
             path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
             description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
-    # Only run if relevant files changed for this test group
-    if: |
-      contains(github.event.pull_request.labels.*.name, 'full ci') ||
-      (matrix.test_group.name == 'core' && needs.detect_changes.outputs.core == 'true') ||
-      (matrix.test_group.name == 'transformer' && needs.detect_changes.outputs.transformer == 'true') ||
-      (matrix.test_group.name == 'models' && needs.detect_changes.outputs.models == 'true') ||
-      (matrix.test_group.name == 'distributed' && needs.detect_changes.outputs.distributed == 'true') ||
-      (matrix.test_group.name == 'dist_checkpointing' && needs.detect_changes.outputs.dist_checkpointing == 'true') ||
-      (matrix.test_group.name == 'tensor_parallel' && needs.detect_changes.outputs.tensor_parallel == 'true') ||
-      (matrix.test_group.name == 'pipeline_parallel' && needs.detect_changes.outputs.pipeline_parallel == 'true') ||
-      (matrix.test_group.name == 'data' && needs.detect_changes.outputs.data == 'true') ||
-      (matrix.test_group.name == 'fusions' && needs.detect_changes.outputs.fusions == 'true') ||
-      (matrix.test_group.name == 'others' && needs.detect_changes.outputs.others == 'true')
     name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
     container:
       image: ${{ inputs.image }}
@@ -189,7 +168,39 @@ jobs:
       volumes: ${{ fromJson(inputs.container_volumes) }}
       options: ${{ inputs.container_options }}
     steps:
+      # Check if this test group should run based on changed files or "full ci" label
+      - name: Check if tests should run
+        id: should_run
+        run: |
+          TEST_GROUP='${{ matrix.test_group.name }}'
+          FULL_CI='${{ contains(github.event.pull_request.labels.*.name, 'full ci') }}'
+
+          # If "full ci" label is present, run all tests
+          if [ "$FULL_CI" == "true" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
+          # Check change detection output for this test group
+          case "$TEST_GROUP" in
+            core) CHANGED='${{ needs.detect_changes.outputs.core }}' ;;
+            transformer) CHANGED='${{ needs.detect_changes.outputs.transformer }}' ;;
+            models) CHANGED='${{ needs.detect_changes.outputs.models }}' ;;
+            distributed) CHANGED='${{ needs.detect_changes.outputs.distributed }}' ;;
+            dist_checkpointing) CHANGED='${{ needs.detect_changes.outputs.dist_checkpointing }}' ;;
+            tensor_parallel) CHANGED='${{ needs.detect_changes.outputs.tensor_parallel }}' ;;
+            pipeline_parallel) CHANGED='${{ needs.detect_changes.outputs.pipeline_parallel }}' ;;
+            data) CHANGED='${{ needs.detect_changes.outputs.data }}' ;;
+            fusions) CHANGED='${{ needs.detect_changes.outputs.fusions }}' ;;
+            others) CHANGED='${{ needs.detect_changes.outputs.others }}' ;;
+            *) CHANGED="true" ;;
+          esac
+
+          echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
+  
+
       - name: Checkout source code
+        if: steps.should_run.outputs.should_run == 'true'
         uses: actions/checkout@v6
         with:
           repository: ${{ github.event.pull_request.head.repo.full_name || github.repository }}
@@ -205,10 +216,12 @@ jobs:
           lfs: false
 
       - name: Set safe directory
+        if: steps.should_run.outputs.should_run == 'true'
         run: |
           git config --global --add safe.directory $GITHUB_WORKSPACE
 
       - name: Setup Python environment
+        if: steps.should_run.outputs.should_run == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -227,6 +240,7 @@ jobs:
         timeout-minutes: 30
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
+        if: steps.should_run.outputs.should_run == 'true'
         id: unit_test
         working-directory: ${{ github.workspace }}
         run: |
