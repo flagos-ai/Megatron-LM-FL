@@ -67,6 +67,7 @@ test_matrix:
       - tests/unit_tests/transformer/test_multi_token_prediction.py
       - tests/unit_tests/transformer/test_retro_attention.py
       - tests/unit_tests/transformer/test_transformer_block.py
+      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
   # functional:
   #   train:
   #     - device: a100
