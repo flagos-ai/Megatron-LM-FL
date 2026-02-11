@@ -170,9 +170,11 @@ COPY . /tmp/Megatron-LM-FL
 WORKDIR /tmp/Megatron-LM-FL
 
 # Install project (non-editable mode)
-RUN pip install . --no-deps && \
+RUN uv pip install numpy==1.26.4 && \
+    pip install . --no-deps && \
     rm -rf /tmp/Megatron-LM-FL && \
-    uv pip install numpy==1.26.4
+    # Clean up files from uv sync stage
+    rm -rf /workspace/*
 
 WORKDIR /workspace
 

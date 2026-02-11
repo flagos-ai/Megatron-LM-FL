@@ -225,19 +225,10 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          source /root/miniconda3/etc/profile.d/conda.sh
-          conda activate flagscale-train
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
           # Install package in development mode
-          pip install pynvml nvtx==0.2.14
           pip install -e . --no-deps
-
-          # Copy test data
-          mkdir -p /opt/data
-          
-          wget -O /opt/data/datasets.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/datasets.zip && unzip -o /opt/data/datasets.zip -d /opt/data && rm /opt/data/datasets.zip
-          wget -O /opt/data/tokenizers.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/tokenizers.zip && unzip -o /opt/data/tokenizers.zip -d /opt/data && rm /opt/data/tokenizers.zip
         timeout-minutes: 30
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
@@ -246,8 +237,6 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
-          source /root/miniconda3/etc/profile.d/conda.sh
-          conda activate flagscale-train
 
           PLATFORM='${{ inputs.platform }}'
           DEVICE='${{ inputs.device }}'
