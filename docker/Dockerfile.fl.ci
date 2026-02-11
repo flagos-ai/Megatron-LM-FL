@@ -83,15 +83,15 @@ COPY uv.loc[k] /workspace/
 # Install build dependencies and project dependencies
 ARG IMAGE_TYPE=dev
 ENV NVTE_CUDA_ARCHS="80;90;100"
+ENV UV_HTTP_TIMEOUT=3600
 
 RUN if [ -n "${HTTPS_PROXY}" ]; then \
         export https_proxy=${HTTPS_PROXY} http_proxy=${HTTPS_PROXY}; \
     fi && \
-    /root/.local/bin/uv sync --only-group build || true
+    uv sync --only-group build || true
 
-ENV UV_HTTP_TIMEOUT=3600
 # Install project dependencies with test/linting/ci groups from pyproject.toml
-RUN /root/.local/bin/uv sync \
+RUN uv sync \
     --extra ${IMAGE_TYPE} --extra mlm \
     --group test --group linting --group ci \
     --link-mode copy \
@@ -127,7 +127,7 @@ RUN /root/.local/bin/uv sync \
     --no-install-package nvidia-nccl-cu12
 
 # ============================================
-# Stage 4: Install CUDA 12 compatible packages
+# Stage 3: Install CUDA 12 compatible packages
 # ============================================
 # Build environment for CUDA packages
 ENV CAUSAL_CONV1D_FORCE_BUILD=1
@@ -136,7 +136,9 @@ ENV MAX_JOBS=4
 
 # transformer-engine for CUDA 12 (install from NVIDIA PyPI)
 # This installs the full PyPI package with proper metadata to pass sanity checks
-RUN git clone --recursive https://github.com/NVIDIA/TransformerEngine.git && \
+RUN pip uninstall transformer_engine transformer-engine-torch -y 2>/dev/null || true && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/transformer_engine* || true && \
+    git clone --recursive https://github.com/NVIDIA/TransformerEngine.git && \
     cd TransformerEngine && \
     git checkout e9a5fa4e && \
     # TransformerEngine commit: e9a5fa4e (Thu Sep 4 22:39:53 2025 +0200)
@@ -145,21 +147,21 @@ RUN git clone --recursive https://github.com/NVIDIA/TransformerEngine.git && \
     rm -rf TransformerEngine
 
 # nv-grouped-gemm (build from source)
-RUN pip install nv-grouped-gemm==1.1.4.post6 --no-build-isolation
+RUN uv pip install nv-grouped-gemm==1.1.4.post6 --no-build-isolation
 
 # flash-mla (build from git)
 # RUN pip install git+https://github.com/deepseek-ai/FlashMLA@47c35a712362f11bc235854ead51819ad76f5a81 --no-build-isolation
 
 # causal-conv1d and mamba-ssm (require CUDA compilation)
-RUN pip install causal-conv1d==1.5.3.post1 --no-build-isolation
-RUN pip install mamba-ssm==2.2.6.post3 --no-build-isolation
+RUN uv pip install causal-conv1d==1.5.3.post1 --no-build-isolation
+RUN uv pip install mamba-ssm==2.2.6.post3 --no-build-isolation
 
 # flashinfer (match CUDA and torch version, adjust URL as needed)
 # Reference: https://docs.flashinfer.ai/installation.html
 # RUN pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.7/
 
 # ============================================
-# Stage 5: Copy full project
+# Stage 4: Copy full project
 # ============================================
 COPY . ${PROJECT_ROOT}
 WORKDIR ${PROJECT_ROOT}
@@ -168,7 +170,7 @@ WORKDIR ${PROJECT_ROOT}
 RUN pip install -e . --no-deps
 
 # ============================================
-# Stage 6: Download test data
+# Stage 5: Download test data
 # ============================================
 RUN mkdir -p /opt/data && \
     wget -O /opt/data/datasets.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/datasets.zip && \

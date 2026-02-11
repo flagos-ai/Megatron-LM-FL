@@ -105,6 +105,7 @@ jobs:
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
           # Install package in development mode
+          pip install pynvml nvtx==0.2.14
           pip install -e . --no-deps
 
           # Copy test data
