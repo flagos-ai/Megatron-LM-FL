@@ -166,11 +166,15 @@ RUN uv pip install mamba-ssm==2.2.6.post3 --no-build-isolation
 # ============================================
 # Stage 4: Copy full project
 # ============================================
-COPY . ${PROJECT_ROOT}
-WORKDIR ${PROJECT_ROOT}
+COPY . /tmp/Megatron-LM-FL
+WORKDIR /tmp/Megatron-LM-FL
 
-# Install project in development mode (extras already installed by uv sync above)
-RUN pip install -e . --no-deps
+# Install project (non-editable mode)
+RUN pip install . --no-deps && \
+    rm -rf /tmp/Megatron-LM-FL && \
+    uv pip install numpy==1.26.4
+
+WORKDIR /workspace
 
 # ============================================
 # Stage 5: Download test data

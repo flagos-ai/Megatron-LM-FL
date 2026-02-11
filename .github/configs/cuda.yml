@@ -61,6 +61,7 @@ test_matrix:
       - tests/unit_tests/transformer/moe/test_routers.py
       - tests/unit_tests/transformer/test_attention.py
       - tests/unit_tests/transformer/test_attention_packed_seq.py
+      - tests/unit_tests/transformer/test_cuda_graphs.py
   # functional:
   #   train:
   #     - device: a100
