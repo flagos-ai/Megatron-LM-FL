@@ -66,6 +66,7 @@ test_matrix:
       - tests/unit_tests/transformer/test_multi_latent_attention.py
       - tests/unit_tests/transformer/test_multi_token_prediction.py
       - tests/unit_tests/transformer/test_retro_attention.py
+      - tests/unit_tests/transformer/test_transformer_block.py
   # functional:
   #   train:
   #     - device: a100
