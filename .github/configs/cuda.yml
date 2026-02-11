@@ -68,6 +68,8 @@ test_matrix:
       - tests/unit_tests/transformer/test_retro_attention.py
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
+      - tests/unit_tests/dist_checkpointing/test_local.py
+
   # functional:
   #   train:
   #     - device: a100
