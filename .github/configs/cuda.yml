@@ -56,7 +56,8 @@ test_matrix:
       - tests/unit_tests/models/test_gpt_model.py
       - tests/unit_tests/models/test_mamba_model.py
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
-
+      - tests/unit_tests/transformer/moe/test_aux_loss.py
+      - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
   # functional:
   #   train:
   #     - device: a100

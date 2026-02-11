@@ -30,7 +30,106 @@ on:
         description: JSON array of test files to ignore (e.g., '["tests/unit_tests/test_a.py", "tests/unit_tests/test_b.py"]')
 
 jobs:
+  # Detect which test groups need to run based on changed files
+  detect_changes:
+    runs-on: ubuntu-latest
+    outputs:
+      core: ${{ steps.filter.outputs.core }}
+      transformer: ${{ steps.filter.outputs.transformer }}
+      models: ${{ steps.filter.outputs.models }}
+      distributed: ${{ steps.filter.outputs.distributed }}
+      dist_checkpointing: ${{ steps.filter.outputs.dist_checkpointing }}
+      tensor_parallel: ${{ steps.filter.outputs.tensor_parallel }}
+      pipeline_parallel: ${{ steps.filter.outputs.pipeline_parallel }}
+      data: ${{ steps.filter.outputs.data }}
+      fusions: ${{ steps.filter.outputs.fusions }}
+      others: ${{ steps.filter.outputs.others }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: filter
+        run: |
+          set -euo pipefail
+
+          # Get the base ref for comparison
+          if [ "${{ github.event_name }}" == "pull_request" ]; then
+            BASE_REF="origin/${{ github.base_ref }}"
+            git fetch origin ${{ github.base_ref }} --depth=1
+          else
+            # For push events, compare with the previous commit
+            BASE_REF="HEAD~1"
+          fi
+
+          echo "Comparing against: $BASE_REF"
+
+          # Get list of changed files
+          CHANGED_FILES=$(git diff --name-only $BASE_REF...HEAD 2>/dev/null || git diff --name-only $BASE_REF HEAD)
+          echo "Changed files:"
+          echo "$CHANGED_FILES"
+
+          # Function to check if any pattern matches
+          check_patterns() {
+            local patterns="$1"
+            for pattern in $patterns; do
+              if echo "$CHANGED_FILES" | grep -qE "$pattern"; then
+                echo "true"
+                return
+              fi
+            done
+            echo "false"
+          }
+
+          # Define patterns for each test group
+          # Format: "test_path_pattern|source_path_pattern"
+
+          # Core tests: root-level test files and core megatron files
+          CORE_PATTERNS="^tests/unit_tests/test_.*\.py$ ^megatron/core/[^/]*\.py$ ^megatron/core/__init__\.py$"
+          echo "core=$(check_patterns "$CORE_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Transformer tests
+          TRANSFORMER_PATTERNS="^tests/unit_tests/transformer/ ^megatron/core/transformer/"
+          echo "transformer=$(check_patterns "$TRANSFORMER_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Models tests
+          MODELS_PATTERNS="^tests/unit_tests/models/ ^megatron/core/models/"
+          echo "models=$(check_patterns "$MODELS_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Distributed tests
+          DISTRIBUTED_PATTERNS="^tests/unit_tests/distributed/ ^megatron/core/distributed/"
+          echo "distributed=$(check_patterns "$DISTRIBUTED_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Dist checkpointing tests
+          DIST_CKPT_PATTERNS="^tests/unit_tests/dist_checkpointing/ ^megatron/core/dist_checkpointing/"
+          echo "dist_checkpointing=$(check_patterns "$DIST_CKPT_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Tensor parallel tests
+          TP_PATTERNS="^tests/unit_tests/tensor_parallel/ ^megatron/core/tensor_parallel/"
+          echo "tensor_parallel=$(check_patterns "$TP_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Pipeline parallel tests
+          PP_PATTERNS="^tests/unit_tests/pipeline_parallel/ ^megatron/core/pipeline_parallel/"
+          echo "pipeline_parallel=$(check_patterns "$PP_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Data tests
+          DATA_PATTERNS="^tests/unit_tests/data/ ^megatron/core/datasets/"
+          echo "data=$(check_patterns "$DATA_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Fusions tests
+          FUSIONS_PATTERNS="^tests/unit_tests/fusions/ ^megatron/core/fusions/"
+          echo "fusions=$(check_patterns "$FUSIONS_PATTERNS")" >> $GITHUB_OUTPUT
+
+          # Others tests (export, post_training, tokenizers, utils)
+          OTHERS_PATTERNS="^tests/unit_tests/export/ ^tests/unit_tests/post_training/ ^tests/unit_tests/tokenizers/ ^tests/unit_tests/utils/ ^megatron/core/export/ ^megatron/post_training/ ^megatron/tokenizer/ ^megatron/core/utils/"
+          echo "others=$(check_patterns "$OTHERS_PATTERNS")" >> $GITHUB_OUTPUT
+
+          echo "=== Change detection complete ==="
+
   unit_test:
+    needs: detect_changes
     defaults:
       run:
         shell: bash
@@ -69,6 +168,19 @@ jobs:
           - name: others
             path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
             description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
+    # Only run if relevant files changed for this test group
+    if: |
+      contains(github.event.pull_request.labels.*.name, 'full ci') ||
+      (matrix.test_group.name == 'core' && needs.detect_changes.outputs.core == 'true') ||
+      (matrix.test_group.name == 'transformer' && needs.detect_changes.outputs.transformer == 'true') ||
+      (matrix.test_group.name == 'models' && needs.detect_changes.outputs.models == 'true') ||
+      (matrix.test_group.name == 'distributed' && needs.detect_changes.outputs.distributed == 'true') ||
+      (matrix.test_group.name == 'dist_checkpointing' && needs.detect_changes.outputs.dist_checkpointing == 'true') ||
+      (matrix.test_group.name == 'tensor_parallel' && needs.detect_changes.outputs.tensor_parallel == 'true') ||
+      (matrix.test_group.name == 'pipeline_parallel' && needs.detect_changes.outputs.pipeline_parallel == 'true') ||
+      (matrix.test_group.name == 'data' && needs.detect_changes.outputs.data == 'true') ||
+      (matrix.test_group.name == 'fusions' && needs.detect_changes.outputs.fusions == 'true') ||
+      (matrix.test_group.name == 'others' && needs.detect_changes.outputs.others == 'true')
     name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
     container:
       image: ${{ inputs.image }}
@@ -131,11 +243,6 @@ jobs:
           echo "Test path: $TEST_PATH"
           echo "Platform: $PLATFORM"
           echo "Device: $DEVICE"
-          echo "Working directory: $GITHUB_WORKSPACE"
-
-          # Display Python environment info
-          echo "Python location: $(which python)"
-          echo "Python version: $(python --version)"
 
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
@@ -158,13 +265,6 @@ jobs:
           # Each test group runs in isolation to avoid state pollution
           torchrun --nproc_per_node=8 -m pytest -v $TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
-
-          if [ $exit_code -eq 0 ]; then
-            echo "✅ Unit tests passed for $TEST_GROUP on $PLATFORM/$DEVICE"
-          else
-            echo "❌ Unit tests failed for $TEST_GROUP on $PLATFORM/$DEVICE (exit code: $exit_code)"
-          fi
-
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
         timeout-minutes: 60
