@@ -65,6 +65,7 @@ test_matrix:
       - tests/unit_tests/transformer/test_full_cuda_graph.py
       - tests/unit_tests/transformer/test_multi_latent_attention.py
       - tests/unit_tests/transformer/test_multi_token_prediction.py
+      - tests/unit_tests/transformer/test_retro_attention.py
   # functional:
   #   train:
   #     - device: a100
