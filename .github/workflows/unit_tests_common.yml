@@ -228,6 +228,7 @@ jobs:
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
           # Install package in development mode
+          pip install boto3==1.42.1
           pip install -e . --no-deps
         timeout-minutes: 30
 
