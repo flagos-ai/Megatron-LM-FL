@@ -1,3 +1,5 @@
+# Won't work for now, because of compatibility issues 
+
 export TRAINING_SCRIPT_PATH="pretrain_gpt.py"                              # 训练脚本
 export TRAINING_PARAMS_PATH="tests/functional_tests/test_cases/gpt/gpt3_mcore_tp1_pp2/model_config.yaml"  # 测试配置
 export GOLDEN_VALUES_PATH="tests/functional_tests/test_cases/gpt/gpt3_mcore_tp1_pp2/golden_values_dev_dgx_a100.json"  # 参考值
@@ -11,9 +13,7 @@ export ENABLE_LIGHTWEIGHT_MODE="true"                                      # 轻
 export GPUS_PER_NODE=8                                                     # 每节点GPU数量
 export NUM_NODES=1                                                         # 节点数量
 
-# 创建必要目录
 mkdir -p $OUTPUT_PATH $TENSORBOARD_PATH $CHECKPOINT_SAVE_PATH $CHECKPOINT_LOAD_PATH $DATA_CACHE_PATH
 
-# 运行测试
 cd /root/Megatron-LM-FL
 bash tests/functional_tests/shell_test_utils/run_ci_test.sh
