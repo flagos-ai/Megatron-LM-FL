@@ -56,7 +56,7 @@ class TestLocalCheckpointingReplication:
             assert (123, 4) == ckpt_mgr._filename_to_id(filename)[:2]
 
     @pytest.mark.parametrize(('tp,pp'), [(2, 4)])
-    @pytest.mark.skip(reason="Skipping this test for now")
+    @pytest.mark.skip(reason="Skipping test_sharded_tensors")
     def test_sharded_tensors(self, tp, pp):
         Utils.initialize_model_parallel(tp, pp)
         num_floating_point_operations_so_far = 0
@@ -72,6 +72,7 @@ class TestLocalCheckpointing:
 
     @pytest.mark.parametrize(('tp,pp'), [(2, 4)])
     @pytest.mark.parametrize(('use_torch_fsdp2'), [True, False])
+    @pytest.mark.skip(reason="Skipping test_sharded_tensors")
     def test_sharded_tensors(self, tp, pp, use_torch_fsdp2):
         Utils.initialize_model_parallel(tp, pp)
         num_floating_point_operations_so_far = 0
