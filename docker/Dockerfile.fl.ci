@@ -112,6 +112,7 @@ RUN uv sync \
     --no-install-package flash-mla \
     --no-install-package nvidia-modelopt \
     --no-install-package nvidia-modelopt-core \
+    --no-install-package numpy \
     # === NVIDIA CUDA libraries, use NGC base image version === \
     --no-install-package nvidia-cublas-cu12 \
     --no-install-package nvidia-cuda-cupti-cu12 \
@@ -144,7 +145,9 @@ RUN pip uninstall transformer_engine transformer-engine-torch -y 2>/dev/null || 
     # TransformerEngine commit: e9a5fa4e (Thu Sep 4 22:39:53 2025 +0200)
     /root/.local/bin/uv pip install --no-build-isolation --verbose . && \
     cd .. && \
-    rm -rf TransformerEngine
+    rm -rf TransformerEngine && \
+    # Fix: remove duplicate .so files in wheel_lib/ (keep root level version)
+    rm -rf ${UV_PROJECT_ENVIRONMENT}/lib/python3.12/site-packages/transformer_engine/wheel_lib/
 
 # nv-grouped-gemm (build from source)
 RUN uv pip install nv-grouped-gemm==1.1.4.post6 --no-build-isolation
@@ -180,3 +183,4 @@ RUN mkdir -p /opt/data && \
     unzip -o /opt/data/tokenizers.zip -d /opt/data && \
     rm /opt/data/tokenizers.zip
 
+ENV PYTHONPATH=${UV_PROJECT_ENVIRONMENT}/lib/python3.12/site-packages/:$PYTHONPATH

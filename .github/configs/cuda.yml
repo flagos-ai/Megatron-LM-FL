@@ -58,6 +58,7 @@ test_matrix:
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
       - tests/unit_tests/transformer/moe/test_aux_loss.py
       - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
+      - tests/unit_tests/transformer/moe/test_routers.py
   # functional:
   #   train:
   #     - device: a100
