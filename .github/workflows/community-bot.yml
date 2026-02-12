@@ -11,20 +11,19 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-name: Create PR to main with cherry-pick from release
+name: Community Bot
 
-on:
-  push:
-    branches:
-      - main
+# on:
+#   issues:
+#     types: [opened, edited, reopened, closed, deleted]
+#   issue_comment:
+#     types: [created, edited, deleted]
 
 jobs:
-  cherry-pick:
-    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_cherry_pick.yml@v0.65.9
-    if: github.repository == 'NVIDIA/Megatron-LM'
+  community-bot:
+    uses: NVIDIA-NeMo/FW-CI-templates/.github/workflows/_community_bot.yml@v0.65.10
     with:
-      target-branches-pattern: 'core_(*dev_)?r[0-9]+\.[0-9]+\.[0-9]+'
+      community_project_id: ${{ vars.COMMUNITY_PROJECT_ID }}
+    if: github.repository == 'NVIDIA/Megatron-LM'
     secrets:
-      PAT: ${{ secrets.PAT }}
-      SLACK_WEBHOOK_ADMIN: ${{ secrets.SLACK_WEBHOOK_ADMIN }}
-      SLACK_WEBHOOK: ${{ secrets.SLACK_WEBHOOK }}
+      GH_TOKEN: ${{ secrets.PAT }}

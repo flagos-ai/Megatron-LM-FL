@@ -1,8 +1,8 @@
 name: Dependabot
-on:
-  schedule:
-    - cron: "0 8 * * 1"
-  workflow_dispatch: # Allow manual triggering
+# on:
+#   schedule:
+#     - cron: "0 8 * * 1"
+#   workflow_dispatch: # Allow manual triggering
 
 permissions:
   id-token: write

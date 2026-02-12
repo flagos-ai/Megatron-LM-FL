@@ -1,21 +1,21 @@
 name: API Compatibility Check
 
-on:
-  push:
-    branches:
-      - dev
-      - main
-      - 'pull-request/[0-9]+'
-      - 'deploy-release/*'
-  merge_group:
-    types: [checks_requested]
+# on:
+#   push:
+#     branches:
+#       - dev
+#       - main
+#       - 'pull-request/[0-9]+'
+#       - 'deploy-release/*'
+#   merge_group:
+#     types: [checks_requested]
 
-  # Allow manual trigger
-  workflow_dispatch:
-    inputs:
-      baseline:
-        description: 'Baseline git reference (tag/branch/commit)'
-        required: true
+#   # Allow manual trigger
+#   workflow_dispatch:
+#     inputs:
+#       baseline:
+#         description: 'Baseline git reference (tag/branch/commit)'
+#         required: true
 
 jobs:
   pre-flight:
