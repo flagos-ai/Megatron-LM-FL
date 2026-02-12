@@ -54,6 +54,8 @@ except ImportError as import_megatron_fsdp_error:
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 class FullyShardedDataParallel(_BaseDataParallel):
     """
@@ -88,7 +90,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
         self.bucket_size = self.ddp_config.bucket_size
         if disable_bucketing:
             self.bucket_size = None
-        self.device = device if device else torch.device(f'cuda:{torch.cuda.current_device()}')
+        self.device = device if device else torch.device(mg_accelerator.current_device_name())
 
         if fsdp_unit_modules is not None:
             self.fsdp_unit_modules = fsdp_unit_modules
@@ -417,7 +419,7 @@ def _get_rng_state_dict():
         'random_rng_state': random.getstate(),
         'np_rng_state': np.random.get_state(),
         'torch_rng_state': torch.get_rng_state(),
-        'cuda_rng_state': torch.cuda.get_rng_state(),
+        'cuda_rng_state': mg_accelerator.get_rng_state(),
         'rng_tracker_states': tensor_parallel.get_cuda_rng_tracker().get_states(),
     }
     return rng_state_dict
@@ -427,5 +429,5 @@ def _load_rng_state_dict(rng_state_dict):
     random.setstate(rng_state_dict['random_rng_state'])
     np.random.set_state(rng_state_dict['np_rng_state'])
     torch.set_rng_state(rng_state_dict['torch_rng_state'])
-    torch.cuda.set_rng_state(rng_state_dict['cuda_rng_state'])
+    mg_accelerator.set_rng_state(rng_state_dict['cuda_rng_state'])
     tensor_parallel.get_cuda_rng_tracker().set_states(rng_state_dict['rng_tracker_states'])

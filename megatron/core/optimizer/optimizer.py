@@ -5,6 +5,7 @@
 import copy
 import logging
 import math
+from re import M
 import warnings
 from abc import ABC, abstractmethod
 from itertools import chain
@@ -55,6 +56,8 @@ from megatron.plugin.decorators import plugin_method
 
 logger = getLogger(__name__)
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 def _zero_grad_group_helper(
     group: List[torch.nn.Parameter], set_to_none: bool, use_decoupled_grad: bool = False
@@ -358,7 +361,7 @@ class MegatronOptimizer(ABC):
                     if isinstance(v, torch.Tensor) and v.is_cuda:
                         state_dict[k] = v.cpu()
 
-            torch.cuda.empty_cache()
+            mg_accelerator.empty_cache()
 
     def restore_from_cpu(self):
         """Function used for RL training.
@@ -371,12 +374,12 @@ class MegatronOptimizer(ABC):
             for param_group in self.optimizer.param_groups:
                 for p in param_group['params']:
                     if isinstance(p, torch.Tensor) and not p.is_cuda:
-                        p.data = p.data.cuda()
+                        p.data = p.data.to(mg_accelerator.device())
 
             for state_dict in self.optimizer.state.values():
                 for k, v in state_dict.items():
                     if isinstance(v, torch.Tensor) and not v.is_cuda:
-                        state_dict[k] = v.cuda()
+                        state_dict[k] = v.to(mg_accelerator.device())
 
     @staticmethod
     def _filter_and_reorder_param_groups(
@@ -469,7 +472,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         # Note that we keep this for the cases that grad scaler is none.
         # We still record nan/inf if we have a bfloat16 with a grad scaler.
         if self.grad_scaler:
-            self.found_inf = torch.tensor([0.0], dtype=torch.float, device='cuda')
+            self.found_inf = torch.tensor([0.0], dtype=torch.float, device=mg_accelerator.device())
 
         # Dummy tensor needed for apex multi-apply tensor.
         # For bfloat, we don't have multi-tensor apply and for now
@@ -477,11 +480,11 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.config.bf16:
             self._dummy_overflow_buf = None
         else:
-            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=mg_accelerator.device())
 
         # In case grad scaler is not passed, define the unity scale.
         if self.grad_scaler is None:
-            self._scale_one = torch.tensor([1.0], dtype=torch.float, device='cuda')
+            self._scale_one = torch.tensor([1.0], dtype=torch.float, device=mg_accelerator.device())
 
     def get_loss_scale(self):
         if self.grad_scaler is None:
@@ -904,7 +907,7 @@ class FP32Optimizer(MegatronOptimizer):
 
         super(FP32Optimizer, self).__init__(optimizer, config, init_state_fn)
 
-        self._scale = torch.tensor([1.0], dtype=torch.float, device='cuda')
+        self._scale = torch.tensor([1.0], dtype=torch.float, device=mg_accelerator.device())
         self.is_stub_optimizer = True if optimizer is None else False
 
     def zero_grad(self, set_to_none=True):
@@ -1139,7 +1142,7 @@ class ChainedOptimizer(MegatronOptimizer):
         if self.chained_optimizers:
             return self.chained_optimizers[0].get_loss_scale()
         else:
-            return torch.tensor([1.0], dtype=torch.float32, device=torch.cuda.current_device())
+            return torch.tensor([1.0], dtype=torch.float32, device=mg_accelerator.current_device())
 
     def _split_state_dict(self, state_dict):
         """Split the state dict into sub-state dicts according to the chunks of each sub-optimizer

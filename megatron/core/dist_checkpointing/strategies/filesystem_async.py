@@ -53,6 +53,8 @@ _GLOBAL_PREVIOUS_METADATA = None
 
 _GLOBAL_PREVIOUS_COUNT = 0
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 def get_previous_metadata():
     """
@@ -275,7 +277,7 @@ class FileSystemWriterAsync(FileSystemWriter):
             ]
             result.append((file_name, storage_key, (bytes_data, tensor_data)))
         if non_blocking:
-            torch.cuda.synchronize()
+            mg_accelerator.synchronize()
         return result
 
     @staticmethod

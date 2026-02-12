@@ -32,6 +32,8 @@ def get_te_version():
     warnings.warn("`get_te_version` will be deprecated in a future release")
     return _get_te_version()
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 class BertModel(LanguageModule):
     """Transformer language model.
@@ -359,7 +361,7 @@ class BertModel(LanguageModule):
             output = torch.zeros(
                 size=(embeddings.shape[0], embeddings.shape[2]),
                 dtype=torch.float32,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
             )
             for i, (embedding, mask) in enumerate(zip(embeddings, masks)):
                 output[i, :] = torch.mean(embedding[1 : mask - 1], dim=0)

@@ -25,6 +25,9 @@ from megatron.core.distributed.finalize_model_grads import _get_main_grad_attr, 
 from megatron.plugin.utils import get_device_type_for_comm
 from megatron.plugin.decorators import plugin_implementation
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 logger = logging.getLogger(__name__)
 
 @plugin_implementation("finalize_model_grads", "_allreduce_embedding_grad")
@@ -141,7 +144,7 @@ def _allreduce_embedding_grad(
                     grad.data.copy_(original_grad_data)
                     torch.distributed.all_reduce(grad, group=group)
         if grad.device == torch.device('cpu'):
-            grad.to(torch.cuda.current_device())
+            grad.to(mg_accelerator.current_device())
         setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
     ######## FlagScale End ########
 

@@ -42,6 +42,8 @@ except:
 
 import megatron.core.nccl_allocator as nccl_allocator
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 class BufferType(Enum):
     """
@@ -385,12 +387,12 @@ class _ParamAndGradBucketGroup:
         ):
             # Assign a communication stream if we have multiple DistOpt instances and we
             # need to overlap communication.
-            stream_context = torch.cuda.stream(self.communication_stream)
+            stream_context = mg_accelerator.stream(self.communication_stream)
 
             # The RS/AR communication stream needs to wait for the default stream
             # to complete its gradient computation before launching the next
             # gradient reduction collective.
-            self.communication_stream.wait_stream(torch.cuda.default_stream())
+            self.communication_stream.wait_stream(mg_accelerator.default_stream())
         else:
             stream_context = nullcontext()
 
@@ -488,7 +490,7 @@ class _ParamAndGradBucketGroup:
         # When using multiple DistOpt instances, we don't need to sync here as we launch
         # communications on a separate communication stream.
         if self.ddp_config.num_distributed_optimizer_instances > 1:
-            torch.cuda.default_stream().wait_stream(self.communication_stream)
+            mg_accelerator.default_stream().wait_stream(self.communication_stream)
             return
         assert self.grad_reduce_handle is not None, (
             f"Communication call has not been issued for this bucket "
@@ -730,7 +732,7 @@ class _ParamAndGradBuffer:
                 self.shared_buffer = torch.zeros(
                     self.numel,
                     dtype=self.grad_dtype,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     requires_grad=False,
                 )
                 # For FP32 weight grads, only half of the buffer is used to store params in bf16.
@@ -747,13 +749,13 @@ class _ParamAndGradBuffer:
                     self.param_data = torch.zeros(
                         self.numel,
                         dtype=self.param_dtype,
-                        device=torch.cuda.current_device(),
+                        device=mg_accelerator.current_device(),
                         requires_grad=False,
                     )
                 self.grad_data = torch.zeros(
                     self.numel,
                     dtype=self.grad_dtype,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     requires_grad=False,
                 )
 

@@ -19,6 +19,8 @@ from .param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 class DistributedDataParallel(_BaseDataParallel):
     """
@@ -248,7 +250,7 @@ class DistributedDataParallel(_BaseDataParallel):
                 assert (
                     self.ddp_config.use_distributed_optimizer
                 ), 'Partial DistOpt cannot be used without DistOpt'
-                communication_stream = torch.cuda.Stream(device=torch.cuda.current_device())
+                communication_stream = mg_accelerator.Stream(device=mg_accelerator.current_device())
                 for bucket_group in bucket_groups:
                     bucket_group.inter_distributed_optimizer_instance_group = (
                         self.inter_dist_opt_group

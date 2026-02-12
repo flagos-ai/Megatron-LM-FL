@@ -68,8 +68,11 @@ from .resharding import (
 )
 from .state_dict_saver import save_state_dict_async_finalize, save_state_dict_async_plan
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 try:
-    if not torch.cuda.is_available():
+    if not mg_accelerator.is_available():
         raise ImportError
     from transformer_engine.pytorch.float8_tensor import Float8Tensor
 

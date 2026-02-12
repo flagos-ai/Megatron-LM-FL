@@ -17,6 +17,8 @@ from megatron.core.inference.model_inference_wrappers.inference_wrapper_config i
 from megatron.core.models.T5 import T5Model
 from megatron.core.utils import get_attr_wrapped_model
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 # pylint: disable=line-too-long
 class T5InferenceWrapper(AbstractModelInferenceWrapper):
@@ -85,8 +87,8 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
             mask_decoder = decoder_prompts_tokens_numpy[i] == tokenizer.pad
             batch_mask_encoder.append(mask_encoder)
             batch_mask_decoder.append(mask_decoder)
-        batch_mask_encoder = torch.tensor(numpy.array(batch_mask_encoder)).cuda()
-        batch_mask_decoder = torch.tensor(numpy.array(batch_mask_decoder)).cuda()
+        batch_mask_encoder = torch.tensor(numpy.array(batch_mask_encoder)).to(mg_accelerator.device())
+        batch_mask_decoder = torch.tensor(numpy.array(batch_mask_decoder)).to(mg_accelerator.device())
 
         return {
             "encoder_tokens": encoder_prompts_tokens,
@@ -144,7 +146,7 @@ class T5InferenceWrapper(AbstractModelInferenceWrapper):
             padding_size = max_sequence_length - len(encoder_prompt_tokens)
             encoder_prompt_tokens.extend([tokenizer.pad] * padding_size)
 
-        return torch.tensor(encoder_prompts_tokens_list).cuda()
+        return torch.tensor(encoder_prompts_tokens_list).to(mg_accelerator.device())
 
     def get_batch_for_context_window(
         self,

@@ -71,6 +71,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 class ExtendedRMSNorm(RMSNormGated):
     """
@@ -285,7 +287,7 @@ class MambaMixer(MegatronModule):
                 kernel_size=d_conv,
                 groups=conv_dim,
                 padding=d_conv - 1,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
                 dtype=config.params_dtype,
             )
             setattr(self.conv1d.weight, "tensor_model_parallel", True)
@@ -304,7 +306,7 @@ class MambaMixer(MegatronModule):
             dt = torch.exp(
                 torch.rand(
                     self.nheads_local_tp,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     dtype=config.params_dtype,
                 )
                 * (math.log(dt_max) - math.log(dt_min))
@@ -318,7 +320,7 @@ class MambaMixer(MegatronModule):
             # A parameter
             assert A_init_range[0] > 0 and A_init_range[1] >= A_init_range[0]
             A = torch.empty(
-                self.nheads_local_tp, dtype=torch.float32, device=torch.cuda.current_device()
+                self.nheads_local_tp, dtype=torch.float32, device=mg_accelerator.current_device()
             ).uniform_(*A_init_range)
             A_log = torch.log(A)  # Keep A_log in fp32
             self.A_log = nn.Parameter(A_log)
@@ -328,7 +330,7 @@ class MambaMixer(MegatronModule):
         self.D = nn.Parameter(
             torch.ones(
                 self.d_inner_local_tp if self.D_has_hdim else self.nheads_local_tp,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
             )
         )  # Keep in fp32
         setattr(self.D, "tensor_model_parallel", True)
@@ -340,7 +342,7 @@ class MambaMixer(MegatronModule):
                 eps=1e-5,
                 group_size=self.d_inner_local_tp // self.ngroups_local_tp,
                 norm_before_gate=self.norm_before_gate,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
                 dtype=config.params_dtype,
             )
             setattr(self.norm.weight, "tensor_model_parallel", True)

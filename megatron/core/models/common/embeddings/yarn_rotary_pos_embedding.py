@@ -14,6 +14,9 @@ from megatron.core.models.common.embeddings.rope_utils import get_pos_emb_on_thi
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.transformer import TransformerConfig
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 logger = logging.getLogger(__name__)
 
 
@@ -72,7 +75,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         self.mscale_all_dim = mscale_all_dim
         self.correction_range_round_to_int = correction_range_round_to_int
 
-        device = 'cpu' if use_cpu_initialization else torch.cuda.current_device()
+        device = 'cpu' if use_cpu_initialization else mg_accelerator.current_device()
 
         with torch.device(device):
             self.inv_freq_extra = 1.0 / (
@@ -120,11 +123,11 @@ class YarnRotaryEmbedding(RotaryEmbedding):
 
         if self.inv_freq_extra.device.type == 'cpu':
             # move `inv_freq_extra` to GPU once at the first micro-batch forward pass
-            self.inv_freq_extra = self.inv_freq_extra.to(device=torch.cuda.current_device())
+            self.inv_freq_extra = self.inv_freq_extra.to(device=mg_accelerator.current_device())
 
         if self.inv_freq_inter.device.type == 'cpu':
             # move `inv_freq_inter` to GPU once at the first micro-batch forward pass
-            self.inv_freq_inter = self.inv_freq_inter.to(device=torch.cuda.current_device())
+            self.inv_freq_inter = self.inv_freq_inter.to(device=mg_accelerator.current_device())
 
         low, high = _yarn_find_correction_range(
             self.beta_fast,

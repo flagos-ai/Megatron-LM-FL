@@ -69,6 +69,9 @@ if TYPE_CHECKING:
     import wandb as WandbModule
 
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 class ContextOverflowError(Exception):
     """Base exception for when a new request does not fit.
 
@@ -517,7 +520,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Per-request state.
         self.request_ids = torch.full(
-            (self.max_total_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
+            (self.max_total_requests,), -1, dtype=torch.int32, device=mg_accelerator.current_device()
         )
         # request_query_lengths is the input prompt tokens length during prefill phase (1st step) and then 1 for the decode phase (i.e During generation)
         self.request_query_lengths = torch.empty_like(self.request_ids)
@@ -533,19 +536,19 @@ class DynamicInferenceContext(BaseInferenceContext):
             (self.max_total_requests, self.max_kv_block_count),
             -1,
             dtype=torch.int,
-            device=torch.cuda.current_device(),
+            device=mg_accelerator.current_device(),
         )
 
         # Track request metadata.
         self.request_metadata = torch.empty(
             (self.max_total_requests, self.num_request_metadata),
             dtype=torch.float32,
-            device=torch.cuda.current_device(),
+            device=mg_accelerator.current_device(),
         )
 
         # Per-token state.
         self.token_to_input_ids = torch.full(
-            (self.max_tokens,), 0, dtype=torch.long, device=torch.cuda.current_device()
+            (self.max_tokens,), 0, dtype=torch.long, device=mg_accelerator.current_device()
         )
         self.token_to_pos_ids = torch.full_like(self.token_to_input_ids, 0)
         self.token_to_request_idx = torch.empty_like(self.token_to_input_ids)
@@ -569,7 +572,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                         self.kv_reduced_dim,
                     ),
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                 )
             else:
                 self.memory_buffer = torch.empty(
@@ -582,7 +585,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                         self.hidden_size_per_attention_head,
                     ),
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                 )
 
         # Optional state tensors for hybrid models
@@ -594,12 +597,12 @@ class DynamicInferenceContext(BaseInferenceContext):
                 self.mamba_conv_states = torch.empty(
                     (self.num_mamba_layers, self.max_total_requests) + self.mamba_conv_states_shape,
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                 )
                 self.mamba_ssm_states = torch.empty(
                     (self.num_mamba_layers, self.max_total_requests) + self.mamba_ssm_states_shape,
                     dtype=self.params_dtype,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                 )
 
             else:
@@ -608,7 +611,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Allocate `ctx_manager`-managed buffers. (For currently unknown reasons,
         # `ctx_manager` can only be used once.)
         ctx_manager = (
-            torch.cuda.use_mem_pool(self.unified_memory_mempool)
+            mg_accelerator.use_mem_pool(self.unified_memory_mempool)
             if self.unified_memory_level > 0
             else nullcontext()
         )
@@ -1131,7 +1134,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Pre-construct shared objects (safe due to deep copy in DynamicInferenceRequest.__post_init__)
         shared_sampling_params = SamplingParams(num_tokens_to_generate=1, termination_id=-1)
-        shared_decode_tokens = torch.zeros(1, dtype=torch.long, device=torch.cuda.current_device())
+        shared_decode_tokens = torch.zeros(1, dtype=torch.long, device=mg_accelerator.current_device())
 
         decode_requests = [
             DynamicInferenceRequest(
@@ -1161,7 +1164,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Create a single large tensor and slice from it for each prefill request
         max_prefill_tokens = per_prefill_tokens + (1 if rem_prefill_tokens > 0 else 0)
         shared_prefill_tokens = torch.zeros(
-            max_prefill_tokens, dtype=torch.long, device=torch.cuda.current_device()
+            max_prefill_tokens, dtype=torch.long, device=mg_accelerator.current_device()
         )
 
         prefill_requests = [
@@ -1879,7 +1882,7 @@ class DynamicInferenceContext(BaseInferenceContext):
             row_idx = torch.arange(
                 self.paused_request_count,
                 self.paused_request_count + resume_request_count,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
             )
             col_idx = self.request_kv_block_counts[
                 self.paused_request_count : (self.paused_request_count + resume_request_count)
@@ -1894,7 +1897,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # 9. We make relevant changes to the token bookkeeping tensors
         self.token_to_request_idx[: self.active_token_count] = torch.arange(
-            self.paused_request_count, self.total_request_count, device=torch.cuda.current_device()
+            self.paused_request_count, self.total_request_count, device=mg_accelerator.current_device()
         )
         self.token_to_position_in_request[: self.active_token_count] = (
             self.request_kv_length_offsets[self.paused_request_count : self.total_request_count]

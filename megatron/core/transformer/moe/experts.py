@@ -55,6 +55,8 @@ except ImportError:
 
     HAVE_TE = False
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 # TODO(Hepteract): delete the usage of the global parallel_state.
 # Currently we still have to use the global parallel_state in expert_dist_ckpt_decorator(),
@@ -214,7 +216,7 @@ class GroupedMLP(MegatronModule):
                 torch.empty(
                     self.config.hidden_size,
                     fc1_output_size_per_partition,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     dtype=config.params_dtype,
                 )
             )
@@ -222,7 +224,7 @@ class GroupedMLP(MegatronModule):
                 torch.empty(
                     fc2_input_size_per_partition,
                     self.config.hidden_size,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     dtype=config.params_dtype,
                 )
             )

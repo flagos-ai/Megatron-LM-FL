@@ -23,6 +23,8 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import get_model_config
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 # pylint: disable=line-too-long
 class AbstractModelInferenceWrapper(abc.ABC):
@@ -193,7 +195,7 @@ class AbstractModelInferenceWrapper(abc.ABC):
             seq_len = seq_len // self.tp_size
         recv_size = (seq_len, batch_size, self.inference_wrapper_config.hidden_size)
         return torch.empty(
-            recv_size, dtype=self.pipeline_communication_dtype, device=torch.cuda.current_device()
+            recv_size, dtype=self.pipeline_communication_dtype, device=mg_accelerator.current_device()
         )
 
     def forward_pass_without_pipeline_parallel(
@@ -296,7 +298,7 @@ class AbstractModelInferenceWrapper(abc.ABC):
             logits = torch.empty(
                 (batch_size, logits_seq_len, self.inference_wrapper_config.padded_vocab_size),
                 dtype=self.pipeline_communication_dtype,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
             )
 
         recv_buffer = None

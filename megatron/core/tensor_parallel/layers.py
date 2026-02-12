@@ -61,16 +61,19 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
     "partition_stride": 1,
 }
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 try:
     if is_torch_min_version("2.4.0a0"):
         custom_fwd = partial(torch.amp.custom_fwd, device_type="cuda")
         custom_bwd = partial(torch.amp.custom_bwd, device_type="cuda")
     else:
-        custom_fwd = torch.cuda.amp.custom_fwd
-        custom_bwd = torch.cuda.amp.custom_bwd
+        custom_fwd = mg_accelerator.amp.custom_fwd
+        custom_bwd = mg_accelerator.amp.custom_bwd
 except:
-    custom_fwd = torch.cuda.amp.custom_fwd
-    custom_bwd = torch.cuda.amp.custom_bwd
+    custom_fwd = mg_accelerator.amp.custom_fwd
+    custom_bwd = mg_accelerator.amp.custom_bwd
 
 try:
     if is_torch_min_version("1.13.0"):
@@ -252,7 +255,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                 torch.empty(
                     self.num_embeddings_per_partition,
                     self.embedding_dim,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     dtype=config.params_dtype,
                 )
             )
@@ -543,7 +546,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             assert not ctx.allreduce_dgrad
             dim_size = list(input.size())
             sub_grad_input = torch.empty(
-                dim_size, dtype=input.dtype, device=torch.cuda.current_device(), requires_grad=False
+                dim_size, dtype=input.dtype, device=mg_accelerator.current_device(), requires_grad=False
             )
             # reduce_scatter
             handle = dist_reduce_scatter_func(
@@ -595,7 +598,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         grad_weight = torch.zeros(
                             weight.main_grad.shape,
                             dtype=input.dtype,
-                            device=torch.cuda.current_device(),
+                            device=mg_accelerator.current_device(),
                             requires_grad=False,
                         )
                 else:
@@ -605,7 +608,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         grad_weight = torch.empty(
                             weight.main_grad.shape,
                             dtype=input.dtype,
-                            device=torch.cuda.current_device(),
+                            device=mg_accelerator.current_device(),
                             requires_grad=False,
                         )
                 weight.grad_added_to_main_grad = True
@@ -873,7 +876,7 @@ class ColumnParallelLinear(torch.nn.Module):
                     torch.empty(
                         self.output_size_per_partition,
                         self.input_size,
-                        device=torch.cuda.current_device(),
+                        device=mg_accelerator.current_device(),
                         dtype=config.params_dtype,
                     )
                 )
@@ -899,7 +902,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.bias = Parameter(
                     torch.empty(
                         self.output_size_per_partition,
-                        device=torch.cuda.current_device(),
+                        device=mg_accelerator.current_device(),
                         dtype=config.params_dtype,
                     )
                 )
@@ -1186,7 +1189,7 @@ class RowParallelLinear(torch.nn.Module):
                 torch.empty(
                     self.output_size,
                     self.input_size_per_partition,
-                    device=torch.cuda.current_device(),
+                    device=mg_accelerator.current_device(),
                     dtype=config.params_dtype,
                 )
             )
@@ -1207,7 +1210,7 @@ class RowParallelLinear(torch.nn.Module):
                 self.bias = Parameter(
                     torch.empty(
                         self.output_size,
-                        device=torch.cuda.current_device(),
+                        device=mg_accelerator.current_device(),
                         dtype=config.params_dtype,
                     )
                 )

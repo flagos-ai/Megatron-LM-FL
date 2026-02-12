@@ -43,6 +43,8 @@ except ImportError:
     TensorAwareStateDict = types.new_class("TensorAwareStateDict", ())
     HAVE_NVRX = False
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 @dataclass
 class MCoreTensorAwareStateDict(TensorAwareStateDict):
@@ -301,7 +303,7 @@ class MCoreTensorAwareStateDict(TensorAwareStateDict):
                         parallelization_group,
                         exchange_algo,
                     )
-                    torch.cuda.synchronize()
+                    mg_accelerator.synchronize()
         loaded_objects = {}
         for sh_base in nested_values(self.sharded_state_dict):
             if not isinstance(sh_base, ShardedTensor):

@@ -106,6 +106,8 @@ try:
 except ImportError:
     HAVE_FUSED_QKV_ROPE = False
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 @dataclass
 class SelfAttentionSubmodules:
@@ -283,7 +285,7 @@ class Attention(MegatronModule, ABC):
             self.num_query_groups_per_partition,
             dim,
             dtype=dtype,
-            device=torch.cuda.current_device(),
+            device=mg_accelerator.current_device(),
         )
 
     def _get_pp_layer_offset_for_inference(self):

@@ -23,6 +23,8 @@ logger = getLogger(__name__)
 
 from dataclasses import fields
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 def _compare_dataclasses(obj1, obj2):
     if type(obj1) != type(obj2):
@@ -201,7 +203,7 @@ def verify_global_md_reuse(
                 f"local_verify_reuse is False: diffs -"
                 f" {_compare_dataclasses(local_plan, loaded_all_plans[rank])}"
             )
-        all_results = torch.tensor([local_verify_reuse], dtype=torch.int, device='cuda')
+        all_results = torch.tensor([local_verify_reuse], dtype=torch.int, device=mg_accelerator.current_device_name())
         torch.distributed.all_reduce(all_results, op=torch.distributed.ReduceOp.MIN)
         # Check if all reduced results are True
         global_md_verify_reuse = all_results.item() == 1
@@ -249,7 +251,7 @@ def save_state_dict_async_finalize(
     # Broadcast failure status to all ranks to raise exceptions everywhere if needed.
     # The failure details are only raised on the coordinator.
     failures_occurred = torch.tensor(
-        [int(len(node_failures) > 0)], dtype=torch.int, device=torch.cuda.current_device()
+        [int(len(node_failures) > 0)], dtype=torch.int, device=mg_accelerator.current_device()
     )
     torch.distributed.broadcast(
         failures_occurred, src=dist_wrapper.coordinator_rank, group=dist_wrapper.group

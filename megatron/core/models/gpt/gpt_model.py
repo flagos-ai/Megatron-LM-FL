@@ -35,6 +35,8 @@ from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import WrappedTensor, deprecate_inference_params
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 class GPTModel(LanguageModule):
     """GPT Transformer language model.
@@ -381,7 +383,7 @@ class GPTModel(LanguageModule):
             sequence_len_offset = torch.tensor(
                 [inference_context.sequence_len_offset] * current_batch_size,
                 dtype=torch.int32,
-                device=torch.cuda.current_device(),
+                device=mg_accelerator.current_device(),
             )
         else:
             sequence_len_offset = None

@@ -64,6 +64,8 @@ except ImportError:
     te = MagicMock()
     HAVE_TE = False
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 def _get_extra_te_kwargs(config: TransformerConfig):
     extra_transformer_engine_kwargs = {"params_dtype": config.params_dtype}
@@ -74,7 +76,7 @@ def _get_extra_te_kwargs(config: TransformerConfig):
         elif config.init_model_with_meta_device:
             extra_transformer_engine_kwargs["device"] = "meta"
         else:
-            extra_transformer_engine_kwargs["device"] = torch.cuda.current_device()
+            extra_transformer_engine_kwargs["device"] = mg_accelerator.current_device()
     return extra_transformer_engine_kwargs
 
 
@@ -837,7 +839,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
     via set_tensor_parallel_group() and set_context_parallel_group().
     """
 
-    cp_stream: torch.cuda.Stream = None
+    cp_stream: mg_accelerator.Stream = None
 
     def __init__(
         self,
@@ -915,7 +917,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 "1.0.0"
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttention, "cp_stream") is None:
-                TEDotProductAttention.cp_stream = torch.cuda.Stream()
+                TEDotProductAttention.cp_stream = mg_accelerator.Stream()
             extra_kwargs["cp_group"] = pg_collection.cp
             extra_kwargs["cp_global_ranks"] = torch.distributed.get_process_group_ranks(
                 pg_collection.cp
@@ -1279,7 +1281,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
         def _encode_extra_state(self, state):
             # TE 2.0 changed the format of extra_state to be a byte tensor
             if is_te_min_version("2.0.0"):
-                torch.cuda.synchronize()
+                mg_accelerator.synchronize()
                 state_serialized = bytearray(pickle.dumps(state))
                 state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
             else:

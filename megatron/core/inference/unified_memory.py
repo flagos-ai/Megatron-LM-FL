@@ -7,6 +7,9 @@ from contextlib import contextmanager
 from enum import Enum, auto
 from pathlib import Path
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import CUDA_HOME, load_inline
 
@@ -16,7 +19,7 @@ try:
     if is_torch_min_version("2.8.0"):
         from torch.cuda.memory import MemPool
     else:
-        from torch.cuda import MemPool
+        from mg_accelerator import MemPool
     _has_mem_pool = True
 except ImportError:
     _has_mem_pool = False
@@ -169,10 +172,10 @@ def compile_allocator():
         import torch
 
         local_state = torch.tensor(
-            [_compilation_state.value], dtype=torch.uint8, device=torch.cuda.current_device()
+            [_compilation_state.value], dtype=torch.uint8, device=mg_accelerator.current_device()
         )
         world_states = [
-            torch.empty(1, dtype=torch.uint8, device=torch.cuda.current_device())
+            torch.empty(1, dtype=torch.uint8, device=mg_accelerator.current_device())
             for _ in range(torch.distributed.get_world_size())
         ]
         torch.distributed.all_gather(world_states, local_state)

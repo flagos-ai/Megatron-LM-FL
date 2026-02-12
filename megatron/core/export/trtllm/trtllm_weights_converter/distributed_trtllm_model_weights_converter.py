@@ -19,6 +19,8 @@ try:
 except ImportError:
     HAVE_TQDM = False
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
 
 def str_dtype_to_torch(dtype: DataType):
     """Get torch datatype from input datatype"""
@@ -219,7 +221,7 @@ class DistributedTRTLLMModelWeightsConverter:
             dim_size = list(val.size())
             dim_size[0] = vocab_size_padded
             gathered_val = torch.zeros(
-                dim_size, dtype=val.dtype, device=torch.cuda.current_device()
+                dim_size, dtype=val.dtype, device=mg_accelerator.current_device()
             )
             gathered_val[vocab_start_index:vocab_end_index] = val
             torch.distributed.all_reduce(gathered_val, group=self.tp_group)

@@ -17,6 +17,10 @@ Shape = Union[List[int], torch.Size]
 from megatron.plugin.hetero.parallel_context import get_parallel_context
 from megatron.plugin.hetero.parallel_context import ParallelContext
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
+
 def is_single_shape(x) -> bool:
     """Check if the input is a single shape."""
     if isinstance(x, torch.Size):
@@ -89,7 +93,7 @@ def recv_forward_hetero(tensor_shapes, is_first_stage: bool, config: ModelParall
                     rank=rank, local_tensor_shape=tensor_shape, next=False
                 )
                 input_tensor = torch.empty(tensor_shape,
-                                        device=torch.cuda.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
+                                        device=mg_accelerator.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
                                         dtype=config.pipeline_dtype,
                                         requires_grad=True)
                 if tensor_slices is not None:
@@ -115,7 +119,7 @@ def recv_forward_hetero(tensor_shapes, is_first_stage: bool, config: ModelParall
             if config.timers is not None:
                 config.timers('forward-recv').stop()
         if input_tensor is not None and input_tensor.device == torch.device("cpu"):
-            input_tensor = input_tensor.to(torch.cuda.current_device())
+            input_tensor = input_tensor.to(mg_accelerator.current_device())
         input_tensors.append(input_tensor)
     if unwrap_tensor_shapes:
         return input_tensors[0]
@@ -159,7 +163,7 @@ def recv_backward_hetero(
                     rank=rank, local_tensor_shape=tensor_shape, next=True
                 )
                 output_tensor_grad = torch.empty(tensor_shape,
-                                                device=torch.cuda.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
+                                                device=mg_accelerator.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
                                                 dtype=config.pipeline_dtype,
                                                 requires_grad=True)
                 if tensor_slices is not None:
@@ -190,7 +194,7 @@ def recv_backward_hetero(
                 config.timers('backward-recv').stop()
 
         if output_tensor_grad is not None and output_tensor_grad.device == torch.device("cpu"):
-            output_tensor_grad = output_tensor_grad.to(torch.cuda.current_device())
+            output_tensor_grad = output_tensor_grad.to(mg_accelerator.current_device())
         output_tensor_grads.append(output_tensor_grad)
 
     if unwrap_tensor_shapes:
@@ -346,7 +350,7 @@ def send_forward_recv_backward_hetero(
                     rank=rank, local_tensor_shape=output_tensor.shape, next=True
                 )
                 output_tensor_grad = torch.empty(tensor_shape,
-                                                device=torch.cuda.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
+                                                device=mg_accelerator.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
                                                 dtype=config.pipeline_dtype,
                                                 requires_grad=True)
                 if tensor_slices is not None:
@@ -376,7 +380,7 @@ def send_forward_recv_backward_hetero(
             if config.timers is not None:
                 config.timers('forward-send-backward-recv').stop()
         if output_tensor_grad is not None and output_tensor_grad.device == torch.device("cpu"):
-            output_tensor_grad = output_tensor_grad.to(torch.cuda.current_device())
+            output_tensor_grad = output_tensor_grad.to(mg_accelerator.current_device())
         output_tensor_grads.append(output_tensor_grad)
     if unwrap_output_tensors:
         return output_tensor_grads[0]
@@ -425,7 +429,7 @@ def send_backward_recv_forward_hetero(
                     rank=rank, local_tensor_shape=input_tensor_grad.shape, next=False
                 )
                 input_tensor = torch.empty(tensor_shape,
-                                        device=torch.cuda.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
+                                        device=mg_accelerator.current_device() if "cpu:gloo" != pp_groups[0].name() else torch.device("cpu"),
                                         dtype=config.pipeline_dtype,
                                         requires_grad=True)
                 if tensor_slices is not None:
@@ -451,7 +455,7 @@ def send_backward_recv_forward_hetero(
             if config.timers is not None:
                 config.timers('backward-send-forward-recv').stop()
         if input_tensor is not None and input_tensor.device == torch.device("cpu"):
-            input_tensor = input_tensor.to(torch.cuda.current_device())
+            input_tensor = input_tensor.to(mg_accelerator.current_device())
         input_tensors.append(input_tensor)
     if unwrap_input_tensor_grads:
         return input_tensors[0]

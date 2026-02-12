@@ -6,6 +6,9 @@ import torch
 from torch import Tensor
 
 
+from megatron.plugin.accelerator import get_accelerator
+mg_accelerator = get_accelerator()
+
 class BlockAllocator:
     """Allocator that manages blocks of memory for the KV cache.
 
@@ -35,7 +38,7 @@ class BlockAllocator:
 
         # Initialize block pool as a "stack" data structure
         self.block_bag = torch.arange(
-            self.total_count, dtype=torch.int32, device=torch.cuda.current_device()
+            self.total_count, dtype=torch.int32, device=mg_accelerator.current_device()
         )
 
     def __str__(self):
