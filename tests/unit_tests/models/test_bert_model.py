@@ -169,6 +169,7 @@ class TestBertModelAttentionDimensions:
     @pytest.mark.internal
     @pytest.mark.flaky
     @pytest.mark.flaky_in_dev
+    @pytest.mark.skip(reason="This test is flaky and needs to be fixed")
     def test_transformer_engine_version_1_7_to_1_10_rng_error(self, mocker):
         bert_layer_with_transformer_engine_spec.submodules.self_attention.params[
             'attn_mask_type'

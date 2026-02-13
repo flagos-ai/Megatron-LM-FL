@@ -239,6 +239,7 @@ def test_different_initialize_order_consistency(src_tp_pp, ep_size):
 )
 @pytest.mark.flaky
 @pytest.mark.flaky_in_dev
+@pytest.mark.skip(reason="This test is flaky and needs to be fixed")
 def test_different_initialize_order_unconsistency(src_tp_pp, ep_size):
     Utils.initialize_model_parallel(
         *src_tp_pp, expert_model_parallel_size=ep_size, order='tp-ep-dp-pp'

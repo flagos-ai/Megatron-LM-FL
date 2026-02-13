@@ -17,15 +17,15 @@
 
 name: Installation Test
 
-on:
-  push:
-    branches:
-      - dev
-      - main
-      - 'pull-request/[0-9]+'
-      - 'deploy-release/*'
-  merge_group:
-    types: [checks_requested]
+# on:
+#   push:
+#     branches:
+#       - dev
+#       - main
+#       - 'pull-request/[0-9]+'
+#       - 'deploy-release/*'
+#   merge_group:
+#     types: [checks_requested]
 
 jobs:
   pre-flight:

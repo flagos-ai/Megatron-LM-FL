@@ -1,9 +1,9 @@
 name: Auto-assign Milestone to PR
 
-on:
-  push:
-    branches:
-      - "pull-request/[0-9]+"
+# on:
+#   push:
+#     branches:
+#       - "pull-request/[0-9]+"
 
 permissions:
   contents: read

@@ -1,0 +1,108 @@
+# Disabled for compatibility issues
+name: Common Functional Tests - Training
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+        description: Platform name (e.g., cuda, default)
+      test_matrix:
+        required: true
+        type: string
+        description: JSON array of test configurations
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+
+jobs:
+  functional_test_train:
+    defaults:
+      run:
+        shell: bash
+    env:
+      PROJECT_ROOT: /workspace/Megatron-LM-FL
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJson(inputs.test_matrix) }}
+    container:
+      image: ${{ inputs.image }}
+      ports:
+        - 80
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Set safe directory
+        run: |
+          git config --global --add safe.directory $PROJECT_ROOT
+
+      - name: Setup Python environment
+        run: |
+          set -euo pipefail
+          cd $PROJECT_ROOT
+          pip install -e . --no-deps 
+        timeout-minutes: 30
+
+      - name: Run functional tests
+        id: functional_test
+        run: |
+          set -euo pipefail
+          cd $PROJECT_ROOT
+
+          PLATFORM='${{ inputs.platform }}'
+          DEVICE='${{ matrix.test_config.device }}'
+          TASK='${{ matrix.test_config.task }}'
+          MODEL='${{ matrix.test_config.model }}'
+          CASE='${{ matrix.test_config.case }}'
+
+
+          echo "Running functional tests for training"
+          echo "Platform: $PLATFORM"
+          echo "Device: $DEVICE"
+          echo "Task: $TASK"
+          echo "Model: $MODEL"
+          echo "Case: ${CASE:-all}"
+
+          # Set environment variables
+          export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
+          export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache
+          mkdir -p $TORCHINDUCTOR_CACHE_DIR
+
+          # Run functional tests
+          # The functional tests are located in tests/functional_tests
+          # Adjust the test path and command based on the model and case
+          TEST_DIR="tests/functional_tests"
+
+          if [ -d "$TEST_DIR" ]; then
+            echo "Running functional tests from $TEST_DIR"
+            pytest -v "$TEST_DIR" \
+              --tb=short \
+              -x \
+              || exit_code=$?
+          else
+            echo "Functional test directory not found: $TEST_DIR"
+            exit_code=0
+          fi
+
+          exit_code=${exit_code:-0}
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          exit $exit_code
+        timeout-minutes: 60

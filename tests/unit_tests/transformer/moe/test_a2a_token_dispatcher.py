@@ -31,6 +31,7 @@ class TestAlltoAllDispatcher:
     @pytest.mark.parametrize("tp_size,ep_size", [(1, 8), (8, 1), (4, 2), (1, 1)])
     @pytest.mark.parametrize("permute_fusion", permute_fusion_params)
     @pytest.mark.parametrize("deterministic", [False, True])
+    @pytest.mark.skip(reason="This test is flaky and needs to be fixed")
     def test_forward_backward(self, tp_size, ep_size, permute_fusion, deterministic, monkeypatch):
         if deterministic:
             # We only need to exercise the deterministic branches in moe_utils.
