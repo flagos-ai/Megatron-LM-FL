@@ -954,6 +954,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             sharded_model_param = self.optimizer.param_groups[group_index]["params"][group_order]
             tensors = {}
             for k in self.optimizer.state[sharded_model_param]:
+                if not isinstance(self.optimizer.state[sharded_model_param][k], torch.Tensor):
+                    continue
                 if isinstance(self.optimizer, HybridDeviceOptimizer):
                     tensors[k] = self.optimizer.state[sharded_model_param][k]
                     continue
@@ -963,16 +965,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         else:
             main_param = self.optimizer.param_groups[group_index]["params"][group_order]
             optim_state = self.optimizer.state[main_param]
-            tensors = {"param": main_param, **optim_state}
-        # process muon to be compatiable with adam ( always save to exp_avg / exp_avg_sq )
-        if isinstance(self.optimizer, Muon):
-            use_muon = self.optimizer.param_groups[group_index].get("use_muon", False)
-            if use_muon:
-                tensors["exp_avg"] = tensors["muon_buffer"]
-                tensors["exp_avg_sq"] = torch.zeros_like(tensors["param"])
-            else:
-                tensors["exp_avg"] = tensors["adamw_exp_avg"]
-                tensors["exp_avg_sq"] = tensors["adamw_exp_avg_sq"]
+            tensors = {"param": main_param}
+            for k, v in optim_state.items():
+                if isinstance(v, torch.Tensor):
+                    tensors[k] = v
         return tensors
 
     def _set_main_param_and_optimizer_states(self, model_param, tensors):
@@ -989,6 +985,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         if self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8:
             sharded_model_param = self.optimizer.param_groups[group_index]["params"][group_order]
             for k, v in tensors.items():
+                if not isinstance(v, torch.Tensor):
+                    continue
                 if isinstance(self.optimizer, HybridDeviceOptimizer):
                     if k == "param":
                         k = "master_param"
@@ -1002,31 +1000,14 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         else:
             main_param = self.optimizer.param_groups[group_index]["params"][group_order]
             optim_state = self.optimizer.state[main_param]
-            
-            if isinstance(self.optimizer, Muon):
-                if "param" in tensors:
-                    main_param.copy_(tensors["param"])
-                use_muon = self.optimizer.param_groups[group_index].get("use_muon", False)
-                if use_muon:
-                    if "muon_buffer" not in optim_state:
-                        optim_state["muon_buffer"] = torch.zeros_like(main_param)
-                    if "exp_avg" in tensors:
-                        optim_state["muon_buffer"].copy_(tensors["exp_avg"])
-                else:
-                    if "adamw_exp_avg" not in optim_state:
-                        optim_state["adamw_exp_avg"] = torch.zeros_like(main_param)
-                    if "adamw_exp_avg_sq" not in optim_state:
-                        optim_state["adamw_exp_avg_sq"] = torch.zeros_like(main_param)
-                    if "exp_avg" in tensors:
-                        optim_state["adamw_exp_avg"].copy_(tensors["exp_avg"])
-                    if "exp_avg_sq" in tensors:
-                        optim_state["adamw_exp_avg_sq"].copy_(tensors["exp_avg_sq"])
-            else:
-                dst_tensors = {"param": main_param, **optim_state}
-                for key in dst_tensors:
-                    if not key in tensors:
-                        continue
-                    dst_tensors[key].copy_(tensors[key])
+            dst_tensors = {"param": main_param}
+            for k, v in optim_state.items():
+                if isinstance(v, torch.Tensor):
+                    dst_tensors[k] = v
+            for key in dst_tensors:
+                if not isinstance(tensors[key], torch.Tensor):
+                    continue
+                dst_tensors[key].copy_(tensors[key])
 
     def get_parameter_state_dp_reshardable(self):
         """Get internal representation of parameter state without any copies and modifications.
