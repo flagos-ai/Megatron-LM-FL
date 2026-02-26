@@ -1,7 +1,8 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
+from __future__ import annotations
 
 import os
 import warnings
@@ -11,6 +12,7 @@ from typing import Any, Callable, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from typing_extensions import override
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
@@ -56,6 +58,8 @@ except ImportError:
     HAVE_TE = False
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
+    "expert_tp": False,
+    "is_qkv": False,
     "tensor_model_parallel": False,
     "partition_dim": -1,
     "partition_stride": 1,
@@ -84,12 +88,16 @@ except:
     dist_reduce_scatter_func = torch.distributed._reduce_scatter_base
 
 
-def param_is_not_tensor_parallel_duplicate(param):
+def param_is_not_tensor_parallel_duplicate(param, tp_group=None):
     """Returns true if the passed-in parameter is not a duplicate parameter
     on another TP rank."""
-    return (hasattr(param, "tensor_model_parallel") and param.tensor_model_parallel) or (
-        get_tensor_model_parallel_rank() == 0
-    )
+    if hasattr(param, "tensor_model_parallel") and param.tensor_model_parallel:
+        return True
+    # Prefer provided tp_group when available (new explicit path).
+    if tp_group is not None:
+        return tp_group.rank() == 0
+    # Fallback to legacy global state (back-compat).
+    return get_tensor_model_parallel_rank() == 0
 
 
 def set_tensor_model_parallel_attributes(tensor, is_parallel, dim, stride):
@@ -310,6 +318,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                 key=weight_prefix,
                 allow_shape_mismatch=True,
                 prepend_offsets=sharded_offsets,
+                tp_group=self.tp_group,
+                dp_cp_group=metadata["dp_cp_group"],
             )
         }
 
@@ -816,7 +826,7 @@ class ColumnParallelLinear(torch.nn.Module):
         embedding_activation_buffer: Optional[List[torch.Tensor]] = None,
         grad_output_buffer: Optional[List[torch.Tensor]] = None,
         is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
+        tp_comm_buffer_name: Optional[str] = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
@@ -960,7 +970,7 @@ class ColumnParallelLinear(torch.nn.Module):
         input_: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
         runtime_gather_output: Optional[bool] = None,
-    ):
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -1054,11 +1064,23 @@ class ColumnParallelLinear(torch.nn.Module):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def backward_dw(self) -> None:
+        """Compute weight gradients during the backward pass if delay_wgrad_compute is enabled.
+
+        Not supported - does nothing.
+        """
+        pass
+
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 0, bias sharded"""
         state_dict = self.state_dict(prefix="", keep_vars=True)
         return make_sharded_tensors_for_checkpoint(
-            state_dict, prefix, {"weight": 0, "bias": 0}, sharded_offsets
+            state_dict,
+            prefix,
+            {"weight": 0, "bias": 0},
+            sharded_offsets,
+            tp_group=self.tp_group,
+            dp_cp_group=metadata['dp_cp_group'],
         )
 
     def set_extra_state(self, state: Any):
@@ -1068,12 +1090,16 @@ class ColumnParallelLinear(torch.nn.Module):
         """Keep compatibility with TE state dict."""
         return None
 
-    def __repr__(self):
+    @override
+    def extra_repr(self) -> str:
+        """Extra context to add to the module's string representation."""
         tp = self.output_size // self.output_size_per_partition
         use_bias = self.bias is not None and self.bias is True
         return (
-            f"{type(self).__name__}(in_features={self.input_size}, "
-            f"out_features={self.output_size}, bias={use_bias}, TP={tp})"
+            f"in_features={self.input_size}, "
+            f"out_features={self.output_size}, "
+            f"bias={use_bias}, "
+            f"TP={tp}"
         )
 
 
@@ -1126,7 +1152,7 @@ class RowParallelLinear(torch.nn.Module):
         stride: int = 1,
         keep_master_weight_for_test: bool = False,
         is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
+        tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super(RowParallelLinear, self).__init__()
@@ -1234,7 +1260,7 @@ class RowParallelLinear(torch.nn.Module):
         else:
             return linear_with_grad_accumulation_and_async_allreduce(input, weight, *args, **kwargs)
 
-    def forward(self, input_):
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward of RowParallelLinear
 
         Args:
@@ -1292,11 +1318,23 @@ class RowParallelLinear(torch.nn.Module):
             output_bias = self.bias
         return output, output_bias
 
+    def backward_dw(self) -> None:
+        """Compute weight gradients during the backward pass if delay_wgrad_compute is enabled.
+
+        Not supported - does nothing.
+        """
+        pass
+
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 1, bias not sharded"""
         state_dict = self.state_dict(prefix="", keep_vars=True)
         return make_sharded_tensors_for_checkpoint(
-            state_dict, prefix, {"weight": 1}, sharded_offsets
+            state_dict,
+            prefix,
+            {"weight": 1},
+            sharded_offsets,
+            tp_group=self.tp_group,
+            dp_cp_group=metadata['dp_cp_group'],
         )
 
     def set_extra_state(self, state: Any):
@@ -1306,10 +1344,14 @@ class RowParallelLinear(torch.nn.Module):
         """Keep compatibility with TE state dict."""
         return None
 
-    def __repr__(self):
+    @override
+    def extra_repr(self) -> str:
+        """Extra context to add to the module's string representation."""
         tp = self.input_size // self.input_size_per_partition
         use_bias = self.bias is not None and self.bias is True
         return (
-            f"{type(self).__name__}(in_features={self.input_size}, "
-            f"out_features={self.output_size}, bias={use_bias}, TP={tp})"
+            f"in_features={self.input_size}, "
+            f"out_features={self.output_size}, "
+            f"bias={use_bias}, "
+            f"TP={tp}"
         )

@@ -1,4 +1,5 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+
 import logging
 import os
 from collections import Counter, defaultdict
@@ -10,12 +11,7 @@ import torch
 
 from megatron.core.dist_checkpointing import ShardedTensor
 from megatron.core.dist_checkpointing.core import CheckpointingException, maybe_load_config
-from megatron.core.dist_checkpointing.dict_utils import (
-    diff,
-    extract_matching_values,
-    map_reduce,
-    nested_values,
-)
+from megatron.core.dist_checkpointing.dict_utils import diff, extract_matching_values, nested_values
 from megatron.core.dist_checkpointing.mapping import (
     CommonStateDict,
     ShardedBase,
@@ -437,19 +433,25 @@ def validate_sharding_integrity(
     for rank, rank_shardings in enumerate(global_metadata):
         for sharding in rank_shardings:
             key_shardings[sharding.key].append((rank, sharding))
+    errors = []
     for key, shardings in key_shardings.items():
         if isinstance(shardings[0][1], ShardedObject):
-            _validate_objects_for_key(shardings)
+            errors.extend(_validate_objects_for_key(shardings))
         else:
-            _validate_sharding_for_key(shardings)
+            errors.extend(_validate_sharding_for_key(shardings))
+
+    if errors:
+        errors = '\n'.join(str(e) for e in errors)
+        raise CheckpointingException(f'Invalid sharding pattern validation. Errors: {errors}')
 
 
-def _validate_sharding_for_key(rank_sharding: List[Tuple[int, ShardedTensor]]):
+def _validate_sharding_for_key(
+    rank_sharding: List[Tuple[int, ShardedTensor]]
+) -> List[CheckpointingException]:
     some_rank_shard = rank_sharding[0][1]
     global_shape = some_rank_shard.global_shape
     local_shape = some_rank_shard.local_shape
     dtype = some_rank_shard.dtype
-    has_flattened_range = some_rank_shard.flattened_range is not None
     has_regular_sharding_grid = some_rank_shard.has_regular_grid
     for rank, sharding in rank_sharding:
         assert sharding.dtype == dtype, (sharding.dtype, dtype, some_rank_shard)
@@ -468,33 +470,21 @@ def _validate_sharding_for_key(rank_sharding: List[Tuple[int, ShardedTensor]]):
                 local_shape,
                 some_rank_shard,
             )
-        assert (sharding.flattened_range is not None) == has_flattened_range, (
-            (sharding.flattened_range is not None),
-            has_flattened_range,
-            some_rank_shard,
-        )
 
+    errors = []
     if not has_regular_sharding_grid:
         # In case of uneven sharding we defer the validation to DCP
-        return
+        return errors
 
     shard_access_cnt = _compute_shards_access(rank_sharding)
-    if has_flattened_range:
-        map_reduce(
-            rank_sharding,
-            lambda x: x[1].global_offset,
-            lambda x: x[1],
-            _validate_sharding_for_key_flattened,
-        )
-        # For each shard with at least 1 flattened tensor in it, the above
-        # `_validate_sharding_for_key_flattened` ensure a correct consistent pattern
-        # The only thing that can go wrong at this point is that some shard don't have
-        # *any* representatives which will be checked later by comparing `shard_access_cnt == 1`
-        shard_access_cnt = torch.minimum(shard_access_cnt, torch.tensor([1]))
     if not torch.all(shard_access_cnt == 1):
-        raise CheckpointingException(
-            f"Invalid access pattern for {rank_sharding[0][1]}: {shard_access_cnt}"
+        errors.append(
+            CheckpointingException(
+                f'Invalid access pattern for {rank_sharding[0][1]}: {shard_access_cnt}'
+            )
         )
+
+    return errors
 
 
 def _compute_shards_access(rank_sharding):
@@ -507,39 +497,24 @@ def _compute_shards_access(rank_sharding):
     return shard_access_cnt
 
 
-def _validate_sharding_for_key_flattened(tensors_by_shard):
-    all_slices = []
-    local_shape = tensors_by_shard[0].local_shape
-    for sharding in tensors_by_shard:
-        assert sharding.local_shape == local_shape
-        sharding: ShardedTensor
-        if not is_main_replica(sharding.replica_id):
-            continue
-
-        all_slices.append((sharding.flattened_range.start, sharding.flattened_range.stop))
-
-    starts, stops = map(np.asarray, zip(*sorted(all_slices)))
-    expected_size = np.prod(local_shape)
-    if starts[0] != 0 or stops[-1] != expected_size or not np.all(starts[1:] == stops[:-1]):
-        raise CheckpointingException(
-            f"Flattened ranges dont cover the whole shard {tensors_by_shard[0]} of size {expected_size}. Ranges: {(starts, stops)}"
-        )
-
-
-def _validate_objects_for_key(sharded_objects: List[ShardedObject]):
+def _validate_objects_for_key(sharded_objects: List[ShardedObject]) -> List[CheckpointingException]:
     """Ensure uniqueness of saved objects."""
     unique_keys = [
         sh_obj.unique_key for _, sh_obj in sharded_objects if is_main_replica(sh_obj.replica_id)
     ]
+    errors = []
     if len(unique_keys) != len(set(unique_keys)):
         duplicates = {k: cnt for k, cnt in Counter(unique_keys).items() if cnt > 1}
         logger.error(f"Duplicate ShardedObject keys and counts: {duplicates}")
-        raise CheckpointingException(f"Duplicate ShardedObject keys: {list(duplicates.keys())}")
+        errors.append(
+            CheckpointingException(f'Duplicate ShardedObject keys: {list(duplicates.keys())}')
+        )
     expected_shard_num = np.prod(sharded_objects[0][1].global_shape)
     if len(unique_keys) != expected_shard_num:
         err_msg = f"Invalid access pattern: {expected_shard_num - len(unique_keys)} ShardedObject are missing."
         logger.error(f"{err_msg} Existing shards: {unique_keys}")
-        raise CheckpointingException(err_msg)
+        errors.append(CheckpointingException(err_msg))
+    return errors
 
 
 def determine_global_metadata(

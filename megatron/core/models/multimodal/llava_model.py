@@ -17,8 +17,10 @@ from megatron.core.models.vision.radio import RADIOViTModel
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer import MegatronModule
+from megatron.core.transformer.attention import SelfAttentionSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_layer import TransformerLayerSubmodules
 from megatron.core.utils import deprecate_inference_params, log_single_rank
 
 try:
@@ -124,6 +126,7 @@ class LLaVAModel(MegatronModule):
         max_num_tiles: int = 0,
         tokenizer_type: str = "",
         vp_stage: Optional[int] = None,
+        use_vision_backbone_fp8_arch: bool = False,
     ) -> None:
         super().__init__(config=language_transformer_config)
 
@@ -157,9 +160,18 @@ class LLaVAModel(MegatronModule):
         self.context_parallel_lm = language_transformer_config.context_parallel_size
         if self.sequence_parallel_lm or self.context_parallel_lm > 1:
             if not language_model_type.startswith('nemotron5-hybrid'):
-                attn_module = language_transformer_layer_spec.submodules.self_attention
+                assert isinstance(
+                    language_transformer_layer_spec.submodules, TransformerLayerSubmodules
+                )
+                assert isinstance(
+                    language_transformer_layer_spec.submodules.self_attention.submodules,
+                    SelfAttentionSubmodules,
+                )
+                attn_submodules = (
+                    language_transformer_layer_spec.submodules.self_attention.submodules
+                )
                 assert (
-                    attn_module.submodules.core_attention == TEDotProductAttention and HAVE_TE
+                    attn_submodules.core_attention == TEDotProductAttention and HAVE_TE
                 ), "Sequence/Context Parallelism is supported only with TE DotProductAttention."
             if self.context_parallel_lm > 1:
                 self.cp_group = self.pg_collection.cp
@@ -295,7 +307,7 @@ class LLaVAModel(MegatronModule):
                     ln_post_impl = None
                     use_mask_token = False
 
-                if vision_transformer_config.fp8:
+                if vision_transformer_config.fp8 or use_vision_backbone_fp8_arch:
                     # FP8 padding for final sequence length to be a multiple of 16 or 32.
                     class_token_len = 32 if vision_transformer_config.fp8_recipe == "mxfp8" else 16
 
@@ -923,27 +935,16 @@ class LLaVAModel(MegatronModule):
                 )
             )
 
-        if isinstance(self.language_model, MambaModel):
-            output = self.language_model(
-                input_ids=None,
-                position_ids=None,
-                attention_mask=attention_mask,
-                decoder_input=combined_embeddings,
-                labels=new_labels,
-                inference_context=inference_context,
-                runtime_gather_output=runtime_gather_output,
-            )
-        else:
-            output = self.language_model(
-                input_ids=None,
-                position_ids=None,
-                attention_mask=attention_mask,
-                decoder_input=combined_embeddings,
-                labels=new_labels,
-                inference_context=inference_context,
-                runtime_gather_output=runtime_gather_output,
-                packed_seq_params=packed_seq_params,
-            )
+        output = self.language_model(
+            input_ids=None,
+            position_ids=None,
+            attention_mask=attention_mask,
+            decoder_input=combined_embeddings,
+            labels=new_labels,
+            inference_context=inference_context,
+            runtime_gather_output=runtime_gather_output,
+            packed_seq_params=packed_seq_params,
+        )
 
         return output, new_loss_mask
 
