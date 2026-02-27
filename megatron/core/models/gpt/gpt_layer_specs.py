@@ -521,7 +521,6 @@ def get_gpt_decoder_layer_specs(
     qk_l2_norm: Optional[bool] = False,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    is_dualpipev_first_chunk: Optional[bool] = False,
 ) -> TransformerBlockSubmodules:
     """GPT block spec."""
     if use_transformer_engine:
@@ -617,6 +616,7 @@ def get_gpt_decoder_block_spec(
     qk_l2_norm: Optional[bool] = False,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
+    is_dualpipev_first_chunk: Optional[bool] = False,
 ) -> TransformerBlockSubmodules:
     """GPT block spec."""
     layer_specs = get_gpt_decoder_layer_specs(
