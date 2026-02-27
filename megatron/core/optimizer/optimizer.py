@@ -94,8 +94,8 @@ def _multi_tensor_copy_this_to_that(
         for this_, that_ in zip(this, that):
             that_.copy_(this_)
 
-
-param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr', 'use_muon', 'is_vision_model_param') ####FlagScale add is_vision_model_param
+#### FlagScale add is_vision_model_param
+param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr', 'is_vision_model_param')
 
 
 class MegatronOptimizer(ABC):
