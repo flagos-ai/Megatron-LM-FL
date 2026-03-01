@@ -69,6 +69,10 @@ test_matrix:
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
       - tests/unit_tests/dist_checkpointing/test_local.py
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
+
+  # TODO(test_layer_wise_optimizer.py): add logic for installing emerging-optimizers repo before execution
+  # ref: https://github.com/NVIDIA-NeMo/Emerging-Optimizers?tab=readme-ov-file#install-from-source
 
   # functional:
   #   train:

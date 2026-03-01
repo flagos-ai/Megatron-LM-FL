@@ -54,7 +54,23 @@ def _unscale_main_grads_and_check_for_nan(self):
 @plugin_implementation("ChainedOptimizer", "load_state_dict")
 def load_state_dict(self, state_dict):
     logger.debug(f"Megatron-LM-FL Plugins: load_state_dict")
-    if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers
+
+    if not self.convert_to_ep: # megatron origin apply ep
+        # If there is only one optimizer, we read the state dict as a single optimizer.
+        if len(self.chained_optimizers) == 1:
+            self.chained_optimizers[0].load_state_dict(state_dict)
+            return
+        if len(self.chained_optimizers) != len(state_dict):
+            raise RuntimeError(
+                f'Expected {len(self.chained_optimizers)} entries'
+                f' in state dict, but got {len(state_dict)}.'
+            )
+        if isinstance(state_dict, dict):
+            state_dict = (v for k, v in sorted(state_dict.items()))
+        for optimizer, state in zip(self.chained_optimizers, state_dict):
+            optimizer.load_state_dict(state)
+        self._synchronize_steps()
+    else: # convert tp/pp chained_optimizers to ep chained_optimizers
         logger.info(
             "load_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
         )
@@ -82,18 +98,3 @@ def load_state_dict(self, state_dict):
             new_state_dict = (v for k, v in sorted(new_state_dict.items()))
         for optimizer, state in zip(self.chained_optimizers, new_state_dict):
             optimizer.load_state_dict(state)
-    else:  # megatron source apply ep
-        # If there is only one optimizer, we read the state dict as a single optimizer.
-        if len(self.chained_optimizers) == 1:
-            self.chained_optimizers[0].load_state_dict(state_dict)
-            return
-        if len(self.chained_optimizers) != len(state_dict):
-            raise RuntimeError(
-                f'Expected {len(self.chained_optimizers)} entries'
-                f' in state dict, but got {len(state_dict)}.'
-            )
-        if isinstance(state_dict, dict):
-            state_dict = (v for k, v in sorted(state_dict.items()))
-        for optimizer, state in zip(self.chained_optimizers, state_dict):
-            optimizer.load_state_dict(state)
-        self._synchronize_steps()

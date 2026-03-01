@@ -94,8 +94,8 @@ def _multi_tensor_copy_this_to_that(
         for this_, that_ in zip(this, that):
             that_.copy_(this_)
 
-
-param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr', 'use_muon', 'is_vision_model_param') ####FlagScale add is_vision_model_param
+#### FlagScale add is_vision_model_param
+param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr', 'is_vision_model_param')
 
 
 class MegatronOptimizer(ABC):
@@ -155,7 +155,9 @@ class MegatronOptimizer(ABC):
                 grad = param.grad
             grad_not_none = grad is not None
             is_not_shared = param_is_not_shared(param)
-            is_not_tp_duplicate = tensor_parallel.param_is_not_tensor_parallel_duplicate(param)
+            is_not_tp_duplicate = tensor_parallel.param_is_not_tensor_parallel_duplicate(
+                param, getattr(self, 'tp_group', None)
+            )
             if grad_not_none and is_not_shared and is_not_tp_duplicate:
                 grads_for_norm.append(grad)
 
@@ -227,6 +229,7 @@ class MegatronOptimizer(ABC):
             params,
             grad_stats_parallel_group=self.get_grad_stats_parallel_group(),
             use_decoupled_grad=self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8,
+            tp_group=getattr(self, 'tp_group', None),
         )
 
     @abstractmethod

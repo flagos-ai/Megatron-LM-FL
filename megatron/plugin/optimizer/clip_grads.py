@@ -158,8 +158,8 @@ def count_zeros_fp32(
     parameters: Union[List[torch.Tensor], torch.Tensor],
     grad_stats_parallel_group: torch.distributed.ProcessGroup,
     use_decoupled_grad: bool = False,
+    tp_group: Optional[torch.distributed.ProcessGroup] = None,
 ) -> float:
-    logger.debug(f"Megatron-LM-FL Plugins: count_zeros_fp32")
     """Counts the number of zeros in gradients associated with the passed-in list of
     parameters.
 
@@ -173,6 +173,8 @@ def count_zeros_fp32(
         use_decoupled_grad (bool, optional) whether to read grad from ".grad" or ".decoupled_grad",
             default value is False.
     """
+
+    logger.debug(f"Megatron-LM-FL Plugins: count_zeros_fp32")
 
     if isinstance(parameters, torch.Tensor):
         parameters = [parameters]
@@ -196,7 +198,7 @@ def count_zeros_fp32(
         grad_attr = "decoupled_grad" if use_decoupled_grad else "grad"
         grad_not_none = hasattr(param, grad_attr) and getattr(param, grad_attr) is not None
         is_not_shared = param_is_not_shared(param)
-        is_not_tp_duplicate = param_is_not_tensor_parallel_duplicate(param)
+        is_not_tp_duplicate = param_is_not_tensor_parallel_duplicate(param, tp_group=tp_group)
         if grad_not_none and is_not_shared and is_not_tp_duplicate:
             grad_obj = getattr(param, grad_attr)
             data_parallel_group = get_data_parallel_group_if_dtensor(grad_obj, data_parallel_group)

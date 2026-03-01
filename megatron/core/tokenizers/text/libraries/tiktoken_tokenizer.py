@@ -2,6 +2,7 @@
 
 import base64
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -14,13 +15,17 @@ except ImportError:
 from .abstract_tokenizer import MegatronTokenizerTextAbstract
 from .chat_template import MegatronTokenizerChatTemplate
 
-PATTERN_TIKTOKEN_V1 = (
+logger = logging.getLogger(__name__)
+
+_PATTERN_TIKTOKEN_V1 = (
     r"[^\r\n\p{L}\p{N}]?+\p{L}+|\p{N}| ?[^\s\p{L}\p{N}]++[\r\n]*|\s*[\r\n]|\s+(?!\S)|\s+"
 )
-PATTERN_TIKTOKEN_V2 = "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"  # pylint: disable=line-too-long
+_PATTERN_TIKTOKEN_V2 = "[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]*[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]+|[^\\r\\n\\p{L}\\p{N}]?[\\p{Lu}\\p{Lt}\\p{Lm}\\p{Lo}\\p{M}]+[\\p{Ll}\\p{Lm}\\p{Lo}\\p{M}]*|\\p{N}| ?[^\\s\\p{L}\\p{N}]+[\\r\\n/]*|\\s*[\\r\\n]+|\\s+(?!\\S)|\\s+"  # pylint: disable=line-too-long
 DEFAULT_TIKTOKEN_MAX_VOCAB = 2**17  # 131072
 SPECIAL_TOKENS = ["<unk>", "<s>", "</s>", "<mask>", "<pad>", "<cls>", "<sep>"]
 SPECIAL_TOKEN_TEMPLATE = "<SPECIAL_{id}>"
+
+__all__ = ["TikTokenTokenizer", "reload_mergeable_ranks"]
 
 
 def reload_mergeable_ranks(
@@ -39,15 +44,18 @@ def reload_mergeable_ranks(
     """
 
     assert path.endswith(".json")
+    from megatron.core.utils import log_single_rank
 
     # reload vocab
     with open(path, "r") as f:
         vocab = json.load(f)
     assert isinstance(vocab, list)
-    print(f"Vocab size: {len(vocab)}")
+    log_single_rank(logger, logging.INFO, f"Vocab size: {len(vocab)}")
     if max_vocab is not None:
         vocab = vocab[:max_vocab]
-        print(f"Cutting vocab to first {len(vocab)} tokens.")
+        from megatron.core.utils import log_single_rank
+
+        log_single_rank(logger, logging.INFO, f"Cutting vocab to first {len(vocab)} tokens")
 
     # build ranks
     ranks: Dict[bytes, int] = {}
@@ -94,9 +102,9 @@ class TikTokenTokenizer(MegatronTokenizerTextAbstract, MegatronTokenizerChatTemp
             special_tokens = SPECIAL_TOKENS.copy()
 
         if pattern == "v1":
-            pattern = PATTERN_TIKTOKEN_V1
+            pattern = _PATTERN_TIKTOKEN_V1
         elif pattern == "v2":
-            pattern = PATTERN_TIKTOKEN_V2
+            pattern = _PATTERN_TIKTOKEN_V2
         else:
             raise ValueError(f"Expected tiktoken pattern to be `v1` or `v2`, but got {pattern}.")
 
@@ -124,10 +132,14 @@ class TikTokenTokenizer(MegatronTokenizerTextAbstract, MegatronTokenizerChatTemp
             for i in range(len(special_tokens), num_special_tokens)
         ]
         self.special_filler = special_filler
+        from megatron.core.utils import log_single_rank
+
         if special_filler:
-            print(
+            log_single_rank(
+                logger,
+                logging.INFO,
                 "Adding special tokens: "
-                f"{', '.join(special_tokens)}, {special_filler[0]}, ..., {special_filler[-1]}"
+                f"{', '.join(special_tokens)}, {special_filler[0]}, ..., {special_filler[-1]}",
             )
         self.special_tokens = special_tokens + special_filler
         assert (

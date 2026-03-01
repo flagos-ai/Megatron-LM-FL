@@ -34,6 +34,7 @@ def _allreduce_embedding_grad(
     pp_group: torch.distributed.ProcessGroup,
     weight_getter: Callable[[torch.nn.Module], Optional[torch.nn.Parameter]],
     skip_if_none: bool = True,
+    config: TransformerConfig = None,
 ):
     """Unified helper to all-reduce embedding parameters across pipeline stages.
 
@@ -48,7 +49,7 @@ def _allreduce_embedding_grad(
         skip_if_none (bool, optional): If True, quietly returns when the parameter or its
             gradient is ``None``. Defaults to True.
     """
-    
+
     logger.debug(f"Megatron-LM-FL Plugins: _allreduce_embedding_grad")
     embd_group_is_list = isinstance(embd_group, list)
     if (
@@ -62,6 +63,9 @@ def _allreduce_embedding_grad(
         if is_pp_first_stage(pp_group):
             model_module = model[0]
         elif is_pp_last_stage(pp_group):
+            model_module = model[-1]
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
             model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
