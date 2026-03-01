@@ -88,6 +88,7 @@ def test_get_param_groups_no_overrides(mock_get_world_size):
         'is_decoupled_lr',
         'max_lr',
         'min_lr',
+        'is_vision_model_param',
     }
     assert pg0['params'] == list(net.parameters())
     assert pg0['is_expert_parallel'] == False
