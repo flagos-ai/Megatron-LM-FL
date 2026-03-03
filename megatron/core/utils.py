@@ -2002,7 +2002,7 @@ def nvtx_range_push(msg=None, suffix=None) -> None:
     _nvtx_range_messages.append(msg)
 
     # Push NVTX range
-    cur_platform.nvtx.range_push(msg)
+    cur_platform.range_push(msg)
 
 
 def nvtx_range_pop(msg=None, suffix=None) -> None:
@@ -2031,7 +2031,7 @@ def nvtx_range_pop(msg=None, suffix=None) -> None:
         )
 
     # Pop NVTX range
-    cur_platform.nvtx.range_pop()
+    cur_platform.range_pop()
 
 
 @lru_cache(maxsize=None)
