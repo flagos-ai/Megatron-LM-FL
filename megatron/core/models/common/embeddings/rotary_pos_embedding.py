@@ -27,8 +27,8 @@ from megatron.core.models.common.embeddings.rope_utils import (  # for backward 
 )
 from megatron.core.utils import deprecate_inference_params
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +78,7 @@ class RotaryEmbedding(nn.Module):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        device = 'cpu' if use_cpu_initialization else mg_accelerator.current_device()
+        device = 'cpu' if use_cpu_initialization else cur_platform.current_device()
         self.inv_freq = 1.0 / (
             rotary_base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
         )
@@ -164,7 +164,7 @@ class RotaryEmbedding(nn.Module):
         """
         if self.inv_freq.device.type == 'cpu':
             # move `inv_freq` to GPU once at the first micro-batch forward pass
-            self.inv_freq = self.inv_freq.to(device=mg_accelerator.current_device())
+            self.inv_freq = self.inv_freq.to(device=cur_platform.current_device())
 
         freqs = self.get_freqs_non_repeated(max_seq_len, offset)
         # first part even vector components, second part odd vector components,
@@ -272,7 +272,7 @@ class MultimodalRotaryEmbedding(nn.Module):
         self.inv_freq = 1.0 / (
             rotary_base
             ** (
-                torch.arange(0, dim, 2, dtype=torch.float32, device=mg_accelerator.current_device())
+                torch.arange(0, dim, 2, dtype=torch.float32, device=cur_platform.current_device())
                 / dim
             )
         )

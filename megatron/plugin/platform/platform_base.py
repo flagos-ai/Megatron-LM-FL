@@ -2,7 +2,7 @@ import abc
 from abc import ABC
 
 
-class MegatronAccelerator(ABC):
+class PlatformBase(ABC):
 
     def __init__(self):
         self._name = None

@@ -41,8 +41,8 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 # pylint: disable=missing-class-docstring
@@ -393,7 +393,7 @@ def apply_swiglu_sharded_factory(
                 )
                 merged_sub_state_dict = torch.cat([t.cpu() for t in sub_state_dict])
                 gc.collect()
-                mg_accelerator.empty_cache()
+                cur_platform.empty_cache()
                 return merged_sub_state_dict
 
     return ShardedTensorFactory(

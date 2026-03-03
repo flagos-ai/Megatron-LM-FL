@@ -27,8 +27,8 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version, make_tp_sharded_tensor_for_checkpoint
 from megatron.plugin.decorators import plugin_method
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class LanguageModule(MegatronModule):
     """Base language module that has common helper functions used across GPT, BERT etc.
@@ -235,7 +235,7 @@ class LanguageModule(MegatronModule):
         if torch.distributed.is_initialized():
             if self._is_in_embd_group():
                 weight = self.shared_embedding_or_output_weight()
-                weight.data = weight.data.to(mg_accelerator.device())
+                weight.data = weight.data.to(cur_platform.device())
                 torch.distributed.all_reduce(weight.data, group=self.embd_group)
 
         elif not getattr(LanguageModule, "embedding_warning_printed", False):

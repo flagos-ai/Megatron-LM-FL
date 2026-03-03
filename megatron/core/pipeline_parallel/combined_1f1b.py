@@ -14,8 +14,8 @@ from megatron.core.utils import get_attr_wrapped_model
 # Types
 Shape = Union[List[int], torch.Size]
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def combined_1f1b_schedule_for_no_pipelining(
     forward_step_func,
@@ -407,7 +407,7 @@ def combined_forward_backward_step(
         from megatron.core.pipeline_parallel.schedules import forward_step_calc_loss
 
         loss_node = ScheduleNode(
-            loss_func, mg_accelerator.current_stream(), f_schedule_plan.event, name="loss_func"
+            loss_func, cur_platform.current_stream(), f_schedule_plan.event, name="loss_func"
         )
         loss_func = loss_node.forward
         output_tensor, num_tokens = forward_step_calc_loss(

@@ -21,8 +21,8 @@ try:
 except:
     NORM_IMPL = torch.nn.LayerNorm
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 # Note: This is under development and is missing features like position embedding interpolation.
 class CLIPViTModel(VisionModule):
@@ -123,7 +123,7 @@ class CLIPViTModel(VisionModule):
             padding=padding,
         )
 
-        self.position_ids = torch.arange(self.seq_length).expand(1, -1).to(mg_accelerator.device())
+        self.position_ids = torch.arange(self.seq_length).expand(1, -1).to(cur_platform.device())
 
         self.position_embeddings = torch.nn.Embedding(
             self.seq_length, self.visual_hidden_size, dtype=transformer_config.params_dtype

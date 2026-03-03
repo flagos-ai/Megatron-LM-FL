@@ -5,8 +5,8 @@ import math
 import torch.distributed as dist
 
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 # copy from https://github.com/KellerJordan/Muon/tree/master
 # @torch.compile
@@ -164,7 +164,7 @@ class Muon(torch.optim.Optimizer):
                 group['step'] = 1
 
         dtype = torch.bfloat16
-        device = mg_accelerator.current_device()
+        device = cur_platform.current_device()
 
         ns_inputs = {}
 

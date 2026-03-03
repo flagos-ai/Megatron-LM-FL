@@ -18,8 +18,8 @@ try:
 except ImportError:
     has_nvml = False
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class EnergyMonitor:
     """
@@ -40,7 +40,7 @@ class EnergyMonitor:
         """Setup the NVML Handler."""
         if has_nvml:
             nvmlInit()
-            self._handle = nvmlDeviceGetHandleByIndex(mg_accelerator.current_device())
+            self._handle = nvmlDeviceGetHandleByIndex(cur_platform.current_device())
 
     def shutdown(self) -> None:
         """Shutdown NVML."""

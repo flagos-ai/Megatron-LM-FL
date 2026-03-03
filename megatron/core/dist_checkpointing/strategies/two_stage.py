@@ -31,8 +31,9 @@ logger.warning(
     ' FullyParallelLoadStrategyWrapper to accomplish a parallelized checkpoint load.'
 )
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 def timed(verbose=True):
     """Timing decorator."""
@@ -125,8 +126,8 @@ class TwoStageDataParallelLoadShardedStrategy(LoadShardedStrategy):
         # TODO: `timers` keys are not guaranteed to be the same across ranks which causes hangs
         for key, times in sorted(timers.items()):
             times_sum = sum(times)
-            max_times = torch.tensor([times_sum], device=mg_accelerator.current_device_name())
-            avg_times = torch.tensor([times_sum], device=mg_accelerator.current_device_name())
+            max_times = torch.tensor([times_sum], device=cur_platform.current_device_name())
+            avg_times = torch.tensor([times_sum], device=cur_platform.current_device_name())
             torch.distributed.all_reduce(max_times, op=torch.distributed.ReduceOp.MAX)
             torch.distributed.all_reduce(avg_times, op=torch.distributed.ReduceOp.SUM)
             avg_times /= torch.distributed.get_world_size()
@@ -216,12 +217,12 @@ class TwoStageDataParallelLoadShardedStrategy(LoadShardedStrategy):
             if self.dp_group_rank == ten_meta.dist_group_rank:
                 exchange_tensor = self.load_tensor_from_storage(checkpoint_dir, ten_meta)
                 if not self.cpu_transfer:
-                    exchange_tensor = exchange_tensor.to(mg_accelerator.device())
+                    exchange_tensor = exchange_tensor.to(cur_platform.device())
             else:
                 # TODO: for non-flattened ranges we could reuse the buffer from the start here
                 exchange_tensor = torch.empty(
                     ten_meta.sharded_tensor_no_data.local_shape,
-                    device='cpu' if self.cpu_transfer else mg_accelerator.current_device_name(),
+                    device='cpu' if self.cpu_transfer else cur_platform.current_device_name(),
                     dtype=ten_meta.sharded_tensor_no_data.dtype,
                 )
 

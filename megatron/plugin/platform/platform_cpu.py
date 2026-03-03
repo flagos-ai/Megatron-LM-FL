@@ -1,7 +1,7 @@
-from .abstract_accelerator import MegatronAccelerator
+# Copyright (c) BAAI Corporation.
 
-# During setup stage torch may not be installed, pass on no torch will
-# allow op builder related API to be executed.
+import os
+
 try:
     import torch
 except ImportError as e:
@@ -13,11 +13,11 @@ try:
 except ImportError as e:
     oneccl_imported_p = False
 
-import os
+from .platform_base import PlatformBase
 
 
-# accelerator for Intel CPU
-class CPU_Accelerator(MegatronAccelerator):
+# Platform for Intel CPU
+class PlatformCPU(PlatformBase):
 
     def __init__(self):
         self._name = 'cpu'
@@ -33,6 +33,8 @@ class CPU_Accelerator(MegatronAccelerator):
             self.max_mem = mem
         except ImportError as e:
             self.max_mem = 0
+        
+        print(f"Megatron-LM-FL Platform: CPU initialized")
 
     def get_device_properties(self, device_index=None):
         raise NotImplementedError("CPU does not have device properties")

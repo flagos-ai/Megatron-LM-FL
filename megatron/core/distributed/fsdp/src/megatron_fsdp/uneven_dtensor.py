@@ -27,8 +27,8 @@ from torch.distributed.tensor.placement_types import Replicate, Shard, _StridedS
 
 from .utils import get_mesh_names
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def gather_and_compute_chunk_metadata(dtensor: DTensor) -> ChunkStorageMetadata:
     """
@@ -182,7 +182,7 @@ def validate_uneven_dtensor(dtensor: DTensor) -> None:
             for (dim, (offset, size)) in enumerate(zip(chunk_meta.offsets, chunk_meta.sizes))
         ],
         dtype=torch.int,
-    ).to(mg_accelerator.current_device())
+    ).to(cur_platform.current_device())
 
     for i, p in enumerate(dtensor.placements):
         if isinstance(p, Shard) or isinstance(p, _StridedShard):

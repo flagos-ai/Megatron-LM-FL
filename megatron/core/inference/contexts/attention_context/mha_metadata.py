@@ -5,8 +5,8 @@ from megatron.core.inference.batch_dimensions_utils import InferenceBatchDimensi
 
 from .metadata_base import MetadataBase
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class MHAMetadata(MetadataBase):
     """
@@ -17,7 +17,7 @@ class MHAMetadata(MetadataBase):
         self, block_count_total, max_kv_block_count, max_requests, block_size_tokens, max_seqlen
     ):
         super().__init__()
-        device = mg_accelerator.current_device()
+        device = cur_platform.current_device()
         self.device = device
         self.max_blocks = block_count_total
         self.max_kv_blocks = max_kv_block_count

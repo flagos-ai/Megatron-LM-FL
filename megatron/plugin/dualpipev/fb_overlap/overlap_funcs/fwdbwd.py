@@ -35,8 +35,8 @@ from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     turn_shared_experts_delay_wgrad_compute,
 )
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 def router_forward(self, hidden_states):
@@ -794,7 +794,7 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
             event=last_comm_handle,
-            stream=mg_accelerator.current_stream(),
+            stream=cur_platform.current_stream(),
         )
         last_comm_handle_2 = perm1_probs_a2a_handle
 
@@ -803,7 +803,7 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             fwd_layer.mlp.token_dispatcher.output_splits,
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
-            stream=mg_accelerator.current_stream(),
+            stream=cur_platform.current_stream(),
         )
         last_comm_handle_1 = perm1_local_input_tokens_a2a_handle
 
@@ -838,7 +838,7 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         bwd_layer_graph.input_splits,
         bwd_layer_graph.output_splits,
         ep_group,
-        stream=mg_accelerator.current_stream(),
+        stream=cur_platform.current_stream(),
     )
     last_comm_handle_2 = bwd_perm_a2a_handle2
     _, perm1_out1_grad, bwd_perm_a2a_handle1 = async_all_to_all(
@@ -846,7 +846,7 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         bwd_layer_graph.input_splits,
         bwd_layer_graph.output_splits,
         ep_group,
-        stream=mg_accelerator.current_stream(),
+        stream=cur_platform.current_stream(),
     )
     last_comm_handle_1 = bwd_perm_a2a_handle1
 
@@ -904,7 +904,7 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.output_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
-            stream=mg_accelerator.current_stream(),
+            stream=cur_platform.current_stream(),
         )
 
     run_graph_backward(bwd_layer_graph.perm1_graph, perm1_out1_grad)

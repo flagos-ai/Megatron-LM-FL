@@ -66,8 +66,8 @@ except:
 
 logger = getLogger(__name__)
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class Range:
     """
@@ -837,7 +837,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=mg_accelerator.current_device()
+                                (numel,), dtype=dtype, device=cur_platform.current_device()
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
@@ -1154,7 +1154,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else mg_accelerator.current_device()
+                                device = "cpu" if use_gloo_comm else cur_platform.current_device()
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device
@@ -1166,7 +1166,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather.
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.to(mg_accelerator.device())
+                                send_tensor = send_tensor.to(cur_platform.device())
                             if return_on_all_ranks:
                                 torch.distributed.all_gather(
                                     recv_tensors, send_tensor, data_parallel_group

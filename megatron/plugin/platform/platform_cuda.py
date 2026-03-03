@@ -1,17 +1,10 @@
-# Copyright (c) Microsoft Corporation.
-# SPDX-License-Identifier: Apache-2.0
+# Copyright (c) BAAI Corporation.
 
-# DeepSpeed Team
-
-import functools
 import os
-import pkgutil
-import importlib
 import sys
 
-from .abstract_accelerator import MegatronAccelerator
-# During setup stage torch may not be installed, pass on no torch will
-# allow op builder related API to be executed.
+from .platform_base import PlatformBase
+
 try:
     import torch.cuda
 except ImportError:
@@ -21,7 +14,7 @@ except ImportError:
 pynvml = None
 
 
-class CUDA_Accelerator(MegatronAccelerator):
+class PlatformCUDA(PlatformBase):
 
     def __init__(self):
         self._name = 'cuda'
@@ -29,8 +22,8 @@ class CUDA_Accelerator(MegatronAccelerator):
         self._compile_backend = "inductor"
         if pynvml is None:
             self._init_pynvml()
-        print(f"mg_accelerator:CUDA_Accelerator initialized")
-
+        
+        print(f"Megatron-LM-FL Platform: CUDA initialized")
 
     def _init_pynvml(self):
         global pynvml

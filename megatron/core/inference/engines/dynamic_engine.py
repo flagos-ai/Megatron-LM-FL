@@ -86,8 +86,8 @@ try:
 except ImportError:
     HAVE_PSUTIL = False
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class EngineSuspendedError(Exception):
     """Engine is currently suspended and not performing steps."""
@@ -235,8 +235,8 @@ class DynamicInferenceEngine(AbstractEngine):
         # Timing and logging variables.
         self.rank = torch.distributed.get_rank()
         self.step_count = 0
-        self.step_start_event = mg_accelerator.Event(enable_timing=True)
-        self.step_end_event = mg_accelerator.Event(enable_timing=True)
+        self.step_start_event = cur_platform.Event(enable_timing=True)
+        self.step_end_event = cur_platform.Event(enable_timing=True)
         self.capture_stats = None
 
         # Runtime state.
@@ -288,7 +288,7 @@ class DynamicInferenceEngine(AbstractEngine):
             context.cuda_graph_batch_dimensions_list = filtered_cuda_graph_batch_dimensions_list
 
         time_start = time.time()
-        mem_stats_start = mg_accelerator.memory_stats()
+        mem_stats_start = cur_platform.memory_stats()
 
         logging.info("> dynamic_engine.py: building cuda graphs for ")
         for graph in context.cuda_graph_batch_dimensions_list:
@@ -317,7 +317,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
         # Memory usage.
         time_end = time.time()
-        mem_stats_end = mg_accelerator.memory_stats()
+        mem_stats_end = cur_platform.memory_stats()
         capture_stats = {
             "time": time_end - time_start,
             "allocated_bytes": (
@@ -508,9 +508,9 @@ class DynamicInferenceEngine(AbstractEngine):
 
         try:
 
-            start_mem = mg_accelerator.memory_stats()
+            start_mem = cur_platform.memory_stats()
             start_time = time.time()
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
 
             yield
 
@@ -518,7 +518,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
             end_time = time.time()
 
-            end_mem = mg_accelerator.memory_stats()
+            end_mem = cur_platform.memory_stats()
             start_mem_alloc = start_mem["allocated_bytes.all.current"]
             end_mem_alloc = end_mem["allocated_bytes.all.current"]
             start_mem_res = start_mem["reserved_bytes.all.current"]
@@ -598,9 +598,9 @@ class DynamicInferenceEngine(AbstractEngine):
 
             # Allocate context tensors.
             alloc_time = time.time()
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
             self.context.allocate_all_tensors(is_init=False)
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
             alloc_time = time.time() - alloc_time
 
             # Reset context and request data.
@@ -617,10 +617,10 @@ class DynamicInferenceEngine(AbstractEngine):
 
             # Add requests.
             add_time = time.time()
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
             for request_id in self.resume_request_ids:
                 self._add_request(self.get_request(request_id))
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
             add_time = time.time() - add_time
 
         # Print inner timing (must be outside context manager above for correct formatting).
@@ -752,16 +752,16 @@ class DynamicInferenceEngine(AbstractEngine):
             except TypeError:
                 prompt_token_ids = self.controller.tokenize_prompt(prompt)
             tokens = torch.tensor(
-                prompt_token_ids, dtype=torch.int64, device=mg_accelerator.current_device()
+                prompt_token_ids, dtype=torch.int64, device=cur_platform.current_device()
             )
         elif isinstance(prompt, list):
             # Convert List[int] -> Tensor.
-            tokens = torch.tensor(prompt, dtype=torch.int64, device=mg_accelerator.current_device())
+            tokens = torch.tensor(prompt, dtype=torch.int64, device=cur_platform.current_device())
         elif isinstance(prompt, torch.Tensor):
             # Prompt already tokenized.
             assert prompt.dtype == torch.int64, prompt.dtype
             assert prompt.device == torch.device(
-                mg_accelerator.current_device_name()
+                cur_platform.current_device_name()
             ), prompt.device
             tokens = prompt
 
@@ -1186,7 +1186,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
         # Print context state.
         if verbose:
-            mem = mg_accelerator.memory_stats()
+            mem = cur_platform.memory_stats()
             step_type = "decode" if context_state["is_decode_only"] else "non-decode"
             output_str = (
                 "* rank %d | step %d | %s ... time: %.3f%s ... "
@@ -1332,7 +1332,7 @@ class DynamicInferenceEngine(AbstractEngine):
             int: The number of messages that were received and processed in this batch.
         """
 
-        mg_accelerator.range_push("drain_zmq_socket")
+        cur_platform.range_push("drain_zmq_socket")
         all_messages = []
         if self.is_mp_coordinator:
             while True:
@@ -1365,7 +1365,7 @@ class DynamicInferenceEngine(AbstractEngine):
             else:
                 all_messages = []
 
-        mg_accelerator.range_pop()
+        cur_platform.range_pop()
         for message in all_messages:
             data = msgpack.unpackb(message, raw=False)
             header = Headers(data[0])

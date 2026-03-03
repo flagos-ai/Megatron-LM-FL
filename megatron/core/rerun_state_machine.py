@@ -15,8 +15,8 @@ import numpy as np
 import torch
 
 from megatron.core.dist_checkpointing.mapping import ShardedObject
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 """DISCLAIMER: THIS IS AN EXPERIMENTAL FEATURE.
@@ -311,7 +311,7 @@ class RerunStateMachine:
                 return False
             will_rerun_tensor: torch.Tensor = torch.tensor(
                 [self.rerun_requested], dtype=torch.int32
-            ).to(mg_accelerator.device())
+            ).to(cur_platform.device())
             torch.distributed.all_reduce(will_rerun_tensor)
             if will_rerun_tensor.item() == 0:
                 self.state = RerunState.NOT_RUNNING_YET
@@ -335,7 +335,7 @@ class RerunStateMachine:
                 return False
             will_checkpoint_tensor: torch.Tensor = torch.tensor(
                 [self.checkpoint_requested], dtype=torch.int32
-            ).to(mg_accelerator.device())
+            ).to(cur_platform.device())
             torch.distributed.all_reduce(will_checkpoint_tensor)
             if will_checkpoint_tensor.item() > 0:
                 self.state = RerunState.WILL_RERUN_FROM_CHECKPOINT
@@ -352,7 +352,7 @@ class RerunStateMachine:
         elif self.state == RerunState.RERUNNING_FROM_CHECKPOINT:
             will_restart_again_tensor: torch.Tensor = torch.tensor(
                 [self.restart_again_requested], dtype=torch.int32
-            ).to(mg_accelerator.device())
+            ).to(cur_platform.device())
             torch.distributed.all_reduce(will_restart_again_tensor)
             if will_restart_again_tensor.item() > 0:
                 if _safe_get_rank() == 0:
@@ -364,7 +364,7 @@ class RerunStateMachine:
             else:
                 will_continue_tensor: torch.Tensor = torch.tensor(
                     [self.continue_requested], dtype=torch.int32
-                ).to(mg_accelerator.device())
+                ).to(cur_platform.device())
                 torch.distributed.all_reduce(will_continue_tensor)
                 if will_continue_tensor.item() > 0:
                     if _safe_get_rank() == 0:
@@ -499,7 +499,7 @@ class RerunStateMachine:
                 )
                 rank: int = _safe_get_rank()
                 node: str = os.uname()[1]
-                device: int = mg_accelerator.current_device()
+                device: int = cur_platform.current_device()
                 full_message: str = (
                     f"Rank {rank}, node {node}, device {device}, "
                     f"iteration {self.current_iteration}: "
@@ -538,7 +538,7 @@ class RerunStateMachine:
         def log_failure(message: str) -> None:
             rank: int = _safe_get_rank()
             node: str = os.uname()[1]
-            device: int = mg_accelerator.current_device()
+            device: int = cur_platform.current_device()
             logger.error(f"Rank {rank}, node {node}, device {device}: {message}!")
 
         # Emit message in log so that we can identify which jobs have this instrumentation
@@ -600,7 +600,7 @@ class RerunStateMachine:
                     # Remember the node and device we're running on so that we can check we're not
                     # rerunning on the same GPU when we resume from the checkpoint.
                     self.suspicious_node = os.uname()[1]
-                    self.suspicious_device = mg_accelerator.current_device()
+                    self.suspicious_device = cur_platform.current_device()
                     self._log_validation_error_to_file(
                         status=RerunValidationStatus.FIRST_RERUN_REPRODUCIBLE,
                         result=result,
@@ -615,7 +615,7 @@ class RerunStateMachine:
             elif self.state == RerunState.RERUNNING_FROM_CHECKPOINT:
                 # Ensure we're not on the same GPU as the first rerun.
                 node: str = os.uname()[1]
-                device: int = mg_accelerator.current_device()
+                device: int = cur_platform.current_device()
                 if node == self.suspicious_node and device == self.suspicious_device:
                     logger.error(
                         f"Got rescheduled on the same GPU. Need to resume again from the same "
@@ -902,7 +902,7 @@ class RerunStateMachine:
                 "random_rng_state": random.getstate(),
                 "np_rng_state": np.random.get_state(),
                 "torch_rng_state": torch.get_rng_state(),
-                "cuda_rng_state": mg_accelerator.get_rng_state(),
+                "cuda_rng_state": cur_platform.get_rng_state(),
             },
             "other_state": self.state_save_func() if self.state_save_func else None,
             # any other state to save to guarantee deterministic execution?
@@ -915,7 +915,7 @@ class RerunStateMachine:
         random.setstate(rng_state["random_rng_state"])
         np.random.set_state(rng_state["np_rng_state"])
         torch.set_rng_state(rng_state["torch_rng_state"])
-        mg_accelerator.set_rng_state(rng_state["cuda_rng_state"])
+        cur_platform.set_rng_state(rng_state["cuda_rng_state"])
         if self.saved_state["other_state"] and self.state_restore_func:
             self.state_restore_func(self.saved_state["other_state"])
 
@@ -954,7 +954,7 @@ class RerunStateMachine:
             try:
                 rank: int = _safe_get_rank()
                 node: str = os.uname()[1]
-                device: int = mg_accelerator.current_device()
+                device: int = cur_platform.current_device()
                 with open(self.result_rejected_tracker_filename, "a") as f:
                     print(
                         f"ts={datetime.datetime.now()} node={node} device={device} "

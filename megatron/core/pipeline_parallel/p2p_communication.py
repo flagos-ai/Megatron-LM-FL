@@ -15,8 +15,8 @@ from megatron.plugin.hetero.p2p_communication import recv_forward_hetero, recv_b
 # Types
 Shape = Union[List[int], torch.Size]
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 def _batched_p2p_ops(
@@ -193,19 +193,19 @@ class P2PCommunicator:
         send_next_shape_tensor = None
         if recv_prev:
             recv_prev_shape_tensor = torch.empty(
-                (3,), device=mg_accelerator.current_device(), dtype=torch.int64
+                (3,), device=cur_platform.current_device(), dtype=torch.int64
             )
         if recv_next:
             recv_next_shape_tensor = torch.empty(
-                (3,), device=mg_accelerator.current_device(), dtype=torch.int64
+                (3,), device=cur_platform.current_device(), dtype=torch.int64
             )
         if tensor_send_prev is not None:
             send_prev_shape_tensor = torch.tensor(
-                tensor_send_prev.size(), device=mg_accelerator.current_device(), dtype=torch.int64
+                tensor_send_prev.size(), device=cur_platform.current_device(), dtype=torch.int64
             )
         if tensor_send_next is not None:
             send_next_shape_tensor = torch.tensor(
-                tensor_send_next.size(), device=mg_accelerator.current_device(), dtype=torch.int64
+                tensor_send_next.size(), device=cur_platform.current_device(), dtype=torch.int64
             )
 
         if config.use_ring_exchange_p2p:
@@ -245,7 +245,7 @@ class P2PCommunicator:
 
             # To protect against race condition when using batch_isend_irecv().
             # should take this out once the bug with batch_isend_irecv is resolved.
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
 
         recv_prev_shape = [0, 0, 0]
         if recv_prev_shape_tensor is not None:
@@ -317,7 +317,7 @@ class P2PCommunicator:
             return torch.empty(
                 recv_prev_shape,
                 requires_grad=True,
-                device=mg_accelerator.current_device(),
+                device=cur_platform.current_device(),
                 dtype=config.pipeline_dtype,
             )
 
@@ -325,7 +325,7 @@ class P2PCommunicator:
             return torch.empty(
                 recv_next_shape,
                 requires_grad=True,
-                device=mg_accelerator.current_device(),
+                device=cur_platform.current_device(),
                 dtype=config.pipeline_dtype,
             )
 
@@ -413,7 +413,7 @@ class P2PCommunicator:
         if config.batch_p2p_comm and config.batch_p2p_sync:
             # To protect against race condition when using batch_isend_irecv().
             # User should assert that we have a modern enough PyTorch to not need this
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
 
         return tensor_recv_prev, tensor_recv_next, reqs
 
@@ -692,13 +692,13 @@ class P2PCommunicator:
         to_send_tensor= torch.empty(
                 tensor_shape,
                 requires_grad=True,
-                device=mg_accelerator.current_device(),
+                device=cur_platform.current_device(),
                 dtype=self.config.pipeline_dtype,
             )
         to_recv_tensor= torch.empty(
                 tensor_shape,
                 requires_grad=True,
-                device=mg_accelerator.current_device(),
+                device=cur_platform.current_device(),
                 dtype=self.config.pipeline_dtype,
             )
 
@@ -751,13 +751,13 @@ class P2PCommunicator:
         to_send_tensor= torch.empty(
                 tensor_shape,
                 requires_grad=True,
-                device=mg_accelerator.current_device() if "cpu:gloo" != torch.distributed.get_backend(self.pp_group[0]) else torch.device("cpu"),
+                device=cur_platform.current_device() if "cpu:gloo" != torch.distributed.get_backend(self.pp_group[0]) else torch.device("cpu"),
                 dtype=self.config.pipeline_dtype,
             )
         to_recv_tensor= torch.empty(
                 tensor_shape,
                 requires_grad=True,
-                device=mg_accelerator.current_device() if "cpu:gloo" != torch.distributed.get_backend(self.pp_group[0]) else torch.device("cpu") ,
+                device=cur_platform.current_device() if "cpu:gloo" != torch.distributed.get_backend(self.pp_group[0]) else torch.device("cpu") ,
                 dtype=self.config.pipeline_dtype,
             )
 

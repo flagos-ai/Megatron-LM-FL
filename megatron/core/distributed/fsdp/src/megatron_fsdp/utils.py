@@ -38,8 +38,8 @@ from torch.distributed.device_mesh import _mesh_resources
 
 logger = logging.getLogger(__name__)
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 try:
     import transformer_engine  # pylint: disable=W0611
@@ -334,7 +334,7 @@ elif HAVE_TE and is_te_min_version("2.0"):
             scale_invs.append(model_param._scale_inv.view(1))
             model_param._reset_caches()
 
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=mg_accelerator.current_device_name())
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.current_device_name())
 
         # Update scaling factors.
         packed_scales = torch.empty(len(scales), dtype=torch.float32, device=scales[0].device)
@@ -384,7 +384,7 @@ def quantize_param_shard(
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = mg_accelerator.device(), clone: bool = False, graph_safe: bool = False
+    device: Union[int, str, torch.device] = cur_platform.device(), clone: bool = False, graph_safe: bool = False
 ) -> torch.Tensor:
     """Return the random number generator state of the specified GPU.
 
@@ -397,18 +397,18 @@ def _get_cuda_rng_state(
 
     # if not using cuda graphs, just use the builtin pytorch function
     if not graph_safe:
-        return mg_accelerator.random().get_rng_state(device=device)
+        return cur_platform.random().get_rng_state(device=device)
 
     _lazy_init()
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device(mg_accelerator.current_device_name())
+        device = torch.device(cur_platform.current_device_name())
     idx = device.index
     if idx is None:
-        idx = mg_accelerator.current_device()
+        idx = cur_platform.current_device()
 
-    default_generator = mg_accelerator.default_generator(idx)
+    default_generator = cur_platform.default_generator(idx)
     if clone:
         return default_generator.clone_state()
     return default_generator.graphsafe_get_state()
@@ -435,17 +435,17 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
     else:
         # newer PyTorch
         if device == -1:
-            device = torch.device(mg_accelerator.device())
+            device = torch.device(cur_platform.device())
         elif isinstance(device, str):
             device = torch.device(device)
         elif isinstance(device, int):
-            device = torch.device(mg_accelerator.device(int))
+            device = torch.device(cur_platform.device(int))
 
         def cb():
             idx = device.index
             if idx is None:
-                idx = mg_accelerator.current_device()
-            default_generator = mg_accelerator.default_generator(idx)
+                idx = cur_platform.current_device()
+            default_generator = cur_platform.default_generator(idx)
 
             # if graph capturing, set the rng state in a cudagraphable way
             if graph_safe:
@@ -583,10 +583,10 @@ def initialize_rng_tracker(
                     self.states_[name] = new_state
                 else:
                     # Get the current rng state.
-                    orig_rng_state = mg_accelerator.get_rng_state()
+                    orig_rng_state = cur_platform.get_rng_state()
                     # Set the new state and store it.
-                    mg_accelerator.manual_seed(seed)
-                    self.states_[name] = mg_accelerator.get_rng_state()
+                    cur_platform.manual_seed(seed)
+                    self.states_[name] = cur_platform.get_rng_state()
                     # Reset rng state to what it was.
                     _set_cuda_rng_state(orig_rng_state)
 
@@ -927,7 +927,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=mg_accelerator.current_device(),
+                    device=cur_platform.current_device(),
                     requires_grad=False,
                 )
 

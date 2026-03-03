@@ -53,8 +53,9 @@ _GLOBAL_PREVIOUS_METADATA = None
 
 _GLOBAL_PREVIOUS_COUNT = 0
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 def get_previous_metadata():
     """
@@ -277,7 +278,7 @@ class FileSystemWriterAsync(FileSystemWriter):
             ]
             result.append((file_name, storage_key, (bytes_data, tensor_data)))
         if non_blocking:
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
         return result
 
     @staticmethod

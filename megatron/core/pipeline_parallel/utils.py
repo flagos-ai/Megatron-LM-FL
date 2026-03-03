@@ -9,8 +9,8 @@ from torch.autograd import Variable
 
 from megatron.core.utils import get_pg_rank, get_pg_size, make_viewless_tensor
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def is_pp_first_stage(pp_group: torch.distributed.ProcessGroup):
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
@@ -120,8 +120,8 @@ class ScheduleNode:
     def __init__(
         self,
         forward_func: Callable,
-        stream: mg_accelerator.Stream,
-        event: mg_accelerator.Event,
+        stream: cur_platform.Stream,
+        event: cur_platform.Event,
         backward_func: Optional[Callable] = None,
         free_input: bool = False,
         name: str = "schedule_node",
@@ -173,8 +173,8 @@ class ScheduleNode:
 
     def _forward(self, *inputs):
         with stream_acquire_context(self.stream, self.event):
-            mg_accelerator.range_push(f"{self.name} forward")
-            with mg_accelerator.stream(self.stream):
+            cur_platform.range_push(f"{self.name} forward")
+            with cur_platform.stream(self.stream):
                 self.inputs = [make_viewless(e).detach() if e is not None else None for e in inputs]
                 for i, input in enumerate(self.inputs):
                     if input is not None:
@@ -191,7 +191,7 @@ class ScheduleNode:
                     )
 
                 self.output = data
-            mg_accelerator.nvtx.range_pop()
+            cur_platform.nvtx.range_pop()
 
         # Immediately frees input tensors after they are used for nodes
         # where inputs are no longer needed after computation.
@@ -215,8 +215,8 @@ class ScheduleNode:
 
     def _backward(self, *output_grad):
         with stream_acquire_context(self.stream, self.event):
-            mg_accelerator.range_push(f"{self.name} backward")
-            with mg_accelerator.stream(self.stream):
+            cur_platform.range_push(f"{self.name} backward")
+            with cur_platform.stream(self.stream):
                 outputs = self.output
                 if not isinstance(outputs, tuple):
                     outputs = (outputs,)
@@ -225,7 +225,7 @@ class ScheduleNode:
                     f"{len(output_grad)} of {type(output_grad[0])}"
                 )
                 output_grad = self.backward_func(outputs, output_grad)
-            mg_accelerator.range_pop()
+            cur_platform.range_pop()
 
         # output_grad maybe from another stream
         if output_grad:
@@ -287,9 +287,9 @@ def set_streams(comp_stream=None, comm_stream=None):
         return
 
     if comp_stream is None:
-        comp_stream = mg_accelerator.current_stream()
+        comp_stream = cur_platform.current_stream()
     if comm_stream is None:
-        comm_stream = mg_accelerator.Stream(device=mg_accelerator.current_device())
+        comm_stream = cur_platform.Stream(device=cur_platform.current_device())
 
     assert _COMP_STREAM is None
     assert _COMM_STREAM is None

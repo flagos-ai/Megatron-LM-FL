@@ -30,8 +30,8 @@ from megatron.core.utils import (
     make_viewless_tensor,
 )
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 if is_torch_min_version("1.13.0"):
     dist_all_gather_func = torch.distributed.all_gather_into_tensor
@@ -152,7 +152,7 @@ def roll_tensor(tensor, shifts=-1, dims=-1, cp_group=None):
         empty_tensor = torch.empty(
             tensor_send_list[i].shape,
             dtype=tensor_send_list[i].dtype,
-            device=mg_accelerator.current_device(),
+            device=cur_platform.current_device(),
         )
         tensor_recv_list.append(empty_tensor)
 
@@ -225,7 +225,7 @@ class MTPLossLoggingHelper:
 
         tracker = MTPLossLoggingHelper.tracker
         if "values" not in tracker:
-            tracker["values"] = torch.zeros(num_layers, device=mg_accelerator.current_device())
+            tracker["values"] = torch.zeros(num_layers, device=cur_platform.current_device())
         tracker["values"][layer_number] += loss.detach()
         tracker["reduce_group"] = reduce_group
         tracker["avg_group"] = avg_group

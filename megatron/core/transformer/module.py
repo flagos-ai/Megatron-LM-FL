@@ -15,12 +15,12 @@ from megatron.core.transformer.utils import (
     sharded_state_dict_default,
 )
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
-_FLOAT_TYPES = (torch.FloatTensor, mg_accelerator.FloatTensor)
-_HALF_TYPES = (torch.HalfTensor, mg_accelerator.HalfTensor)
-_BF16_TYPES = (torch.BFloat16Tensor, mg_accelerator.BFloat16Tensor)
+_FLOAT_TYPES = (torch.FloatTensor, cur_platform.FloatTensor)
+_HALF_TYPES = (torch.HalfTensor, cur_platform.HalfTensor)
+_BF16_TYPES = (torch.BFloat16Tensor, cur_platform.BFloat16Tensor)
 
 
 def param_is_not_shared(param):  # pylint: disable=missing-function-docstring
@@ -198,7 +198,7 @@ class GraphableMegatronModule(MegatronModule):
             (slen_per_cptp, micro_batch_size, self.config.hidden_size),
             dtype=torch.bfloat16,
             requires_grad=True,
-            device=mg_accelerator.current_device(),
+            device=cur_platform.current_device(),
         )
         return static_inputs
 

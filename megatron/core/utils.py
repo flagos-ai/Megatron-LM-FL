@@ -70,8 +70,8 @@ _fa_version = None
 _mamba_ssm_version = None
 _causal_conv1d_version = None
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 @contextmanager
@@ -637,7 +637,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=mg_accelerator.current_device(),
+                    device=cur_platform.current_device(),
                     requires_grad=False,
                 )
 
@@ -864,7 +864,7 @@ def check_param_hashes_across_dp_replicas(
         assert len(params) == len(local_param_hashes)
         if len(params) == 0:
             continue
-        local_param_hashes = torch.stack(local_param_hashes).to(mg_accelerator.device())
+        local_param_hashes = torch.stack(local_param_hashes).to(cur_platform.device())
         all_param_hashes = [
             torch.zeros_like(local_param_hashes) for _ in range(all_gather_group.size())
         ]
@@ -1131,7 +1131,7 @@ def local_multi_tensor_l2_norm(chunk_size, noop_flag, tensor_lists, per_tensor, 
     """
     l2 = [[(torch.norm(tensor)) for tensor in tensor_list] for tensor_list in tensor_lists]
     l2_reduced = torch.norm(torch.tensor(l2))
-    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float).to(mg_accelerator.device())
+    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float).to(cur_platform.device())
     return l2_cuda, None
 
 
@@ -1321,10 +1321,10 @@ class StragglerDetector:
         self.bdata: bool = False
         self.dev: Union[torch.device, int, None] = None
         self.evt_q: Union[queue.LifoQueue, None] = None
-        self.start_gemm_ev: List[mg_accelerator.Event] = []
-        self.stop_gemm_ev: List[mg_accelerator.Event] = []
-        self.start_data_ev: List[mg_accelerator.Event] = []
-        self.stop_data_ev: List[mg_accelerator.Event] = []
+        self.start_gemm_ev: List[cur_platform.Event] = []
+        self.stop_gemm_ev: List[cur_platform.Event] = []
+        self.start_data_ev: List[cur_platform.Event] = []
+        self.stop_data_ev: List[cur_platform.Event] = []
         self.start_gemm_tm: List[int] = []
         self.stop_gemm_tm: List[int] = []
         self.start_data_tm: List[int] = []
@@ -1374,7 +1374,7 @@ class StragglerDetector:
         self.stop = self.null_method
         self._off = True
         # No CUDA, No Support
-        if mg_accelerator.is_available():
+        if cur_platform.is_available():
             self._off = not enabled
             self.world = world
             self.rank = rank
@@ -1394,12 +1394,12 @@ class StragglerDetector:
             self.stop_data_tm = []
             backend = torch.distributed.get_backend()
             if backend == "nccl":
-                self.dev = mg_accelerator.current_device()
+                self.dev = cur_platform.current_device()
             else:
                 self.dev = torch.device("cpu")
             # cache some events
             for _ in range(prefill):
-                self.evt_q.put(mg_accelerator.Event(enable_timing=True))
+                self.evt_q.put(cur_platform.Event(enable_timing=True))
             if self.rank == 0:
                 # Start the controller
                 self._controller()
@@ -1444,8 +1444,8 @@ class StragglerDetector:
             sev = self.evt_q.get()  # no try-catch
             eev = self.evt_q.get()  # no try-catch
         else:
-            sev = mg_accelerator.Event(enable_timing=True)
-            eev = mg_accelerator.Event(enable_timing=True)
+            sev = cur_platform.Event(enable_timing=True)
+            eev = cur_platform.Event(enable_timing=True)
         # First check if this start is for data
         if self.bdata:
             self.start_data_ev.append(sev)
@@ -1520,7 +1520,7 @@ class StragglerDetector:
             power = torch.cuda.power_draw()
             util = torch.cuda.utilization()
             clock = torch.cuda.clock_rate()
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
             # Process Events
             for i in range(ls_ev):
                 e_ev = self.start_gemm_ev[i].elapsed_time(self.stop_gemm_ev[i])
@@ -2002,7 +2002,7 @@ def nvtx_range_push(msg=None, suffix=None) -> None:
     _nvtx_range_messages.append(msg)
 
     # Push NVTX range
-    mg_accelerator.nvtx.range_push(msg)
+    cur_platform.nvtx.range_push(msg)
 
 
 def nvtx_range_pop(msg=None, suffix=None) -> None:
@@ -2031,7 +2031,7 @@ def nvtx_range_pop(msg=None, suffix=None) -> None:
         )
 
     # Pop NVTX range
-    mg_accelerator.nvtx.range_pop()
+    cur_platform.nvtx.range_pop()
 
 
 @lru_cache(maxsize=None)

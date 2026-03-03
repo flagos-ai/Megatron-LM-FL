@@ -45,8 +45,8 @@ from .utils import (
 
 logger = logging.getLogger(__name__)
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 try:
     # Default to Megatron-LM FW.
@@ -205,7 +205,7 @@ class MultiGroupUBRAllocator:
 
     def __enter__(self):
         for group in self.groups[1:]:
-            backend = group._get_backend(torch.device(mg_accelerator.current_device_name()))
+            backend = group._get_backend(torch.device(cur_platform.current_device_name()))
             try:
                 # Since the registration is done in mempool granularity, we need to deregister
                 # the tensors in the mempool and re-register the mempool including the newly created
@@ -218,7 +218,7 @@ class MultiGroupUBRAllocator:
     def __exit__(self, *args):
         self.mem_allocator.__exit__(*args)
         for group in self.groups[1:]:
-            backend = group._get_backend(torch.device(mg_accelerator.current_device_name()))
+            backend = group._get_backend(torch.device(cur_platform.current_device_name()))
             if torch.distributed.get_rank() == 0:
                 logger.info(
                     f"[MultiGroupUBRAllocator] Registering mem pool to group {group}, "
@@ -754,7 +754,7 @@ class FixedPoolAllocator(TemporaryBucketAllocator):
                 ):
                     # Requires synchronization for new buffer allocation
                     self.allocation_tracker[(buffer_name, dtype)] = size
-                    mg_accelerator.synchronize()
+                    cur_platform.synchronize()
             return Bucket(
                 data=get_global_memory_buffer().get_tensor(
                     [size], dtype=dtype, name=buffer_name, mem_alloc_context=mem_alloc_context
@@ -1541,7 +1541,7 @@ class ParamAndGradBuffer:
         grad_reduce_in_fp32: bool = True,
         gradient_scaling_factor: Optional[float] = None,
         expert_gradient_scaling_factor: Optional[float] = None,
-        device: torch.device = torch.device(mg_accelerator.current_device_name()),
+        device: torch.device = torch.device(cur_platform.current_device_name()),
         only_create_grad_buffer_and_main_weight_buffer_for_param_requires_grad: bool = True,
         reset_parameters_for_meta_device_init_module: bool = False,
     ):
@@ -2066,7 +2066,7 @@ class ParamAndGradBuffer:
                             # CUDA device.
                             if check_gpu_memory(threshold=0.5):
                                 gc.collect()
-                                mg_accelerator.empty_cache()
+                                cur_platform.empty_cache()
 
                             m.to_empty(device=self.device, recurse=False)
                             if (
@@ -2250,7 +2250,7 @@ class ParamAndGradBuffer:
 
         # Clean up deallocated memory.
         gc.collect()
-        mg_accelerator.empty_cache()
+        cur_platform.empty_cache()
 
     def _reset_parameters(self, old_params, new_params):
         assert len(old_params) == len(new_params)
@@ -2719,7 +2719,7 @@ class GradReducePipeline:
     def __init__(
         self,
         param_and_grad_buffer: ParamAndGradBuffer,
-        rs_stream: Optional[mg_accelerator.Stream] = None,
+        rs_stream: Optional[cur_platform.Stream] = None,
         check_nans: bool = False,
     ) -> None:
         self.buffer = param_and_grad_buffer
@@ -2742,7 +2742,7 @@ class GradReducePipeline:
         if dist_index.use_hybrid_fsdp:
             # If there are multiple FSDP groups, we need to reduce gradients across groups.
             self.outer_fsdp_group_grad_reduce = True
-            self.outer_fsdp_group_grad_reduce_stream = mg_accelerator.Stream()
+            self.outer_fsdp_group_grad_reduce_stream = cur_platform.Stream()
         else:
             self.outer_fsdp_group_grad_reduce = False
 
@@ -2847,7 +2847,7 @@ class GradReducePipeline:
                 free_up_grad_bucket()
 
         if suggested_queue_size == 0 and self.outer_fsdp_group_grad_reduce:
-            mg_accelerator.current_stream().wait_stream(self.outer_fsdp_group_grad_reduce_stream)
+            cur_platform.current_stream().wait_stream(self.outer_fsdp_group_grad_reduce_stream)
 
     def _enforce_double_buffer_limit(self, add_buckets):
         if not self.buffer.ddp_config.fsdp_double_buffer:
@@ -2927,14 +2927,14 @@ class GradReducePipeline:
         if ddp_config.fsdp_double_buffer:
             self._enforce_double_buffer_limit(bucket_group)
 
-        current_stream = mg_accelerator.current_stream()
+        current_stream = cur_platform.current_stream()
         reduce_scatter_stream = (
-            self.rs_stream if self.rs_stream is not None else mg_accelerator.current_stream()
+            self.rs_stream if self.rs_stream is not None else cur_platform.current_stream()
         )
         reduce_scatter_stream.wait_stream(current_stream)
 
         dp_group = self.get_fsdp_buffer(bucket_group[0]).data_parallel_group
-        with mg_accelerator.stream(reduce_scatter_stream):
+        with cur_platform.stream(reduce_scatter_stream):
             with _coalescing_manager(dp_group):
                 grad_buffer = []
                 reduced_grad = []
@@ -2987,7 +2987,7 @@ class GradReducePipeline:
         if outer_fsdp_group_grad_reduce:
             self.outer_fsdp_group_grad_reduce_stream.wait_stream(reduce_scatter_stream)
             outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group()
-            with mg_accelerator.stream(self.outer_fsdp_group_grad_reduce_stream):
+            with cur_platform.stream(self.outer_fsdp_group_grad_reduce_stream):
                 with _coalescing_manager(outer_fsdp_group):
                     reduced_grad = []
                     for bucket_id in bucket_group:
@@ -3087,7 +3087,7 @@ class AllGatherPipeline:
     def __init__(
         self,
         param_and_grad_buffer: ParamAndGradBuffer,
-        ag_stream: Optional[mg_accelerator.Stream] = None,
+        ag_stream: Optional[cur_platform.Stream] = None,
     ) -> None:
         self.buffer = param_and_grad_buffer
         self.ag_stream = ag_stream
@@ -3119,7 +3119,7 @@ class AllGatherPipeline:
         ):
             # If there are multiple FSDP groups and full sharding, we need to
             # all-gather parameters across groups.
-            self.outer_fsdp_group_param_gather_stream = mg_accelerator.Stream()
+            self.outer_fsdp_group_param_gather_stream = cur_platform.Stream()
 
     @property
     def num_buckets(self):
@@ -3284,11 +3284,11 @@ class AllGatherPipeline:
         # Coalesce all-gather operations for all buckets in the same data-parallel-group
         for _, buckets in bucket_group_to_buckets.items():
             all_gather_stream = (
-                self.ag_stream if self.ag_stream is not None else mg_accelerator.current_stream()
+                self.ag_stream if self.ag_stream is not None else cur_platform.current_stream()
             )
             if outer_fsdp_group_param_gather:
-                self.outer_fsdp_group_param_gather_stream.wait_stream(mg_accelerator.current_stream())
-                with mg_accelerator.stream(self.outer_fsdp_group_param_gather_stream):
+                self.outer_fsdp_group_param_gather_stream.wait_stream(cur_platform.current_stream())
+                with cur_platform.stream(self.outer_fsdp_group_param_gather_stream):
                     outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group()
                     with _coalescing_manager(outer_fsdp_group, async_ops=False):
                         for bucket_id in buckets:
@@ -3305,9 +3305,9 @@ class AllGatherPipeline:
                 all_gather_stream.wait_stream(self.outer_fsdp_group_param_gather_stream)
 
             # Coalesce the asynchronous NCCL operations in this context.
-            all_gather_stream.wait_stream(mg_accelerator.current_stream())
+            all_gather_stream.wait_stream(cur_platform.current_stream())
             dp_group = self.get_fsdp_buffer(buckets[0]).data_parallel_group
-            with mg_accelerator.stream(all_gather_stream):
+            with cur_platform.stream(all_gather_stream):
                 with _coalescing_manager(
                     dp_group, async_ops=async_param_gather
                 ) as coalescing_event:
@@ -3440,12 +3440,12 @@ def check_gpu_memory(threshold=0.9):
     Returns:
         bool: True if the GPU memory is over the threshold.
     """
-    if not mg_accelerator.is_available():
+    if not cur_platform.is_available():
         return False
-    device = mg_accelerator.current_device()
-    allocated = mg_accelerator.memory_allocated(device)
-    reserved = mg_accelerator.memory_reserved(device)
-    total = mg_accelerator.get_device_properties(device).total_memory
+    device = cur_platform.current_device()
+    allocated = cur_platform.memory_allocated(device)
+    reserved = cur_platform.memory_reserved(device)
+    total = cur_platform.get_device_properties(device).total_memory
 
     allocated_ratio = allocated / total
     reserved_ratio = reserved / total

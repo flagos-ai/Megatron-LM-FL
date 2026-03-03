@@ -22,8 +22,8 @@ from megatron.core.transformer.utils import (
 )
 from megatron.core.utils import divide
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class DotProductAttention(MegatronModule):
     """
@@ -120,7 +120,7 @@ class DotProductAttention(MegatronModule):
         elif self.config.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
                 self.num_attention_heads_per_partition,
-                device=mg_accelerator.current_device(),
+                device=cur_platform.current_device(),
                 dtype=self.config.params_dtype,
             )
         elif self.config.softmax_type == "learnable":
@@ -129,7 +129,7 @@ class DotProductAttention(MegatronModule):
                 torch.nn.Parameter(
                     torch.empty(
                         self.num_attention_heads_per_partition,
-                        device=mg_accelerator.current_device(),
+                        device=cur_platform.current_device(),
                         dtype=self.config.params_dtype,
                     )
                 ),

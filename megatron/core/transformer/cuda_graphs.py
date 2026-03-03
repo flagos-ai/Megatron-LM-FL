@@ -71,8 +71,8 @@ try:
 except ImportError:
     pass
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def is_graph_capturing():
     """Query if currently capturing."""
@@ -245,7 +245,7 @@ class _CudagraphGlobalRecord:
             prev_bwd_hidden_state_inputgrad = None
 
         gc.collect()
-        mg_accelerator.empty_cache()
+        cur_platform.empty_cache()
 
         _set_capture_start()
         if has_te_modules:
@@ -259,7 +259,7 @@ class _CudagraphGlobalRecord:
             return "%d bytes" % mem_bytes
 
         time_start = time.time()
-        mem_stats_start = mg_accelerator.memory_stats()
+        mem_stats_start = cur_platform.memory_stats()
         progress_bar = enumerate(cls.cudagraph_record)
         if HAVE_TQDM:
             progress_bar = tqdm(progress_bar, "create cuda graphs", total=len(cls.cudagraph_record))
@@ -267,7 +267,7 @@ class _CudagraphGlobalRecord:
 
             runner, graph_type = g[0:2]
 
-            mem_stats = mg_accelerator.memory_stats()
+            mem_stats = cur_platform.memory_stats()
             progress_str = "create cuda graphs | mem: alloc %s, res %s" % (
                 format_mem_bytes(mem_stats["allocated_bytes.all.current"]),
                 format_mem_bytes(mem_stats["reserved_bytes.all.current"]),
@@ -313,7 +313,7 @@ class _CudagraphGlobalRecord:
 
         # Memory usage.
         time_end = time.time()
-        mem_stats_end = mg_accelerator.memory_stats()
+        mem_stats_end = cur_platform.memory_stats()
         capture_stats = {
             "time": time_end - time_start,
             "allocated_bytes": (
@@ -393,7 +393,7 @@ def delete_cuda_graphs():
 
     # TODO: Optional?: Force garbage collection to clean up memory
     gc.collect()
-    mg_accelerator.empty_cache()
+    cur_platform.empty_cache()
 
     CudaGraphManager.global_mempool = None
     CudaGraphManager.fwd_mempools = None
@@ -705,7 +705,7 @@ class _CudaGraphRunner(torch.nn.Module):
                 )
 
         with self.get_quantization_context():
-            mg_accelerator.synchronize()
+            cur_platform.synchronize()
             with torch.cuda.graph(
                 self.fwd_graph, pool=self.fwd_mempool, capture_error_mode="thread_local"
             ):
@@ -771,7 +771,7 @@ class _CudaGraphRunner(torch.nn.Module):
             if torch.is_tensor(static_grad_outputs):
                 static_grad_outputs = (static_grad_outputs,)
 
-        mg_accelerator.synchronize()
+        cur_platform.synchronize()
         with torch.cuda.graph(
             self.bwd_graph, pool=self.bwd_mempool, capture_error_mode="thread_local"
         ):
@@ -839,14 +839,14 @@ class _CudaGraphRunner(torch.nn.Module):
                         wgrad = torch.zeros(
                             param.main_grad.shape,
                             dtype=param.dtype,
-                            device=mg_accelerator.current_device(),
+                            device=cur_platform.current_device(),
                             requires_grad=False,
                         )
                     else:
                         wgrad = torch.empty(
                             param.main_grad.shape,
                             dtype=param.dtype,
-                            device=mg_accelerator.current_device(),
+                            device=cur_platform.current_device(),
                             requires_grad=False,
                         )
                 else:
@@ -1127,8 +1127,8 @@ class CudaGraphManager(torch.nn.Module):
 
         # Cudagraph stream capture requires no operations on the default stream prior to the
         # capture, so change to a side stream.
-        self.stream = mg_accelerator.current_stream()
-        mg_accelerator.set_stream(mg_accelerator.Stream())
+        self.stream = cur_platform.current_stream()
+        cur_platform.set_stream(cur_platform.Stream())
 
     def set_is_first_microbatch(self, is_first_microbatch: bool):
         """Update the is_first_microbatch flag for weight caching.
@@ -1630,7 +1630,7 @@ class TECudaGraphHelper:
         """
         torch.distributed.barrier()
         gc.collect()
-        mg_accelerator.empty_cache()
+        cur_platform.empty_cache()
 
         _set_capture_start()
         log_single_rank(logger, logging.INFO, f'Start CUDA Graphs capture...')
@@ -1659,7 +1659,7 @@ class TECudaGraphHelper:
         clear_aux_losses_tracker()
         reset_model_temporary_tensors(self.config, self.model)
         gc.collect()
-        mg_accelerator.empty_cache()
+        cur_platform.empty_cache()
 
     def create_cudagraphs(self):
         """

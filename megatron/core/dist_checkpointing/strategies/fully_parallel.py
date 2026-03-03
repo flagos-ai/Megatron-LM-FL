@@ -42,8 +42,9 @@ from megatron.core.utils import get_pg_rank, get_pg_size
 
 logger = logging.getLogger(__name__)
 
-from megatron.plugin.accelerator import get_accelerator
-mg_accelerator = get_accelerator()
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 T = TypeVar('T', ShardedObject, ShardedTensor)
 
@@ -272,7 +273,7 @@ class FullyParallelLoadStrategyWrapper(LoadShardedStrategy):
                 )
 
             with debug_time("torch.cuda.synchronize", logger):
-                mg_accelerator.synchronize()
+                cur_platform.synchronize()
 
         all_loaded_objects = exchange_loaded_objects_gather_object(loaded_objects)
 
@@ -281,7 +282,7 @@ class FullyParallelLoadStrategyWrapper(LoadShardedStrategy):
             raise CheckpointingException(
                 f'Missing object shards after fully parallel loading: {missing_object_shards}'
             )
-        mg_accelerator.synchronize()
+        cur_platform.synchronize()
 
         self.fill_in_deferred_sharded_tensors(sharded_tensors, all_loaded_tensors)
         self.fill_in_deferred_sharded_objects(sharded_objects, all_loaded_objects)
