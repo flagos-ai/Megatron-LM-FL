@@ -307,7 +307,7 @@ def combined_forward_backward_step(
         config.timers('forward-compute', log_level=2).start()
 
     if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
+        context_manager = torch.autocast(cur_platform.device_name(), dtype=config.autocast_dtype)
     else:
         context_manager = contextlib.nullcontext()
 

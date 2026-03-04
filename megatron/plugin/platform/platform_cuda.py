@@ -242,6 +242,10 @@ class PlatformCUDA(PlatformBase):
     def is_available(self):
         return torch.cuda.is_available()
 
+    def range(self, msg):
+        if hasattr(torch.cuda.nvtx, 'range'):
+            return torch.cuda.nvtx.range(msg)
+
     def range_push(self, msg):
         if hasattr(torch.cuda.nvtx, 'range_push'):
             return torch.cuda.nvtx.range_push(msg)
@@ -350,3 +354,15 @@ class PlatformCUDA(PlatformBase):
         else:
             raise ValueError(
                 f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")
+
+    def temperature(self):
+        return torch.cuda.temperature()
+
+    def power_draw(self):
+        return torch.cuda.power_draw()
+
+    def utilization(self):
+        return torch.cuda.utilization()
+
+    def clock_rate(self):
+        return torch.cuda.clock_rate()

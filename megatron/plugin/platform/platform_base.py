@@ -203,6 +203,10 @@ class PlatformBase(ABC):
         ...
 
     @abc.abstractmethod
+    def range(self, msg):
+        ...
+
+    @abc.abstractmethod
     def range_push(self, msg):
         ...
 
@@ -305,4 +309,20 @@ class PlatformBase(ABC):
 
     @abc.abstractmethod
     def set_compile_backend(self, backend):
+        ...
+    
+    @abc.abstractmethod
+    def temperature(self):
+        ...
+
+    @abc.abstractmethod
+    def power_draw(self):
+        ...
+
+    @abc.abstractmethod
+    def utilization(self):
+        ...
+
+    @abc.abstractmethod
+    def clock_rate(self):
         ...

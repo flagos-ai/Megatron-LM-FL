@@ -206,6 +206,11 @@ class PlatformCPU(PlatformBase):
     def is_available(self):
         return True
 
+    def range(self, msg):
+        # TODO itt is currently not supported yet
+        # return torch.profiler.itt.range(msg)
+        return
+
     def range_push(self, msg):
         # TODO itt is currently not supported yet
         # return torch.profiler.itt.range_push(msg)
@@ -320,3 +325,15 @@ class PlatformCPU(PlatformBase):
         else:
             raise ValueError(
                 f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")
+
+    def temperature(self):
+        return -1
+
+    def power_draw(self):
+        return -1
+
+    def utilization(self):
+        return -1
+
+    def clock_rate(self):
+        return -1

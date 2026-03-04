@@ -8,7 +8,8 @@ from megatron.core.dist_checkpointing.utils import add_prefix_for_sharding
 logger = getLogger(__name__)
 
 from megatron.plugin.decorators import plugin_implementation
-
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 @plugin_implementation("MixedPrecisionOptimizer", "_unscale_main_grads_and_check_for_nan")
 def _unscale_main_grads_and_check_for_nan(self):
@@ -42,8 +43,8 @@ def _unscale_main_grads_and_check_for_nan(self):
             op=torch.distributed.ReduceOp.MAX,
             group=group
         )
-    if self.found_inf.device != torch.device('cuda'):
-        self.found_inf = self.found_inf.cuda()
+    if self.found_inf.device != torch.device(cur_platform.device_name()):
+        self.found_inf = self.found_inf.to(cur_platform.device())
 
     # Check for nan.
     found_inf_flag = self.found_inf.item() > 0

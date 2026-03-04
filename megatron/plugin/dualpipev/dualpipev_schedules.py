@@ -34,6 +34,9 @@ from megatron.plugin.dualpipev.fb_overlap.transformer_layer import (
     transformer_layer_forward_backward_overlapping,
 )
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 # Types
 Shape = Union[List[int], torch.Size]
 
@@ -445,7 +448,7 @@ def forward_step_no_model_graph(
     set_input_tensor(input_tensor)
 
     if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
+        context_manager = torch.autocast(cur_platform.device_name(), dtype=config.autocast_dtype)
     else:
         context_manager = contextlib.nullcontext()
     with context_manager:
@@ -618,7 +621,7 @@ def forward_step_with_model_graph(
     set_input_tensor(input_tensor)
 
     if config.enable_autocast:
-        context_manager = torch.autocast("cuda", dtype=config.autocast_dtype)
+        context_manager = torch.autocast(cur_platform.device_name(), dtype=config.autocast_dtype)
     else:
         context_manager = contextlib.nullcontext()
     with context_manager:
@@ -793,7 +796,7 @@ def forward_backward_pipelining_with_dualpipev(
     if config.sequence_parallel:
         tensor_shape[0] = tensor_shape[0] // parallel_state.get_tensor_model_parallel_world_size()
 
-    total_num_tokens = torch.tensor(0, dtype=torch.int).cuda()
+    total_num_tokens = torch.tensor(0, dtype=torch.int).to(cur_platform.device())
     input_tensors = [[], []]
     output_tensors = [[], []]
     model_graphs = [[], []]

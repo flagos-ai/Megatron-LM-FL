@@ -18,6 +18,9 @@ from megatron.core.utils import to_local_if_dtensor
 from megatron.core.transformer.module import param_is_not_shared
 from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 try:
     from transformer_engine.pytorch.optimizers import (
         multi_tensor_applier,
@@ -37,7 +40,7 @@ try:
     from megatron.plugin.utils import get_device_type_for_comm
 except ImportError:
     def get_device_type_for_comm(group):
-        return "cuda"
+        return cur_platform.device_name()
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +88,7 @@ def get_grad_norm_fp32(
     # Calculate norm.
     if norm_type == inf:
         total_norm = max(grad.abs().max() for grad in grads_for_norm)
-        total_norm_cuda = torch.tensor([float(total_norm)], dtype=torch.float, device='cuda')
+        total_norm_cuda = torch.tensor([float(total_norm)], dtype=torch.float, device=cur_platform.device_name())
         # Take max across all data-parallel GPUs if using FSDP and then all model-parallel GPUs.
         if data_parallel_group:
             torch.distributed.all_reduce(
@@ -109,7 +112,7 @@ def get_grad_norm_fp32(
 
     else:
         if norm_type == 2.0:
-            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
+            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device=cur_platform.device_name())
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
@@ -121,7 +124,7 @@ def get_grad_norm_fp32(
                     False,  # no per-parameter norm
                 )
             else:
-                grad_norm = torch.zeros(1, dtype=torch.float, device='cuda')
+                grad_norm = torch.zeros(1, dtype=torch.float, device=cur_platform.device_name())
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
             total_norm = grad_norm**norm_type
@@ -181,7 +184,7 @@ def count_zeros_fp32(
     #   - grad should not be none
     #   - parameter should not be shared
     #   - should not be a replica due to tensor model parallelism
-    total_num_zeros = torch.zeros(1, dtype=torch.float, device='cuda')
+    total_num_zeros = torch.zeros(1, dtype=torch.float, device=cur_platform.device_name())
     data_parallel_group = None
     use_megatron_fsdp = False
     for param in parameters:

@@ -80,7 +80,7 @@ class StaticBufferLoader:
                 if k not in StaticBufferLoader.static_buffers[stage][microbatch]:
                     if isinstance(inputs[k], torch.Tensor):
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = torch.empty_like(
-                            inputs[k], device="cuda"
+                            inputs[k], device=cur_platform.device_name()
                         )
                     else:
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = inputs[k]
