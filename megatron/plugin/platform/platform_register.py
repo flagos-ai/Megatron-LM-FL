@@ -5,7 +5,7 @@
 PLATFORMS = {}
 
 
-def register_builtins() -> None:
+def register_platforms() -> None:
     """
     Register all platforms
 
