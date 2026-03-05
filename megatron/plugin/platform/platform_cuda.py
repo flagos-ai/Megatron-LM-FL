@@ -22,8 +22,17 @@ class PlatformCUDA(PlatformBase):
         self._compile_backend = "inductor"
         if pynvml is None:
             self._init_pynvml()
-        
-        print(f"Megatron-LM-FL Platform: CUDA initialized")
+
+    def is_available(self):
+        try:
+            import torch
+            # Determine if we are on a GPU or x86 CPU with torch.
+            if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
+                return True
+            else:
+                return False
+        except (RuntimeError, ImportError) as e:
+            return False
 
     def _init_pynvml(self):
         global pynvml

@@ -1,13 +1,13 @@
 # Copyright (c) BAAI Corporation.
 
 import os
+from .platform_register import PLATFORMS
 
-SUPPORTED_PLATFORM_LIST = ['cuda', 'cpu']
 cur_platform = None
 
 
 def is_current_platform_supported():
-    return get_platform().device_name() in SUPPORTED_PLATFORM_LIST
+    return get_platform().device_name() in PLATFORMS.keys()
 
 
 def get_platform():
@@ -18,42 +18,23 @@ def get_platform():
     platform_name = None
     # 1. Detect whether there is override of Megatron-LM-FL platforms from environment variable.
     if "MG_PLATFORM" in os.environ.keys():
-        platform_name = os.environ["MG_ACCELERATOR"]
-        if platform_name == "cpu":
-            pass
-        elif platform_name not in SUPPORTED_PLATFORM_LIST:
-            raise ValueError(f'MG_PLATFORM must be one of {SUPPORTED_PLATFORM_LIST}. '
+        platform_name = os.environ["MG_PLATFORM"].lower()
+        if platform_name not in PLATFORMS.keys():
+            raise ValueError(f'MG_PLATFORM must be one of {PLATFORMS.keys()}. '
                              f'Value "{platform_name}" is not supported')
+        cur_platform = PLATFORMS[platform_name]
+        print(f"Megatron-LM-FL Platform: {platform_name} Selected")
 
     # 2. If no override, detect which platform to use automatically
-    if platform_name is None:
-        # We need a way to choose among different platform types.
-        # Currently we detect which platform extension is installed
-        # in the environment and use it if the installing answer is True.
-
-        if platform_name is None:
-            try:
-                import torch
-
-                # Determine if we are on a GPU or x86 CPU with torch.
-                if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
-                    platform_name = "cuda"
-            except (RuntimeError, ImportError) as e:
-                # TODO need a more decent way to detect which accelerator to use, consider using nvidia-smi command for detection
-                pass
-        if platform_name is None:
-            # cpu added as catch-all when accelerator detection fails
-            platform_name = "cpu"
-
-    # 3. Set cur_platform accordingly
-    if platform_name == "cuda":
-        from .platform_cuda import PlatformCUDA
-
-        cur_platform = PlatformCUDA()
-    elif platform_name == "cpu":
-        from .platform_cpu import PlatformCPU
-
-        cur_platform = PlatformCPU()
+    else:
+        if "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
+            cur_platform = PLATFORMS["cuda"]
+            print(f"Megatron-LM-FL Platform: cuda Selected")
+        elif "cpu" in PLATFORMS.keys() and PLATFORMS["cpu"].is_available():
+            cur_platform = PLATFORMS["cpu"]
+            print(f"Megatron-LM-FL Platform: cpu Selected")
+        else:
+            raise ValueError("No platform is available")
     
     return cur_platform
 

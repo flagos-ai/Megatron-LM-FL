@@ -33,8 +33,9 @@ class PlatformCPU(PlatformBase):
             self.max_mem = mem
         except ImportError as e:
             self.max_mem = 0
-        
-        print(f"Megatron-LM-FL Platform: CPU initialized")
+
+    def is_available(self):
+        return True
 
     def get_device_properties(self, device_index=None):
         raise NotImplementedError("CPU does not have device properties")

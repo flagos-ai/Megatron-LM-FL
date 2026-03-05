@@ -10,6 +10,10 @@ class PlatformBase(ABC):
         self._compile_backend = None
 
     @abc.abstractmethod
+    def is_available(self) -> bool:
+        raise NotImplementedError
+
+    @abc.abstractmethod
     def get_device_properties(self, device_index=None):
         ...
 
