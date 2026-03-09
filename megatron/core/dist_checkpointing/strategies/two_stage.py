@@ -126,8 +126,8 @@ class TwoStageDataParallelLoadShardedStrategy(LoadShardedStrategy):
         # TODO: `timers` keys are not guaranteed to be the same across ranks which causes hangs
         for key, times in sorted(timers.items()):
             times_sum = sum(times)
-            max_times = torch.tensor([times_sum], device=cur_platform.current_device_name())
-            avg_times = torch.tensor([times_sum], device=cur_platform.current_device_name())
+            max_times = torch.tensor([times_sum], device=cur_platform.device_name())
+            avg_times = torch.tensor([times_sum], device=cur_platform.device_name())
             torch.distributed.all_reduce(max_times, op=torch.distributed.ReduceOp.MAX)
             torch.distributed.all_reduce(avg_times, op=torch.distributed.ReduceOp.SUM)
             avg_times /= torch.distributed.get_world_size()
@@ -222,7 +222,7 @@ class TwoStageDataParallelLoadShardedStrategy(LoadShardedStrategy):
                 # TODO: for non-flattened ranges we could reuse the buffer from the start here
                 exchange_tensor = torch.empty(
                     ten_meta.sharded_tensor_no_data.local_shape,
-                    device='cpu' if self.cpu_transfer else cur_platform.current_device_name(),
+                    device='cpu' if self.cpu_transfer else cur_platform.device_name(),
                     dtype=ten_meta.sharded_tensor_no_data.dtype,
                 )
 

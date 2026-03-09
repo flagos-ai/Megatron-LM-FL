@@ -815,7 +815,7 @@ def track_moe_metrics(
             for key in track_names:
                 if key not in tracker:
                     tracker[key] = {}
-                    tracker[key]["values"] = torch.zeros(num_layers, device=cur_platform.device())
+                    tracker[key]["values"] = torch.zeros(num_layers, device=cur_platform.device_name())
                     tracker[key]["reduce_group"] = None
                     tracker[key]["avg_group"] = None
                     tracker[key]["reduce_group_has_dp"] = False

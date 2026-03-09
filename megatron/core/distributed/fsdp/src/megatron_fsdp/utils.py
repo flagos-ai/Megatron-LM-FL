@@ -334,7 +334,7 @@ elif HAVE_TE and is_te_min_version("2.0"):
             scale_invs.append(model_param._scale_inv.view(1))
             model_param._reset_caches()
 
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.current_device_name())
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
 
         # Update scaling factors.
         packed_scales = torch.empty(len(scales), dtype=torch.float32, device=scales[0].device)
@@ -384,7 +384,7 @@ def quantize_param_shard(
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = cur_platform.device(), clone: bool = False, graph_safe: bool = False
+    device: Union[int, str, torch.device] = cur_platform.device_name(), clone: bool = False, graph_safe: bool = False
 ) -> torch.Tensor:
     """Return the random number generator state of the specified GPU.
 
@@ -435,7 +435,7 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
     else:
         # newer PyTorch
         if device == -1:
-            device = torch.device(cur_platform.device())
+            device = torch.device(cur_platform.device_name())
         elif isinstance(device, str):
             device = torch.device(device)
         elif isinstance(device, int):

@@ -366,7 +366,7 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                     if isinstance(optimizer, self.defaults["cpu_optimizer_cls"]):
                         self.state[orig_param][k] = state[k] = v.to("cpu")
                     else:
-                        self.state[orig_param][k] = state[k] = v.to(cur_platform.device())
+                        self.state[orig_param][k] = state[k] = v.to(cur_platform.device_name())
 
     def _update_fp32_params_by_new_state(self):
         if not self.param_update_in_fp32:

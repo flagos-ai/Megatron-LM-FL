@@ -206,13 +206,13 @@ class IndicesToMultihot(torch.autograd.Function):
         ), "indices and probs_indices must have the same shape"
         topk = indices.shape[1]
         multihot_indices = torch.empty(
-            (num_of_tokens, num_of_local_experts), dtype=torch.bool, device=cur_platform.current_device()
+            (num_of_tokens, num_of_local_experts), dtype=torch.bool, device=cur_platform.device_name()
         )
         probs_in_multihot = torch.empty(
-            (num_of_tokens, num_of_local_experts), dtype=probs_indices.dtype, device=cur_platform.current_device()
+            (num_of_tokens, num_of_local_experts), dtype=probs_indices.dtype, device=cur_platform.device_name()
         )
         position_map = torch.empty(
-            (num_of_tokens, num_of_local_experts), dtype=torch.int32, device=cur_platform.current_device()
+            (num_of_tokens, num_of_local_experts), dtype=torch.int32, device=cur_platform.device_name()
         )
         # Compute the next power of 2 for the topk and num_of_local_experts
         topk_next_power_of_2 = 2 ** int(math.ceil(math.log2(topk)))
@@ -259,7 +259,7 @@ class IndicesToMultihot(torch.autograd.Function):
 
         # Initialize the gradient of the indices and probs_indices
         grad_probs_indices = torch.empty(
-            (num_of_tokens, topk), dtype=grad_probs_in_multihot.dtype, device=cur_platform.current_device()
+            (num_of_tokens, topk), dtype=grad_probs_in_multihot.dtype, device=cur_platform.device_name()
         )
         # Compute the next power of 2 for the topk and num_of_local_experts
         topk_next_power_of_2 = 2 ** int(math.ceil(math.log2(topk)))

@@ -472,7 +472,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         # Note that we keep this for the cases that grad scaler is none.
         # We still record nan/inf if we have a bfloat16 with a grad scaler.
         if self.grad_scaler:
-            self.found_inf = torch.tensor([0.0], dtype=torch.float, device=cur_platform.device())
+            self.found_inf = torch.tensor([0.0], dtype=torch.float, device=cur_platform.device_name())
 
         # Dummy tensor needed for apex multi-apply tensor.
         # For bfloat, we don't have multi-tensor apply and for now
@@ -480,11 +480,11 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.config.bf16:
             self._dummy_overflow_buf = None
         else:
-            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device())
+            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
 
         # In case grad scaler is not passed, define the unity scale.
         if self.grad_scaler is None:
-            self._scale_one = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device())
+            self._scale_one = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device_name())
 
     def get_loss_scale(self):
         if self.grad_scaler is None:
@@ -907,7 +907,7 @@ class FP32Optimizer(MegatronOptimizer):
 
         super(FP32Optimizer, self).__init__(optimizer, config, init_state_fn)
 
-        self._scale = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device())
+        self._scale = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device_name())
         self.is_stub_optimizer = True if optimizer is None else False
 
     def zero_grad(self, set_to_none=True):

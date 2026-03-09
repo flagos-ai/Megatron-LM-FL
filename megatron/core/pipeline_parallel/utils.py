@@ -289,7 +289,7 @@ def set_streams(comp_stream=None, comm_stream=None):
     if comp_stream is None:
         comp_stream = cur_platform.current_stream()
     if comm_stream is None:
-        comm_stream = cur_platform.Stream(device=cur_platform.current_device())
+        comm_stream = cur_platform.Stream(device=cur_platform.device_name())
 
     assert _COMP_STREAM is None
     assert _COMM_STREAM is None

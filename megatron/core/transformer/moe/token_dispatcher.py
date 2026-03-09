@@ -394,7 +394,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         # [tp_size]. Represents the number of tokens received by the current rank from
         # other TP ranks.
         self.output_splits_tp = None
-        self.permute_idx_device = torch.device(cur_platform.device()) if self.config.moe_permute_fusion else "cpu"
+        self.permute_idx_device = torch.device(cur_platform.device_name()) if self.config.moe_permute_fusion else "cpu"
         input_chunk_idxs = torch.arange(
             self.num_experts * self.tp_size, device=self.permute_idx_device
         )

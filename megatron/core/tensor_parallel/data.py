@@ -37,7 +37,7 @@ def _build_key_size_numel_dictionaries(keys, data, tp_group=None):
             offset += max_dim
 
     # Move to GPU and broadcast.
-    sizes_cuda = torch.tensor(sizes, dtype=torch.long, device=cur_platform.current_device())
+    sizes_cuda = torch.tensor(sizes, dtype=torch.long, device=cur_platform.device_name())
     group_ranks = torch.distributed.get_process_group_ranks(group=tp_group)
     torch.distributed.broadcast(sizes_cuda, group_ranks[0], group=tp_group)
 
