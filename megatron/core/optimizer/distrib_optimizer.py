@@ -56,18 +56,11 @@ from .optimizer_config import OptimizerConfig
 from .muon import Muon, MuonDistMeta
 from megatron.core.parallel_state import get_tensor_model_parallel_group
 
-try:
-    # This will be used when "--fp8-param-gather" is enabled.
-    # When BF16/FP16 parameters don't exist, we need to cast the FP32 main parameters to
-    # FP8 directly in the optimizer.
-    from transformer_engine.pytorch.cpp_extensions import cast_to_fp8
-except:
-    pass
-
 logger = getLogger(__name__)
 
 from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
+
 
 class Range:
     """
@@ -535,13 +528,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             assert self.ddp_config == model_chunk.ddp_config
         self.distributed_optimizer_instance_id = distributed_optimizer_instance_id
 
-        # assert (
-        #     isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer))
-        #     or optimizer is None
-        # ), (
-        #     "Only Adam and HybridDeviceOptimizer currently supported, "
-        #     "due to checkpointing requirements."
-        # )
         assert (
             isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer, Muon))
             or optimizer is None

@@ -791,7 +791,6 @@ def reduce_aux_losses_tracker_across_ranks(track_names: Optional[List[str]] = No
             )
 
 
-
 def track_moe_metrics(
     loss_scale: float,
     iteration: int,

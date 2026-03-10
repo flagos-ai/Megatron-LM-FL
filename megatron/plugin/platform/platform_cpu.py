@@ -16,6 +16,18 @@ except ImportError as e:
 from .platform_base import PlatformBase
 
 
+class noop_context(object):
+
+    def __init__(self):
+        pass
+
+    def __enter__(self):
+        pass
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        pass
+
+
 # Platform for Intel CPU
 class PlatformCPU(PlatformBase):
 
@@ -106,7 +118,6 @@ class PlatformCPU(PlatformBase):
         return None
 
     def stream(self, stream):
-        from .utils import noop_context
         return noop_context()
 
     def set_stream(self, stream):
@@ -247,7 +258,6 @@ class PlatformCPU(PlatformBase):
         return None
 
     def capture_to_graph(self, graph, pool=None, stream=None):
-        from utils import noop_context
         return noop_context()
 
     def replay_graph(self, graph):
