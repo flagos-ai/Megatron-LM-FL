@@ -6,8 +6,6 @@ class PlatformBase(ABC):
 
     def __init__(self):
         self._name = None
-        self._communication_backend_name = None
-        self._compile_backend = None
 
     @abc.abstractmethod
     def is_available(self) -> bool:
