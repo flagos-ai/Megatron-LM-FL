@@ -10,18 +10,18 @@ try:
 except ImportError:
     pass
 
-# Delay import pynvml to avoid import error when CUDA is not available
 pynvml = None
+try:
+    import pynvml
+    pynvml.nvmlInit()
+except Exception:
+    pynvml = None
 
 
 class PlatformCUDA(PlatformBase):
 
     def __init__(self):
         self._name = 'cuda'
-        self._communication_backend_name = 'nccl' if sys.platform != 'win32' else 'gloo'
-        self._compile_backend = "inductor"
-        if pynvml is None:
-            self._init_pynvml()
 
     def is_available(self):
         try:
@@ -33,18 +33,6 @@ class PlatformCUDA(PlatformBase):
                 return False
         except (RuntimeError, ImportError) as e:
             return False
-
-    def _init_pynvml(self):
-        global pynvml
-        try:
-            import pynvml
-        except ImportError:
-            return
-        try:
-            pynvml.nvmlInit()
-        except pynvml.NVMLError:
-            pynvml = None
-            return
 
     def get_device_properties(self, device_index=None):
         return torch.cuda.get_device_properties(device_index)

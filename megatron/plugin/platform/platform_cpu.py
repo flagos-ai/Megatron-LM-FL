@@ -21,12 +21,6 @@ class PlatformCPU(PlatformBase):
 
     def __init__(self):
         self._name = 'cpu'
-        self._compile_backend = "inductor"
-        if oneccl_imported_p:
-            self._communication_backend_name = 'ccl'
-        else:
-            # fallback to gloo if oneccl_binding_for_pytorch is not installed
-            self._communication_backend_name = 'gloo'
         try:
             import psutil
             mem = psutil.Process().memory_info().rss
