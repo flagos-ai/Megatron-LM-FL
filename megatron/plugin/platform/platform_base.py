@@ -1,3 +1,5 @@
+# Adopted from DeepSpeed Accelerator, https://github.com/deepspeedai/DeepSpeed/
+
 import abc
 from abc import ABC
 

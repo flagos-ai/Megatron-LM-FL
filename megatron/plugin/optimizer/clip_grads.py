@@ -12,7 +12,7 @@ from typing import List, Optional, Union
 import torch
 from torch import inf
 
-from megatron.plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import override
 from megatron.core.utils import get_data_parallel_group_if_dtensor
 from megatron.core.utils import to_local_if_dtensor
 from megatron.core.transformer.module import param_is_not_shared
@@ -44,7 +44,7 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-@plugin_implementation("clip_grads", "get_grad_norm_fp32")
+@override("clip_grads", "get_grad_norm_fp32")
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
     norm_type: Union[int, float] = 2,
@@ -156,7 +156,7 @@ def get_grad_norm_fp32(
 
     return total_norm
 
-@plugin_implementation("clip_grads", "count_zeros_fp32")
+@override("clip_grads", "count_zeros_fp32")
 def count_zeros_fp32(
     parameters: Union[List[torch.Tensor], torch.Tensor],
     grad_stats_parallel_group: torch.distributed.ProcessGroup,

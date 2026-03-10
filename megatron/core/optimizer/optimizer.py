@@ -52,7 +52,7 @@ from .clip_grads import clip_grad_by_total_norm_fp32, count_zeros_fp32, get_grad
 from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
 
-from megatron.plugin.decorators import plugin_method
+from megatron.plugin.decorators import overridable
 
 logger = getLogger(__name__)
 
@@ -495,7 +495,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.param_groups:
             self._copy_model_params_to_main_params(state_dict=state_dict)
 
-    @plugin_method
+    @overridable
     def _unscale_main_grads_and_check_for_nan(self):
 
         # Collect main grads.
@@ -1263,7 +1263,7 @@ class ChainedOptimizer(MegatronOptimizer):
                     sharded_state_dict[optimizer_idx] = optim_state_dict
                 return sharded_state_dict
 
-    @plugin_method
+    @overridable
     def load_state_dict(self, state_dict):
         # If there is only one optimizer, we read the state dict as a single optimizer.
         if len(self.chained_optimizers) == 1:

@@ -11,14 +11,14 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
 
-from megatron.plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import override
 from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
 
-@plugin_implementation("LanguageModule", "_is_in_embd_group")
+@override("LanguageModule", "_is_in_embd_group")
 def _is_in_embd_group(self):
     """
     Plugin implementation of _is_in_embd_group.
@@ -78,7 +78,7 @@ def _is_in_embd_group(self):
     return False
 
 
-@plugin_implementation("LanguageModule", "setup_embeddings_and_output_layer")
+@override("LanguageModule", "setup_embeddings_and_output_layer")
 def setup_embeddings_and_output_layer(self) -> None:
     """Sets up embedding layer in first stage and output layer in last stage.
 

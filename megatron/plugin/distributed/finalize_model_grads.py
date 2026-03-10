@@ -23,14 +23,14 @@ from megatron.core.distributed.finalize_model_grads import _get_main_grad_attr, 
 
 
 from megatron.plugin.utils import get_device_type_for_comm
-from megatron.plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import override
 
 from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
-@plugin_implementation("finalize_model_grads", "_allreduce_embedding_grad")
+@override("finalize_model_grads", "_allreduce_embedding_grad")
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
     embd_group: torch.distributed.ProcessGroup,

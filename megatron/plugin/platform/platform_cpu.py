@@ -1,4 +1,4 @@
-# Copyright (c) BAAI Corporation.
+# Adopted from DeepSpeed Accelerator, https://github.com/deepspeedai/DeepSpeed/
 
 import os
 
