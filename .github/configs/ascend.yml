@@ -1,19 +1,19 @@
-# CUDA Hardware Configuration for Megatron-LM-FL
-# This file defines CI/CD settings for CUDA-based testing
-# Test configurations are defined in tests/test_utils/config/platforms/cuda.yaml
+# Ascend Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Ascend-based testing
+# Test configurations are defined in tests/test_utils/config/platforms/ascend.yaml
 
-hardware_name: cuda
-display_name: 'CUDA Tests'
+hardware_name: ascend
+display_name: 'Ascend Tests'
 
 # Docker image for this hardware
-ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:huawei-cann8.5.0
 
 # Runner labels for this hardware
 runner_labels:
   - self-hosted
   - Linux
   - X64
-  - nvidia
+  - ascend
   - gpu-8
 
 # Container volumes (hardware-specific paths)
@@ -30,13 +30,13 @@ container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_
 
 # Device types to run tests on
 device_types:
-  - a100
+  - 910c
 
 # Test matrix configuration
 test_matrix:
   unit:
     devices:
-      - a100
+      - 910c
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
