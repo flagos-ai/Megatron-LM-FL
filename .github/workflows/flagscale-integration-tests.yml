@@ -11,7 +11,7 @@ on:
         description: 'FlagScale branch/ref to use'
         required: false
         type: string
-        default: 'cicd'
+        default: 'main'
 
 jobs:
   get-megatron-info:
