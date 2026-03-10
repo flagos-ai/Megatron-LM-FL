@@ -30,6 +30,7 @@ cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
+
 @override("finalize_model_grads", "_allreduce_embedding_grad")
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
