@@ -56,7 +56,7 @@ jobs:
           echo "  Megatron-LM-FL repo: ${MEGATRON_REPO}"
           echo "  Megatron-LM-FL branch: ${MEGATRON_BRANCH}"
 
-          gh workflow run functional_tests_train_megatron_lm_fl.yml \
+          gh workflow run functional_tests_megatron_fl_trigger.yml \
             --repo "${FLAGSCALE_REPO}" \
             --ref "${FLAGSCALE_REF}" \
             --field megatron_lm_fl_repo="${MEGATRON_REPO}" \
@@ -72,7 +72,7 @@ jobs:
           sleep 10  # Wait for run to appear
           RUN_ID=$(gh run list \
             --repo "${FLAGSCALE_REPO}" \
-            --workflow=functional_tests_train_megatron_lm_fl.yml \
+            --workflow=functional_tests_megatron_fl_trigger.yml \
             --limit 5 \
             --json databaseId,createdAt \
             --jq "sort_by(.createdAt) | reverse | .[0] | .databaseId")
