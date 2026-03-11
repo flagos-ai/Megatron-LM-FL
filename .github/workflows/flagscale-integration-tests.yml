@@ -55,7 +55,8 @@ jobs:
           echo "  FlagScale ref: ${FLAGSCALE_REF}"
           echo "  Megatron-LM-FL repo: ${MEGATRON_REPO}"
           echo "  Megatron-LM-FL branch: ${MEGATRON_BRANCH}"
-
+          echo "  TOKEN: ${{ secrets.FLAGSCALE_PAT }}"
+          
           gh workflow run functional_tests_megatron_fl_trigger.yml \
             --repo "${FLAGSCALE_REPO}" \
             --ref "${FLAGSCALE_REF}" \
