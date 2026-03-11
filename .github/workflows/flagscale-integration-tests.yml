@@ -3,7 +3,7 @@ name: Trigger FlagScale Training Tests
 on:
   push:
     branches: ["main", "dev"]
-  pull_request:
+  pull_request_target:
     branches: ["main"]
   workflow_dispatch:
     inputs:
@@ -23,7 +23,7 @@ jobs:
       - name: Get branch and repo info
         id: info
         run: |
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
+          if [ "${{ github.event_name }}" == "pull_request_target" ]; then
             BRANCH="${{ github.event.pull_request.head.ref }}"
             REPO="${{ github.event.pull_request.head.repo.full_name }}"
           else
