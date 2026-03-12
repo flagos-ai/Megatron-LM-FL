@@ -6,7 +6,7 @@ import sys
 from .platform_base import PlatformBase
 
 try:
-    import torch.musa
+    import torch
 except ImportError:
     pass
 
@@ -57,9 +57,6 @@ class PlatformMUSA(PlatformBase):
         if device_index is None:
             return 'musa'
         return 'musa:{}'.format(device_index)
-
-    def communication_backend_version(self):
-        return torch.musa.mccl.version()
 
     def device(self, device_index=None):
         return torch.device('musa', device_index)
@@ -186,8 +183,18 @@ class PlatformMUSA(PlatformBase):
             return False
         return torch.musa.is_bf16_supported()
 
+    def is_fp16_supported(self):
+        if not torch.musa.is_available():
+            return False
+        # Some backends expose an explicit check; otherwise assume fp16 is supported.
+        if hasattr(torch.musa, "is_fp16_supported"):
+            return torch.musa.is_fp16_supported()
+        return False
+
     def supported_dtypes(self):
         supported_dtypes = [torch.float]
+        if self.is_fp16_supported():
+            supported_dtypes.append(torch.half)
         if self.is_bf16_supported():
             supported_dtypes.append(torch.bfloat16)
         return supported_dtypes
@@ -198,17 +205,17 @@ class PlatformMUSA(PlatformBase):
             return torch.musa.amp
         return None
 
-    def is_available(self):
-        return torch.musa.is_available()
-
     def range(self, msg):
-        pass
+        if hasattr(torch.cuda.nvtx, 'range'):
+            return torch.cuda.nvtx.range(msg)
 
     def range_push(self, msg):
-        pass
+        if hasattr(torch.cuda.nvtx, 'range_push'):
+            return torch.cuda.nvtx.range_push(msg)
 
     def range_pop(self):
-        pass
+        if hasattr(torch.cuda.nvtx, 'range_pop'):
+            return torch.cuda.nvtx.range_pop()
 
     def lazy_call(self, callback):
         pass

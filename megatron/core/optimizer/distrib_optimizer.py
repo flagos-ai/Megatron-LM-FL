@@ -372,7 +372,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 dist_meta = MuonDistMeta(gbuf_index, bucket_index, model_param.shape, param_world_indexes, tp_split_dim)
                 
                 # fp16, bf16 params.
-                if model_param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                # cuda check -> platform check
+                if model_param.device.type == cur_platform.device_name() and model_param.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                ):
 
                     # Generate sharded model param.
                     if is_float8tensor(model_param) and config.fp8_recipe != "delayed":
@@ -434,7 +438,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     dist_metas[shard_main_param] = dist_meta
 
                 # fp32 params.
-                elif model_param.type() == 'torch.cuda.FloatTensor':
+                elif model_param.device.type == cur_platform.device_name() and model_param.dtype == torch.float32:
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
@@ -447,9 +451,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'torch.cuda.FloatTensor,  '
-                        'torch.cuda.HalfTensor, or '
-                        'torch.cuda.BFloat16Tensor. '
+                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '
                         'Received {}'.format(model_param.type())
                     )
 
@@ -597,7 +599,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for param in param_group['params']:
                 if param.requires_grad:
                     # fp32 copy only needed for 16-bit parameters.
-                    if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                    if param.device.type == cur_platform.device_name() and param.dtype in (
+                        torch.float16,
+                        torch.bfloat16,
+                    ):
                         param.main_param = None
                         param.main_param_sharded = True
 

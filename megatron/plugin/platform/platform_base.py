@@ -223,10 +223,6 @@ class PlatformBase(ABC):
         ...
 
     @abc.abstractmethod
-    def communication_backend_name(self):
-        ...
-
-    @abc.abstractmethod
     def is_triton_supported(self):
         ...
 
@@ -293,10 +289,6 @@ class PlatformBase(ABC):
 
     @abc.abstractmethod
     def build_extension(self):
-        ...
-
-    @abc.abstractmethod
-    def export_envs(self):
         ...
 
     @abc.abstractmethod

@@ -58,9 +58,6 @@ class PlatformCUDA(PlatformBase):
             return 'cuda'
         return 'cuda:{}'.format(device_index)
 
-    def communication_backend_version(self):
-        return torch.cuda.nccl.version()
-
     def device(self, device_index=None):
         return torch.device('cuda', device_index)
 
@@ -236,9 +233,6 @@ class PlatformCUDA(PlatformBase):
             return torch.cuda.amp
         return None
 
-    def is_available(self):
-        return torch.cuda.is_available()
-
     def range(self, msg):
         if hasattr(torch.cuda.nvtx, 'range'):
             return torch.cuda.nvtx.range(msg)
@@ -253,9 +247,6 @@ class PlatformCUDA(PlatformBase):
 
     def lazy_call(self, callback):
         return torch.cuda._lazy_call(callback)
-
-    def communication_backend_name(self):
-        return self._communication_backend_name
 
     def is_triton_supported(self):
         if not self.is_available():
@@ -330,9 +321,6 @@ class PlatformCUDA(PlatformBase):
     def build_extension(self):
         from torch.utils.cpp_extension import BuildExtension
         return BuildExtension
-
-    def export_envs(self):
-        return ['NCCL']
 
     def visible_devices_envs(self):
         return ['CUDA_VISIBLE_DEVICES']

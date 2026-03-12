@@ -3,9 +3,11 @@ import torch
 from typing import List, Optional
 from megatron.core import parallel_state
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def get_device_type_for_comm(model_parallel_group=None):
-    device = 'cuda'
+    device = cur_platform.device_name()
     # "cpu:gloo": gloo only supports cpu tensor.
     # "gloo" & "cpu:gloo,cuda:gloo": gloo supports both cpu and cuda tensor.
     if isinstance(model_parallel_group, list):

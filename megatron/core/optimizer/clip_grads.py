@@ -167,7 +167,11 @@ def clip_grad_by_total_norm_fp32(
                 grads.append(to_local_if_dtensor(param.decoupled_grad).detach())
         else:
             if param.grad is not None:
-                assert param.grad.type() == 'torch.cuda.FloatTensor'
+                # Keep original intent: accelerator fp32 gradients only, but make it platform-agnostic.
+                assert (
+                    param.grad.device.type == cur_platform.device_name()
+                    and param.grad.dtype == torch.float32
+                )
                 params.append(param)
                 grads.append(to_local_if_dtensor(param.grad).detach())
 

@@ -209,9 +209,6 @@ class PlatformCPU(PlatformBase):
     def amp(self):
         return torch.cpu.amp
 
-    def is_available(self):
-        return True
-
     def range(self, msg):
         # TODO itt is currently not supported yet
         # return torch.profiler.itt.range(msg)
@@ -229,9 +226,6 @@ class PlatformCPU(PlatformBase):
 
     def lazy_call(self, callback):
         return callback()
-
-    def communication_backend_name(self):
-        return self._communication_backend_name
 
     def is_triton_supported(self):
         return False
@@ -308,9 +302,6 @@ class PlatformCPU(PlatformBase):
     def build_extension(self):
         from torch.utils.cpp_extension import BuildExtension
         return BuildExtension
-
-    def export_envs(self):
-        return []
 
     # TODO: cpu's visible envs is confirmed, keep as CUDA_VISIBLE_DEVICES
     def visible_devices_envs(self):
