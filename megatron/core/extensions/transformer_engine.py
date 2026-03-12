@@ -662,6 +662,7 @@ class TEColumnParallelLinear(TELinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
+        print("TEColumnParallelLinear init")
         if not HAVE_TE:
             raise ImportError(
                 "Transformer Engine is not installed. "
