@@ -108,7 +108,7 @@ def _get_param_groups(
         List of parameter groups.
     """
 
-    # Map (wd_mult, is_expert_parallel, param_group_hyperparameters_config) to params.
+    # Map (wd_mult, is_expert_parallel, param_group_hyperparameters_config, is_engram_parallel) to params.
     params_map = {}
     configs_map = {}
     muon_params_map = {}
@@ -135,6 +135,7 @@ def _get_param_groups(
                     uses_default_config = True
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
+            is_engram_parallel = getattr(param, 'is_engram_embedding', False)  # FlagScale add is_engram_parallel
 
             # TODO: Make sure there is a way to support old no_weight_decay_func functionality
             # and default_skip_embedding_weight_decay:
@@ -170,7 +171,7 @@ def _get_param_groups(
                     muon_params_map[key] = []
                 muon_params_map[key].append(param)
             else:
-                key = (wd_mult, is_expert_parallel, is_vision_model_param, config_tuple)
+                key = (wd_mult, is_expert_parallel, is_vision_model_param, config_tuple, is_engram_parallel)
                 if key not in params_map:
                     params_map[key] = []
                 params_map[key].append(param)
@@ -205,7 +206,7 @@ def _get_param_groups(
 
     param_groups = []
     for key in params_key:
-        wd_mult, is_expert_parallel, is_vision_model_param, _ = key
+        wd_mult, is_expert_parallel, is_vision_model_param, _, is_engram_parallel = key
         params = params_map[key] if key in params_map else []
         config, uses_default_config = None, True
         if key not in configs_map:
@@ -223,6 +224,7 @@ def _get_param_groups(
             'is_decoupled_lr': False,  # For backwards compatibility.
             'default_config': uses_default_config,
             'is_vision_model_param': is_vision_model_param,
+            'is_engram_parallel': is_engram_parallel,  # FlagScale add is_engram_parallel
         }
 
         # Stick relevant fields into param_group from config object.
@@ -578,6 +580,9 @@ def get_megatron_optimizer(
     ########## FlagScale Begin ##########
     mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
     model_parallel_rank = mp_group[0].rank()
+    engram_dp_group = process_groups['engram_dp_group']
+    engram_embed_group = process_groups['engram_embed_group']
+    engram_dp_group_gloo = process_groups['engram_dp_group_gloo']
     ########## FlagScale End ##########
     expt_tp_pp_group = process_groups['expt_tp_pp_group']
     intra_dp_cp_group_gloo = process_groups['intra_dp_cp_group_gloo']
@@ -707,6 +712,44 @@ def get_megatron_optimizer(
                 data_parallel_group_gloo=expt_data_parallel_group_gloo,
                 data_parallel_group_idx=expt_model_parallel_rank,
                 intra_dist_opt_group=intra_dist_opt_group,
+                distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+            )
+        )
+    # Engram parallel param groups and buffers
+    engram_param_groups, engram_buffers = _get_param_groups_and_buffers(
+        model_chunks,
+        model_chunk_offset=0,
+        config=config,
+        config_overrides=config_overrides,
+        filter_fn=lambda g: g['is_engram_parallel'],
+        buffer_name='engram_parallel_buffers',
+    )
+    if dump_param_to_param_group_map is not None:
+        for param_group in engram_param_groups:
+            for param in param_group["params"]:
+                param_name = get_global_unique_param_name(model_chunks, param)
+                param_to_param_group[param_name] = param_group_id
+            param_group_id += 1
+    if len(engram_param_groups) > 0:
+        model_parallel_rank = get_pg_rank(engram_embed_group)
+
+        # Pass Gloo process groups into optimizer only if needed.
+        if use_gloo_process_groups:
+            engram_data_parallel_group_gloo = engram_dp_group_gloo
+        else:
+            engram_data_parallel_group_gloo = None
+        assert distributed_optimizer_instance_id == 0, "Engram parallel optimizer only supports a single instance."
+        optimizers.append(
+            _get_megatron_optimizer_based_on_param_groups(
+                config=config,
+                model_chunks=model_chunks,
+                param_groups=engram_param_groups,
+                per_model_buffers=engram_buffers,
+                model_parallel_group=engram_embed_group,
+                data_parallel_group=engram_dp_group,
+                data_parallel_group_gloo=engram_data_parallel_group_gloo,
+                data_parallel_group_idx=model_parallel_rank,
+                intra_dist_opt_group=None,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
             )
         )

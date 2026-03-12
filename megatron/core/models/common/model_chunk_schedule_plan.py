@@ -116,6 +116,9 @@ class TransformerLayerSchedulePlan:
         extra_args["is_moe"] = is_moe
         extra_args["delay_wgrad_compute"] = self.layer.config.delay_wgrad_compute
         extra_args["is_mtp"] = is_mtp
+        if extra_args.get("is_engram", False):
+            extra_args["engram"] = getattr(self.layer, "engram")
+            extra_args["engram_hash_layer_id"] = getattr(self.layer, "engram_hash_layer_id")
 
         # wrapper to help create TransformerLayerNode
         def create_node(stream, module, name):
@@ -324,8 +327,16 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # build layer schedule plan for each layer
         for layer_idx in range(transformer_num_layers):
             layer = model.decoder._get_layer(layer_idx)
+            # build engram layers
+            if hasattr(layer, "engram"):
+                extra_args = {
+                    "is_engram": True,
+                    "engram_hash_input_ids": model.engram_hash_input_ids
+                }
+            else:
+                extra_args = {}
             layer_plan = TransformerLayerSchedulePlan(
-                layer, self._event, self._model_chunk_state, comp_stream, comm_stream
+                layer, self._event, self._model_chunk_state, comp_stream, comm_stream, extra_args
             )
             self._transformer_layers.append(layer_plan)
 
