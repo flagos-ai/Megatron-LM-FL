@@ -213,7 +213,7 @@ class PlatformCUDA(PlatformBase):
             return False
         # See https://docs.nvidia.com/deeplearning/tensorrt/support-matrix/index.html#hardware-precision-matrix
         # FP16 on compute capability 6.x is deprecated
-        allow_deprecated_fp16 = os.environ.get('DS_ALLOW_DEPRECATED_FP16', '0') == '1'
+        allow_deprecated_fp16 = os.environ.get('MG_ALLOW_DEPRECATED_FP16', '0') == '1'
         major, _ = torch.cuda.get_device_capability()
         if major >= 7:
             return True
