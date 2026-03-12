@@ -1,4 +1,4 @@
-name: cuda_tests
+name: metax_tests
 
 on:
   push:
