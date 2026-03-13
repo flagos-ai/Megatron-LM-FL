@@ -14,7 +14,7 @@ runner_labels:
   - Linux
   - X64
   - metax
-  - gpu-8
+  - dev #s
 
 # Container volumes (hardware-specific paths)
 container_volumes:
