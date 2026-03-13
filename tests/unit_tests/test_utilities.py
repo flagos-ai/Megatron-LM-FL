@@ -29,6 +29,7 @@ def _get_device_backend():
                 f"不支持的平台：{platform}！"
                 "目前支持 ascend/metax/cuda 三种平台，请添加适配其他平台代码"
             )
+        #aa
 
 # 全局初始化设备类型和分布式后端
 DEVICE_TYPE, DIST_BACKEND = _get_device_backend()
