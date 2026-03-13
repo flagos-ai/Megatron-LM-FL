@@ -27,7 +27,8 @@ container_volumes:
 
 # Container options (hardware-specific settings)
 container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
-
+# MetaX 容器选项 ？这里感觉不对呀，先放着
+# container_options: '--privileged --device /dev/mxcd0 ... --shm-size=500g --user root'
 # Device types to run tests on
 device_types:
   - C500
