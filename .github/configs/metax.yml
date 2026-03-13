@@ -14,7 +14,7 @@ runner_labels:
   - Linux
   - X64
   - metax
-  - dev #s
+  - dev 
 
 # Container volumes (hardware-specific paths)
 container_volumes:
@@ -25,11 +25,29 @@ container_volumes:
   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
 
+  # ===== 需要修改 3：沐曦设备路径 =====
+  # 这些路径必须存在，否则容器启动会失败
+  - /dev/dri:/dev/dri                                  # 沐曦 GPU 设备文件
+  - /dev/mxcd:/dev/mxcd                                # 沐曦 GPU 设备文件
+  - /opt/maca:/opt/maca                                # MACA 软件栈
+  - /opt/mxdriver:/opt/mxdriver                        # 沐曦驱动路径
+  
 # Container options (hardware-specific settings)
-container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
-# MetaX 容器选项 ？这里感觉不对呀，先放着
-# container_options: '--privileged --device /dev/mxcd0 ... --shm-size=500g --user root'
-# Device types to run tests on
+# container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
+# MetaX 容器选项 
+# ===== 需要修改 4：容器选项 =====
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ulimit nofile=65535:65535
+  --device=/dev/dri
+  --device=/dev/mxcd
+  --group-add video
+  -e PLATFORM=metax
+  -e TORCH_DISTRIBUTED_BACKEND=mccl
+  -e MUSA_VISIBLE_DEVICES=all
 device_types:
   - C500
 
