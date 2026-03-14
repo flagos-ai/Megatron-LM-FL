@@ -438,6 +438,8 @@ def test_get_megatron_optimizer_with_custom_process_groups(world_size, tp_size, 
     pg_collection.pp = pp_group
     pg_collection.mp = mp_group
     pg_collection.tp_ep_pp = None  # Not using expert parallelism in this test
+    pg_collection.engram_dp = None
+    pg_collection.engram_embed = None   # Not using engram in this test
 
     # Create a simple model for testing
     model = torch.nn.Linear(100, 100, bias=False, device='cuda')

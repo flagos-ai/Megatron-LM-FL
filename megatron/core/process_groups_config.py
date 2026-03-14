@@ -439,8 +439,20 @@ class ProcessGroupCollection:
                 )
             intra_dp_cp_group_gloo = None
             intra_expt_dp_group_gloo = None
+            # Engram data parallel group and embedding_parallel_group
+            if not hasattr(pg_collection, "engram_dp"):
+                raise ValueError(
+                    "engram_dp process group is required but not provided in pg_collection. "
+                    "Please explicitly set it to None if you don't need it."
+                )
             engram_dp_group = pg_collection.engram_dp
+            if not hasattr(pg_collection, "engram_embed"):
+                raise ValueError(
+                    "engram_embed process group is required but not provided in pg_collection. "
+                    "Please explicitly set it to None if you don't need it."
+                )
             engram_embed_group = pg_collection.engram_embed
+            engram_dp_group_gloo = None
 
         return {
             'dp_group': dp_group,
