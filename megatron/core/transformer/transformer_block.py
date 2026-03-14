@@ -854,15 +854,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         elif isinstance(self.config.moe_layer_freq, list):
             non_homogeneous_layers = True
 
-        # TODO: @aoyulong - This is a temporary solution to support single-file-per-tensor ckpt
-        non_homogeneous_layers_env = os.getenv('FS_NON_HOMOGENEOUS_LAYERS', 'False').lower() in (
-            'true',
-            '1',
-            't',
-        )
-        if non_homogeneous_layers_env:
-            non_homogeneous_layers = True
-
         if self.config.heterogeneous_block_specs:
             non_homogeneous_layers = True
 

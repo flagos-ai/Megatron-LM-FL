@@ -33,6 +33,8 @@ from megatron.core.utils import (
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def get_transformer_layer_offset(
     config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None, is_dualpipev_first_chunk: Optional[bool] = False
@@ -754,7 +756,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             slen_per_cp = seq_length // self.config.context_parallel_size
             static_inputs["attention_mask"] = (
                 ~(torch.tril(torch.ones((slen_per_cp, seq_length))).bool())
-                .to(torch.cuda.current_device())
+                .to(cur_platform.current_device())
                 .reshape(1, 1, slen_per_cp, seq_length)
                 .tile(micro_batch_size, 1, 1, 1)
             )
@@ -851,7 +853,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 return torch.zeros(
                     (micro_batch_size, 1, slen_per_cp, slen),
                     dtype=torch.bool,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 )
 
             if not is_te_min_version("1.10.0"):

@@ -131,7 +131,6 @@ class OptimizerConfig:
     sgd_momentum: float = 0.9
     """Momentum factor for SGD optimizer."""
 
-
     #######################
     # Distributed optimizer
     #######################

@@ -56,15 +56,10 @@ from .optimizer_config import OptimizerConfig
 from .muon import Muon, MuonDistMeta
 from megatron.core.parallel_state import get_tensor_model_parallel_group
 
-try:
-    # This will be used when "--fp8-param-gather" is enabled.
-    # When BF16/FP16 parameters don't exist, we need to cast the FP32 main parameters to
-    # FP8 directly in the optimizer.
-    from transformer_engine.pytorch.cpp_extensions import cast_to_fp8
-except:
-    pass
-
 logger = getLogger(__name__)
+
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 class Range:
@@ -533,13 +528,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             assert self.ddp_config == model_chunk.ddp_config
         self.distributed_optimizer_instance_id = distributed_optimizer_instance_id
 
-        # assert (
-        #     isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer))
-        #     or optimizer is None
-        # ), (
-        #     "Only Adam and HybridDeviceOptimizer currently supported, "
-        #     "due to checkpointing requirements."
-        # )
         assert (
             isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer, Muon))
             or optimizer is None
@@ -835,7 +823,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=torch.cuda.current_device()
+                                (numel,), dtype=dtype, device=cur_platform.current_device()
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
@@ -1152,7 +1140,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                                device = "cpu" if use_gloo_comm else cur_platform.current_device()
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device
@@ -1164,7 +1152,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather.
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.cuda()
+                                send_tensor = send_tensor.to(cur_platform.device())
                             if return_on_all_ranks:
                                 torch.distributed.all_gather(
                                     recv_tensors, send_tensor, data_parallel_group

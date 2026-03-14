@@ -30,7 +30,7 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
 )
 
-from megatron.plugin.decorators import plugin_method
+from megatron.plugin.decorators import overridable
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
     if hasattr(param, "main_grad"):
@@ -203,7 +203,7 @@ def _allreduce_word_embedding_grads(
     )
 
 
-@plugin_method
+@overridable
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
     embd_group: torch.distributed.ProcessGroup,

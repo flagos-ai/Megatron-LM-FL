@@ -64,6 +64,9 @@ except ImportError:
 
 logger = getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 def register_default_zarr_strategies():
     """Register default strategies related to Zarr backend."""
@@ -150,7 +153,7 @@ def _save_to_existing_array(sharded_tensor: ShardedTensor, arr: Optional[zarr.Ar
     assert arr is not None
     x = sharded_tensor.data
     x = x.detach().cpu()
-    torch.cuda.synchronize()
+    cur_platform.synchronize()
     if x.dtype == torch.bfloat16:
         x = x.float()
         x = x.numpy()

@@ -13,11 +13,11 @@
 # limitations under the License.
 name: Community Bot
 
-on:
-  issues:
-    types: [opened, edited, reopened, closed, deleted]
-  issue_comment:
-    types: [created, edited, deleted]
+# on:
+#   issues:
+#     types: [opened, edited, reopened, closed, deleted]
+#   issue_comment:
+#     types: [created, edited, deleted]
 
 jobs:
   community-bot:

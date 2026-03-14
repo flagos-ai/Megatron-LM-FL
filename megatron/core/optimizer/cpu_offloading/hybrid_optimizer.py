@@ -4,6 +4,8 @@ from typing import Dict
 
 import torch
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def _param_generator(cpu_optimizer):
     for group in cpu_optimizer.param_groups:
@@ -117,12 +119,12 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
     def _register_param_copy_back_gpu_hook(self):
         def param_copy_back_gpu_hook_closure():
             def param_copy_back_gpu_hook(optimizer, args, kwargs):
-                self._h2d_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self._h2d_stream):
+                self._h2d_stream.wait_stream(cur_platform.current_stream())
+                with cur_platform.stream(self._h2d_stream):
                     for param in _param_generator(optimizer):
                         gpu_param = self.cpu_copys_map_gpu_param[param]
                         gpu_param.data.copy_(param.data, non_blocking=True)
-                self._d2h_stream.record_event().wait(torch.cuda.current_stream())
+                self._d2h_stream.record_event().wait(cur_platform.current_stream())
 
             return param_copy_back_gpu_hook
 
@@ -159,8 +161,8 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
         # the lr, wd, etc. are up-to-date.
         self._sync_hdo_param_groups_to_sub_optimizers()
 
-        self._d2h_stream.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(self._d2h_stream):
+        self._d2h_stream.wait_stream(cur_platform.current_stream())
+        with cur_platform.stream(self._d2h_stream):
             self._set_sub_optimizer_grads()
 
         # Step the sub-optimizers.
@@ -214,11 +216,11 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
             self.gpu_optimizer = None
 
         self.cpu_copy_map_grad: Dict[torch.Tensor, torch.Tensor] = defaultdict(torch.Tensor)
-        self._d2h_stream = torch.cuda.current_stream()
-        self._h2d_stream = torch.cuda.current_stream()
+        self._d2h_stream = cur_platform.current_stream()
+        self._h2d_stream = cur_platform.current_stream()
         if self.overlap_cpu_optimizer_d2h_h2d:
-            self._d2h_stream = torch.cuda.Stream()
-            self._h2d_stream = torch.cuda.Stream()
+            self._d2h_stream = cur_platform.Stream()
+            self._h2d_stream = cur_platform.Stream()
         self._cpu_optimizer_map_data_event = dict()
 
         self._register_param_copy_back_gpu_hook()
@@ -365,7 +367,7 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                     if isinstance(optimizer, self.defaults["cpu_optimizer_cls"]):
                         self.state[orig_param][k] = state[k] = v.to("cpu")
                     else:
-                        self.state[orig_param][k] = state[k] = v.to("cuda")
+                        self.state[orig_param][k] = state[k] = v.to(cur_platform.device_name())
 
     def _update_fp32_params_by_new_state(self):
         if not self.param_update_in_fp32:

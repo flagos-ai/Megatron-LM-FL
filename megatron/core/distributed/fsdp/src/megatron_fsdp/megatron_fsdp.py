@@ -27,6 +27,8 @@ from .utils import FSDPDistributedIndex
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 try:
     # Default to Megatron-LM FW.
@@ -172,13 +174,13 @@ class MegatronFSDP(torch.nn.Module):
         super().__init__()
         # If device is not specified, use the current device.
         self.device = (
-            device if device is not None else torch.device(f"cuda:{torch.cuda.current_device()}")
+            device if device is not None else torch.device(cur_platform.current_device_name())
         )
-        if self.device != torch.device(f"cuda:{torch.cuda.current_device()}"):
+        if self.device != torch.device(cur_platform.current_device_name()):
             logger.warning(
                 f"[Rank {torch.distributed.get_rank()}] Megatron-FSDP is "
                 f"using device {self.device} instead of the current device "
-                f"{torch.device(f'cuda:{torch.cuda.current_device()}')}, "
+                f"{torch.device(cur_platform.current_device_name())}, "
                 "which may cause process-to-device mapping issues or "
                 "cross-device Tensor operation errors. If necessary, "
                 "send all Tensors in the module to the Megatron-FSDP "
@@ -342,8 +344,8 @@ class MegatronFSDP(torch.nn.Module):
         self.raw_param = dict(self.module.named_parameters())
 
         # Initialize a gradient buffer and accumulation stream for the GradReducePipeline.
-        self.side_stream_for_buffer_copy_and_grad_accum = torch.cuda.Stream()
-        self.side_stream_for_param_gather = torch.cuda.Stream()
+        self.side_stream_for_buffer_copy_and_grad_accum = cur_platform.Stream()
+        self.side_stream_for_param_gather = cur_platform.Stream()
 
         # Initialize the reduce-scatter pipeline.
         self.grad_reduce_pipeline = GradReducePipeline(

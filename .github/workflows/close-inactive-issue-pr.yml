@@ -12,9 +12,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 name: Stale-Close-Inactive-Issues-PRs
-on:
-  schedule:
-    - cron: "30 1 * * *"
+# on:
+#   schedule:
+#     - cron: "30 1 * * *"
 
 jobs:
   close-issues:

@@ -13,18 +13,18 @@
 # limitations under the License.
 
 name: CICD Megatron-LM
-on:
-  schedule:
-    - cron: 0 0 * * *
-  push:
-    branches:
-      - dev
-      - main
-      - 'pull-request/[0-9]+'
-      - 'deploy-release/*'
-  merge_group:
-    types: [checks_requested]
-  workflow_dispatch:
+# on:
+#   schedule:
+#     - cron: 0 0 * * *
+#   push:
+#     branches:
+#       - dev
+#       - main
+#       - 'pull-request/[0-9]+'
+#       - 'deploy-release/*'
+#   merge_group:
+#     types: [checks_requested]
+#   workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.event.label.name || 'main' }}-${{ github.event_name }}

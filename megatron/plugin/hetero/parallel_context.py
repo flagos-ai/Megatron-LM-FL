@@ -23,6 +23,10 @@ except:
 
 _GLOBAL_PARALLEL_CONTEXT = None
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
+
 def _ensure_var_is_initialized(var, name):
     """Make sure the input variable is not None."""
     # Refer to the same function from megatron/megatron/training/global_vars.py
@@ -454,7 +458,7 @@ class ProcessMesh:
                 )
             torch.distributed.barrier(
                 group=self.get_process_group("dp-cp"),
-                device_ids=[torch.cuda.current_device()],
+                device_ids=[cur_platform.current_device()],
             )
             # Set `NCCL_COLLNET_ENABLE=0` to restrict SHARP application to DP process groups
             os.environ["NCCL_COLLNET_ENABLE"] = "0"

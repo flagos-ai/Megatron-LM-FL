@@ -36,6 +36,9 @@ try:
 except ImportError:
     HAVE_H5PY = False
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 
 class Block(TypedDict):
     """Specific block arg type to mute mypy."""
@@ -274,7 +277,7 @@ def get_blocks_by_rank(
         Returns:
             Max value across all ranks.
         """
-        n_tensor = torch.cuda.LongTensor([n])
+        n_tensor = cur_platform.LongTensor([n])
         torch.distributed.all_reduce(n_tensor, op=torch.distributed.ReduceOp.MAX)
         return n_tensor.item()
 

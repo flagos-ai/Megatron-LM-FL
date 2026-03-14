@@ -13,6 +13,8 @@ from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from megatron.plugin.utils import reduce_aux_losses_tracker_across_ranks_hetero
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -789,7 +791,6 @@ def reduce_aux_losses_tracker_across_ranks(track_names: Optional[List[str]] = No
             )
 
 
-
 def track_moe_metrics(
     loss_scale: float,
     iteration: int,
@@ -813,7 +814,7 @@ def track_moe_metrics(
             for key in track_names:
                 if key not in tracker:
                     tracker[key] = {}
-                    tracker[key]["values"] = torch.zeros(num_layers, device="cuda")
+                    tracker[key]["values"] = torch.zeros(num_layers, device=cur_platform.device_name())
                     tracker[key]["reduce_group"] = None
                     tracker[key]["avg_group"] = None
                     tracker[key]["reduce_group_has_dp"] = False
@@ -904,7 +905,7 @@ def maybe_move_tensor_to_cpu(tensor, as_numpy=False, record_stream=False):
         if as_numpy:
             cpu_tensor = cpu_tensor.numpy()
         if record_stream:
-            tensor.record_stream(torch.cuda.current_stream())
+            tensor.record_stream(cur_platform.current_stream())
         tensor = cpu_tensor
     return tensor
 

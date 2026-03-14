@@ -43,6 +43,8 @@ except ImportError:
     QLinearParams = MagicMock()
     get_qlinear_params_from_qat_params = MagicMock()
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class KitchenConfigType(Enum):
     """Configuration object types in config dictionary"""
@@ -169,7 +171,7 @@ def _get_extra_kitchen_kwargs(config: TransformerConfig):
     elif config.init_model_with_meta_device:
         extra_kitchen_kwargs["device"] = "meta"
     else:
-        extra_kitchen_kwargs["device"] = torch.cuda.current_device()
+        extra_kitchen_kwargs["device"] = cur_platform.current_device()
     return extra_kitchen_kwargs
 
 
@@ -681,7 +683,7 @@ class KitchenGroupedLinear(nvidia_kitchen.GroupedLinear):
         return out, None
 
     def _encode_extra_state(self, state):
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         state_serialized = bytearray(pickle.dumps(state))
         state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
         return state_serialized

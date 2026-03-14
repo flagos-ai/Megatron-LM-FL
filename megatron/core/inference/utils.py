@@ -9,6 +9,8 @@ import torch
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.utils import get_model_config
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class Counter:
     """A simple counter class
@@ -32,7 +34,7 @@ class Counter:
 def get_attention_mask(seq_length: int) -> torch.Tensor:
     """Constructs an attention mask given the input sequence length."""
     attention_mask = torch.tril(
-        torch.ones((1, seq_length, seq_length), device=torch.cuda.current_device())
+        torch.ones((1, seq_length, seq_length), device=cur_platform.current_device())
     ).view(1, 1, seq_length, seq_length)
 
     # Convert to boolean

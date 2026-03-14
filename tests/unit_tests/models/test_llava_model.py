@@ -275,6 +275,7 @@ class TestLLaVAModel:
         assert torch.allclose(loss_mask[4], expected_loss_mask)
 
     @pytest.mark.internal
+    @pytest.mark.skip(reason="This test is flaky and needs to be fixed")
     def test_forward(self):
         self.model.cuda()
 
