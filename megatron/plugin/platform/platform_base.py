@@ -203,10 +203,6 @@ class PlatformBase(ABC):
         ...
 
     @abc.abstractmethod
-    def is_available(self):
-        ...
-
-    @abc.abstractmethod
     def range(self, msg):
         ...
 
