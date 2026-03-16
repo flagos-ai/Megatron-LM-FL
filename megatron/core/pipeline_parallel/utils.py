@@ -191,7 +191,7 @@ class ScheduleNode:
                     )
 
                 self.output = data
-            cur_platform.nvtx.range_pop()
+            cur_platform.range_pop()
 
         # Immediately frees input tensors after they are used for nodes
         # where inputs are no longer needed after computation.
