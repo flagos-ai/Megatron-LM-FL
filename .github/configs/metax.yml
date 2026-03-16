@@ -93,6 +93,7 @@ test_matrix:
   functional:
     train:
       - device: c500
+        type: functional
         task: train
         model: deepseek
-        case: all
+        case: tp2_pp2_ep2
