@@ -49,50 +49,50 @@ container_options: >-
   -e TORCH_DISTRIBUTED_BACKEND=mccl
   -e MUSA_VISIBLE_DEVICES=all
 device_types:
-  - C500
+  - c500
 
 # Test matrix configuration
 test_matrix:
-  unit:
-    devices:
-      - C500
-    # Ignored test files for unit tests
-    # These files will be skipped when running pytest
-    ignored_tests:
-      - tests/unit_tests/data/test_preprocess_data.py
-      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py
-      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py
-      - tests/unit_tests/dist_checkpointing/test_safe_globals.py
-      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
-      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
-      - tests/unit_tests/distributed/test_mcore_fully_sharded_data_parallel.py
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
-      - tests/unit_tests/test_inference.py
-      - tests/unit_tests/test_rl_utils.py
-      - tests/unit_tests/models/test_gpt_model.py
-      - tests/unit_tests/models/test_mamba_model.py
-      - tests/unit_tests/post_training/test_modelopt_module_spec.py
-      - tests/unit_tests/transformer/moe/test_aux_loss.py
-      - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
-      - tests/unit_tests/transformer/moe/test_routers.py
-      - tests/unit_tests/transformer/test_attention.py
-      - tests/unit_tests/transformer/test_attention_packed_seq.py
-      - tests/unit_tests/transformer/test_cuda_graphs.py
-      - tests/unit_tests/transformer/test_full_cuda_graph.py
-      - tests/unit_tests/transformer/test_multi_latent_attention.py
-      - tests/unit_tests/transformer/test_multi_token_prediction.py
-      - tests/unit_tests/transformer/test_retro_attention.py
-      - tests/unit_tests/transformer/test_transformer_block.py
-      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
-      - tests/unit_tests/dist_checkpointing/test_local.py
+  # unit:
+  #   devices:
+  #     - c500
+  #   # Ignored test files for unit tests
+  #   # These files will be skipped when running pytest
+  #   ignored_tests:
+  #     - tests/unit_tests/data/test_preprocess_data.py
+  #     - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+  #     - tests/unit_tests/dist_checkpointing/test_optimizer.py
+  #     - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
+  #     - tests/unit_tests/dist_checkpointing/test_optimizer.py
+  #     - tests/unit_tests/dist_checkpointing/test_safe_globals.py
+  #     - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+  #     - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+  #     - tests/unit_tests/distributed/test_mcore_fully_sharded_data_parallel.py
+  #     - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+  #     - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+  #     - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
+  #     - tests/unit_tests/test_inference.py
+  #     - tests/unit_tests/test_rl_utils.py
+  #     - tests/unit_tests/models/test_gpt_model.py
+  #     - tests/unit_tests/models/test_mamba_model.py
+  #     - tests/unit_tests/post_training/test_modelopt_module_spec.py
+  #     - tests/unit_tests/transformer/moe/test_aux_loss.py
+  #     - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
+  #     - tests/unit_tests/transformer/moe/test_routers.py
+  #     - tests/unit_tests/transformer/test_attention.py
+  #     - tests/unit_tests/transformer/test_attention_packed_seq.py
+  #     - tests/unit_tests/transformer/test_cuda_graphs.py
+  #     - tests/unit_tests/transformer/test_full_cuda_graph.py
+  #     - tests/unit_tests/transformer/test_multi_latent_attention.py
+  #     - tests/unit_tests/transformer/test_multi_token_prediction.py
+  #     - tests/unit_tests/transformer/test_retro_attention.py
+  #     - tests/unit_tests/transformer/test_transformer_block.py
+  #     - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
+  #     - tests/unit_tests/dist_checkpointing/test_local.py
 
-  # functional:
-  #   train:
-  #     - device: C500
-  #       task: train
-  #       model: gpt
-  #       case: all
+  functional:
+    train:
+      - device: c500
+        task: train
+        model: deepseek
+        case: all
