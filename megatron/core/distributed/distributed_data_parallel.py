@@ -113,6 +113,9 @@ class DistributedDataParallel(_BaseDataParallel):
             # Set inter_dist_opt_group if multiple optimizer instances
             if self.ddp_config.num_distributed_optimizer_instances > 1:
                 self.inter_dist_opt_group = process_groups['inter_dist_opt_group']
+            
+            # Set engram_dp_group.
+            self.engram_dp_group = process_groups["engram_dp_group"]
 
         # Turn off bucketing if we are on a pipeline stage that is not the first (since
         # data-parallel communication on these stages is not on the critical path), or if
@@ -310,7 +313,8 @@ class DistributedDataParallel(_BaseDataParallel):
             if self.ddp_config.average_in_collective:
                 gradient_scaling_factor = 1.0
                 expert_gradient_scaling_factor = self.expt_dp_group.size() / self.dp_cp_group.size()
-                engram_embedding_gradient_scaling_factor = self.engram_dp_group.size() / self.dp_cp_group.size()
+                if self.engram_dp_group is not None:
+                    engram_embedding_gradient_scaling_factor = self.engram_dp_group.size() / self.dp_cp_group.size()
             else:
                 data_parallel_world_size = self.dp_cp_group.size()
 
@@ -333,13 +337,16 @@ class DistributedDataParallel(_BaseDataParallel):
         )
 
         # Allocate separate param+grad buffers for engram embedding parallel params' grads.
-        self.engram_embedding_buffers, self.engram_embedding_bucket_groups = (
-            _allocate_buffers_for_parameters(
-                engram_embedding_params,
-                self.engram_dp_group,
-                gradient_scaling_factor=engram_embedding_gradient_scaling_factor,
+        if self.engram_dp_group is not None:
+            self.engram_embedding_buffers, self.engram_embedding_bucket_groups = (
+                _allocate_buffers_for_parameters(
+                    engram_embedding_params,
+                    self.engram_dp_group,
+                    gradient_scaling_factor=engram_embedding_gradient_scaling_factor,
+                )
             )
-        )
+        else:
+            self.engram_embedding_buffers,  self.engram_embedding_bucket_groups = [], []
 
 
         # Delete references to weight_tensor if they exist since we don't want two parameter copies

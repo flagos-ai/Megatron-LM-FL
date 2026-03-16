@@ -248,11 +248,6 @@ class TransformerLayerNode(ScheduleNode):
         self.submodule = submodule
         self.detached = tuple()
         self.before_detached = tuple()
-        if extra_args.get("is_engram", False):
-            self.chunk_state.engram_hash_input_ids = extra_args["engram_hash_input_ids"]
-            self.layer_state.engram = extra_args["engram"]
-            self.layer_state.is_engram = extra_args["is_engram"]
-            self.layer_state.engram_hash_layer_id = extra_args["engram_hash_layer_id"]
 
         # Create flags to indicate first and last layer
         self.is_first_layer = extra_args.get("is_first_layer", False)
@@ -342,7 +337,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         Performs same attnention forward logic as GPT Model.
         """
         if getattr(node.layer_state, "is_engram", False):
-            hash_input_ids = node.chunk_state.engram_hash_input_ids
+            hash_input_ids = node.chunk_state.extra_block_kwargs["engram_hash_input_ids"]
             hidden_states = node.layer_state.engram(hidden_states=hidden_states, hash_input_ids=hash_input_ids[node.layer_state.engram_hash_layer_id]) + hidden_states
         hidden_states, _ = layer._forward_attention(
             hidden_states=hidden_states,

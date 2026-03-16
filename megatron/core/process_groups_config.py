@@ -9,6 +9,10 @@ from typing import List, Optional
 import torch
 
 from megatron.core import parallel_state
+import logging
+from megatron.core.utils import log_single_rank
+
+logger = logging.getLogger(__name__)
 
 
 class ProcessGroupHelperMeta(type):
@@ -441,15 +445,19 @@ class ProcessGroupCollection:
             intra_expt_dp_group_gloo = None
             # Engram data parallel group and embedding_parallel_group
             if not hasattr(pg_collection, "engram_dp"):
-                raise ValueError(
-                    "engram_dp process group is required but not provided in pg_collection. "
-                    "Please explicitly set it to None if you don't need it."
+                pg_collection.engram_dp = None
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "No engram data parallel group provided in pg_collection, set it to None."
                 )
             engram_dp_group = pg_collection.engram_dp
             if not hasattr(pg_collection, "engram_embed"):
-                raise ValueError(
-                    "engram_embed process group is required but not provided in pg_collection. "
-                    "Please explicitly set it to None if you don't need it."
+                pg_collection.engram_embed = None
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "No engram embedding parallel group provided in pg_collection, set it to None."
                 )
             engram_embed_group = pg_collection.engram_embed
             engram_dp_group_gloo = None
@@ -600,7 +608,21 @@ class ProcessGroupCollection:
             result['tp_group'] = pg_collection.tp
             result['pp_group'] = pg_collection.pp
             result['ep_group'] = pg_collection.ep
-            # 6. Engram parallel groups
+            # 6. Engram data parallel group and embedding_parallel_group
+            if not hasattr(pg_collection, "engram_dp"):
+                pg_collection.engram_dp = None
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "No engram data parallel group provided in pg_collection, set it to None."
+                )
+            if not hasattr(pg_collection, "engram_embed"):
+                pg_collection.engram_embed = None
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "No engram embedding parallel group provided in pg_collection, set it to None."
+                )
             result['engram_dp_group'] = pg_collection.engram_dp
             result['engram_embed_group'] = pg_collection.engram_embed
             return result

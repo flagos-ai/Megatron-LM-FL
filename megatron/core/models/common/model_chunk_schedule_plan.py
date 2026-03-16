@@ -119,8 +119,9 @@ class TransformerLayerSchedulePlan:
         extra_args["delay_wgrad_compute"] = self.layer.config.delay_wgrad_compute
         extra_args["is_mtp"] = is_mtp
         if extra_args.get("is_engram", False):
-            extra_args["engram"] = getattr(self.layer, "engram")
-            extra_args["engram_hash_layer_id"] = getattr(self.layer, "engram_hash_layer_id")
+            self.layer_state.engram = getattr(self.layer, "engram")
+            self.layer_state.engram_hash_layer_id = getattr(self.layer, "engram_hash_layer_id")
+            self.layer_state.is_engram = True
 
         # wrapper to help create TransformerLayerNode
         def create_node(stream, module, name):
@@ -333,7 +334,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             if hasattr(layer, "engram"):
                 extra_args = {
                     "is_engram": True,
-                    "engram_hash_input_ids": model.engram_hash_input_ids
+                    "engram_hash_input_ids": self._model_chunk_state.extra_block_kwargs["engram_hash_input_ids"]
                 }
             else:
                 extra_args = {}
