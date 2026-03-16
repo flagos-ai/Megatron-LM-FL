@@ -31,7 +31,7 @@ class PlatformMUSA(PlatformBase):
                 return True
             else:
                 return False
-        except (RuntimeError, ImportError) as e:
+        except Exception as e:
             return False
 
     def get_device_properties(self, device_index=None):
