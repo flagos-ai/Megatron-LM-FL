@@ -63,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           cd $PROJECT_ROOT
-          pip install -e . --no-deps 
+          python -m pip install -e . --no-deps 
         timeout-minutes: 30
 
       - name: Run functional tests

@@ -13,8 +13,8 @@
 # limitations under the License.
 name: 'Release Megatron-Core'
 
-# on:
-#   workflow_dispatch:
+on:
+  workflow_dispatch:
 #     inputs:
 #       release-ref:
 #         description: Ref (SHA or branch name) to release

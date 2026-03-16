@@ -13,8 +13,8 @@
 # limitations under the License.
 name: "Code freeze"
 
-# on:
-#   workflow_dispatch:
+on:
+  workflow_dispatch:
 #     inputs:
 #       release-type:
 #         type: choice

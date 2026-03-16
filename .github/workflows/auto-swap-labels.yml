@@ -1,9 +1,11 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 name: Auto Swap Labels
-# on:
+
+on:
 #   pull_request_review:
 #     types: [submitted]
+  workflow_dispatch: # Allows manual triggering
 
 permissions:
   pull-requests: write

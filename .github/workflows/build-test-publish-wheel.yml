@@ -14,7 +14,7 @@
 
 name: Build, test, and publish a PyPi wheel (to testpypi).
 
-# on:
+on:
 #   push:
 #     branches:
 #       - main
@@ -22,6 +22,7 @@ name: Build, test, and publish a PyPi wheel (to testpypi).
 #       - 'deploy-release/*'
 #   merge_group:
 #     types: [checks_requested]
+  workflow_dispatch: # Allows manual triggering
 
 defaults:
   run:

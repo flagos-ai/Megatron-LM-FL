@@ -1,9 +1,10 @@
 name: Auto-assign Milestone to PR
 
-# on:
+on:
 #   push:
 #     branches:
 #       - "pull-request/[0-9]+"
+  workflow_dispatch: # Allows manual triggering
 
 permissions:
   contents: read

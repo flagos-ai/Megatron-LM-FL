@@ -2,10 +2,10 @@
 
 name: Auto Reminder Bot
 
-# on:
-#   workflow_dispatch:
+on:
 #   schedule:
 #     - cron: "0 12 * * *"
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   run-script:
