@@ -10,13 +10,6 @@ try:
 except ImportError:
     pass
 
-pynvml = None
-try:
-    import pynvml
-    pynvml.nvmlInit()
-except Exception:
-    pynvml = None
-
 
 class PlatformMUSA(PlatformBase):
 
