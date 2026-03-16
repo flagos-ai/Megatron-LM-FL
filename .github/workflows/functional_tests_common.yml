@@ -56,6 +56,7 @@ jobs:
       ## The above step is commented out because there is no git cli in the container, and it causes the step to fail. The safe directory is set in the next step with a conditional check.
       - name: Set safe directory
         run: |
+          mkdir -p $PROJECT_ROOT
           command -v git && git config --global --add safe.directory $PROJECT_ROOT || true
 
       - name: Setup Python environment
