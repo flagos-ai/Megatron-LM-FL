@@ -63,7 +63,7 @@ jobs:
         run: |
           set -euo pipefail
           cd $PROJECT_ROOT
-          python -m pip install -e . --no-deps 
+          pip install -e . --no-deps 
         timeout-minutes: 30
 
       - name: Run functional tests
@@ -110,4 +110,12 @@ jobs:
           exit_code=${exit_code:-0}
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
+        timeout-minutes: 60
+
+      - name: Debug - keep container alive on failure
+        if: failure()
+        run: |
+          echo "Container sleeping for 60 minutes for debugging..."
+          echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
+          sleep 3600
         timeout-minutes: 60
