@@ -87,6 +87,7 @@ class DistributedDataParallel(_BaseDataParallel):
             self.intra_expt_dp_group = parallel_state.get_expert_data_parallel_group(
                 partial_expert_data_parallel=True
             )
+            self.engram_dp_group = parallel_state.get_engram_data_parallel_group()
             if self.ddp_config.num_distributed_optimizer_instances > 1:
                 self.inter_dist_opt_group = (
                     parallel_state.get_inter_distributed_optimizer_instance_group()
@@ -112,6 +113,9 @@ class DistributedDataParallel(_BaseDataParallel):
             # Set inter_dist_opt_group if multiple optimizer instances
             if self.ddp_config.num_distributed_optimizer_instances > 1:
                 self.inter_dist_opt_group = process_groups['inter_dist_opt_group']
+            
+            # Set engram_dp_group.
+            self.engram_dp_group = process_groups["engram_dp_group"]
 
         # Turn off bucketing if we are on a pipeline stage that is not the first (since
         # data-parallel communication on these stages is not on the critical path), or if
@@ -131,6 +135,7 @@ class DistributedDataParallel(_BaseDataParallel):
         param_to_name = {}
         dense_params = []
         expert_parallel_params = []
+        engram_embedding_params = []
         self.params_with_grad = []
         for name, param in self.module.named_parameters():
             if not param.requires_grad:
@@ -146,7 +151,10 @@ class DistributedDataParallel(_BaseDataParallel):
             if getattr(param, 'allreduce', True):
                 dense_params.append(param)
             else:
-                expert_parallel_params.append(param)
+                if getattr(param, "is_engram_embedding", False):
+                    engram_embedding_params.append(param)
+                else:
+                    expert_parallel_params.append(param)
 
         def _allocate_buffers_for_parameters(
             input_params, data_parallel_group, gradient_scaling_factor
@@ -305,11 +313,14 @@ class DistributedDataParallel(_BaseDataParallel):
             if self.ddp_config.average_in_collective:
                 gradient_scaling_factor = 1.0
                 expert_gradient_scaling_factor = self.expt_dp_group.size() / self.dp_cp_group.size()
+                if self.engram_dp_group is not None:
+                    engram_embedding_gradient_scaling_factor = self.engram_dp_group.size() / self.dp_cp_group.size()
             else:
                 data_parallel_world_size = self.dp_cp_group.size()
 
                 gradient_scaling_factor = 1.0 / data_parallel_world_size
                 expert_gradient_scaling_factor = 1.0 / data_parallel_world_size
+                engram_embedding_gradient_scaling_factor = 1.0 / data_parallel_world_size
 
         # Allocate the param+grad buffers for dense params' grads.
         self.buffers, self.bucket_groups = _allocate_buffers_for_parameters(
@@ -324,6 +335,19 @@ class DistributedDataParallel(_BaseDataParallel):
                 gradient_scaling_factor=expert_gradient_scaling_factor,
             )
         )
+
+        # Allocate separate param+grad buffers for engram embedding parallel params' grads.
+        if self.engram_dp_group is not None:
+            self.engram_embedding_buffers, self.engram_embedding_bucket_groups = (
+                _allocate_buffers_for_parameters(
+                    engram_embedding_params,
+                    self.engram_dp_group,
+                    gradient_scaling_factor=engram_embedding_gradient_scaling_factor,
+                )
+            )
+        else:
+            self.engram_embedding_buffers,  self.engram_embedding_bucket_groups = [], []
+
 
         # Delete references to weight_tensor if they exist since we don't want two parameter copies
         # if we re-mapped parameters (which happens when we use the distributed optimizer).
@@ -474,12 +498,12 @@ class DistributedDataParallel(_BaseDataParallel):
         """
         Context manager that turns off gradient synchronization.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
             bucket_group.is_last_microbatch = False
         try:
             yield
         finally:
-            for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+            for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
                 bucket_group.is_last_microbatch = True
 
     def start_param_sync(self, *unused, force_sync: bool = False, force_dispatch: bool = False):
@@ -501,7 +525,7 @@ class DistributedDataParallel(_BaseDataParallel):
             if self.overlap_param_gather_with_optimizer_step and not force_dispatch:
                 return
 
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
             bucket_group.start_param_sync(force_sync=force_sync)
 
             if not self.ddp_config.overlap_param_gather:
@@ -541,7 +565,7 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
             bucket_group.start_grad_sync()
 
     def finish_grad_sync(self):
@@ -553,12 +577,12 @@ class DistributedDataParallel(_BaseDataParallel):
         calls to complete. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
             bucket_group.finish_grad_sync()
 
     def scale_gradients(self, scaling_factor: float):
         """Scale all gradients inside the buffers by `scaling_factor`."""
-        for buffer in self.buffers + self.expert_parallel_buffers:
+        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:
             buffer.scale_gradients(scaling_factor)
 
     def zero_grad_buffer(self):
@@ -572,9 +596,9 @@ class DistributedDataParallel(_BaseDataParallel):
             # to True, and there will be a double-GA.
             for param in self.params_with_grad:
                 param.grad_added_to_main_grad = False
-        for buffer in self.buffers + self.expert_parallel_buffers:
+        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:
             buffer.reset()
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups:
+        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
             bucket_group.reset()
 
     def broadcast_params(self):
@@ -585,7 +609,11 @@ class DistributedDataParallel(_BaseDataParallel):
             is_expert_parallel = not getattr(param, 'allreduce', True)
 
             if is_expert_parallel:
-                data_parallel_group = self.expt_dp_group
+                is_engram_embedding_parallel = getattr(param, "is_engram_embedding", False)
+                if is_engram_embedding_parallel:
+                    data_parallel_group = self.engram_dp_group
+                else:
+                    data_parallel_group = self.expt_dp_group
             else:
                 data_parallel_group = self.dp_cp_group
             torch.distributed.broadcast(

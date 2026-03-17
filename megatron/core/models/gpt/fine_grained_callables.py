@@ -336,6 +336,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         Performs same attnention forward logic as GPT Model.
         """
+        if getattr(node.layer_state, "is_engram", False):
+            hash_input_ids = node.chunk_state.extra_block_kwargs["engram_hash_input_ids"]
+            hidden_states = node.layer_state.engram(hidden_states=hidden_states, hash_input_ids=hash_input_ids[node.layer_state.engram_hash_layer_id]) + hidden_states
         hidden_states, _ = layer._forward_attention(
             hidden_states=hidden_states,
             attention_mask=node.chunk_state.attention_mask,

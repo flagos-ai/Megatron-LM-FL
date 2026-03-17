@@ -272,7 +272,8 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
             for param in group["params"]:
                 orig_param = param
                 cpu_copy = False
-                if offload_params_numel < offload_threshold and param.is_cuda:
+                if (getattr(param, "is_offloading_candidate", False) or offload_params_numel < offload_threshold) and param.is_cuda:
+                    # If the param is a candidate for offloading and enven if we have not offloaded enough params, we offload it to CPU.
                     param = param.detach().clone().cpu().pin_memory()
                     offload_params_numel += param.numel()
                     cpu_copy = True
