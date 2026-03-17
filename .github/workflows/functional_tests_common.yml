@@ -31,7 +31,7 @@ jobs:
       run:
         shell: bash
     env:
-      PROJECT_ROOT: /workspace/Megatron-LM-FL
+      PROJECT_ROOT: ${{ github.workspace }}
     runs-on: ${{ fromJson(inputs.runs_on) }}
     strategy:
       fail-fast: false
@@ -56,9 +56,14 @@ jobs:
       ## The above step is commented out because there is no git cli in the container, and it causes the step to fail. The safe directory is set in the next step with a conditional check.
       - name: Set safe directory
         run: |
-          mkdir -p $PROJECT_ROOT
           command -v git && git config --global --add safe.directory $PROJECT_ROOT || true
-
+          
+      - name: Activate Python environment
+        run: |
+          source /opt/conda/etc/profile.d/conda.sh
+          conda activate base   # 或镜像内实际的 env name
+          echo "PATH=$PATH" >> $GITHUB_ENV
+    
       - name: Setup Python environment
         run: |
           set -euo pipefail
