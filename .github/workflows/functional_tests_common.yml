@@ -57,7 +57,7 @@ jobs:
       - name: Set safe directory
         run: |
           command -v git && git config --global --add safe.directory $PROJECT_ROOT || true
-          
+
       - name: Activate Python environment
         run: |
           source /opt/conda/etc/profile.d/conda.sh
@@ -83,7 +83,6 @@ jobs:
           MODEL='${{ matrix.test_config.model }}'
           CASE='${{ matrix.test_config.case }}'
 
-
           echo "Running functional tests for training"
           echo "Platform: $PLATFORM"
           echo "Device: $DEVICE"
@@ -92,27 +91,26 @@ jobs:
           echo "Case: ${CASE:-all}"
 
           # Set environment variables
-          export PYTHONPATH=$PROJECT_ROOT:$PYTHONPATH
-          export TORCHINDUCTOR_CACHE_DIR=/workspace/.torch_inductor_cache
-          mkdir -p $TORCHINDUCTOR_CACHE_DIR
+          export PYTHONPATH=$PROJECT_ROOT:${PYTHONPATH:-}
 
-          # Run functional tests
-          # The functional tests are located in tests/functional_tests
-          # Adjust the test path and command based on the model and case
-          TEST_DIR="tests/functional_tests"
+          # Run functional tests via run_tests.sh with explicit platform/device/task/model/case
+          set +e
+          bash "$PROJECT_ROOT/tests/test_utils/runners/run_tests.sh" \
+            --platform "$PLATFORM" \
+            --device "$DEVICE" \
+            --type functional \
+            --task "$TASK" \
+            --model "$MODEL" \
+            --list "$CASE"
+          exit_code=$?
+          set -e
 
-          if [ -d "$TEST_DIR" ]; then
-            echo "Running functional tests from $TEST_DIR"
-            pytest -v "$TEST_DIR" \
-              --tb=short \
-              -x \
-              || exit_code=$?
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ Functional tests passed for $PLATFORM/$DEVICE/$TASK/$MODEL/$CASE"
           else
-            echo "Functional test directory not found: $TEST_DIR"
-            exit_code=0
+            echo "❌ Functional tests failed for $PLATFORM/$DEVICE/$TASK/$MODEL/$CASE (exit code: $exit_code)"
           fi
 
-          exit_code=${exit_code:-0}
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
         timeout-minutes: 60
