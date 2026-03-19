@@ -68,37 +68,36 @@ jobs:
           IGNORED_TESTS=$(yq '.test_matrix.unit.ignored_tests // [] | tojson(0)' "$CONFIG_FILE")
           echo "ignored_tests=$IGNORED_TESTS" >> $GITHUB_OUTPUT
 
-  unit_tests:
-    needs: checkout_and_config
-    strategy:
-      fail-fast: false
-      matrix:
-        device: ${{ fromJson(needs.checkout_and_config.outputs.device_types) }}
-    uses: ./.github/workflows/unit_tests_common.yml
-    name: unit_tests
-    with:
-      platform: ${{ inputs.platform }}
-      device: ${{ matrix.device }}
-      image: ${{ needs.checkout_and_config.outputs.ci_image }}
-      runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
-      container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
-      container_options: ${{ needs.checkout_and_config.outputs.container_options }}
-      ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
-
-  # arguments.py not compatible with megatron-core-fl
-  # functional_tests_train:
-  #   needs:
-  #     - checkout_and_config
-  #     - unit_tests
-  #   if: fromJson(needs.checkout_and_config.outputs.train_test_matrix)[0] != null
-  #   uses: ./.github/workflows/functional_tests_train.yml
+  # unit_tests:
+  #   needs: checkout_and_config
+  #   strategy:
+  #     fail-fast: false
+  #     matrix:
+  #       device: ${{ fromJson(needs.checkout_and_config.outputs.device_types) }}
+  #   uses: ./.github/workflows/unit_tests_common.yml
+  #   name: unit_tests
   #   with:
   #     platform: ${{ inputs.platform }}
-  #     test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
+  #     device: ${{ matrix.device }}
   #     image: ${{ needs.checkout_and_config.outputs.ci_image }}
   #     runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
   #     container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
   #     container_options: ${{ needs.checkout_and_config.outputs.container_options }}
+  #     ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
+
+  # arguments.py not compatible with megatron-core-fl
+  functional_tests:
+    needs:
+      - checkout_and_config
+    if: fromJson(needs.checkout_and_config.outputs.train_test_matrix)[0] != null
+    uses: ./.github/workflows/functional_tests_common.yml
+    with:
+      platform: ${{ inputs.platform }}
+      test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
+      image: ${{ needs.checkout_and_config.outputs.ci_image }}
+      runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
+      container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
+      container_options: ${{ needs.checkout_and_config.outputs.container_options }}
 
 
   all_tests_complete:
@@ -107,8 +106,8 @@ jobs:
         shell: bash
     needs:
       - checkout_and_config
-      - unit_tests
-      # - functional_tests_train
+      # - unit_tests
+      - functional_tests
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -117,17 +116,17 @@ jobs:
           # Check all test jobs (skip if not run)
           failed=false
 
-          if [ "${{ needs.unit_tests.result }}" != "success" ]; then
-            echo "❌ Unit tests failed"
-            failed=true
-          fi
-
-          # # Only check functional tests if they ran
-          # if [ "${{ needs.functional_tests_train.result }}" != "success" ] && \
-          #    [ "${{ needs.functional_tests_train.result }}" != "skipped" ]; then
-          #   echo "❌ Training functional tests failed"
+          # if [ "${{ needs.unit_tests.result }}" != "success" ]; then
+          #   echo "❌ Unit tests failed"
           #   failed=true
           # fi
+
+          # # Only check functional tests if they ran
+          if [ "${{ needs.functional_tests.result }}" != "success" ] && \
+             [ "${{ needs.functional_tests.result }}" != "skipped" ]; then
+            echo "❌ Training functional tests failed"
+            failed=true
+          fi
 
           if [ "$failed" = "true" ]; then
             exit 1

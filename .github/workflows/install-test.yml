@@ -17,7 +17,7 @@
 
 name: Installation Test
 
-# on:
+on:
 #   push:
 #     branches:
 #       - dev
@@ -26,6 +26,7 @@ name: Installation Test
 #       - 'deploy-release/*'
 #   merge_group:
 #     types: [checks_requested]
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   pre-flight:
