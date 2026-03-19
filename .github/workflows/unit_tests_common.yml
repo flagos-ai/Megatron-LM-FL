@@ -286,8 +286,8 @@ jobs:
           exit $exit_code
         timeout-minutes: 60
 
-      - name: Debug - keep container alive on failure
-        if: failure()
+      - name: Debug - keep container alive on finished
+        if: steps.should_run.outputs.should_run == 'true'
         run: |
           echo "Container sleeping for 60 minutes for debugging..."
           echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
