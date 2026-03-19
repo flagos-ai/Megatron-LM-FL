@@ -1,0 +1,30 @@
+# Hardware Configuration Template for Megatron-LM-FL
+
+hardware_name: my_hardware # Change this to your hardware name
+display_name: 'My Hardware Tests' # Display name for GitHub Actions
+
+# Docker image for this hardware (change image tag if needed)
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:my-hardware-image
+
+# Runner labels for this hardware
+runner_labels:
+  - self-hosted
+  - Linux
+  - X64
+  - my-runner-label # Update: change to your runner's labels
+  - gpu-8
+
+# Container volumes (hardware-specific paths)
+container_volumes:
+  - /home/flagscale_cicd/flask/static:/workspace/report
+  - /home/flagscale_cicd/flask/config:/workspace/config
+  - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
+  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
+  - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
+  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+# Add hardware-specific volumes here if needed (e.g., cache locations)
+
+# Container options (hardware-specific settings)
+container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
+
+# Add your Device types and Test matrix configuration below
