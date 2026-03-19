@@ -196,7 +196,10 @@ jobs:
             *) CHANGED="true" ;;
           esac
 
-          echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
+          # echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
+
+          # Force Run
+          echo "should_run=true" >> $GITHUB_OUTPUT
   
 
       - name: Checkout source code
@@ -218,7 +221,13 @@ jobs:
       - name: Set safe directory
         if: steps.should_run.outputs.should_run == 'true'
         run: |
-          git config --global --add safe.directory $GITHUB_WORKSPACE
+          command -v git && git config --global --add safe.directory $GITHUB_WORKSPACE || true
+
+      - name: Activate Python environment
+        run: |
+          source /opt/conda/etc/profile.d/conda.sh
+          conda activate base
+          echo "PATH=$PATH" >> $GITHUB_ENV
 
       - name: Setup Python environment
         if: steps.should_run.outputs.should_run == 'true'
@@ -272,4 +281,12 @@ jobs:
           exit_code=$?
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
+        timeout-minutes: 60
+
+      - name: Debug - keep container alive on failure
+        if: failure()
+        run: |
+          echo "Container sleeping for 60 minutes for debugging..."
+          echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
+          sleep 3600
         timeout-minutes: 60
