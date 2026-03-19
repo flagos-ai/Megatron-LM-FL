@@ -24,7 +24,6 @@ def _get_device_backend():
                 f"Unsupported platform: {platform}! "
                 "Currently supported platforms are: ascend, metax, cuda. Please add adaptation code for other platforms."：{platform}！"
             )
-        #aa
 
 DEVICE_TYPE, DIST_BACKEND = _get_device_backend()
 
