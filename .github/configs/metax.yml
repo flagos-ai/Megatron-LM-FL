@@ -84,6 +84,44 @@ test_matrix:
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
       - tests/unit_tests/dist_checkpointing/test_local.py
 
+      # === Need >2 GPU（model_size > 2） ===
+      # core: tp=2,pp=4 or tp=world_size
+      - tests/unit_tests/test_parallel_state.py
+      - tests/unit_tests/test_tokenizer.py
+      # tensor_parallel: tp≥4 or tp*pp=8
+      - tests/unit_tests/tensor_parallel/test_cross_entropy.py
+      - tests/unit_tests/tensor_parallel/test_mappings.py
+      - tests/unit_tests/tensor_parallel/test_data.py
+      - tests/unit_tests/tensor_parallel/test_random.py
+      - tests/unit_tests/tensor_parallel/test_initialization.py
+      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py
+      - tests/unit_tests/tensor_parallel/test_layers.py
+      # pipeline_parallel: pp≥4
+      - tests/unit_tests/pipeline_parallel/test_schedules.py
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      # transformer: tp*pp>2 or ep>2
+      - tests/unit_tests/transformer/test_transformer_layer.py
+      - tests/unit_tests/transformer/test_submodule_callables.py
+      - tests/unit_tests/transformer/moe/test_sequential_mlp.py
+      - tests/unit_tests/transformer/moe/test_token_dispatcher.py
+      # models: tp≥4
+      - tests/unit_tests/models/test_t5_model.py
+      - tests/unit_tests/models/test_llava_model.py
+      # distributed: pp=4
+      - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      # dist_checkpointing: tp*pp=8
+      - tests/unit_tests/dist_checkpointing/test_serialization.py
+      - tests/unit_tests/dist_checkpointing/test_strict.py
+      - tests/unit_tests/dist_checkpointing/test_async_save.py
+      - tests/unit_tests/dist_checkpointing/test_msc.py
+      - tests/unit_tests/dist_checkpointing/test_torch_dist.py
+      - tests/unit_tests/dist_checkpointing/test_replication.py
+      - tests/unit_tests/dist_checkpointing/test_flattened_resharding.py
+      # ssm: cp≥4 or tp=4
+      - tests/unit_tests/ssm/test_mamba_mixer.py
+      - tests/unit_tests/ssm/test_mamba_context_parallel.py
+
   # functional:
   #   train:
   #     - device: c500
