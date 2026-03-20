@@ -269,12 +269,20 @@ jobs:
           # Build ignore options from ignored_tests input
           IGNORED_TESTS='${{ inputs.ignored_tests }}'
           IGNORE_OPTS=""
+          FINAL_TEST_PATH="$TEST_PATH"
           if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
             echo "Parsing ignored tests list..."
-            # Parse JSON array and build ignore/deselect options
-            # Use --ignore for file-level entries (no '::') to prevent import errors during collection
-            # Use --deselect for specific test case entries (containing '::')
-            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]; print(' '.join(opts)) if tests else None")
+            if echo "$TEST_PATH" | grep -q '\*'; then
+              # Glob pattern: pytest --ignore does NOT skip explicitly-listed file args.
+              # Pre-filter the expanded file list in Python to exclude ignored files directly.
+              FINAL_TEST_PATH=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json, glob; ignored = json.load(sys.stdin); ignored_files = set(t for t in ignored if '::' not in t); files = sorted(f for f in glob.glob('$TEST_PATH') if f not in ignored_files); print(' '.join(files))")
+              # For glob mode, only --deselect applies (for specific test-case entries containing '::')
+              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--deselect=' + t for t in tests if '::' in t]; print(' '.join(opts))")
+            else
+              # Directory path: pytest auto-discovery respects --ignore for files/dirs
+              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]; print(' '.join(opts))")
+            fi
+            echo "Test paths: $FINAL_TEST_PATH"
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
@@ -282,7 +290,7 @@ jobs:
 
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=2 -m pytest -v $TEST_PATH $IGNORE_OPTS -p no:randomly
+          torchrun --nproc_per_node=2 -m pytest -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
