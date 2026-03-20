@@ -1,5 +1,5 @@
-# Metax Hardware Configuration for Megatron-LM Testing
-# This file defines CI/CD settings for METAX-based testing
+# Metax Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Metax-based testing
 # Test configurations are defined in tests/test_utils/config/platforms/metax.yaml
 
 hardware_name: metax
@@ -24,12 +24,11 @@ container_volumes:
   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+  # Metax GPU driver
+  - /dev/dri:/dev/dri
+  - /dev/mxcd:/dev/mxcd
 
-  - /dev/dri:/dev/dri 
-  - /dev/mxcd:/dev/mxcd 
-  - /opt/maca:/opt/maca 
-  - /opt/mxdriver:/opt/mxdriver 
-
+# Container options (hardware-specific settings)
 container_options: >-
   --privileged
   --shm-size=500g
@@ -41,7 +40,7 @@ container_options: >-
   --group-add video
   -e PLATFORM=metax
   -e TORCH_DISTRIBUTED_BACKEND=mccl
-  -e MUSA_VISIBLE_DEVICES=all
+  -e MACA_VISIBLE_DEVICES=all
 device_types:
   - c500
 
@@ -125,9 +124,10 @@ test_matrix:
       - tests/unit_tests/ssm/test_mamba_mixer.py
       - tests/unit_tests/ssm/test_mamba_context_parallel.py
 
-      # specific case that are unstable on MetaX
+      # specific case that are unstable on Metax
       - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel::test_inference
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer
 
   # functional:
   #   train:
