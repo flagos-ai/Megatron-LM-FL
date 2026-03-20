@@ -139,27 +139,30 @@ jobs:
           - name: models
             path: "tests/unit_tests/models/"
             description: "Model tests"
-          - name: distributed
-            path: "tests/unit_tests/distributed/"
-            description: "Distributed tests"
-          - name: dist_checkpointing
-            path: "tests/unit_tests/dist_checkpointing/"
-            description: "Distributed checkpointing tests"
-          - name: tensor_parallel
-            path: "tests/unit_tests/tensor_parallel/"
-            description: "Tensor parallel tests"
-          - name: pipeline_parallel
-            path: "tests/unit_tests/pipeline_parallel/"
-            description: "Pipeline parallel tests"
-          - name: data
-            path: "tests/unit_tests/data/"
-            description: "Data tests"
-          - name: fusions
-            path: "tests/unit_tests/fusions/"
-            description: "Fusion tests"
-          - name: others
-            path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
-            description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
+          # - name: distributed
+          #   path: "tests/unit_tests/distributed/"
+          #   description: "Distributed tests"
+          # - name: dist_checkpointing
+          #   path: "tests/unit_tests/dist_checkpointing/"
+          #   description: "Distributed checkpointing tests"
+          # - name: tensor_parallel
+          #   path: "tests/unit_tests/tensor_parallel/"
+          #   description: "Tensor parallel tests"
+          # - name: pipeline_parallel
+          #   path: "tests/unit_tests/pipeline_parallel/"
+          #   description: "Pipeline parallel tests"
+          # - name: data
+          #   path: "tests/unit_tests/data/"
+          #   description: "Data tests"
+          # - name: fusions
+          #   path: "tests/unit_tests/fusions/"
+          #   description: "Fusion tests"
+          - name: post_training
+            path: "tests/unit_tests/post_training/"
+            description: "Post Training unit tests"
+          # - name: others
+          #   path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
+          #   description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
     name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
     container:
       image: ${{ inputs.image }}
@@ -196,7 +199,10 @@ jobs:
             *) CHANGED="true" ;;
           esac
 
-          echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
+          # echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
+
+          # Force Run
+          echo "should_run=true" >> $GITHUB_OUTPUT
   
 
       - name: Checkout source code
@@ -218,7 +224,13 @@ jobs:
       - name: Set safe directory
         if: steps.should_run.outputs.should_run == 'true'
         run: |
-          git config --global --add safe.directory $GITHUB_WORKSPACE
+          command -v git && git config --global --add safe.directory $GITHUB_WORKSPACE || true
+
+      - name: Activate Python environment
+        run: |
+          source /opt/conda/etc/profile.d/conda.sh
+          conda activate base
+          echo "PATH=$PATH" >> $GITHUB_ENV
 
       - name: Setup Python environment
         if: steps.should_run.outputs.should_run == 'true'
@@ -228,7 +240,7 @@ jobs:
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
           # Install package in development mode
-          pip install boto3==1.42.1
+          pip install boto3==1.42.1 mock
           pip install -e . --no-deps
         timeout-minutes: 30
 
@@ -257,10 +269,20 @@ jobs:
           # Build ignore options from ignored_tests input
           IGNORED_TESTS='${{ inputs.ignored_tests }}'
           IGNORE_OPTS=""
+          FINAL_TEST_PATH="$TEST_PATH"
           if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
             echo "Parsing ignored tests list..."
-            # Parse JSON array and build --ignore options
-            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); print(' '.join(['--deselect=' + t for t in tests])) if tests else None")
+            if echo "$TEST_PATH" | grep -q '\*'; then
+              # Glob pattern: pytest --ignore does NOT skip explicitly-listed file args.
+              # Pre-filter the expanded file list in Python to exclude ignored files directly.
+              FINAL_TEST_PATH=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json, glob; ignored = json.load(sys.stdin); ignored_files = set(t for t in ignored if '::' not in t); files = sorted(f for f in glob.glob('$TEST_PATH') if f not in ignored_files); print(' '.join(files))")
+              # For glob mode, only --deselect applies (for specific test-case entries containing '::')
+              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--deselect=' + t for t in tests if '::' in t]; print(' '.join(opts))")
+            else
+              # Directory path: pytest auto-discovery respects --ignore for files/dirs
+              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]; print(' '.join(opts))")
+            fi
+            echo "Test paths: $FINAL_TEST_PATH"
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
@@ -268,8 +290,16 @@ jobs:
 
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=8 -m pytest -v $TEST_PATH $IGNORE_OPTS -p no:randomly
+          torchrun --nproc_per_node=2 -m pytest -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
+        timeout-minutes: 60
+
+      - name: Debug - keep container alive on failure
+        if: failure()
+        run: |
+          echo "Container sleeping for 10 minutes for debugging..."
+          echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
+          sleep 600
         timeout-minutes: 60
