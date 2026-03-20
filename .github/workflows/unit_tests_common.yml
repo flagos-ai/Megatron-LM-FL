@@ -274,12 +274,7 @@ jobs:
             # Parse JSON array and build ignore/deselect options
             # Use --ignore for file-level entries (no '::') to prevent import errors during collection
             # Use --deselect for specific test case entries (containing '::')
-            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "
-            import sys, json
-            tests = json.load(sys.stdin)
-            opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]
-            print(' '.join(opts)) if tests else None
-            ")
+            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]; print(' '.join(opts)) if tests else None")
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
