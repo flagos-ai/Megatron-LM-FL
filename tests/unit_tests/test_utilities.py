@@ -9,29 +9,25 @@ import megatron.core.parallel_state as ps
 
 
 def _get_device_backend():
-    """根据可用硬件返回 (device_type, dist_backend)（使用 match/case 实现）"""
-    # 从环境变量中获取平台类型，默认为 'cuda'，并转换为小写以便匹配
-    #这里需要看一下哪里添加代码传MEGATRON_TEST_PLATFORM参数过来的，看看怎么改？？？？？
+
     platform = os.environ.get('MEGATRON_TEST_PLATFORM', 'cuda').strip().lower()
     
-    # 使用 match/case 语法根据平台类型返回对应的设备类型和分布式后端
+    #choose device and distributed backend based on platform
     match platform:
         case 'ascend':
-            import torch_npu  # 华为昇腾
+            import torch_npu  
             return 'npu', 'hccl'
         case 'metax':
-            import torch_musa  # 沐曦 MetaX（使用 MUSA 框架）
+            import torch_musa  
             return 'musa', 'mccl'
-        case 'cuda':  # 匹配所有其他情况，默认为 CUDA
+        case 'cuda':  
             return 'cuda', 'nccl'
-        case _:  # 匹配所有非法平台，直接报错
+        case _:  
             raise ValueError(
-                f"不支持的平台：{platform}！"
-                "目前支持 ascend/metax/cuda 三种平台，请添加适配其他平台代码"
+                f"Unsupported platform: {platform}! "
+                "Currently supported platforms are: ascend, metax, cuda. Please add adaptation code for other platforms."
             )
-        #aa
-
-# 全局初始化设备类型和分布式后端
+        
 DEVICE_TYPE, DIST_BACKEND = _get_device_backend()
 
 
@@ -71,7 +67,7 @@ class Utils:
                 f'Initializing torch.distributed with rank: {Utils.rank}, '
                 f'world_size: {Utils.world_size}'
             )
-            # 根据设备类型设置当前设备
+            # Set the device before initializing torch.distributed since the initialization
             device_module = getattr(torch, DEVICE_TYPE)  # torch.cuda / torch.npu / torch.musa
             device_module.set_device(Utils.rank % device_module.device_count())
             # torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
@@ -91,7 +87,6 @@ class Utils:
             Utils.store = store
 
             torch.distributed.init_process_group(
-                #修改这里的 backend 参数，改为根据设备类型动态设置
                 # backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store  
                 backend=DIST_BACKEND, world_size=Utils.world_size, rank=Utils.rank, store=store
             )
