@@ -236,7 +236,7 @@ def forward_step_calc_loss(
             cp_group_size is not None and is_last_stage is not None
         ), "cp_group_size and is_last_stage must be provided"
 
-    num_tokens = torch.tensor(0, dtype=torch.int)
+    num_tokens = torch.tensor(0, dtype=torch.int, device=cur_platform.device_name())
     if is_last_stage:
         if not collect_non_loss_data:
             outputs = loss_func(output_tensor)
