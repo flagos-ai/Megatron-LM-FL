@@ -271,8 +271,15 @@ jobs:
           IGNORE_OPTS=""
           if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
             echo "Parsing ignored tests list..."
-            # Parse JSON array and build --ignore options
-            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); print(' '.join(['--deselect=' + t for t in tests])) if tests else None")
+            # Parse JSON array and build ignore/deselect options
+            # Use --ignore for file-level entries (no '::') to prevent import errors during collection
+            # Use --deselect for specific test case entries (containing '::')
+            IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "
+            import sys, json
+            tests = json.load(sys.stdin)
+            opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]
+            print(' '.join(opts)) if tests else None
+            ")
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
