@@ -681,7 +681,7 @@ def get_megatron_optimizer(
         model_chunk_offset=0,
         config=config,
         config_overrides=config_overrides,
-        filter_fn=lambda g: g['is_expert_parallel'],
+        filter_fn=lambda g: g['is_expert_parallel'] and not g['is_engram_parallel'],
         buffer_name='expert_parallel_buffers',
     )
     if dump_param_to_param_group_map is not None:
@@ -722,7 +722,7 @@ def get_megatron_optimizer(
         config=config,
         config_overrides=config_overrides,
         filter_fn=lambda g: g['is_engram_parallel'],
-        buffer_name='engram_parallel_buffers',
+        buffer_name='engram_embedding_buffers',
     )
     if dump_param_to_param_group_map is not None:
         for param_group in engram_param_groups:
@@ -749,7 +749,7 @@ def get_megatron_optimizer(
                 data_parallel_group=engram_dp_group,
                 data_parallel_group_gloo=engram_data_parallel_group_gloo,
                 data_parallel_group_idx=model_parallel_rank,
-                intra_dist_opt_group=None,
+                intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
             )
         )
