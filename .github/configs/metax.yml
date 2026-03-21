@@ -55,6 +55,8 @@ test_matrix:
       - tests/unit_tests/test_inference.py
       - tests/unit_tests/test_rl_utils.py
       - tests/unit_tests/test_hyper_comm_grid.py
+      - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_checkpointing.py
 
       - tests/unit_tests/models/test_bert_model.py
       - tests/unit_tests/models/test_mamba_model.py
