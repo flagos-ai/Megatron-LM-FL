@@ -61,6 +61,7 @@ test_matrix:
       - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/test_optimizer_cpu_offloading.py ## RuntimeError: No CUDA GPUs are available
       - tests/unit_tests/test_local_multi_tensor_fns.py ## RuntimeError: No CUDA GPUs are available
+      - tests/unit_tests/test_optimizer.py ## RuntimeError: No CUDA GPUs are available
 
       # models
       - tests/unit_tests/models/test_bert_model.py
