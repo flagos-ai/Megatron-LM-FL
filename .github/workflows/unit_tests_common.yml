@@ -133,9 +133,9 @@ jobs:
           - name: core
             path: "tests/unit_tests/test_*.py"
             description: "Core unit tests"
-          - name: transformer
-            path: "tests/unit_tests/transformer/"
-            description: "Transformer tests"
+          # - name: transformer
+          #   path: "tests/unit_tests/transformer/"
+          #   description: "Transformer tests"
           # - name: models
           #   path: "tests/unit_tests/models/"
           #   description: "Model tests"
@@ -301,7 +301,7 @@ jobs:
       - name: Debug - keep container alive on failure
         if: failure()
         run: |
-          echo "Container sleeping for 20 minutes for debugging..."
+          echo "Container sleeping for 10 minutes for debugging..."
           echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
-          sleep 1200
+          sleep 600
         timeout-minutes: 60

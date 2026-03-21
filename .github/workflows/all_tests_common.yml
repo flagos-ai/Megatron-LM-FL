@@ -85,19 +85,18 @@ jobs:
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
 
-  # arguments.py not compatible with megatron-core-fl
-  # functional_tests:
-  #   needs:
-  #     - checkout_and_config
-  #   if: fromJson(needs.checkout_and_config.outputs.train_test_matrix)[0] != null
-  #   uses: ./.github/workflows/functional_tests_common.yml
-  #   with:
-  #     platform: ${{ inputs.platform }}
-  #     test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
-  #     image: ${{ needs.checkout_and_config.outputs.ci_image }}
-  #     runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
-  #     container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
-  #     container_options: ${{ needs.checkout_and_config.outputs.container_options }}
+  functional_tests:
+    needs:
+      - checkout_and_config
+    if: fromJson(needs.checkout_and_config.outputs.train_test_matrix)[0] != null
+    uses: ./.github/workflows/functional_tests_common.yml
+    with:
+      platform: ${{ inputs.platform }}
+      test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
+      image: ${{ needs.checkout_and_config.outputs.ci_image }}
+      runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
+      container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
+      container_options: ${{ needs.checkout_and_config.outputs.container_options }}
 
 
   all_tests_complete:
@@ -107,7 +106,7 @@ jobs:
     needs:
       - checkout_and_config
       - unit_tests
-      # - functional_tests
+      - functional_tests
     runs-on: ubuntu-latest
     if: always()
     steps:
@@ -121,12 +120,12 @@ jobs:
             failed=true
           fi
 
-          # # Only check functional tests if they ran
-          # if [ "${{ needs.functional_tests.result }}" != "success" ] && \
-          #    [ "${{ needs.functional_tests.result }}" != "skipped" ]; then
-          #   echo "❌ Training functional tests failed"
-          #   failed=true
-          # fi
+          # Only check functional tests if they ran
+          if [ "${{ needs.functional_tests.result }}" != "success" ] && \
+             [ "${{ needs.functional_tests.result }}" != "skipped" ]; then
+            echo "❌ Training functional tests failed"
+            failed=true
+          fi
 
           if [ "$failed" = "true" ]; then
             exit 1

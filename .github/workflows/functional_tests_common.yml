@@ -77,38 +77,40 @@ jobs:
           set -euo pipefail
           cd $PROJECT_ROOT
 
-          PLATFORM='${{ inputs.platform }}'
-          DEVICE='${{ matrix.test_config.device }}'
-          TASK='${{ matrix.test_config.task }}'
           MODEL='${{ matrix.test_config.model }}'
-          CASE='${{ matrix.test_config.case }}'
+          TEST_CASE='${{ matrix.test_config.test_case }}'
+          TRAINING_SCRIPT='${{ matrix.test_config.training_script }}'
+          N_REPEAT='${{ matrix.test_config.n_repeat || 1 }}'
 
-          echo "Running functional tests for training"
-          echo "Platform: $PLATFORM"
-          echo "Device: $DEVICE"
-          echo "Task: $TASK"
-          echo "Model: $MODEL"
-          echo "Case: ${CASE:-all}"
+          echo "Running functional test: ${MODEL}/${TEST_CASE}"
+          echo "Training script: ${TRAINING_SCRIPT}"
 
-          # Set environment variables
           export PYTHONPATH=$PROJECT_ROOT:${PYTHONPATH:-}
 
-          # Run functional tests via run_tests.sh with explicit platform/device/task/model/case
-          set +e
-          bash "$PROJECT_ROOT/tests/test_utils/runners/run_tests.sh" \
-            --platform "$PLATFORM" \
-            --device "$DEVICE" \
-            --type functional \
-            --task "$TASK" \
-            --model "$MODEL" \
-            --list "$CASE"
+          OUTPUT_DIR="./test_output/${TEST_CASE}"
+          mkdir -p "${OUTPUT_DIR}"
+
+          ARGUMENTS=(
+            "DATA_PATH=/opt/data/datasets"
+            "DATA_CACHE_PATH=/tmp/data_cache"
+            "OUTPUT_PATH=${OUTPUT_DIR}"
+            "TENSORBOARD_PATH=${OUTPUT_DIR}/tensorboard"
+            "CHECKPOINT_SAVE_PATH=${OUTPUT_DIR}/checkpoints"
+            "CHECKPOINT_LOAD_PATH=/tmp/checkpoints"
+            "TRAINING_SCRIPT_PATH=${TRAINING_SCRIPT}"
+            "TRAINING_PARAMS_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/model_config.yaml"
+            "GOLDEN_VALUES_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/golden_values_dev_${{ inputs.platform }}.json"
+            "N_REPEAT=${N_REPEAT}"
+            "ENABLE_LIGHTWEIGHT_MODE=1"
+          )
+
+          bash ./tests/functional_tests/shell_test_utils/run_ci_test.sh "${ARGUMENTS[@]}"
           exit_code=$?
-          set -e
 
           if [ $exit_code -eq 0 ]; then
-            echo "✅ Functional tests passed for $PLATFORM/$DEVICE/$TASK/$MODEL/$CASE"
+            echo "✅ Functional test passed: ${MODEL}/${TEST_CASE}"
           else
-            echo "❌ Functional tests failed for $PLATFORM/$DEVICE/$TASK/$MODEL/$CASE (exit code: $exit_code)"
+            echo "❌ Functional test failed: ${MODEL}/${TEST_CASE} (exit code: $exit_code)"
           fi
 
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
@@ -118,7 +120,7 @@ jobs:
       - name: Debug - keep container alive on failure
         if: failure()
         run: |
-          echo "Container sleeping for 60 minutes for debugging..."
+          echo "Container sleeping for 10 minutes for debugging..."
           echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
-          sleep 3600
+          sleep 600
         timeout-minutes: 60

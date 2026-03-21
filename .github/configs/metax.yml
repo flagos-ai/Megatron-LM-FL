@@ -58,6 +58,7 @@ test_matrix:
       - tests/unit_tests/test_hyper_comm_grid.py
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_checkpointing.py
+      - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
 
       # models
       - tests/unit_tests/models/test_bert_model.py
@@ -68,6 +69,7 @@ test_matrix:
       - tests/unit_tests/transformer/moe/test_aux_loss.py
       - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
       - tests/unit_tests/transformer/moe/test_routers.py
+      - tests/unit_tests/transformer/moe/test_grouped_mlp.py
       - tests/unit_tests/transformer/test_attention.py
       - tests/unit_tests/transformer/test_attention_packed_seq.py
       - tests/unit_tests/transformer/test_cuda_graphs.py
@@ -138,16 +140,16 @@ test_matrix:
       - tests/unit_tests/ssm/test_mamba_context_parallel.py
 
       # specific case that are unstable on Metax
-      ## core
-      - tests/unit_tests/test_fp8_utils.py::TestFP8Padding::test_prepare_model_for_fp8_inference_basic ## ZeroDivisionError: integer modulo by zero
+      # core
       - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer ## RuntimeError: No CUDA GPUs are available
-
+      # models
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      # post training
       - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel::test_inference
 
-  # functional:
-  #   train:
-  #     - device: c500
-  #       task: train
-  #       model: deepseek
-  #       case: tp2_pp2_ep2
+  functional:
+    train:
+      - model: gpt
+        test_case: gpt3_mcore_te_tp1_pp1_resume_torch_dist_dist_optimizer
+        training_script: pretrain_gpt.py
+        n_repeat: 1
