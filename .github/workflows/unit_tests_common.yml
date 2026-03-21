@@ -288,10 +288,11 @@ jobs:
           # Calc GPU num
           NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)")
           echo "=== Platform: ${{ inputs.platform }} | Device: ${{ inputs.device }} | GPUs: $NUM_GPUS ==="
+          ## torch.cuda.device_count() returns 0 on Metax
 
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=$NUM_GPUS -m pytest -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
+          torchrun --nproc_per_node=2 -m pytest -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
@@ -302,5 +303,5 @@ jobs:
         run: |
           echo "Container sleeping for 60 minutes for debugging..."
           echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
-          sleep 600
+          sleep 3600
         timeout-minutes: 60
