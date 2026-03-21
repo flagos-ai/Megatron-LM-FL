@@ -71,7 +71,7 @@ jobs:
           pip install -e . --no-deps 
         timeout-minutes: 30
 
-      - name: Install dependencies (yq, envsubst, uv)
+      - name: Install dependencies (yq, envsubst, uv shim)
         run: |
           # Install mikefarah/yq (v4)
           if ! command -v yq &>/dev/null; then
@@ -89,13 +89,23 @@ jobs:
           fi
           envsubst --version
 
-          # Install uv (used by run_ci_test.sh to invoke python test utils)
+          # Create uv shim: run_ci_test.sh calls 'uv run --no-sync python/pytest ...'
+          # Translate to direct python/pytest invocation using the conda environment
           if ! command -v uv &>/dev/null; then
-            curl -LsSf https://astral.sh/uv/install.sh | sh
-            echo "$HOME/.local/bin" >> $GITHUB_PATH
-            export PATH="$HOME/.local/bin:$PATH"
+            cat > /usr/local/bin/uv << 'EOF'
+          #!/bin/bash
+          # Shim: translate 'uv run [--no-sync] CMD ...' to 'CMD ...'
+          if [[ "$1" == "run" ]]; then
+            shift
+          [[ "$1" == "--no-sync" ]] && shift
+            exec "$@"
           fi
-          uv --version
+          echo "uv shim: unsupported command: $*" >&2
+          exit 1
+          EOF
+            chmod +x /usr/local/bin/uv
+          fi
+          uv --version || echo "uv shim installed"
 
       - name: Run functional tests
         id: functional_test
@@ -143,10 +153,10 @@ jobs:
           exit $exit_code
         timeout-minutes: 60
 
-      # - name: Debug - keep container alive on failure
-      #   if: failure()
-      #   run: |
-      #     echo "Container sleeping for 10 minutes for debugging..."
-      #     echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
-      #     sleep 600
-      #   timeout-minutes: 60
+      - name: Debug - keep container alive on failure
+        if: failure()
+        run: |
+          echo "Container sleeping for 10 minutes for debugging..."
+          echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
+          sleep 600
+        timeout-minutes: 60
