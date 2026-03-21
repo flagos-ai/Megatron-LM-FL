@@ -59,6 +59,8 @@ test_matrix:
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_checkpointing.py
       - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
+      - tests/unit_tests/test_optimizer_cpu_offloading.py ## RuntimeError: No CUDA GPUs are available
+      - tests/unit_tests/test_local_multi_tensor_fns.py ## RuntimeError: No CUDA GPUs are available
 
       # models
       - tests/unit_tests/models/test_bert_model.py
@@ -140,9 +142,6 @@ test_matrix:
       - tests/unit_tests/ssm/test_mamba_context_parallel.py
 
       # specific case that are unstable on Metax
-      # core
-      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer ## RuntimeError: No CUDA GPUs are available
-      - tests/unit_tests/test_local_multi_tensor_fns.py::test_local_multi_tensor_l2_norm_and_scale ## RuntimeError: No CUDA GPUs are available
       # models
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
       # post training

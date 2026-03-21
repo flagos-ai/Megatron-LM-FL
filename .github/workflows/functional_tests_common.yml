@@ -71,20 +71,31 @@ jobs:
           pip install -e . --no-deps 
         timeout-minutes: 30
 
-      - name: Install yq
+      - name: Install dependencies (yq, envsubst, uv)
         run: |
-          YQ_BIN=/usr/local/bin/yq
+          # Install mikefarah/yq (v4)
           if ! command -v yq &>/dev/null; then
             ARCH=$(uname -m)
-            case "$ARCH" in
-              x86_64)  YQ_ARCH=amd64 ;;
-              aarch64) YQ_ARCH=arm64 ;;
-              *)        YQ_ARCH=amd64 ;;
-            esac
-            wget -qO "$YQ_BIN" "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${YQ_ARCH}"
-            chmod +x "$YQ_BIN"
+            case "$ARCH" in x86_64) YQ_ARCH=amd64 ;; aarch64) YQ_ARCH=arm64 ;; *) YQ_ARCH=amd64 ;; esac
+            wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${YQ_ARCH}"
+            chmod +x /usr/local/bin/yq
           fi
           yq --version
+
+          # Install envsubst (from gettext)
+          if ! command -v envsubst &>/dev/null; then
+            apt-get install -y -qq gettext-base 2>/dev/null || \
+            conda install -y -q gettext 2>/dev/null || true
+          fi
+          envsubst --version
+
+          # Install uv (used by run_ci_test.sh to invoke python test utils)
+          if ! command -v uv &>/dev/null; then
+            curl -LsSf https://astral.sh/uv/install.sh | sh
+            echo "$HOME/.local/bin" >> $GITHUB_PATH
+            export PATH="$HOME/.local/bin:$PATH"
+          fi
+          uv --version
 
       - name: Run functional tests
         id: functional_test
@@ -132,10 +143,10 @@ jobs:
           exit $exit_code
         timeout-minutes: 60
 
-      - name: Debug - keep container alive on failure
-        if: failure()
-        run: |
-          echo "Container sleeping for 10 minutes for debugging..."
-          echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
-          sleep 600
-        timeout-minutes: 60
+      # - name: Debug - keep container alive on failure
+      #   if: failure()
+      #   run: |
+      #     echo "Container sleeping for 10 minutes for debugging..."
+      #     echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
+      #     sleep 600
+      #   timeout-minutes: 60
