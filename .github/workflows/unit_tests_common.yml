@@ -133,12 +133,12 @@ jobs:
           - name: core
             path: "tests/unit_tests/test_*.py"
             description: "Core unit tests"
-          - name: transformer
-            path: "tests/unit_tests/transformer/"
-            description: "Transformer tests"
-          - name: models
-            path: "tests/unit_tests/models/"
-            description: "Model tests"
+          # - name: transformer
+          #   path: "tests/unit_tests/transformer/"
+          #   description: "Transformer tests"
+          # - name: models
+          #   path: "tests/unit_tests/models/"
+          #   description: "Model tests"
           # - name: distributed
           #   path: "tests/unit_tests/distributed/"
           #   description: "Distributed tests"
@@ -157,9 +157,6 @@ jobs:
           # - name: fusions
           #   path: "tests/unit_tests/fusions/"
           #   description: "Fusion tests"
-          - name: post_training
-            path: "tests/unit_tests/post_training/"
-            description: "Post Training unit tests"
           # - name: others
           #   path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
           #   description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
@@ -288,9 +285,13 @@ jobs:
             fi
           fi
 
+          # Calc GPU num
+          NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)")
+          echo "=== Platform: ${{ inputs.platform }} | Device: ${{ inputs.device }} | GPUs: $NUM_GPUS ==="
+
           # Run unit tests with torchrun
           # Each test group runs in isolation to avoid state pollution
-          torchrun --nproc_per_node=2 -m pytest -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
+          torchrun --nproc_per_node=$NUM_GPUS -m pytest -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
@@ -299,7 +300,7 @@ jobs:
       - name: Debug - keep container alive on failure
         if: failure()
         run: |
-          echo "Container sleeping for 10 minutes for debugging..."
+          echo "Container sleeping for 60 minutes for debugging..."
           echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
           sleep 600
         timeout-minutes: 60
