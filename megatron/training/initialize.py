@@ -39,7 +39,8 @@ def initialize_megatron(
     extra_args_provider=None,
     args_defaults={},
     ignore_unknown_args=False,
-    allow_no_cuda=False,
+    # support not only cuda
+    allow_no_cuda=True,
     skip_mpu_initialization=False,
     get_embedding_ranks=None,
     get_position_embedding_ranks=None,
