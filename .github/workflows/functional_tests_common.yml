@@ -63,13 +63,28 @@ jobs:
           source /opt/conda/etc/profile.d/conda.sh
           conda activate base   # 或镜像内实际的 env name
           echo "PATH=$PATH" >> $GITHUB_ENV
-    
+
       - name: Setup Python environment
         run: |
           set -euo pipefail
           cd $PROJECT_ROOT
           pip install -e . --no-deps 
         timeout-minutes: 30
+
+      - name: Install yq
+        run: |
+          YQ_BIN=/usr/local/bin/yq
+          if ! command -v yq &>/dev/null; then
+            ARCH=$(uname -m)
+            case "$ARCH" in
+              x86_64)  YQ_ARCH=amd64 ;;
+              aarch64) YQ_ARCH=arm64 ;;
+              *)        YQ_ARCH=amd64 ;;
+            esac
+            wget -qO "$YQ_BIN" "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${YQ_ARCH}"
+            chmod +x "$YQ_BIN"
+          fi
+          yq --version
 
       - name: Run functional tests
         id: functional_test
