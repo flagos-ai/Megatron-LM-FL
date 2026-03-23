@@ -57,6 +57,7 @@ test_matrix:
       - tests/unit_tests/test_rl_utils.py ## No module named 'wandb'
       - tests/unit_tests/test_hyper_comm_grid.py
       - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_utils.py
       - tests/unit_tests/test_checkpointing.py
       - tests/unit_tests/test_process_groups_config.py
       - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
