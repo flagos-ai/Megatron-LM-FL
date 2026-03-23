@@ -64,6 +64,7 @@ test_matrix:
       - tests/unit_tests/test_rl_utils.py    #No module named 'wandb'
       # - tests/unit_tests/test_tokenizer.py    # No module named 'nltk'
       - tests/unit_tests/test_utils.py
+      - tests/unit_tests/test_training.py
 
       # 2.models
       #ZeroDivisionError: integer modulo by zero
