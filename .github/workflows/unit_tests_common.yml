@@ -218,7 +218,7 @@ jobs:
       - name: Set safe directory
         if: steps.should_run.outputs.should_run == 'true'
         run: |
-          agt update && apt install git
+          apt update && apt install git
           git config --global --add safe.directory $GITHUB_WORKSPACE
 
       - name: Setup Python environment
