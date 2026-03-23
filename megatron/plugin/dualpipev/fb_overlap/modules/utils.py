@@ -9,6 +9,9 @@ from torch.autograd.variable import Variable
 from megatron.core.parallel_state import get_global_memory_buffer, get_tensor_model_parallel_rank
 from megatron.core.pipeline_parallel import p2p_communication
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 COMM_STREAM = None
 
 
@@ -24,15 +27,15 @@ def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event
         a2a_out = input_.new_empty(
             size=[sum(output_split_sizes)] + list(input_.size()[1:]),
             dtype=input_.dtype,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
 
     if event or stream:
         # multi stream wait event
         global COMM_STREAM
         if COMM_STREAM is None:
-            COMM_STREAM = torch.cuda.Stream(device=torch.cuda.current_device())
-        with torch.cuda.stream(COMM_STREAM):
+            COMM_STREAM = cur_platform.Stream(device=cur_platform.current_device())
+        with cur_platform.stream(COMM_STREAM):
             if event:
                 event.wait()
             if stream:

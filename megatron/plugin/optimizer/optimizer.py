@@ -7,10 +7,11 @@ from megatron.core.dist_checkpointing.utils import add_prefix_for_sharding
 
 logger = getLogger(__name__)
 
-from megatron.plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import override
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
-
-@plugin_implementation("MixedPrecisionOptimizer", "_unscale_main_grads_and_check_for_nan")
+@override("MixedPrecisionOptimizer", "_unscale_main_grads_and_check_for_nan")
 def _unscale_main_grads_and_check_for_nan(self):
     logger.debug(f"Megatron-LM-FL Plugins: _unscale_main_grads_and_check_for_nan")
     # Collect main grads.
@@ -42,8 +43,8 @@ def _unscale_main_grads_and_check_for_nan(self):
             op=torch.distributed.ReduceOp.MAX,
             group=group
         )
-    if self.found_inf.device != torch.device('cuda'):
-        self.found_inf = self.found_inf.cuda()
+    if self.found_inf.device != torch.device(cur_platform.device_name()):
+        self.found_inf = self.found_inf.to(cur_platform.device())
 
     # Check for nan.
     found_inf_flag = self.found_inf.item() > 0
@@ -51,7 +52,7 @@ def _unscale_main_grads_and_check_for_nan(self):
     return found_inf_flag
 
 
-@plugin_implementation("ChainedOptimizer", "load_state_dict")
+@override("ChainedOptimizer", "load_state_dict")
 def load_state_dict(self, state_dict):
     logger.debug(f"Megatron-LM-FL Plugins: load_state_dict")
     if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers

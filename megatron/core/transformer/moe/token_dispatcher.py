@@ -2,6 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from re import M
 from typing import List, Optional, Tuple
 
 import torch
@@ -48,6 +49,8 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class MoETokenDispatcher:
     """
@@ -391,7 +394,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         # [tp_size]. Represents the number of tokens received by the current rank from
         # other TP ranks.
         self.output_splits_tp = None
-        self.permute_idx_device = torch.device("cuda") if self.config.moe_permute_fusion else "cpu"
+        self.permute_idx_device = torch.device(cur_platform.device_name()) if self.config.moe_permute_fusion else "cpu"
         input_chunk_idxs = torch.arange(
             self.num_experts * self.tp_size, device=self.permute_idx_device
         )
@@ -427,7 +430,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         }
         self.cuda_dtoh_point = "before_permutation_1"
         if MoEAlltoAllTokenDispatcher.cuda_dtoh_stream is None:
-            MoEAlltoAllTokenDispatcher.cuda_dtoh_stream = torch.cuda.Stream()
+            MoEAlltoAllTokenDispatcher.cuda_dtoh_stream = cur_platform.Stream()
 
         self.shared_experts = None
 
@@ -833,10 +836,10 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if not self.drop_and_pad:
             if point == self.cuda_dtoh_point:
                 # Move all possible GPU tensors to CPU at self.cuda_dtoh_point.
-                on_side_stream = torch.cuda.current_stream() != self.cuda_dtoh_stream
+                on_side_stream = cur_platform.current_stream() != self.cuda_dtoh_stream
                 if on_side_stream:
-                    self.cuda_dtoh_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self.cuda_dtoh_stream):
+                    self.cuda_dtoh_stream.wait_stream(cur_platform.current_stream())
+                with cur_platform.stream(self.cuda_dtoh_stream):
                     # TODO: use MemcpyBatchAsync instead.
                     tokens_per_expert = maybe_move_tensor_to_cpu(
                         tokens_per_expert, record_stream=on_side_stream

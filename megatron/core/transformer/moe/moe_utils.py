@@ -13,6 +13,8 @@ from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.transformer_config import TransformerConfig
 
 from megatron.plugin.utils import reduce_aux_losses_tracker_across_ranks_hetero
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 try:
     import transformer_engine as te  # pylint: disable=unused-import
@@ -789,7 +791,6 @@ def reduce_aux_losses_tracker_across_ranks(track_names: Optional[List[str]] = No
             )
 
 
-
 def track_moe_metrics(
     loss_scale: float,
     iteration: int,
@@ -807,13 +808,20 @@ def track_moe_metrics(
     """Track the MoE metrics for logging."""
     # Aux loss logging
     tracker = get_moe_layer_wise_logging_tracker()
-    # Initialize the tracker if force_initialize is True
+    # Initialize the tracker if force_initialize is True.
+    # The values tensor size must match what the router creates in save_to_aux_losses_tracker,
+    # which uses (num_layers + mtp_num_layers). This is important for PP ranks that have no
+    # MoE layers (so the tracker is empty and force_initialize creates the entry); their tensor
+    # size must match ranks that do have MoE layers, otherwise all_reduce across PP will hang.
+    tracker_num_layers = num_layers
+    if mtp_num_layers is not None:
+        tracker_num_layers += mtp_num_layers
     if force_initialize:
         if track_names is not None:
             for key in track_names:
                 if key not in tracker:
                     tracker[key] = {}
-                    tracker[key]["values"] = torch.zeros(num_layers, device="cuda")
+                    tracker[key]["values"] = torch.zeros(tracker_num_layers, device=cur_platform.device_name())
                     tracker[key]["reduce_group"] = None
                     tracker[key]["avg_group"] = None
                     tracker[key]["reduce_group_has_dp"] = False
@@ -904,7 +912,7 @@ def maybe_move_tensor_to_cpu(tensor, as_numpy=False, record_stream=False):
         if as_numpy:
             cpu_tensor = cpu_tensor.numpy()
         if record_stream:
-            tensor.record_stream(torch.cuda.current_stream())
+            tensor.record_stream(cur_platform.current_stream())
         tensor = cpu_tensor
     return tensor
 

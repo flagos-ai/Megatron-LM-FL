@@ -15,6 +15,8 @@ from megatron.core.datasets.utils import Split, normalize
 from megatron.core.utils import log_single_rank
 
 from megatron.plugin.utils import is_built_on_zero_rank
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
@@ -374,7 +376,7 @@ class BlendedMegatronDatasetBuilder(object):
                     # but not too much to avoid overloading storage on miss path.
                     # if user set num_dataset_builder_threads to 1,
                     # i.e. meant for serial build, do not scale up.
-                    num_workers *= min(2, max(1, torch.cuda.device_count()))
+                    num_workers *= min(2, max(1, cur_platform.device_count()))
                 _threading_helper(
                     megatron_datasets, num_workers, prefixes, split, sizes_per_dataset
                 )

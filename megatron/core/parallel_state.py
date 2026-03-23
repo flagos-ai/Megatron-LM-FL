@@ -14,7 +14,8 @@ import torch
 from .utils import GlobalMemoryBuffer, is_torch_min_version
 
 from megatron.plugin.hetero.parallel_context import get_parallel_context  
-
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
@@ -135,6 +136,16 @@ _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP = None
 # Paralel group of all GPUs in a distributed optimizer instance
 _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = None
 
+# Parallel group of engram embedding
+_ENGRAM_EMBEDDING_PARALLEL_GROUP = None
+_ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = None
+_ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = None
+
+# Parallel gorup of engram data parallel
+_ENGRAM_DATA_PARALLEL_GROUP = None
+_ENGRAM_DATA_PARALLEL_GROUP_GLOO = None
+_ENGRAM_DATA_PARALLEL_GLOBAL_RANKS = None
+
 _LAST_RANK_WHEN_USING_PIPELINE = None
 
 # Memory buffers to avoid dynamic memory allocation
@@ -194,7 +205,7 @@ def update_pg_timeout(
     """
     if hasattr(torch.distributed.distributed_c10d, "_set_pg_timeout"):
         torch.distributed.barrier(pg)
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         try:
             if pg is None:
                 global _global_process_group_list
@@ -528,6 +539,7 @@ def initialize_model_parallel(
     context_parallel_size: int = 1,
     hierarchical_context_parallel_sizes: Optional[List[int]] = None,
     expert_model_parallel_size: int = 1,
+    engram_embedding_parallel_size: Optional[int] = None,
     num_distributed_optimizer_instances: int = 1,
     expert_tensor_parallel_size: Optional[int] = None,
     nccl_communicator_config_path: Optional[str] = None,
@@ -776,6 +788,22 @@ def initialize_model_parallel(
         order=order,
         rank_offset=0,
     )
+    ######## FlsgScale Begin ########
+    engram_dp_size = world_size // (engram_embedding_parallel_size * pipeline_model_parallel_size) if engram_embedding_parallel_size is not None else None
+    if engram_embedding_parallel_size is not None:
+        engram_rank_generator = RankGenerator(
+            tp=1,
+            ep=1,
+            dp=engram_dp_size,
+            pp=pipeline_model_parallel_size,
+            cp=engram_embedding_parallel_size,
+            order=order,
+            rank_offset=0,
+        )
+    else:
+        engram_rank_generator = None
+    ######## FlsgScale End ########
+        
 
     assert (
         order.endswith("pp")
@@ -872,6 +900,56 @@ def initialize_model_parallel(
             _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP = _DATA_PARALLEL_GROUP_WITH_CP
             _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP_GLOO = _DATA_PARALLEL_GROUP_WITH_CP_GLOO
 
+    if engram_rank_generator is not None:
+        for ranks in engram_rank_generator.get_ranks('dp'):
+            group = create_group(
+                ranks,
+                timeout=timeout,
+                pg_options=get_nccl_options("engram_dp", nccl_comm_cfgs),
+                group_desc="ENGRAM_DATA_PARALLEL_GROUP",
+            )
+            if create_gloo_process_groups:
+                group_gloo = create_group(
+                    ranks,
+                    timeout=timeout,
+                    backend="gloo",
+                    group_desc="ENGRAM_DATA_PARALLEL_GROUP_GLOO",
+                )
+            else:
+                group_gloo = None
+            if rank in ranks:
+                global _ENGRAM_DATA_PARALLEL_GROUP
+                global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+                global _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS
+                _ENGRAM_DATA_PARALLEL_GROUP = group
+                _ENGRAM_DATA_PARALLEL_GROUP_GLOO = group_gloo
+                _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS = ranks
+                print(f"[rank{torch.distributed.get_rank()}] engram_dp_ranks = {ranks}")
+        for ranks in engram_rank_generator.get_ranks('cp'):
+            group = create_group(
+                ranks,
+                timeout=timeout,
+                pg_options=get_nccl_options("engram_embedding_parallel", nccl_comm_cfgs),
+                group_desc="ENGRAM_EMBEDDING_PARALLEL_GROUP",
+            )
+            if create_gloo_process_groups:
+                group_gloo = create_group(
+                    ranks,
+                    timeout=timeout,
+                    backend="gloo",
+                    group_desc="ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO",
+                )
+            else:
+                group_gloo = None
+            if rank in ranks:
+                global _ENGRAM_EMBEDDING_PARALLEL_GROUP
+                global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+                global _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS
+                _ENGRAM_EMBEDDING_PARALLEL_GROUP = group
+                _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = group_gloo
+                _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = ranks
+                print(f"[rank{torch.distributed.get_rank()}] engram_embeds_ranks = {ranks}")
+
     # Apply SHARP to the dp group.
     if sharp_enabled_group == "dp":
         if rank == 0:
@@ -889,9 +967,9 @@ def initialize_model_parallel(
         # Therefore, we need to perform a nccl call to ensure that the communicator group is created.
         torch.distributed.barrier(
             group=get_data_parallel_group(with_context_parallel=True),
-            device_ids=[torch.cuda.current_device()],
+            device_ids=[cur_platform.current_device()],
         )
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         # Set `NCCL_COLLNET_ENABLE=0` to restrict SHARP application to the dp group.
         if "NCCL_COLLNET_ENABLE" in os.environ:
             del os.environ["NCCL_COLLNET_ENABLE"]
@@ -1265,9 +1343,9 @@ def initialize_model_parallel(
                 if _INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP is not None:
                     torch.distributed.barrier(
                         group=_INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP,
-                        device_ids=[torch.cuda.current_device()],
+                        device_ids=[cur_platform.current_device()],
                     )
-                    torch.cuda.synchronize()
+                    cur_platform.synchronize()
                 # Set NCCL_COLLNET_ENABLE to 0 to restrict SHARP application to the dp_replica group.
                 if "NCCL_COLLNET_ENABLE" in os.environ:
                     del os.environ["NCCL_COLLNET_ENABLE"]
@@ -2213,6 +2291,29 @@ def get_inter_distributed_optimizer_instance_group(check_initialized=True):
 
 ### End of expert-related functions region
 
+## Engram related parallel states functions
+def get_engram_embedding_parallel_group():
+    """Get the engram embedding group the caller rank belongs to."""
+    global _ENGRAM_EMBEDDING_PARALLEL_GROUP
+    return _ENGRAM_EMBEDDING_PARALLEL_GROUP
+
+
+def get_engram_data_parallel_group():
+    """Get the engram data parallel group the caller rank belongs to."""
+    global _ENGRAM_DATA_PARALLEL_GROUP
+    return _ENGRAM_DATA_PARALLEL_GROUP
+
+
+def get_engram_embedding_parallel_group_gloo():
+    """Get the engram embedding group the caller rank belongs to."""
+    global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+    return _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+
+
+def get_engram_data_parallel_group_gloo():
+    """Get the engram data parallel group the caller rank belongs to."""
+    global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+    return _ENGRAM_DATA_PARALLEL_GROUP_GLOO
 
 def _set_global_memory_buffer():
     """Initialize global buffer."""
@@ -2400,6 +2501,34 @@ def destroy_model_parallel():
     global _INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP
     _INTER_PARTIAL_EXPERT_DATA_PARALLEL_GROUP = None
     # End of expert parallelism destroy.
+
+    # Engram parallel groups destroy.
+    global _ENGRAM_EMBEDDING_PARALLEL_GROUP
+    _ENGRAM_EMBEDDING_PARALLEL_GROUP = None
+
+    global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+    if (
+        _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO is not None
+        and torch.distributed.distributed_c10d._world.pg_map.get(
+            _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO, None
+        )
+        is not None
+    ):
+        torch.distributed.destroy_process_group(_ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO)
+    _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = None
+
+    global _ENGRAM_DATA_PARALLEL_GROUP
+    _ENGRAM_DATA_PARALLEL_GROUP = None
+
+    global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+    if (
+        _ENGRAM_DATA_PARALLEL_GROUP_GLOO is not None
+        and torch.distributed.distributed_c10d._world.pg_map.get(_ENGRAM_DATA_PARALLEL_GROUP_GLOO, None)
+        is not None
+    ):
+        torch.distributed.destroy_process_group(_ENGRAM_DATA_PARALLEL_GROUP_GLOO)
+    _ENGRAM_DATA_PARALLEL_GROUP_GLOO = None
+    # End of Engram parallel groups destroy.
 
     global _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP
     _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = None

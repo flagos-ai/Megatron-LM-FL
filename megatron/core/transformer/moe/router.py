@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from abc import ABC, abstractmethod
+from re import M
 from typing import Optional
 
 import torch
@@ -23,6 +24,8 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class Router(ABC, MegatronModule):
     """Base Router class"""
@@ -86,9 +89,9 @@ class Router(ABC, MegatronModule):
         """
         if self.weight.device.type == 'cpu':
             # move weights to GPU
-            self.weight.data = self.weight.data.to(device=torch.cuda.current_device())
+            self.weight.data = self.weight.data.to(device=cur_platform.current_device())
         if self.bias is not None and self.bias.device.type == 'cpu':
-            self.bias.data = self.bias.data.to(device=torch.cuda.current_device())
+            self.bias.data = self.bias.data.to(device=cur_platform.current_device())
 
         # Convert to specified datatype for routing computation if enabled
         router_dtype = input.dtype
@@ -165,7 +168,7 @@ class TopKRouter(Router):
                 torch.zeros(
                     self.config.num_moe_experts,
                     dtype=torch.float32,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 ),
                 persistent=False,
             )
@@ -174,7 +177,7 @@ class TopKRouter(Router):
                 torch.zeros(
                     self.config.num_moe_experts,
                     dtype=torch.float32,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 ),
             )
         else:
@@ -188,13 +191,13 @@ class TopKRouter(Router):
                 torch.zeros(
                     self.config.num_moe_experts,
                     dtype=torch.float32,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 ),
                 persistent=False,
             )
             self.register_buffer(
                 'ga_steps',
-                torch.tensor(0, dtype=torch.float32, device=torch.cuda.current_device()),
+                torch.tensor(0, dtype=torch.float32, device=cur_platform.current_device()),
                 persistent=False,
             )
         else:

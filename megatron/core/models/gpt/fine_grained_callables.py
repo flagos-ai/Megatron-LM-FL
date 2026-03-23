@@ -17,6 +17,8 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 def weak_method(method):
     """Creates a weak reference to a method to prevent circular references.
@@ -283,7 +285,7 @@ class TransformerLayerNode(ScheduleNode):
         """Computes the weight gradients for the transformer layer node."""
         if not self.delay_wgrad_compute:
             return
-        with torch.cuda.nvtx.range(f"{self.name} wgrad"):
+        with cur_platform.range(f"{self.name} wgrad"):
             for module in self.bwd_dw_callables:
                 module.backward_dw()
         self.bwd_dw_callables = None
@@ -334,6 +336,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         """
         Performs same attnention forward logic as GPT Model.
         """
+        if getattr(node.layer_state, "is_engram", False):
+            hash_input_ids = node.chunk_state.extra_block_kwargs["engram_hash_input_ids"]
+            hidden_states = node.layer_state.engram(hidden_states=hidden_states, hash_input_ids=hash_input_ids[node.layer_state.engram_hash_layer_id]) + hidden_states
         hidden_states, _ = layer._forward_attention(
             hidden_states=hidden_states,
             attention_mask=node.chunk_state.attention_mask,
@@ -442,7 +447,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         )
 
         # Need to record residual to comm stream, since it's created on comp stream
-        node.layer_state.residual.record_stream(torch.cuda.current_stream())
+        node.layer_state.residual.record_stream(cur_platform.current_stream())
 
         # release tensor reference after use
         node.layer_state.residual = None

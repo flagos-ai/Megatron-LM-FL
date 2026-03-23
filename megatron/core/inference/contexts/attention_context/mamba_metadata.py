@@ -5,6 +5,8 @@ from typing import List, Optional, Tuple
 
 import torch
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 @dataclass
 class MambaInferenceStateConfig:
@@ -37,17 +39,17 @@ class MambaMetadata:
 
         # Metadata for mapping requests to slots in the static Mamba state buffer
         self.request_to_mamba_state_idx = torch.full(
-            (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
+            (self.max_requests,), -1, dtype=torch.int32, device=cur_platform.current_device()
         )
 
         # Separate mapping used only for CUDA graph compatibility
         self.request_to_mamba_state_idx_cudagraph_only = torch.full(
-            (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
+            (self.max_requests,), -1, dtype=torch.int32, device=cur_platform.current_device()
         )
 
         # Allocator for Mamba state slots
         self.mamba_state_free_slots = torch.arange(
-            self.max_requests, dtype=torch.int32, device=torch.cuda.current_device()
+            self.max_requests, dtype=torch.int32, device=cur_platform.current_device()
         )
         self.mamba_state_free_slot_count = self.max_requests
 
@@ -60,7 +62,7 @@ class MambaMetadata:
 
         # Re-initialize the free slot pool
         self.mamba_state_free_slots = torch.arange(
-            self.max_requests, dtype=torch.int32, device=torch.cuda.current_device()
+            self.max_requests, dtype=torch.int32, device=cur_platform.current_device()
         )
         self.mamba_state_free_slot_count = self.max_requests
 

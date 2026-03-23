@@ -56,15 +56,10 @@ from .optimizer_config import OptimizerConfig
 from .muon import Muon, MuonDistMeta
 from megatron.core.parallel_state import get_tensor_model_parallel_group
 
-try:
-    # This will be used when "--fp8-param-gather" is enabled.
-    # When BF16/FP16 parameters don't exist, we need to cast the FP32 main parameters to
-    # FP8 directly in the optimizer.
-    from transformer_engine.pytorch.cpp_extensions import cast_to_fp8
-except:
-    pass
-
 logger = getLogger(__name__)
+
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 
 class Range:
@@ -377,7 +372,11 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 dist_meta = MuonDistMeta(gbuf_index, bucket_index, model_param.shape, param_world_indexes, tp_split_dim)
                 
                 # fp16, bf16 params.
-                if model_param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                # cuda check -> platform check
+                if model_param.device.type == cur_platform.device_name() and model_param.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                ):
 
                     # Generate sharded model param.
                     if is_float8tensor(model_param) and config.fp8_recipe != "delayed":
@@ -439,7 +438,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     dist_metas[shard_main_param] = dist_meta
 
                 # fp32 params.
-                elif model_param.type() == 'torch.cuda.FloatTensor':
+                elif model_param.device.type == cur_platform.device_name() and model_param.dtype == torch.float32:
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
@@ -452,9 +451,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'torch.cuda.FloatTensor,  '
-                        'torch.cuda.HalfTensor, or '
-                        'torch.cuda.BFloat16Tensor. '
+                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '
                         'Received {}'.format(model_param.type())
                     )
 
@@ -533,13 +530,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             assert self.ddp_config == model_chunk.ddp_config
         self.distributed_optimizer_instance_id = distributed_optimizer_instance_id
 
-        # assert (
-        #     isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer))
-        #     or optimizer is None
-        # ), (
-        #     "Only Adam and HybridDeviceOptimizer currently supported, "
-        #     "due to checkpointing requirements."
-        # )
         assert (
             isinstance(optimizer, (Adam, torch.optim.AdamW, HybridDeviceOptimizer, Muon))
             or optimizer is None
@@ -609,7 +599,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for param in param_group['params']:
                 if param.requires_grad:
                     # fp32 copy only needed for 16-bit parameters.
-                    if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                    if param.device.type == cur_platform.device_name() and param.dtype in (
+                        torch.float16,
+                        torch.bfloat16,
+                    ):
                         param.main_param = None
                         param.main_param_sharded = True
 
@@ -835,7 +828,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=torch.cuda.current_device()
+                                (numel,), dtype=dtype, device=cur_platform.current_device()
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
@@ -1152,7 +1145,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                                device = "cpu" if use_gloo_comm else cur_platform.current_device()
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device
@@ -1164,7 +1157,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather.
                             if not use_gloo_comm:
-                                send_tensor = send_tensor.cuda()
+                                send_tensor = send_tensor.to(cur_platform.device())
                             if return_on_all_ranks:
                                 torch.distributed.all_gather(
                                     recv_tensors, send_tensor, data_parallel_group

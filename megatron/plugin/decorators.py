@@ -13,54 +13,54 @@ from typing import Callable, Optional
 
 logger = logging.getLogger(__name__)
 
-# Registry to store plugin implementations
+# Registry to store override methods
 # Key format: "ClassName.method_name" for methods, "module_name.function_name" for functions
 _plugin_registry: dict[str, Callable] = {}
 
-# Cache for plugin implementation lookup results
-# _plugin_impl_cache: stores functions that have plugin implementations
+# Cache for override methods lookup results
+# _plugin_impl_cache: stores functions that have override methods
 # _original_impl_cache: stores functions that should use original implementation (no plugin found)
 _plugin_impl_cache: dict[Callable, Callable] = {}
 _original_impl_cache: set[Callable] = set()
 
 
-def register_plugin_method(method_key: str, implementation: Callable) -> None:
+def register_override_method(method_key: str, implementation: Callable) -> None:
     """
-    Register a plugin implementation for a method or function.
+    Register an override method for a method or function.
     
     Args:
         method_key: Unique key for the method/function (e.g., "LanguageModule._is_in_embd_group" or "clip_grads.get_grad_norm_fp32")
         implementation: The implementation function
     """
     _plugin_registry[method_key] = implementation
-    logger.debug(f"Registered plugin method: {method_key}")
+    logger.debug(f"Registered override method: {method_key}")
 
 
-def get_plugin_method(method_key: str) -> Optional[Callable]:
+def get_override_method(method_key: str) -> Optional[Callable]:
     """
-    Get a plugin implementation for a method or function.
+    Get an override method for a method or function.
     
     Args:
         method_key: Unique key for the method/function
         
     Returns:
-        The plugin implementation if available, None otherwise
+        The override method if available, None otherwise
     """
     return _plugin_registry.get(method_key)
 
 
-def plugin_method(func: Callable) -> Callable:
+def overridable(func: Callable) -> Callable:
     """
     Decorator to mark a method or function as replaceable by plugin.
     
     Usage in core code (for methods):
-        @plugin_method
+        @overridable
         def _is_in_embd_group(self):
             # Original implementation (fallback if no plugin)
             ...
     
     Usage in core code (for module-level functions):
-        @plugin_method
+        @overridable
         def get_grad_norm_fp32(...):
             # Original implementation (fallback if no plugin)
             ...
@@ -68,7 +68,7 @@ def plugin_method(func: Callable) -> Callable:
     The decorator automatically:
     1. For methods: Detects the class name and method name
     2. For functions: Uses module name and function name
-    3. Looks up plugin implementation using the key
+    3. Looks up override method using the key
     4. Uses plugin if found, otherwise uses original implementation
     
     No parameters needed - everything is auto-detected!
@@ -124,7 +124,7 @@ def plugin_method(func: Callable) -> Callable:
             function_name = func.__name__
             method_key = f"{module_name}.{function_name}"
         
-        plugin_impl = get_plugin_method(method_key)
+        plugin_impl = get_override_method(method_key)
         
         # If not found, try to lazy import the plugin module
         if plugin_impl is None:
@@ -139,9 +139,9 @@ def plugin_method(func: Callable) -> Callable:
                     try:
                         importlib.import_module(plugin_module)
                         # Try again after import
-                        plugin_impl = get_plugin_method(method_key)
+                        plugin_impl = get_override_method(method_key)
                         if plugin_impl is not None:
-                            logger.debug(f"Lazy loaded plugin implementation for {method_key}")
+                            logger.debug(f"Lazy loaded override method for {method_key}")
                     except (ImportError, ModuleNotFoundError):
                         # Plugin module doesn't exist, that's okay
                         pass
@@ -152,7 +152,7 @@ def plugin_method(func: Callable) -> Callable:
         # Cache the result
         if plugin_impl is not None:
             _plugin_impl_cache[func] = plugin_impl
-            logger.debug(f"Using plugin implementation for {method_key}")
+            logger.debug(f"Using override method for {method_key}")
             return plugin_impl(*args, **kwargs)
         else:
             # Cache "not found" result to avoid repeated lookup
@@ -164,23 +164,23 @@ def plugin_method(func: Callable) -> Callable:
     return wrapper
 
 
-def plugin_implementation(class_or_module_name: str, method_or_function_name: str):
+def override(class_or_module_name: str, method_or_function_name: str):
     """
-    Decorator to register a plugin implementation.
+    Decorator to register an override method.
     
     Usage in plugins (for methods):
-        @plugin_implementation("LanguageModule", "_is_in_embd_group")
+        @override("LanguageModule", "_is_in_embd_group")
         def _is_in_embd_group(self):
             # Plugin implementation
             ...
     
     Usage in plugins (for functions):
-        @plugin_implementation("clip_grads", "get_grad_norm_fp32")
+        @override("clip_grads", "get_grad_norm_fp32")
         def get_grad_norm_fp32(...):
             # Plugin implementation
             ...
     
-    This decorator automatically registers the function as a plugin implementation.
+    This decorator automatically registers the function as an override method.
     
     Args:
         class_or_module_name: Class name (e.g., "LanguageModule") or module name (e.g., "clip_grads")
@@ -188,7 +188,7 @@ def plugin_implementation(class_or_module_name: str, method_or_function_name: st
     """
     def decorator(impl_func: Callable) -> Callable:
         method_key = f"{class_or_module_name}.{method_or_function_name}"
-        register_plugin_method(method_key, impl_func)
-        logger.info(f"Registered plugin implementation: {method_key}")
+        register_override_method(method_key, impl_func)
+        logger.info(f"Registered override method: {method_key}")
         return impl_func
     return decorator

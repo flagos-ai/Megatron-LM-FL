@@ -25,8 +25,10 @@ from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version, make_tp_sharded_tensor_for_checkpoint
-from megatron.plugin.decorators import plugin_method
+from megatron.plugin.decorators import overridable
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 class LanguageModule(MegatronModule):
     """Base language module that has common helper functions used across GPT, BERT etc.
@@ -57,7 +59,7 @@ class LanguageModule(MegatronModule):
         self.vp_stage = None
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 
-    @plugin_method
+    @overridable
     def _is_in_embd_group(self):
         if self.embd_group is None:
             return False
@@ -164,7 +166,7 @@ class LanguageModule(MegatronModule):
         loss = loss.transpose(0, 1).contiguous()
         return loss
 
-    @plugin_method
+    @overridable
     def setup_embeddings_and_output_layer(self) -> None:
         """Sets up embedding layer in first stage and output layer in last stage.
 
@@ -233,7 +235,7 @@ class LanguageModule(MegatronModule):
         if torch.distributed.is_initialized():
             if self._is_in_embd_group():
                 weight = self.shared_embedding_or_output_weight()
-                weight.data = weight.data.cuda()
+                weight.data = weight.data.to(cur_platform.device())
                 torch.distributed.all_reduce(weight.data, group=self.embd_group)
 
         elif not getattr(LanguageModule, "embedding_warning_printed", False):

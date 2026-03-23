@@ -10,7 +10,7 @@ from megatron.core.utils import log_single_rank
 
 logger = logging.getLogger(__name__)
 
-from megatron.plugin.decorators import plugin_method
+from megatron.plugin.decorators import overridable
 
 
 class OptimizerParamScheduler:
@@ -141,7 +141,7 @@ class OptimizerParamScheduler:
 
         return start_wd + coeff * delta_wd
 
-    @plugin_method
+    @overridable
     def get_lr(self, param_group: dict) -> float:
         """Learning rate decay functions from:
         https://openreview.net/pdf?id=BJYwwY9ll pg. 4

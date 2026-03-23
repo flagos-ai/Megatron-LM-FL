@@ -5,6 +5,9 @@ import math
 import torch.distributed as dist
 
 
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+
 # copy from https://github.com/KellerJordan/Muon/tree/master
 # @torch.compile
 def zeropower_via_newtonschulz5(G, steps):
@@ -161,7 +164,7 @@ class Muon(torch.optim.Optimizer):
                 group['step'] = 1
 
         dtype = torch.bfloat16
-        device = torch.cuda.current_device()
+        device = cur_platform.current_device()
 
         ns_inputs = {}
 

@@ -11,11 +11,14 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
 
-from megatron.plugin.decorators import plugin_implementation
+from megatron.plugin.decorators import override
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
 
 logger = logging.getLogger(__name__)
 
-@plugin_implementation("LanguageModule", "_is_in_embd_group")
+
+@override("LanguageModule", "_is_in_embd_group")
 def _is_in_embd_group(self):
     """
     Plugin implementation of _is_in_embd_group.
@@ -75,7 +78,7 @@ def _is_in_embd_group(self):
     return False
 
 
-@plugin_implementation("LanguageModule", "setup_embeddings_and_output_layer")
+@override("LanguageModule", "setup_embeddings_and_output_layer")
 def setup_embeddings_and_output_layer(self) -> None:
     """Sets up embedding layer in first stage and output layer in last stage.
 
@@ -145,7 +148,7 @@ def setup_embeddings_and_output_layer(self) -> None:
     if torch.distributed.is_initialized():
         if self._is_in_embd_group():
             weight = self.shared_embedding_or_output_weight()
-            weight.data = weight.data.cuda()
+            weight.data = weight.data.to(cur_platform.device())
             embedding_group = self.embd_group
             if not isinstance(embedding_group, list):
                 torch.distributed.all_reduce(weight.data, group=self.embd_group)
@@ -161,7 +164,7 @@ def setup_embeddings_and_output_layer(self) -> None:
                         torch.distributed.all_reduce(weight.data, group=group)
                     if original_dtype != weight.dtype:
                         weight = weight.to(original_dtype)
-                        weight.data = weight.data.cuda()
+                        weight.data = weight.data.to(cur_platform.device())
 
     elif not getattr(LanguageModule, "embedding_warning_printed", False):
         logging.getLogger(__name__).warning(
