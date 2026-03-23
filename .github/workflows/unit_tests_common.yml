@@ -226,6 +226,7 @@ jobs:
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
+          export PATH="/opt/conda/bin:$PATH"
           echo "Python location: $(which python)"
           echo "Python version: $(python --version)"
           # Install package in development mode
