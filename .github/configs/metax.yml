@@ -105,7 +105,7 @@ test_matrix:
       - tests/unit_tests/transformer/moe/test_moe_layer.py
       - tests/unit_tests/transformer/moe/test_multihot_indices_converter.py
 
-      # 5.data
+      # 4.data
       #need cuda. No module named 'nltk'
       - tests/unit_tests/data/test_bin_reader.py    
       - tests/unit_tests/data/test_preprocess_data.py  
