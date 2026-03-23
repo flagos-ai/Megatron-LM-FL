@@ -3,7 +3,7 @@
 # Test configurations are defined in tests/test_utils/config/platforms/cuda.yaml
 
 hardware_name: cuda
-display_name: "CUDA Tests"
+display_name: 'CUDA Tests'
 
 # Docker image for this hardware
 ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
@@ -13,6 +13,7 @@ runner_labels:
   - self-hosted
   - Linux
   - X64
+  - nvidia
   - gpu-8
 
 # Container volumes (hardware-specific paths)
@@ -25,7 +26,7 @@ container_volumes:
   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
 
 # Container options (hardware-specific settings)
-container_options: "--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535"
+container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
 
 # Device types to run tests on
 device_types:

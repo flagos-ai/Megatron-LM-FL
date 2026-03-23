@@ -13,10 +13,11 @@
 # limitations under the License.
 name: Create PR to main with cherry-pick from release
 
-# on:
+on:
 #   push:
 #     branches:
 #       - main
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   cherry-pick:

@@ -1,6 +1,6 @@
 name: API Compatibility Check
 
-# on:
+on:
 #   push:
 #     branches:
 #       - dev
@@ -10,12 +10,12 @@ name: API Compatibility Check
 #   merge_group:
 #     types: [checks_requested]
 
-#   # Allow manual trigger
-#   workflow_dispatch:
-#     inputs:
-#       baseline:
-#         description: 'Baseline git reference (tag/branch/commit)'
-#         required: true
+  # Allow manual trigger
+  workflow_dispatch:
+    inputs:
+      baseline:
+        description: 'Baseline git reference (tag/branch/commit)'
+        required: true
 
 jobs:
   pre-flight:

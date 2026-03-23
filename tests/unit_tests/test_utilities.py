@@ -8,6 +8,29 @@ from torch.distributed import rendezvous
 import megatron.core.parallel_state as ps
 
 
+def _get_device_backend():
+
+    platform = os.environ.get('MEGATRON_TEST_PLATFORM', 'cuda').strip().lower()
+    
+    #choose device and distributed backend based on platform
+    match platform:
+        case 'ascend':
+            import torch_npu  
+            return 'npu', 'hccl'
+        case 'metax':
+            import torch_musa  
+            return 'musa', 'mccl'
+        case 'cuda':  
+            return 'cuda', 'nccl'
+        case _:  
+            raise ValueError(
+                f"Unsupported platform: {platform}! "
+                "Currently supported platforms are: ascend, metax, cuda. Please add adaptation code for other platforms."
+            )
+        
+DEVICE_TYPE, DIST_BACKEND = _get_device_backend()
+
+
 class TestModel(torch.nn.Module):
     def __init__(
         self,
@@ -44,7 +67,10 @@ class Utils:
                 f'Initializing torch.distributed with rank: {Utils.rank}, '
                 f'world_size: {Utils.world_size}'
             )
-            torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
+            # Set the device before initializing torch.distributed since the initialization
+            device_module = getattr(torch, DEVICE_TYPE)  # torch.cuda / torch.npu / torch.musa
+            device_module.set_device(Utils.rank % device_module.device_count())
+            # torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
             init_method = 'tcp://'
             master_ip = os.getenv('MASTER_ADDR', 'localhost')
             master_port = os.getenv('MASTER_PORT', '6000')
@@ -61,7 +87,8 @@ class Utils:
             Utils.store = store
 
             torch.distributed.init_process_group(
-                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
+                # backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store  
+                backend=DIST_BACKEND, world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
             torch.distributed.barrier()
