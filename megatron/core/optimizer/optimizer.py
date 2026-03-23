@@ -671,7 +671,11 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                     if param.requires_grad:
 
                         # float16 params:
-                        if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                        # cuda check -> platform check
+                        if param.device.type == cur_platform.device_name() and param.dtype in (
+                                torch.float16,
+                                torch.bfloat16,
+                        ):
                             float16_params_this_group.append(param)
                             # Create a copy
                             main_param = param.detach().clone().float()
@@ -690,16 +694,14 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             if param in self.optimizer.state:
                                 self.optimizer.state[main_param] = self.optimizer.state.pop(param)
                         # fp32 params.
-                        elif param.type() == 'torch.cuda.FloatTensor':
+                        elif param.device.type == cur_platform.device_name() and param.dtype == torch.float32:
                             fp32_params_this_group.append(param)
                             param_group['params'][i] = param
 
                         else:
                             raise TypeError(
                                 'Wrapped parameters must be one of '
-                                'torch.cuda.FloatTensor,  '
-                                'torch.cuda.HalfTensor, or '
-                                'torch.cuda.BFloat16Tensor. '
+                                'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '
                                 'Received {}'.format(param.type())
                             )
 
