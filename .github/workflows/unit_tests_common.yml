@@ -225,9 +225,12 @@ jobs:
 
       - name: Activate Python environment
         run: |
-          source /opt/conda/etc/profile.d/conda.sh
-          conda activate base
+          if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
+            source /opt/conda/etc/profile.d/conda.sh
+            conda activate base
+          fi
           echo "PATH=$PATH" >> $GITHUB_ENV
+          echo "Python: $(which python) ($(python --version 2>&1))"
 
       - name: Setup Python environment
         if: steps.should_run.outputs.should_run == 'true'
