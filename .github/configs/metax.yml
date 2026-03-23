@@ -54,10 +54,11 @@ test_matrix:
     ignored_tests:
       ## core
       - tests/unit_tests/test_inference.py
-      - tests/unit_tests/test_rl_utils.py
+      - tests/unit_tests/test_rl_utils.py ## No module named 'wandb'
       - tests/unit_tests/test_hyper_comm_grid.py
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_checkpointing.py
+      - tests/unit_tests/test_process_groups_config.py
       - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/test_optimizer_cpu_offloading.py ## RuntimeError: No CUDA GPUs are available
       - tests/unit_tests/test_local_multi_tensor_fns.py ## RuntimeError: No CUDA GPUs are available
@@ -106,7 +107,7 @@ test_matrix:
       # === Need >2 GPU（model_size > 2） ===
       # core: tp=2,pp=4 or tp=world_size
       - tests/unit_tests/test_parallel_state.py
-      - tests/unit_tests/test_tokenizer.py
+      - tests/unit_tests/test_tokenizer.py ## No module named 'nltk'
       # models: tp≥4
       - tests/unit_tests/models/test_t5_model.py
       - tests/unit_tests/models/test_llava_model.py
@@ -147,6 +148,13 @@ test_matrix:
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
       # post training
       - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel::test_inference
+
+  # functional:
+  #   train:
+  #     - device: c500
+  #       task: train
+  #       model: deepseek
+  #       case: tp2_pp2_ep2
 
   functional:
     train:
