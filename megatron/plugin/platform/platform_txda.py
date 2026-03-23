@@ -21,8 +21,9 @@ class PlatformTXDA(PlatformBase):
     def is_available(self):
         try:
             import torch
+            import torch_txda
             # Determine if we are on a TXDA device
-            if torch.cuda.device_count() > 0 and torch.cuda.is_available():
+            if torch.txda.device_count() > 0 and torch.txda.is_available():
                 return True
             else:
                 return False
