@@ -327,9 +327,18 @@ def get_te_version():
         else:
             return version("transformer-engine")
 
+    def parse_te_version_str(ver_str):
+        import re
+
+        # Handle versions like "0.1.0+te2.9.0" — extract the part after "+te"
+        match = re.search(r'\+te(\d+\.\d+.*)', ver_str)
+        if match:
+            return match.group(1)
+        return ver_str
+
     global _te_version
     if _te_version is None and HAVE_TE:
-        _te_version = PkgVersion(get_te_version_str())
+        _te_version = PkgVersion(parse_te_version_str(get_te_version_str()))
     return _te_version
 
 
