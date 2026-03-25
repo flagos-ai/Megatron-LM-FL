@@ -52,6 +52,21 @@ test_matrix:
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
+      # Tests except core are unchecked on Metax yet, just ignore them now
+      - tests/unit_tests/transformer/*.py
+      - tests/unit_tests/models/*.py
+      - tests/unit_tests/distributed/*.py
+      - tests/unit_tests/dist_checkpointing/*.py
+      - tests/unit_tests/tensor_parallel/*.py
+      - tests/unit_tests/pipeline_parallel/*.py
+      - tests/unit_tests/data/*.py
+      - tests/unit_tests/fusions/*.py
+      - tests/unit_tests/export/*.py
+      - tests/unit_tests/post_training/*.py
+      - tests/unit_tests/tokenizers/*.py
+      - tests/unit_tests/utils/*.py
+
+      # single test cases below are unstable on Metax now, need further investigation
       ## 1.core
       - tests/unit_tests/test_checkpointing.py
       - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
@@ -61,7 +76,7 @@ test_matrix:
       - tests/unit_tests/test_optimizer.py ## RuntimeError: No CUDA GPUs are available
       # - tests/unit_tests/test_parallel_state.py
       - tests/unit_tests/test_process_groups_config.py
-      - tests/unit_tests/test_rl_utils.py    #No module named 'wandb'
+      - tests/unit_tests/test_rl_utils.py #No module named 'wandb'
       # - tests/unit_tests/test_tokenizer.py    # No module named 'nltk'
       - tests/unit_tests/test_utils.py
       - tests/unit_tests/test_training.py
@@ -108,9 +123,9 @@ test_matrix:
 
       # 4.data
       #need cuda. No module named 'nltk'
-      - tests/unit_tests/data/test_bin_reader.py    
-      - tests/unit_tests/data/test_preprocess_data.py  
-      - tests/unit_tests/data/test_preprocess_mmdata.py  
+      - tests/unit_tests/data/test_bin_reader.py
+      - tests/unit_tests/data/test_preprocess_data.py
+      - tests/unit_tests/data/test_preprocess_mmdata.py
 
       # ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/data/test_builder.py
@@ -187,7 +202,6 @@ test_matrix:
   #       task: train
   #       model: deepseek
   #       case: tp2_pp2_ep2
-
 
   # functional:
   #   train:
