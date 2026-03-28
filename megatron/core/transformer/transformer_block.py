@@ -629,6 +629,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         if len(self.layers) > 0: # some pp-stage has no layers in pipeline_model_parallel_layout,such as embedding stage
             if hasattr(self.layers[0], 'current_microbatch'):
                 self.current_microbatch = self.layers[0].current_microbatch
+        saved_recompute_granularity = self.config.recompute_granularity
         ########## FlagScale End ##########
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
@@ -821,6 +822,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
 
+        self.config.recompute_granularity = saved_recompute_granularity
         return hidden_states
 
     def sharded_state_dict(
