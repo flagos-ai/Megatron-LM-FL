@@ -14,19 +14,14 @@ def _get_device_backend():
     
     #choose device and distributed backend based on platform
     match platform:
-        case 'ascend':
-            import torch_npu  
-            return 'npu', 'hccl'
         case 'metax':
-            import torch_musa  
-            return 'musa', 'mccl'
-        case 'cuda':  
-            return 'cuda', 'nccl'
+            return 'cuda', 'mccl'
         case _:  
-            raise ValueError(
-                f"Unsupported platform: {platform}! "
-                "Currently supported platforms are: ascend, metax, cuda. Please add adaptation code for other platforms."
-            )
+            return 'cuda', 'nccl'
+            # raise ValueError(
+            #     f"Unsupported platform: {platform}! "
+            #     "Currently supported platforms are: cuda, metax. Please add adaptation code for other platforms."
+            # )
         
 DEVICE_TYPE, DIST_BACKEND = _get_device_backend()
 
@@ -68,7 +63,7 @@ class Utils:
                 f'world_size: {Utils.world_size}'
             )
             # Set the device before initializing torch.distributed since the initialization
-            device_module = getattr(torch, DEVICE_TYPE)  # torch.cuda / torch.npu / torch.musa
+            device_module = getattr(torch, DEVICE_TYPE)  # torch.cuda / torch.npu
             device_module.set_device(Utils.rank % device_module.device_count())
             # torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
             init_method = 'tcp://'
@@ -96,7 +91,7 @@ class Utils:
 
     @staticmethod
     def set_world_size(world_size=None, rank=None):
-        Utils.world_size = torch.cuda.device_count() if world_size is None else world_size
+        Utils.world_size = getattr(torch, DEVICE_TYPE).device_count() if world_size is None else world_size
         if (
             torch.distributed.is_initialized()
             and Utils.world_size != torch.distributed.get_world_size()

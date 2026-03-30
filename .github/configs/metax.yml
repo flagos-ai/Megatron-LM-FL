@@ -37,10 +37,6 @@ container_options: >-
   --ulimit nofile=65535:65535
   --device=/dev/dri
   --device=/dev/mxcd
-  --group-add video
-  -e PLATFORM=metax
-  -e TORCH_DISTRIBUTED_BACKEND=mccl
-  -e MACA_VISIBLE_DEVICES=all
 device_types:
   - c500
 
@@ -52,7 +48,6 @@ test_matrix:
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
-
       # single test cases below are unstable on Metax now, need further investigation
       ## 1.core
       - tests/unit_tests/test_checkpointing.py
@@ -233,7 +228,7 @@ test_matrix:
       # specific case that are unstable on Metax
       # models
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
-      
+
   # functional:
   #   train:
   #     - device: c500
