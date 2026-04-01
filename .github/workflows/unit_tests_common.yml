@@ -44,6 +44,7 @@ jobs:
       data: ${{ steps.filter.outputs.data }}
       fusions: ${{ steps.filter.outputs.fusions }}
       others: ${{ steps.filter.outputs.others }}
+      ci_config: ${{ steps.filter.outputs.ci_config }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v6
@@ -118,6 +119,10 @@ jobs:
           OTHERS_PATTERNS="^tests/unit_tests/export/ ^tests/unit_tests/post_training/ ^tests/unit_tests/tokenizers/ ^tests/unit_tests/utils/ ^megatron/core/export/ ^megatron/post_training/ ^megatron/tokenizer/ ^megatron/core/utils/"
           echo "others=$(check_patterns "$OTHERS_PATTERNS")" >> $GITHUB_OUTPUT
 
+          # CI config: .github workflow and config files
+          CI_CONFIG_PATTERNS="^\.github/"
+          echo "ci_config=$(check_patterns "$CI_CONFIG_PATTERNS")" >> $GITHUB_OUTPUT
+
           echo "=== Change detection complete ==="
 
   unit_test:
@@ -181,6 +186,13 @@ jobs:
             exit 0
           fi
 
+          # If CI config files (.github/) changed, run all tests
+          CI_CONFIG_CHANGED='${{ needs.detect_changes.outputs.ci_config }}'
+          if [ "$CI_CONFIG_CHANGED" == "true" ]; then
+            echo "should_run=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+
           # Check change detection output for this test group
           case "$TEST_GROUP" in
             core) CHANGED='${{ needs.detect_changes.outputs.core }}' ;;
@@ -195,11 +207,7 @@ jobs:
             others) CHANGED='${{ needs.detect_changes.outputs.others }}' ;;
             *) CHANGED="true" ;;
           esac
-
-          # echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
-
-          # Force Run
-          echo "should_run=true" >> $GITHUB_OUTPUT
+          echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
   
 
       - name: Checkout source code
