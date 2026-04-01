@@ -96,6 +96,7 @@ test_matrix:
       - tests/unit_tests/transformer/moe/test_routers.py
       - tests/unit_tests/transformer/moe/test_shared_experts.py
       - tests/unit_tests/transformer/moe/test_upcycling.py
+      - tests/unit_tests/transformer/moe/test_aza_token_dispatcher.py
 
       #need cuda
       - tests/unit_tests/transformer/test_cuda_graphs.py
