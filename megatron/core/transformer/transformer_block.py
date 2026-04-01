@@ -821,8 +821,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # on the computational graph and will lead to unexpected errors in pipeline schedules.
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
-
+        ########## FlagScale Begin ##########
         self.config.recompute_granularity = saved_recompute_granularity
+        ########## FlagScale End ##########
         return hidden_states
 
     def sharded_state_dict(
