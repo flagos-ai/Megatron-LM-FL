@@ -15,32 +15,20 @@ def get_platform():
     if cur_platform is not None:
         return cur_platform
 
-    platform_name = None
-    # 1. Detect whether there is override of Megatron-LM-FL platforms from environment variable.
-    if "MG_PLATFORM" in os.environ.keys():
-        platform_name = os.environ["MG_PLATFORM"].lower()
-        if platform_name not in PLATFORMS.keys():
-            raise ValueError(f'MG_PLATFORM must be one of {PLATFORMS.keys()}. '
-                             f'Value "{platform_name}" is not supported')
-        cur_platform = PLATFORMS[platform_name]
-        print(f"Megatron-LM-FL Platform: {platform_name} Selected")
-
-    # 2. If no override, detect which platform to use automatically
+    if "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
+        cur_platform = PLATFORMS["cuda"]
+        print(f"Megatron-LM-FL Platform: cuda Selected")
+    elif "musa" in PLATFORMS.keys() and PLATFORMS["musa"].is_available():
+        cur_platform = PLATFORMS["musa"]
+        print(f"Megatron-LM-FL Platform: musa Selected")
+    elif "txda" in PLATFORMS.keys() and PLATFORMS["txda"].is_available():
+        cur_platform = PLATFORMS["txda"]
+        print(f"Megatron-LM-FL Platform: txda Selected")
+    elif "cpu" in PLATFORMS.keys() and PLATFORMS["cpu"].is_available():
+        cur_platform = PLATFORMS["cpu"]
+        print(f"Megatron-LM-FL Platform: cpu Selected")
     else:
-        if "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
-            cur_platform = PLATFORMS["cuda"]
-            print(f"Megatron-LM-FL Platform: cuda Selected")
-        elif "musa" in PLATFORMS.keys() and PLATFORMS["musa"].is_available():
-            cur_platform = PLATFORMS["musa"]
-            print(f"Megatron-LM-FL Platform: musa Selected")
-        elif "txda" in PLATFORMS.keys() and PLATFORMS["txda"].is_available():
-            cur_platform = PLATFORMS["txda"]
-            print(f"Megatron-LM-FL Platform: txda Selected")
-        elif "cpu" in PLATFORMS.keys() and PLATFORMS["cpu"].is_available():
-            cur_platform = PLATFORMS["cpu"]
-            print(f"Megatron-LM-FL Platform: cpu Selected")
-        else:
-            raise ValueError("No platform is available")
+        raise ValueError("No platform is available")
     
     return cur_platform
 
