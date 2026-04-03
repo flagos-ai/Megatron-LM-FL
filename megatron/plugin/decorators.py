@@ -80,8 +80,7 @@ def get_override_method(method_key: str) -> Optional[Callable]:
     Selection priority:
     1. If MG_FL_PREFER is set and a matching vendor implementation exists, use it.
     2. Otherwise fall back to the "default" vendor.
-    3. If neither exists but there is exactly one registered vendor, use that.
-    4. Otherwise return None.
+    3. Otherwise return None.
 
     Args:
         method_key: Unique key for the method/function
@@ -102,15 +101,10 @@ def get_override_method(method_key: str) -> Optional[Callable]:
 
     # 2. Default vendor
     if _DEFAULT_VENDOR in vendor_map:
+        logger.debug(f"Using vendor '{_DEFAULT_VENDOR}' for {method_key}")
         return vendor_map[_DEFAULT_VENDOR]
 
-    # 3. Single vendor fallback
-    if len(vendor_map) == 1:
-        vendor_name, impl = next(iter(vendor_map.items()))
-        logger.debug(f"Falling back to sole vendor '{vendor_name}' for {method_key}")
-        return impl
-
-    # 4. Multiple vendors but no preference / no default -- warn and return None
+    # 3. Multiple vendors but no preference / no default -- warn and return None
     if preferred is not None:
         logger.warning(
             f"MG_FL_PREFER='{preferred}' but no matching vendor for {method_key}. "

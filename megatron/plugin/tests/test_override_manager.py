@@ -130,14 +130,6 @@ class TestGetOverrideMethod(unittest.TestCase):
         result = get_override_method("A.foo")
         self.assertEqual(result(), "default")
 
-    def test_single_vendor_no_default_no_prefer(self):
-        """When only one non-default vendor is registered and MG_FL_PREFER is not set, use the sole vendor."""
-        def fn_musa(): return "musa"
-        register_override_method("A.foo", fn_musa, vendor="musa")
-
-        result = get_override_method("A.foo")
-        self.assertEqual(result(), "musa")
-
     def test_multiple_vendors_no_default_no_prefer_returns_none(self):
         """Multiple non-default vendors without MG_FL_PREFER set -> return None."""
         def fn_musa(): return "musa"
