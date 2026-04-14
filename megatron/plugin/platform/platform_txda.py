@@ -99,7 +99,7 @@ class PlatformTXDA(PlatformBase):
 
     @property
     def default_generators(self):
-        return torch.cuda.default_generators
+        return torch.txda.default_generators
 
     # Streams/Events
     @property
