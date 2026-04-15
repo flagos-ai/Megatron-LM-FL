@@ -1,0 +1,102 @@
+name: Trigger FlagScale Training Tests
+
+on:
+  push:
+    branches: ["main", "dev"]
+  pull_request_target:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      flagscale_ref:
+        description: 'FlagScale branch/ref to use'
+        required: false
+        type: string
+        default: 'main'
+
+jobs:
+  get-megatron-info:
+    runs-on: ubuntu-latest
+    outputs:
+      branch: ${{ steps.info.outputs.branch }}
+      repo: ${{ steps.info.outputs.repo }}
+    steps:
+      - name: Get branch and repo info
+        id: info
+        run: |
+          if [ "${{ github.event_name }}" == "pull_request_target" ]; then
+            BRANCH="${{ github.event.pull_request.head.ref }}"
+            REPO="${{ github.event.pull_request.head.repo.full_name }}"
+          else
+            BRANCH="${GITHUB_REF#refs/heads/}"
+            REPO="${{ github.repository }}"
+          fi
+
+          echo "branch=${BRANCH}" >> $GITHUB_OUTPUT
+          echo "repo=${REPO}" >> $GITHUB_OUTPUT
+
+          echo "Branch: ${BRANCH}"
+          echo "Repo: ${REPO}"
+
+  trigger-flagscale-train-tests:
+    needs: [get-megatron-info]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger FlagScale training functional tests
+        env:
+          GH_TOKEN: ${{ secrets.FLAGSCALE_PAT }}
+        run: |
+          FLAGSCALE_REPO="${{ secrets.FLAGSCALE_REPO || 'flagos-ai/FlagScale' }}"
+          FLAGSCALE_REF="${{ inputs.flagscale_ref || 'main' }}"
+          MEGATRON_REPO="${{ needs.get-megatron-info.outputs.repo }}"
+          MEGATRON_BRANCH="${{ needs.get-megatron-info.outputs.branch }}"
+
+          echo "Triggering FlagScale training functional tests"
+          echo "  FlagScale repo: ${FLAGSCALE_REPO}"
+          echo "  FlagScale ref: ${FLAGSCALE_REF}"
+          echo "  Megatron-LM-FL repo: ${MEGATRON_REPO}"
+          echo "  Megatron-LM-FL branch: ${MEGATRON_BRANCH}"
+          
+          gh workflow run functional_tests_megatron_fl_trigger.yml \
+            --repo "${FLAGSCALE_REPO}" \
+            --ref "${FLAGSCALE_REF}" \
+            --field megatron_lm_fl_repo="${MEGATRON_REPO}" \
+            --field megatron_lm_fl_branch="${MEGATRON_BRANCH}"
+
+      - name: Get triggered run ID
+        id: get_run_id
+        env:
+          GH_TOKEN: ${{ secrets.FLAGSCALE_PAT }}
+        run: |
+          FLAGSCALE_REPO="${{ secrets.FLAGSCALE_REPO || 'flagos-ai/FlagScale' }}"
+
+          sleep 10  # Wait for run to appear
+          RUN_ID=$(gh run list \
+            --repo "${FLAGSCALE_REPO}" \
+            --workflow=functional_tests_megatron_fl_trigger.yml \
+            --limit 5 \
+            --json databaseId,createdAt \
+            --jq "sort_by(.createdAt) | reverse | .[0] | .databaseId")
+
+          echo "run_id=${RUN_ID}" >> $GITHUB_OUTPUT
+          echo "Triggered run ID: ${RUN_ID}"
+          echo "View at: https://github.com/${FLAGSCALE_REPO}/actions/runs/${RUN_ID}"
+
+          cat >> $GITHUB_STEP_SUMMARY << EOF
+          ## FlagScale Training Tests Triggered
+
+          **Megatron-LM-FL:** \`${{ needs.get-megatron-info.outputs.branch }}\`
+
+          - [View FlagScale workflow run](https://github.com/${FLAGSCALE_REPO}/actions/runs/${RUN_ID})
+
+          > Tests use the latest code from Megatron-LM-FL branch \`${{ needs.get-megatron-info.outputs.branch }}\`
+          EOF
+
+      - name: Monitor FlagScale workflow
+        env:
+          GH_TOKEN: ${{ secrets.FLAGSCALE_PAT }}
+        run: |
+          FLAGSCALE_REPO="${{ secrets.FLAGSCALE_REPO || 'flagos-ai/FlagScale' }}"
+          RUN_ID="${{ steps.get_run_id.outputs.run_id }}"
+
+          echo "Monitoring FlagScale workflow run: ${RUN_ID}"
+          gh run watch ${RUN_ID} --repo "${FLAGSCALE_REPO}" --exit-status
