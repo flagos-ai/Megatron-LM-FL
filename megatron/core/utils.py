@@ -29,20 +29,6 @@ from typing import Any, Callable, Dict, List, Optional, Tuple, Type, Union
 import numpy
 import torch
 
-try:
-    import torch.distributed._symmetric_memory as symm_mem
-
-    HAVE_TORCH_SYMM_MEM = True
-except ImportError:
-    HAVE_TORCH_SYMM_MEM = False
-
-try:
-    import triton  # pylint: disable=unused-import
-
-    HAVE_TRITON = True
-except ImportError:
-    HAVE_TRITON = False
-
 from megatron.core import config
 from megatron.core._rank_utils import log_single_rank
 from megatron.core.package_info import __version__ as mcore_version
@@ -92,12 +78,9 @@ except Exception:
     _torch_version = PkgVersion("0.0.0") if HAVE_PACKAGING else "0.0.0"
 _te_version = None
 _fa_version = None
+_flashinfer_version = None
 _mamba_ssm_version = None
 _causal_conv1d_version = None
-
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
 
 
 @contextmanager
@@ -335,18 +318,12 @@ def get_te_version():
         else:
             return version("transformer-engine")
 
-    def parse_te_version_str(ver_str):
-        import re
-
-        # Handle versions like "0.1.0+te2.9.0" — extract the part after "+te"
-        match = re.search(r'\+te(\d+\.\d+.*)', ver_str)
-        if match:
-            return match.group(1)
-        return ver_str
-
     global _te_version
-    if _te_version is None and HAVE_TE:
-        _te_version = PkgVersion(parse_te_version_str(get_te_version_str()))
+    if _te_version is None:
+        if HAVE_TE:
+            _te_version = PkgVersion(get_te_version_str())
+        else:
+            _te_version = PkgVersion("0.0.0")
     return _te_version
 
 
@@ -476,6 +453,44 @@ def is_causal_conv1d_min_version(version, check_equality=True):
     return get_causal_conv1d_version() > PkgVersion(version)
 
 
+def get_flashinfer_version():
+    """Get flashinfer version from __version__; if not available use pip's. Use caching."""
+    if not HAVE_PACKAGING:
+        raise ImportError(
+            "packaging is not installed. Please install it with `pip install packaging`."
+        )
+
+    def get_flashinfer_version_str():
+        try:
+            import flashinfer
+        except ImportError:
+            return None
+
+        if hasattr(flashinfer, "__version__"):
+            return str(flashinfer.__version__)
+        else:
+            return version("flashinfer")
+
+    global _flashinfer_version
+    if _flashinfer_version is None:
+        if (flashinfer_version_str := get_flashinfer_version_str()) is not None:
+            _flashinfer_version = PkgVersion(flashinfer_version_str)
+    return _flashinfer_version
+
+
+def is_flashinfer_min_version(version, check_equality=True):
+    """Check if minimum version of `flashinfer` is installed."""
+    if not HAVE_PACKAGING:
+        raise ImportError(
+            "packaging is not installed. Please install it with `pip install packaging`."
+        )
+    if (flashinfer_version := get_flashinfer_version()) is None:
+        return False
+    if check_equality:
+        return flashinfer_version >= PkgVersion(version)
+    return flashinver_version > PkgVersion(version)
+
+
 def ensure_divisibility(numerator, denominator):
     """Ensure that numerator is divisible by the denominator."""
     assert numerator % denominator == 0, "{} is not divisible by {}".format(numerator, denominator)
@@ -486,17 +501,6 @@ def divide(numerator, denominator):
     the division value."""
     ensure_divisibility(numerator, denominator)
     return numerator // denominator
-
-
-def deprecate_inference_params(inference_context, inference_params):
-    """Print warning for deprecated `inference_params`."""
-    if inference_context is None and inference_params is not None:
-        warnings.warn(
-            "`inference_params` renamed to `inference_context`, and will be "
-            "removed in `megatron-core` 0.13."
-        )
-        return inference_params
-    return inference_context
 
 
 def get_tensor_model_parallel_group_if_none(tp_group, is_expert=False, check_initialized=True):
@@ -539,10 +543,6 @@ def get_pg_size(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 1
-    ######### FlagScale Begin #########
-    if isinstance(group, list):
-        return group[0].size()
-    ######### FlagScale End #########
     return group.size()
 
 
@@ -557,10 +557,6 @@ def get_pg_rank(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 0
-    ########### FlagScale Begin #########
-    if isinstance(group, list):
-        return group[0].rank()
-    ########### FlagScale End #########
     return group.rank()
 
 
@@ -649,70 +645,11 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=cur_platform.current_device(),
+                    device=torch.cuda.current_device(),
                     requires_grad=False,
                 )
 
         return self.buffer[(name, dtype)][0:required_len].view(*tensor_shape)
-
-
-class GlobalSymmetricMemoryBuffer:
-    """
-    Global symmetric memory buffer used in inference.
-    This buffer is used by mcore-inference's low-latency
-    NVLS all-gather and reduce-scatter collectives.
-    """
-
-    def __init__(self, size_in_mb, process_group):
-        if not HAVE_TORCH_SYMM_MEM or not HAVE_TRITON:
-            # This should be hit if the user is running an older
-            # version of torch, or if they do not have triton
-            # installed.
-            self.symm_buffer = None
-            self.symm_mem_hdl = None
-        else:
-            numel = int(size_in_mb * 1024 * 1024)  # size in bytes
-            try:
-                symm_mem.enable_symm_mem_for_group(process_group.group_name)
-                self.symm_buffer = symm_mem.empty(numel, dtype=torch.uint8, device='cuda')
-                self.symm_mem_hdl = symm_mem.rendezvous(self.symm_buffer, process_group)
-            except RuntimeError as e:
-                # If symmetric memory initialization fails, set buffer and handle to None
-                # This should happen if the process group is not contained within NVlink
-                self.symm_buffer = None
-                self.symm_mem_hdl = None
-
-    def _can_allocate(self, numel, dtype) -> bool:
-        """
-        Returns whether enough symmetric memory is available
-        for the given tensor shape and dtype.
-        """
-        if self.symm_mem_hdl is None:
-            return False
-        size_of_dtype = torch.tensor([], dtype=dtype).element_size()
-        required_len = numel * size_of_dtype
-        return required_len <= self.symm_buffer.numel()
-
-    def _allocate(self, numel, dtype) -> torch.Tensor:
-        """
-        Allocates a sub-tensor from the self.symm_buffer for the given numel and dtype"""
-        required_bytes = numel * torch.tensor([], dtype=dtype).element_size()
-        return self.symm_buffer[0:required_bytes].view(dtype).view(numel)
-
-    def maybe_get_tensor(self, tensor_shape, dtype):
-        """
-        Returns (potentially) a sub-tensor from the self.symm_buffer for the given shape.
-        If enough symmetric memory is not available, returns None.
-        """
-        if self.symm_mem_hdl is None:
-            return {"tensor": None, "handle": None}
-        numel = reduce(operator.mul, tensor_shape, 1)
-        if not self._can_allocate(numel, dtype):
-            return {"tensor": None, "handle": None}
-        return {
-            "tensor": self._allocate(numel, dtype).view(*tensor_shape),
-            "handle": self.symm_mem_hdl,
-        }
 
 
 def _kernel_make_viewless_tensor(inp, requires_grad):
@@ -833,6 +770,26 @@ def scaled_init_method_normal(sigma, num_layers, multiplier=2.0):
     return functools.partial(torch.nn.init.normal_, mean=0.0, std=std)
 
 
+def mup_scaled_init_method_normal(sigma, num_layers, width_mult, multiplier=2.0):
+    """MuP scaled init method for output layers: N(0, sigma / (sqrt(2*L) * sqrt(m))).
+
+    Combines the standard scaled initialization (for output projection layers)
+    with MuP width scaling. This ensures that both depth and width scaling
+    are accounted for in the initialization.
+
+    Args:
+        sigma (float): Base standard deviation for initialization.
+        num_layers (int): Number of transformer layers.
+        width_mult (float): Width multiplier (hidden_size / base_hidden_size).
+        multiplier (float): Multiplier for depth scaling (default: 2.0).
+
+    Returns:
+        Callable: Initialization function for torch.nn.init.
+    """
+    std = sigma / (math.sqrt(multiplier * num_layers) * math.sqrt(width_mult))
+    return functools.partial(torch.nn.init.normal_, mean=0.0, std=std)
+
+
 def log_on_each_pipeline_stage(
     logger: logging.Logger,
     *args: Any,
@@ -916,7 +873,7 @@ def check_param_hashes_across_dp_replicas(
         assert len(params) == len(local_param_hashes)
         if len(params) == 0:
             continue
-        local_param_hashes = torch.stack(local_param_hashes).to(cur_platform.device())
+        local_param_hashes = torch.stack(local_param_hashes).cuda()
         all_param_hashes = [
             torch.zeros_like(local_param_hashes) for _ in range(all_gather_group.size())
         ]
@@ -1225,7 +1182,7 @@ def local_multi_tensor_l2_norm(chunk_size, noop_flag, tensor_lists, per_tensor, 
     """
     l2 = [[(torch.norm(tensor)) for tensor in tensor_list] for tensor_list in tensor_lists]
     l2_reduced = torch.norm(torch.tensor(l2))
-    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float).to(cur_platform.device())
+    l2_cuda = torch.tensor([float(l2_reduced)], dtype=torch.float, device="cuda")
     return l2_cuda, None
 
 
@@ -1415,10 +1372,10 @@ class StragglerDetector:
         self.bdata: bool = False
         self.dev: Union[torch.device, int, None] = None
         self.evt_q: Union[queue.LifoQueue, None] = None
-        self.start_gemm_ev: List[cur_platform.Event] = []
-        self.stop_gemm_ev: List[cur_platform.Event] = []
-        self.start_data_ev: List[cur_platform.Event] = []
-        self.stop_data_ev: List[cur_platform.Event] = []
+        self.start_gemm_ev: List[torch.cuda.Event] = []
+        self.stop_gemm_ev: List[torch.cuda.Event] = []
+        self.start_data_ev: List[torch.cuda.Event] = []
+        self.stop_data_ev: List[torch.cuda.Event] = []
         self.start_gemm_tm: List[int] = []
         self.stop_gemm_tm: List[int] = []
         self.start_data_tm: List[int] = []
@@ -1468,7 +1425,7 @@ class StragglerDetector:
         self.stop = self.null_method
         self._off = True
         # No CUDA, No Support
-        if cur_platform.is_available():
+        if torch.cuda.is_available():
             self._off = not enabled
             self.world = world
             self.rank = rank
@@ -1488,12 +1445,12 @@ class StragglerDetector:
             self.stop_data_tm = []
             backend = torch.distributed.get_backend()
             if backend == "nccl":
-                self.dev = cur_platform.current_device()
+                self.dev = torch.cuda.current_device()
             else:
                 self.dev = torch.device("cpu")
             # cache some events
             for _ in range(prefill):
-                self.evt_q.put(cur_platform.Event(enable_timing=True))
+                self.evt_q.put(torch.cuda.Event(enable_timing=True))
             if self.rank == 0:
                 # Start the controller
                 self._controller()
@@ -1538,8 +1495,8 @@ class StragglerDetector:
             sev = self.evt_q.get()  # no try-catch
             eev = self.evt_q.get()  # no try-catch
         else:
-            sev = cur_platform.Event(enable_timing=True)
-            eev = cur_platform.Event(enable_timing=True)
+            sev = torch.cuda.Event(enable_timing=True)
+            eev = torch.cuda.Event(enable_timing=True)
         # First check if this start is for data
         if self.bdata:
             self.start_data_ev.append(sev)
@@ -1610,11 +1567,11 @@ class StragglerDetector:
         elif ls_bs != ls_be:
             logger.warning(f"get_batch Start/Stop out of sync {ls_bs}/{ls_be}")
         else:
-            temp = cur_platform.temperature()
-            power = cur_platform.power_draw()
-            util = cur_platform.utilization()
-            clock = cur_platform.clock_rate()
-            cur_platform.synchronize()
+            temp = torch.cuda.temperature()
+            power = torch.cuda.power_draw()
+            util = torch.cuda.utilization()
+            clock = torch.cuda.clock_rate()
+            torch.cuda.synchronize()
             # Process Events
             for i in range(ls_ev):
                 e_ev = self.start_gemm_ev[i].elapsed_time(self.stop_gemm_ev[i])
@@ -2204,7 +2161,7 @@ def nvtx_range_push(msg=None, suffix=None) -> None:
     _nvtx_range_messages.append(msg)
 
     # Push NVTX range
-    cur_platform.range_push(msg)
+    torch.cuda.nvtx.range_push(msg)
 
 
 def nvtx_range_pop(msg=None, suffix=None) -> None:
@@ -2233,7 +2190,7 @@ def nvtx_range_pop(msg=None, suffix=None) -> None:
         )
 
     # Pop NVTX range
-    cur_platform.range_pop()
+    torch.cuda.nvtx.range_pop()
 
 
 @lru_cache(maxsize=None)
@@ -2405,25 +2362,6 @@ def trace_async_exceptions(func: Optional[Callable] = None, *, verbose: bool = F
     return _decorate if func is None else _decorate(func)
 
 
-def get_mamba_inference_state_config_from_model(model) -> Optional["MambaInferenceStateConfig"]:
-    """Returns Mamba inference state config from the model if it is a hybrid model."""
-    from megatron.core.inference.contexts.attention_context.mamba_metadata import (
-        MambaInferenceStateConfig,
-    )
-    from megatron.core.ssm.mamba_hybrid_layer_allocation import Symbols
-
-    decoder = get_attr_wrapped_model(model, "decoder")
-    layer_type_list = getattr(decoder, "layer_type_list", None)
-    if layer_type_list is not None and Symbols.MAMBA in layer_type_list:
-        (mamba_conv_states_shape, mamba_ssm_states_shape) = decoder.mamba_state_shapes_per_request()
-        return MambaInferenceStateConfig(
-            layer_type_list=layer_type_list,
-            mamba_conv_states_shape=mamba_conv_states_shape,
-            mamba_ssm_states_shape=mamba_ssm_states_shape,
-        )
-    return None
-
-
 # ============================================================================
 # Backward Compatibility Decorators
 # ============================================================================
@@ -2558,3 +2496,43 @@ def experimental_api(func: Callable) -> Callable:
     """
     func._experimental_api = True
     return func
+
+
+def deprecate_args(
+    *deprecated_keys, message="Argument '{name}' has been deprecated and should not be used."
+):
+    """
+    Intercepts specific keyword arguments to raise a custom TypeError.
+
+    Args:
+        *deprecated_keys: Strings representing the argument names to block.
+        message: Custom error message string. Use {name} as a placeholder.
+    """
+
+    def decorator(func):
+        @functools.wraps(func)
+        def wrapper(*args, **kwargs):
+            # Check if any deprecated key is present in kwargs
+            found_deprecated = set(deprecated_keys) & set(kwargs.keys())
+
+            if found_deprecated:
+                bad_key = list(found_deprecated)[0]
+                raise TypeError(message.format(name=bad_key))
+
+            # Send args to the real function
+            return func(*args, **kwargs)
+
+        return wrapper
+
+    return decorator
+
+
+def deprecate_inference_params(inference_context, inference_params):
+    """Print warning for deprecated `inference_params`."""
+    if inference_context is None and inference_params is not None:
+        warnings.warn(
+            "`inference_params` renamed to `inference_context`, and will be "
+            "removed in `megatron-core` 0.13."
+        )
+        return inference_params
+    return inference_context

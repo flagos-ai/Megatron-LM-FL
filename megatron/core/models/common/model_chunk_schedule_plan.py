@@ -14,9 +14,6 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
 
 
 class ModelChunkState:
@@ -65,8 +62,8 @@ class TransformerLayerSchedulePlan:
             event (torch.cuda.Event):
                 record CUDA event across multiple nodes on different streams for synchronization.
             chunk_state (ModelChunkState): model state shared in the model chunk.
-            comp_stream (torch.cuda.Stream): CUDA stream for computation.
-            comm_stream (torch.cuda.Stream): CUDA stream for communication.
+            comp_stream (Callable): Func that returns CUDA stream for computation.
+            comm_stream (Callable): Func that returns CUDA stream for communication.
             extra_args (dict): extra arguments for the layer.
 
         The event and chunk_state are binded to the TransformerModelChunkSchedulePlan
@@ -125,20 +122,15 @@ class TransformerLayerSchedulePlan:
 
         # get flags for latter use
         is_mtp = isinstance(self.layer, MultiTokenPredictionLayer)
-        is_moe = (
-            isinstance(self.layer.transformer_layer.mlp, MoELayer)
-            if is_mtp
-            else isinstance(self.layer.mlp, MoELayer)
-        )
+        transformer_layer = self.layer.mtp_model_layer if is_mtp else self.layer
+        is_moe = isinstance(transformer_layer.mlp, MoELayer)
+        num_local_experts = transformer_layer.mlp.num_local_experts if is_moe else None
 
         extra_args["config"] = self.layer.config
         extra_args["is_moe"] = is_moe
+        extra_args["num_local_experts"] = num_local_experts
         extra_args["delay_wgrad_compute"] = self.layer.config.delay_wgrad_compute
         extra_args["is_mtp"] = is_mtp
-        if extra_args.get("is_engram", False):
-            self.layer_state.engram = getattr(self.layer, "engram")
-            self.layer_state.engram_hash_layer_id = getattr(self.layer, "engram_hash_layer_id")
-            self.layer_state.is_engram = True
 
         # wrapper to help create TransformerLayerNode
         def create_node(stream, module, name):
@@ -314,13 +306,10 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
 
         self._model_chunk_state = ModelChunkState()
         self._transformer_layers = []
-        self._event = cur_platform.Event()
+        self._event = torch.cuda.Event()
         self.pre_process = None
         self.post_process = None
         self.vp_stage = model.vp_stage
-
-        comp_stream = get_comp_stream()
-        comm_stream = get_comm_stream()
 
         # save the inputs of model.forward() to ModelChunkState
         self._model_chunk_state.input_ids = input_ids
@@ -340,18 +329,22 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._model_chunk_state.attention_bias = None
 
         # build preprocess
-        self.pre_process = PreProcessNode(model, self._model_chunk_state, self._event, comp_stream)
+        self.pre_process = PreProcessNode(
+            model, self._model_chunk_state, self._event, get_comp_stream
+        )
 
         # build layer schedule plan for each layer.
         # The methods to obtain layers are different for MTP so we need the other build plan for
         # MTP. Also, this can help annotate MTP layer so that it can know where MTP is.
-        self._build_layer_schedule_plan(model.decoder, comp_stream, comm_stream)
-        self._build_layer_schedule_plan(getattr(model, "mtp", None), comp_stream, comm_stream)
+        self._build_layer_schedule_plan(model.decoder, get_comp_stream, get_comm_stream)
+        self._build_layer_schedule_plan(
+            getattr(model, "mtp", None), get_comp_stream, get_comm_stream
+        )
 
         # build post process
         if model.post_process:
             self.post_process = PostProcessNode(
-                model, self._model_chunk_state, self._event, comp_stream
+                model, self._model_chunk_state, self._event, get_comp_stream
             )
 
     def _build_layer_schedule_plan(self, module, comp_stream, comm_stream):
@@ -380,12 +373,12 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
 
     def record_current_stream(self):
         """Records the current CUDA stream in the event."""
-        stream = cur_platform.current_stream()
+        stream = torch.cuda.current_stream()
         self.event.record(stream)
 
     def wait_current_stream(self):
         """Waits for the event to complete on the current CUDA stream."""
-        stream = cur_platform.current_stream()
+        stream = torch.cuda.current_stream()
         self.event.wait(stream)
 
     def get_layer(self, i):
@@ -480,7 +473,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         for i in range(overlapped_layers):
             f_layer = f_schedule_plan.get_layer(i)
             b_layer = b_schedule_plan.pop_layer()
-            cur_platform.range_push(f"layer_{i}f-layer_{b_schedule_plan.num_layers()}b")
+            torch.cuda.nvtx.range_push(f"layer_{i}f-layer_{b_schedule_plan.num_layers()}b")
             f_input, b_grad = TransformerLayerSchedulePlan.run(
                 f_layer,
                 b_layer,
@@ -490,30 +483,30 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             )
             if i < b_num_layers - 1:
                 b_layer.release_state()
-            cur_platform.range_pop()
+            torch.cuda.nvtx.range_pop()
 
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
             b_layer = b_schedule_plan.pop_layer()
-            cur_platform.range_push(f"layer_{b_schedule_plan.num_layers()}b")
+            torch.cuda.nvtx.range_push(f"layer_{b_schedule_plan.num_layers()}b")
             _, b_grad = TransformerLayerSchedulePlan.run(
                 None, b_layer, b_grad=b_grad, is_last_layer_in_bwd=(i == b_num_layers - 1)
             )
             if i < b_num_layers - 1:
                 b_layer.release_state()
-            cur_platform.range_pop()
+            torch.cuda.nvtx.range_pop()
 
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            cur_platform.range_push(f"layer_{i}f")
+            torch.cuda.nvtx.range_push(f"layer_{i}f")
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
-            cur_platform.range_pop()
+            torch.cuda.nvtx.range_pop()
 
         if f_schedule_plan is not None and post_forward is not None:
             # post_forward()/send_forward_recv_forward() is running in the communication stream,
             # so the p2p comm could be overlapped with the attn backward
-            with cur_platform.stream(get_comm_stream()):
+            with torch.cuda.stream(get_comm_stream()):
                 f_schedule_plan.wait_current_stream()
                 post_forward(f_input, f_schedule_plan.vp_stage)
 

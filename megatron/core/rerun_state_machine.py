@@ -16,10 +16,7 @@ import torch
 
 from megatron.core._rank_utils import log_single_rank, safe_get_rank
 from megatron.core.dist_checkpointing.mapping import ShardedObject
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
-
+from megatron.core.typed_torch import copy_signature
 
 """DISCLAIMER: THIS IS AN EXPERIMENTAL FEATURE.
 
@@ -195,6 +192,8 @@ class RerunStateMachine:
     ) -> None:
         self.mode: RerunMode = mode
         self.state: RerunState = RerunState.NOT_RUNNING_YET
+        # Note: current_iteration is 0-indexed internally; all messages to
+        # stdout / stderr and the tracker file add 1 to display 1-indexed iterations.
         self.current_iteration: int = -1
         self.first_iteration_complete = False
         # The flags below are per-rank flags that get all-reduced across all ranks
@@ -526,10 +525,10 @@ class RerunStateMachine:
                 )
                 rank: int = safe_get_rank()
                 node: str = os.uname()[1]
-                device: int = cur_platform.current_device()
+                device: int = torch.cuda.current_device()
                 full_message: str = (
                     f"Rank {rank}, node {node}, device {device}, "
-                    f"iteration {self.current_iteration}: "
+                    f"iteration {self.current_iteration + 1}: "
                     f"Unexpected result {result} (message='{message}')"
                 )
                 if fatal:
@@ -568,16 +567,16 @@ class RerunStateMachine:
         def log_failure(message: str, fatal: bool = True) -> None:
             rank: int = safe_get_rank()
             node: str = os.uname()[1]
-            device: int = cur_platform.current_device()
+            device: int = torch.cuda.current_device()
             if fatal:
                 logger.error(
                     f"Rank {rank}, node {node}, device {device}, "
-                    f"iteration #{self.current_iteration}: {message}!"
+                    f"iteration #{self.current_iteration + 1}: {message}!"
                 )
             else:
                 logger.warning(
                     f"Rank {rank}, node {node}, device {device}, "
-                    f"iteration #{self.current_iteration}: {message}!"
+                    f"iteration #{self.current_iteration + 1}: {message}!"
                 )
 
         # Emit message in log so that we can identify which jobs have this instrumentation
@@ -607,7 +606,7 @@ class RerunStateMachine:
                 logger.error(
                     f"Unexpected result {result} "
                     f"on rank {safe_get_rank()} "
-                    f"at iteration #{self.current_iteration} "
+                    f"at iteration #{self.current_iteration + 1} "
                     f"invocation #{validation_call.sequence} "
                     f"(message='{message}')"
                 )
@@ -645,7 +644,7 @@ class RerunStateMachine:
                     # Remember the node and device we're running on so that we can check we're not
                     # rerunning on the same GPU when we resume from the checkpoint.
                     self.suspicious_node = os.uname()[1]
-                    self.suspicious_device = cur_platform.current_device()
+                    self.suspicious_device = torch.cuda.current_device()
                     self._log_validation_error_to_file(
                         status=RerunValidationStatus.FIRST_RERUN_REPRODUCIBLE,
                         result=result,
@@ -661,7 +660,7 @@ class RerunStateMachine:
             elif self.state == RerunState.RERUNNING_FROM_CHECKPOINT:
                 # Ensure we're not on the same GPU as the first rerun.
                 node = os.uname()[1]
-                device = cur_platform.current_device()
+                device = torch.cuda.current_device()
                 if node == self.suspicious_node and device == self.suspicious_device:
                     logger.error(
                         f"Got rescheduled on the same GPU. Need to resume again from the same "
@@ -958,7 +957,7 @@ class RerunStateMachine:
                 "random_rng_state": random.getstate(),
                 "np_rng_state": np.random.get_state(),
                 "torch_rng_state": torch.get_rng_state(),
-                "cuda_rng_state": cur_platform.get_rng_state(),
+                "cuda_rng_state": torch.cuda.get_rng_state(),
             },
             "other_state": self.state_save_func() if self.state_save_func else None,
             # any other state to save to guarantee deterministic execution?
@@ -971,7 +970,7 @@ class RerunStateMachine:
         random.setstate(rng_state["random_rng_state"])
         np.random.set_state(rng_state["np_rng_state"])
         torch.set_rng_state(rng_state["torch_rng_state"])
-        cur_platform.set_rng_state(rng_state["cuda_rng_state"])
+        torch.cuda.set_rng_state(rng_state["cuda_rng_state"])
         if self.saved_state["other_state"] and self.state_restore_func:
             self.state_restore_func(self.saved_state["other_state"])
 
@@ -1010,12 +1009,12 @@ class RerunStateMachine:
             try:
                 rank: int = safe_get_rank()
                 node: str = os.uname()[1]
-                device: int = cur_platform.current_device()
+                device: int = torch.cuda.current_device()
                 with open(self.result_rejected_tracker_filename, "a") as f:
                     f.write(
                         f"ts={datetime.datetime.now()} node={node} device={device} "
                         f"jobID={os.getenv('SLURM_JOBID', 'N/A')} rank={rank} "
-                        f"iteration={self.current_iteration} status={status} result={result} "
+                        f"iteration={self.current_iteration + 1} status={status} result={result} "
                         f"message='{message}'\n"
                     )
             except Exception as e:
@@ -1342,13 +1341,14 @@ class RerunErrorInjector:
         self.injected_error_type = state_dict["injected_error_type"]
 
 
-def initialize_rerun_state_machine(**kwargs) -> None:
+@copy_signature(RerunStateMachine.__init__, handle_first_src_param='skip')
+def initialize_rerun_state_machine(*args, **kwargs) -> None:
     """Helper function to initialize the rerun machine instance.
 
     Check the RerunStateMachine class for the details.
     """
 
-    rerun_state_machine: RerunStateMachine = RerunStateMachine(**kwargs)
+    rerun_state_machine: RerunStateMachine = RerunStateMachine(*args, **kwargs)
     _set_rerun_state_machine(rerun_state_machine)
 
 

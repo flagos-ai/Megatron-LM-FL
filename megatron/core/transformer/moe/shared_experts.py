@@ -9,6 +9,7 @@ import torch
 import torch.nn.functional as F
 
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl
@@ -21,6 +22,7 @@ from megatron.core.tensor_parallel.mappings import (
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.typed_torch import apply_module
 from megatron.core.utils import (
     is_te_min_version,
     is_torch_min_version,
@@ -29,6 +31,11 @@ from megatron.core.utils import (
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+
+if HAVE_TE:
+    from megatron.core.extensions.transformer_engine import TELinear, set_save_original_input
+else:
+    TELinear, set_save_original_input = None, None
 
 
 class SharedExpertMLP(MLP):
@@ -79,19 +86,8 @@ class SharedExpertMLP(MLP):
                 config.recompute_granularity == 'selective'
                 and "shared_experts" in config.recompute_modules
             )
-            if not shared_experts_recompute:
-                try:
-                    HAVE_TE = True
-                    from megatron.core.extensions.transformer_engine import (
-                        TELinear,
-                        set_save_original_input,
-                    )
-                except ImportError:
-                    HAVE_TE = False
-                    TELinear, set_save_original_input = None, None
-
-                if HAVE_TE and isinstance(self.linear_fc1, TELinear):
-                    set_save_original_input(self.linear_fc1)
+            if not shared_experts_recompute and HAVE_TE and isinstance(self.linear_fc1, TELinear):
+                set_save_original_input(self.linear_fc1)
 
         if self.config.moe_shared_expert_overlap:
             # disable TP related AG/RS communications in the linear module
@@ -188,7 +184,9 @@ class SharedExpertMLP(MLP):
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with cur_platform.stream(self.stream):
             # [s, b, 4 * h/p]
-            intermediate_parallel, bias_parallel = self.linear_fc1(self.cached_fc1_input)
+            intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
+                self.cached_fc1_input
+            )
             self.cached_fc1_input = None
 
             if self.config.use_te_activation_func:
@@ -239,7 +237,7 @@ class SharedExpertMLP(MLP):
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with cur_platform.stream(self.stream):
             # [s, b, h]
-            self.cached_fc2_output, _ = self.linear_fc2(self.cached_fc2_input)
+            self.cached_fc2_output, _ = apply_module(self.linear_fc2)(self.cached_fc2_input)
             self.cached_fc2_input = None
 
     def post_forward_comm(self):

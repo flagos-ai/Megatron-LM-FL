@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
+# Copyright (c) 2025-2026, NVIDIA CORPORATION.  All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -27,7 +27,7 @@ import sys
 project = "Megatron Core"
 copyright = "2026, NVIDIA Corporation"
 author = "NVIDIA Corporation"
-release = "0.16.0"
+release = "nightly"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -109,16 +109,7 @@ html_theme_options = {
             "icon": "fa-brands fa-github",
         }
     ],
-    "extra_head": {
-        """
-    <script src="https://assets.adobedtm.com/5d4962a43b79/c1061d2c5e7b/launch-191c2462b890.min.js" ></script>
-    """
-    },
-    "extra_footer": {
-        """
-    <script type="text/javascript">if (typeof _satellite !== "undefined") {_satellite.pageBottom();}</script>
-    """
-    },
+    "public_docs_features": True
 }
 html_extra_path = ["project.json", "versions1.json"]
 

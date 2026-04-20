@@ -1,3 +1,12 @@
+<!---
+   Copyright (c) 2022-2026, NVIDIA CORPORATION. All rights reserved.
+   NVIDIA CORPORATION and its licensors retain all intellectual property
+   and proprietary rights in and to this software, related documentation
+   and any modifications thereto. Any use, reproduction, disclosure or
+   distribution of this software and related documentation without an express
+   license agreement from NVIDIA CORPORATION is strictly prohibited.
+-->
+
 # Llama, Mistral and other Llama-like model support in Megatron-LM
 
 NOTE: In order to simplify code we now only support converting llama-3.x and mistral checkpoints downloaded from Hugging Face. For converting other models, see [Megatron Bridge](models/index.md).
@@ -351,7 +360,7 @@ The following sections detail these steps.
 
 ## Download Huggingface checkpoints
 
-Users must first apply for access to download the Mistral-7b checkpoints through [Huggingface](https://huggingface.co/mistralai/Mistral-7B-v0.3) (HF).
+Users must first apply for access to download the Mistral-7b checkpoints through Huggingface. Two variants are available: the base model ([Mistral-7B-v0.3](https://huggingface.co/mistralai/Mistral-7B-v0.3)) and the instruct model ([Mistral-7B-Instruct-v0.3](https://huggingface.co/mistralai/Mistral-7B-Instruct-v0.3)).
 
 ## Convert checkpoint format
 
