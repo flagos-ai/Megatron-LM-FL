@@ -9,7 +9,7 @@ try:
     import torch
     import flag_gems
     from torch_txda import transfer_to_txda
-except ImportError:
+except Exception:
     pass
 
 
