@@ -607,16 +607,32 @@ def get_megatron_optimizer(
     # TODO: Remove `optimizer` from this eventually (e.g., if we use Muon for some layers and
     # Adam for other layers). This would need some more refactoring to work though (param_groups
     # filtered by optimizer passed into _get_megatron_optimizer_based_on_param_groups).
-    fields_to_check_for_consistency = [
-        'overlap_param_gather_with_optimizer_step',
-        'optimizer',
-        'optimizer_cpu_offload',
-    ]
-    for field_name in fields_to_check_for_consistency:
-        field = getattr(config, field_name, None)
-        if config_overrides is not None:
-            all_configs = list(config_overrides.values())
-            assert all([getattr(x, field_name, None) == field for x in all_configs])
+    if config_overrides is not None:
+        fields_to_check_for_consistency = [
+            'overlap_param_gather_with_optimizer_step',
+            'optimizer',
+            'optimizer_cpu_offload',
+        ]
+        for field_name in fields_to_check_for_consistency:
+            base_field = getattr(config, field_name, None)
+            all_config_overrides = list(config_overrides.values())
+            for config_override in all_config_overrides:
+                # Handle both OptimizerConfig (old style) and ParamGroupOverride (new style)
+                if isinstance(config_override, dict):
+                    # ParamGroupOverride: check if field is in dict
+                    if field_name in config_override:
+                        field = config_override[field_name]
+                        if field != base_field:
+                            raise ValueError(
+                                f"Field {field_name} should not be overriden in a config override."
+                            )
+                else:
+                    # OptimizerConfig: use getattr
+                    field = getattr(config_override, field_name, None)
+                    if field != base_field:
+                        raise ValueError(
+                            f"Field {field_name} in config_override does not match base config."
+                        )
 
     # Separate out first model chunk if overlapping param AG with optimizer step.
     if config.overlap_param_gather_with_optimizer_step:
