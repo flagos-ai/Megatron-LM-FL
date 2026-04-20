@@ -73,6 +73,9 @@ _MPU_EXPERT_TENSOR_PARALLEL_RANK = None
 
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = None
 _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+######### FlagScale Begin ########
+_DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+######### FlagScale End ########
 
 # These values enable us to change the mpu sizes on the fly.
 _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
@@ -136,6 +139,25 @@ _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP = None
 
 # Paralel group of all GPUs in a distributed optimizer instance
 _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = None
+
+######### FlagScale Begin ########
+# Parallel group of engram embedding
+_ENGRAM_EMBEDDING_PARALLEL_GROUP = None
+_ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = None
+_ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = None
+_ENGRAM_ENABLE = False
+
+# Parallel group of engram model parallel, which contain pipeline + embed, used to allreduce grad and param norm.
+_ENGRAM_MODEL_PARALLEL_GROUP = None
+_ENGRAM_MODEL_PARALLEL_GROUP_RANKS = None
+
+# Parallel group of engram data parallel
+_ENGRAM_DATA_PARALLEL_GROUP = None
+_ENGRAM_DATA_PARALLEL_GROUP_GLOO = None
+_ENGRAM_DATA_PARALLEL_GLOBAL_RANKS = None
+
+_LAST_RANK_WHEN_USING_PIPELINE = None
+######### FlagScale End ########
 
 # Memory buffers to avoid dynamic memory allocation
 _GLOBAL_MEMORY_BUFFER = None
@@ -555,6 +577,7 @@ def initialize_model_parallel(
     hierarchical_context_parallel_sizes: Optional[List[int]] = None,
     hybrid_context_parallel: bool = False,
     expert_model_parallel_size: int = 1,
+    engram_embedding_parallel_size: Optional[int] = None,
     num_distributed_optimizer_instances: int = 1,
     expert_tensor_parallel_size: Optional[int] = None,
     nccl_communicator_config_path: Optional[str] = None,
@@ -568,6 +591,7 @@ def initialize_model_parallel(
     create_all_gather_group: Optional[bool] = False,
     rank_offset: int = 0,
     local_world_size: Optional[int] = None,
+    create_dualpipev_parallel_size: bool = False,
 ) -> None:
     """Initialize model data parallel groups.
 
@@ -756,6 +780,12 @@ def initialize_model_parallel(
         _VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK = 0
         _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = virtual_pipeline_model_parallel_size
 
+    ######### FlagScale Begin ########
+    if create_dualpipev_parallel_size:
+        global _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+        _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = pipeline_model_parallel_size
+    ######### FlagScale End ########
+
     rank = torch.distributed.get_rank()
 
     nccl_comm_cfgs = {}
@@ -808,6 +838,24 @@ def initialize_model_parallel(
         order=order,
         rank_offset=rank_offset,
     )
+
+    ######### FlagScale Begin ########
+    engram_dp_size = world_size // (engram_embedding_parallel_size * pipeline_model_parallel_size) if engram_embedding_parallel_size is not None else None
+    if engram_embedding_parallel_size is not None:
+        engram_rank_generator = RankGenerator(
+            tp=engram_embedding_parallel_size,
+            ep=1,
+            dp=engram_dp_size,
+            pp=pipeline_model_parallel_size,
+            cp=1,
+            order=order,
+            rank_offset=0,
+        )
+        global _ENGRAM_ENABLE
+        _ENGRAM_ENABLE = True
+    else:
+        engram_rank_generator = None
+    ######### FlagScale End ########
 
     assert (
         order.endswith("pp")
@@ -1147,6 +1195,11 @@ def initialize_model_parallel(
             _POSITION_EMBEDDING_GROUP = group
             _POSITION_EMBEDDING_GLOBAL_RANKS = position_embedding_ranks
 
+    ######### FlagScale Begin ########
+    global _LAST_RANK_WHEN_USING_PIPELINE
+    _LAST_RANK_WHEN_USING_PIPELINE = decoder_rank_generator.get_ranks('pp')[-1][-1]
+    ######### FlagScale End ########
+
     # Build the tensor + data parallel groups.
     global _TENSOR_AND_DATA_PARALLEL_GROUP
     global _TENSOR_AND_DATA_PARALLEL_GROUP_WITH_CP
@@ -1350,6 +1403,68 @@ def initialize_model_parallel(
             if rank in intra_dist_opt_ranks:
                 _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP = intra_dist_opt_instance_group
             intra_dist_opt_ranks = []
+
+    ######### FlagScale Begin ########
+    if engram_rank_generator is not None:
+        for ranks in engram_rank_generator.get_ranks('dp'):
+            group = create_group(
+                ranks,
+                timeout=timeout,
+                pg_options=get_nccl_options("engram_dp", nccl_comm_cfgs),
+                group_desc="ENGRAM_DATA_PARALLEL_GROUP",
+            )
+            if create_gloo_process_groups:
+                group_gloo = create_group(
+                    ranks,
+                    timeout=timeout,
+                    backend="gloo",
+                    group_desc="ENGRAM_DATA_PARALLEL_GROUP_GLOO",
+                )
+            else:
+                group_gloo = None
+            if rank in ranks:
+                global _ENGRAM_DATA_PARALLEL_GROUP
+                global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+                global _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS
+                _ENGRAM_DATA_PARALLEL_GROUP = group
+                _ENGRAM_DATA_PARALLEL_GROUP_GLOO = group_gloo
+                _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS = ranks
+        for ranks in engram_rank_generator.get_ranks('tp'):
+            group = create_group(
+                ranks,
+                timeout=timeout,
+                pg_options=get_nccl_options("engram_embedding_parallel", nccl_comm_cfgs),
+                group_desc="ENGRAM_EMBEDDING_PARALLEL_GROUP",
+            )
+            if create_gloo_process_groups:
+                group_gloo = create_group(
+                    ranks,
+                    timeout=timeout,
+                    backend="gloo",
+                    group_desc="ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO",
+                )
+            else:
+                group_gloo = None
+            if rank in ranks:
+                global _ENGRAM_EMBEDDING_PARALLEL_GROUP
+                global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+                global _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS
+                _ENGRAM_EMBEDDING_PARALLEL_GROUP = group
+                _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = group_gloo
+                _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = ranks
+        for ranks in engram_rank_generator.get_ranks('tp-pp'):
+            group = create_group(
+                ranks,
+                timeout=timeout,
+                pg_options=get_nccl_options("engram_model_parallel", nccl_comm_cfgs),
+                group_desc="ENGRAM_MODEL_PARALLEL_GROUP",
+            )
+            if rank in ranks:
+                global _ENGRAM_MODEL_PARALLEL_GROUP
+                global _ENGRAM_MODEL_PARALLEL_GROUP_RANKS
+                _ENGRAM_MODEL_PARALLEL_GROUP = group
+                _ENGRAM_MODEL_PARALLEL_GROUP_RANKS = ranks
+    ######### FlagScale End ########
 
     # Initialize global memory buffer
     # This isn't really "parallel state" but there isn't another good place to
@@ -1681,6 +1796,21 @@ def get_virtual_pipeline_model_parallel_world_size():
     return _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
 
 
+######### FlagScale Begin ########
+def get_dualpipev_pipeline_model_parallel_world_size():
+    """Return the dualpipev pipeline-parallel world size."""
+    global _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    return _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+
+
+def get_last_rank_when_using_pipeline():
+    """Return the last rank when using pipeline."""
+    global _LAST_RANK_WHEN_USING_PIPELINE
+    assert _LAST_RANK_WHEN_USING_PIPELINE is not None, "Last rank when using pipeline is not initialized"
+    return _LAST_RANK_WHEN_USING_PIPELINE
+######### FlagScale End ########
+
+
 def get_tensor_model_parallel_src_rank():
     """Calculate the global rank corresponding to the first local rank
     in the tensor model parallel group."""
@@ -2009,6 +2139,39 @@ def get_inter_distributed_optimizer_instance_group(check_initialized=True):
 ### End of expert-related functions region
 
 
+######### FlagScale Begin ########
+## Engram related parallel states functions
+def get_engram_embedding_parallel_group():
+    """Get the engram embedding group the caller rank belongs to."""
+    global _ENGRAM_EMBEDDING_PARALLEL_GROUP
+    return _ENGRAM_EMBEDDING_PARALLEL_GROUP
+
+
+def get_engram_model_parallel_group():
+    """Get the engram model group the caller rank belongs to."""
+    global _ENGRAM_MODEL_PARALLEL_GROUP
+    return _ENGRAM_MODEL_PARALLEL_GROUP
+
+
+def get_engram_data_parallel_group():
+    """Get the engram data parallel group the caller rank belongs to."""
+    global _ENGRAM_DATA_PARALLEL_GROUP
+    return _ENGRAM_DATA_PARALLEL_GROUP
+
+
+def get_engram_embedding_parallel_group_gloo():
+    """Get the engram embedding group the caller rank belongs to."""
+    global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+    return _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+
+
+def get_engram_data_parallel_group_gloo():
+    """Get the engram data parallel group the caller rank belongs to."""
+    global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+    return _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+######### FlagScale End ########
+
+
 def _set_global_memory_buffer():
     """Initialize global buffer."""
     global _GLOBAL_MEMORY_BUFFER
@@ -2090,6 +2253,14 @@ def destroy_model_parallel():
 
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+
+    ######### FlagScale Begin ########
+    global _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
+    _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = None
+
+    global _LAST_RANK_WHEN_USING_PIPELINE
+    _LAST_RANK_WHEN_USING_PIPELINE = None
+    ######### FlagScale End ########
 
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
     _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE = None
