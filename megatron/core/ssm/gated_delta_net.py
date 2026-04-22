@@ -32,9 +32,6 @@ from megatron.core.transformer.utils import (
     sharded_state_dict_default,
 )
 from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
 
 # TODO: Implement GatedDeltaNetContextParallel
 # from .gated_delta_net_context_parallel import GatedDeltaNetContextParallel
@@ -173,7 +170,7 @@ class GatedDeltaNet(MegatronModule):
             kernel_size=self.conv_kernel_dim,
             groups=self.conv_dim_local_tp,
             padding=self.conv_kernel_dim - 1,
-            device=cur_platform.current_device(),
+            device=torch.cuda.current_device(),
             dtype=config.params_dtype,
         )
         setattr(self.conv1d.weight, "tensor_model_parallel", True)
@@ -189,7 +186,7 @@ class GatedDeltaNet(MegatronModule):
             torch.empty(
                 self.num_v_heads_local_tp,
                 dtype=config.params_dtype,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
         )
         setattr(self.dt_bias, "tensor_model_parallel", True)
@@ -199,7 +196,7 @@ class GatedDeltaNet(MegatronModule):
             torch.empty(
                 self.num_v_heads_local_tp,
                 dtype=config.params_dtype,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
         )
         setattr(self.A_log, "tensor_model_parallel", True)
@@ -243,13 +240,13 @@ class GatedDeltaNet(MegatronModule):
                     self.num_v_heads_local_tp,
                     out=self.dt_bias.data,
                     dtype=self.config.params_dtype,
-                    device=cur_platform.current_device(),
+                    device=torch.cuda.current_device(),
                 )
                 # A_log
                 A = torch.empty(
                     self.num_v_heads_local_tp,
                     dtype=self.config.params_dtype,
-                    device=cur_platform.current_device(),
+                    device=torch.cuda.current_device(),
                 ).uniform_(*self.A_init_range)
                 self.A_log.data.copy_(torch.log(A))
 

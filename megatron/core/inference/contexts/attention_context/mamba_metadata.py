@@ -9,12 +9,6 @@ from megatron.core.inference.contexts.mamba_slot_allocator import (
     MAX_INTERMEDIATE_OFFSETS_PER_REQUEST,
 )
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
-########## FlagScale End ##########
-
 
 class MambaMetadata:
     """Manages the metadata tensors required for Mamba layers during inference."""
@@ -36,14 +30,14 @@ class MambaMetadata:
         self.max_tokens = max_tokens
         self.mamba_chunk_size = mamba_chunk_size
         self.d_conv = d_conv
-        self.device = cur_platform.current_device()
+        self.device = torch.cuda.current_device()
 
         # Maximum possible chunks across all batch configurations
         self.max_chunks = max_tokens // mamba_chunk_size + max_requests
 
         # Map from requests to slots in the static Mamba state buffer
         self.request_to_mamba_state_idx = torch.full(
-            (self.max_requests,), -1, dtype=torch.int32, device=cur_platform.current_device()
+            (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
         )
 
         # Map from requests to slots in the static Mamba state buffer for active decode requests
@@ -92,7 +86,7 @@ class MambaMetadata:
 
         # Allocator for Mamba state slots
         self.mamba_state_free_slots = torch.arange(
-            self.max_requests, dtype=torch.int32, device=cur_platform.current_device()
+            self.max_requests, dtype=torch.int32, device=torch.cuda.current_device()
         )
         self.mamba_state_free_slot_count = self.max_requests
 
@@ -125,7 +119,7 @@ class MambaMetadata:
 
         # Re-initialize the free slot pool
         self.mamba_state_free_slots = torch.arange(
-            self.max_requests, dtype=torch.int32, device=cur_platform.current_device()
+            self.max_requests, dtype=torch.int32, device=torch.cuda.current_device()
         )
         self.mamba_state_free_slot_count = self.max_requests
 

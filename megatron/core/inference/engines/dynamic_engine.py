@@ -63,13 +63,7 @@ from megatron.core.utils import (
     trace_async_exceptions,
 )
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
 from .async_zmq_communicator import AsyncZMQCommunicator
-
-cur_platform = get_platform()
-########## FlagScale End ##########
 
 try:
     from tqdm import tqdm
@@ -290,8 +284,8 @@ class DynamicInferenceEngine(AbstractEngine):
 
         # Timing and logging variables.
         self.rank = torch.distributed.get_rank()
-        self.step_start_event = cur_platform.Event(enable_timing=True)
-        self.step_end_event = cur_platform.Event(enable_timing=True)
+        self.step_start_event = torch.cuda.Event(enable_timing=True)
+        self.step_end_event = torch.cuda.Event(enable_timing=True)
         self.capture_stats = None
 
         # Runtime state.
@@ -355,7 +349,7 @@ class DynamicInferenceEngine(AbstractEngine):
         controller = self.controller
 
         time_start = time.time()
-        mem_stats_start = cur_platform.memory_stats()
+        mem_stats_start = torch.cuda.memory_stats()
 
         logging.info("> dynamic_engine.py: building cuda graphs for ")
         for graph in context.cuda_graph_batch_dimensions_list:
@@ -404,7 +398,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
         # Memory usage.
         time_end = time.time()
-        mem_stats_end = cur_platform.memory_stats()
+        mem_stats_end = torch.cuda.memory_stats()
         capture_stats = {
             "time": time_end - time_start,
             "allocated_bytes": (
@@ -655,10 +649,10 @@ class DynamicInferenceEngine(AbstractEngine):
 
         try:
 
-            start_mem = cur_platform.memory_stats()
+            start_mem = torch.cuda.memory_stats()
             start_time = time.time()
             range_push(f"{key}-inference-context")
-            cur_platform.synchronize()
+            torch.cuda.synchronize()
 
             yield
 
@@ -667,7 +661,7 @@ class DynamicInferenceEngine(AbstractEngine):
             range_pop()
             end_time = time.time()
 
-            end_mem = cur_platform.memory_stats()
+            end_mem = torch.cuda.memory_stats()
             start_mem_alloc = start_mem["allocated_bytes.all.current"]
             end_mem_alloc = end_mem["allocated_bytes.all.current"]
             start_mem_res = start_mem["reserved_bytes.all.current"]
@@ -763,9 +757,9 @@ class DynamicInferenceEngine(AbstractEngine):
 
             # Allocate context tensors.
             alloc_time = time.time()
-            cur_platform.synchronize()
+            torch.cuda.synchronize()
             self.context.reinitialize_inference_state_buffers()
-            cur_platform.synchronize()
+            torch.cuda.synchronize()
             alloc_time = time.time() - alloc_time
 
             capture_time = time.time()
@@ -778,7 +772,7 @@ class DynamicInferenceEngine(AbstractEngine):
 
             # Re-add requests saved during suspend.
             add_time = time.time()
-            cur_platform.synchronize()
+            torch.cuda.synchronize()
             for request_id in self.resume_request_ids:
                 self._add_request(self.get_request(request_id))
 
@@ -788,7 +782,7 @@ class DynamicInferenceEngine(AbstractEngine):
                     self.waiting_request_ids.remove(self.context.chunked_prefill_request_id)
                     self.waiting_request_ids.appendleft(self.context.chunked_prefill_request_id)
 
-            cur_platform.synchronize()
+            torch.cuda.synchronize()
             add_time = time.time() - add_time
 
         # Print inner timing (must be outside context manager above for correct formatting).
@@ -992,16 +986,16 @@ class DynamicInferenceEngine(AbstractEngine):
                     self.controller.tokenizer, prompt
                 )
             tokens = torch.tensor(
-                prompt_token_ids, dtype=torch.int64, device=cur_platform.current_device()
+                prompt_token_ids, dtype=torch.int64, device=torch.cuda.current_device()
             )
         elif isinstance(prompt, list):
             # Convert List[int] -> Tensor.
-            tokens = torch.tensor(prompt, dtype=torch.int64, device=cur_platform.current_device())
+            tokens = torch.tensor(prompt, dtype=torch.int64, device=torch.cuda.current_device())
         elif isinstance(prompt, torch.Tensor):
             # Prompt already tokenized.
             assert prompt.dtype == torch.int64, prompt.dtype
             assert prompt.device == torch.device(
-                f"cuda:{cur_platform.current_device()}"
+                f"cuda:{torch.cuda.current_device()}"
             ), prompt.device
             tokens = prompt
 
@@ -1836,7 +1830,7 @@ class DynamicInferenceEngine(AbstractEngine):
             self.logging_step_interval > 0
             and self.context.step_count % self.logging_step_interval == 0
         ):
-            mem = cur_platform.memory_stats()
+            mem = torch.cuda.memory_stats()
             step_type = "decode" if context_state["is_decode_only"] else "non-decode"
             output_str = (
                 "* rank %d | step %d | %s ... time: %.3f ms%s ... "

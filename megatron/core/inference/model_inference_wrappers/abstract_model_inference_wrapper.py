@@ -17,12 +17,6 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.utils import deprecate_args, get_attr_wrapped_model, get_model_config
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
-########## FlagScale End ##########
-
 DEPRECATED_ARGS = ["inference_wrapper_config", "pg_collection"]
 
 
@@ -144,10 +138,10 @@ class AbstractModelInferenceWrapper(abc.ABC):
         # so that the dummy forward pass will work with sequence parallel
         num_dummy_tokens = self.tp_size
         tokens = torch.zeros(
-            (1, num_dummy_tokens), dtype=torch.long, device=cur_platform.current_device()
+            (1, num_dummy_tokens), dtype=torch.long, device=torch.cuda.current_device()
         )
         position_ids = torch.zeros(
-            (1, num_dummy_tokens), dtype=torch.long, device=cur_platform.current_device()
+            (1, num_dummy_tokens), dtype=torch.long, device=torch.cuda.current_device()
         )
         attention_mask = None
         # Always skip MTP during dummy forwards.  When num_speculative_tokens > 0
@@ -188,7 +182,7 @@ class AbstractModelInferenceWrapper(abc.ABC):
             seq_len = seq_len // self.tp_size
         recv_size = (seq_len, batch_size, self.config.hidden_size)
         return torch.empty(
-            recv_size, dtype=self.pipeline_communication_dtype, device=cur_platform.current_device()
+            recv_size, dtype=self.pipeline_communication_dtype, device=torch.cuda.current_device()
         )
 
     def forward_pass_without_pipeline_parallel(

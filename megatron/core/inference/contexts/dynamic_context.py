@@ -35,18 +35,12 @@ from megatron.core.utils import deprecate_args
 from megatron.core.utils import divide as core_divide
 from megatron.core.utils import get_pg_size, internal_api
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
 from .attention_context.mamba_metadata import MambaMetadata
 from .attention_context.mha_metadata import GraphedMHAMetadata, NonGraphedMHAMetadata
 from .base_context import BaseInferenceContext
 from .kv_block_allocator import KVBlockAllocator
 from .mamba_slot_allocator import MambaSlotAllocator
 from .routing_metadata import RoutingMetadata
-
-cur_platform = get_platform()
-########## FlagScale End ##########
 
 try:
     from .fused_kv_append_kernel import triton_append_key_value_cache
@@ -475,7 +469,7 @@ class DynamicInferenceContext(BaseInferenceContext):
             block_count_tensor = torch.tensor(
                 (block_count, paused_block_count),
                 dtype=torch.int32,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
             torch.distributed.all_reduce(
                 block_count_tensor,
@@ -619,7 +613,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                     self.kv_reduced_dim,
                 ),
                 dtype=self.params_dtype,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
         else:
             self.memory_buffer = torch.empty(
@@ -632,7 +626,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                     self.hidden_size_per_attention_head,
                 ),
                 dtype=self.params_dtype,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
         if (
             self.kv_cache_management_mode == KVCacheManagementMode.OFFLOAD
@@ -655,12 +649,12 @@ class DynamicInferenceContext(BaseInferenceContext):
             self.mamba_conv_states = torch.empty(
                 (self.num_mamba_layers, self.max_requests) + self.mamba_conv_states_shape,
                 dtype=self.mamba_conv_states_dtype,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
             self.mamba_ssm_states = torch.empty(
                 (self.num_mamba_layers, self.max_requests) + self.mamba_ssm_states_shape,
                 dtype=self.mamba_ssm_states_dtype,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
             if self.num_speculative_tokens > 0:
                 self.mamba_intermediate_conv_states = torch.empty(
@@ -671,7 +665,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                         *self.mamba_conv_states_shape,
                     ),
                     dtype=self.mamba_conv_states_dtype,
-                    device=cur_platform.current_device(),
+                    device=torch.cuda.current_device(),
                 )
                 self.mamba_intermediate_ssm_states = torch.empty(
                     (
@@ -681,7 +675,7 @@ class DynamicInferenceContext(BaseInferenceContext):
                         *self.mamba_ssm_states_shape,
                     ),
                     dtype=self.mamba_ssm_states_dtype,
-                    device=cur_platform.current_device(),
+                    device=torch.cuda.current_device(),
                 )
             if (
                 self.kv_cache_management_mode == KVCacheManagementMode.OFFLOAD
@@ -729,7 +723,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         # Per-request state.
         self.request_ids = torch.full(
-            (self.max_requests,), -1, dtype=torch.int32, device=cur_platform.current_device()
+            (self.max_requests,), -1, dtype=torch.int32, device=torch.cuda.current_device()
         )
         # request_query_lengths is the input prompt tokens length during prefill phase (1st step) and then 1 for the decode phase (i.e During generation)
         self.request_query_lengths = torch.empty_like(self.request_ids)
@@ -747,20 +741,20 @@ class DynamicInferenceContext(BaseInferenceContext):
             (self.max_requests, self.max_kv_block_count),
             -1,
             dtype=torch.int,
-            device=cur_platform.current_device(),
+            device=torch.cuda.current_device(),
         )
 
         # Track request metadata.
         self.request_metadata = {
             label: torch.empty(
-                (self.max_requests,), dtype=dtype, device=cur_platform.current_device()
+                (self.max_requests,), dtype=dtype, device=torch.cuda.current_device()
             )
             for label, dtype, _ in self.request_metadata_types
         }
 
         # Per-token state.
         self.token_to_input_ids = torch.full(
-            (self.max_tokens,), 0, dtype=torch.long, device=cur_platform.current_device()
+            (self.max_tokens,), 0, dtype=torch.long, device=torch.cuda.current_device()
         )
         self.token_to_pos_ids = torch.full_like(self.token_to_input_ids, 0)
         self.token_to_request_idx = torch.empty_like(self.token_to_input_ids)
@@ -788,7 +782,7 @@ class DynamicInferenceContext(BaseInferenceContext):
 
         ctx_manager = nullcontext()
         if self.unified_memory_level != 0:
-            ctx_manager = cur_platform.use_mem_pool(self.unified_memory_mempool)
+            ctx_manager = torch.cuda.use_mem_pool(self.unified_memory_mempool)
         elif HAVE_TORCH_MEMORY_SAVER and need_static_addr:
             ctx_manager = torch_memory_saver.region(
                 tag=self.TMS_TAG,
@@ -1297,7 +1291,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         self.request_kv_block_counts[request_slice] = block_counts
         for i, (label, dtype, _) in enumerate(self.request_metadata_types):
             self.request_metadata[label][request_slice] = torch.tensor(
-                metadata_cols[i], dtype=dtype, device=cur_platform.current_device()
+                metadata_cols[i], dtype=dtype, device=torch.cuda.current_device()
             )
 
         dummy_block_idx = self.kv_block_allocator.dummy_block_idx
@@ -1379,7 +1373,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Pre-construct shared objects (safe due to deep copy in DynamicInferenceRequest.__post_init__)
         shared_sampling_params = SamplingParams(num_tokens_to_generate=1, termination_id=-1)
         shared_decode_tokens = torch.zeros(
-            self.num_speculative_tokens + 1, dtype=torch.long, device=cur_platform.current_device()
+            self.num_speculative_tokens + 1, dtype=torch.long, device=torch.cuda.current_device()
         )
 
         decode_requests = [
@@ -1410,7 +1404,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Create a single large tensor and slice from it for each prefill request
         max_prefill_tokens = per_prefill_tokens + (1 if rem_prefill_tokens > 0 else 0)
         shared_prefill_tokens = torch.zeros(
-            max_prefill_tokens, dtype=torch.long, device=cur_platform.current_device()
+            max_prefill_tokens, dtype=torch.long, device=torch.cuda.current_device()
         )
 
         prefill_requests = [
@@ -1987,7 +1981,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         # Increment ref counts and update timestamps for matched (shared) blocks
         if num_matched_blocks > 0:
             matched_tensor = torch.tensor(
-                matched_block_ids, dtype=torch.int32, device=cur_platform.current_device()
+                matched_block_ids, dtype=torch.int32, device=torch.cuda.current_device()
             )
             self.kv_block_allocator.block_ref_counts[matched_tensor] += 1
             if self.prefix_caching_eviction_policy == PrefixCachingEvictionPolicy.LRU:
@@ -2386,7 +2380,7 @@ class DynamicInferenceContext(BaseInferenceContext):
             -1,
             -1,
             dtype=paused_block_counts_cumsum.dtype,
-            device=cur_platform.current_device(),
+            device=torch.cuda.current_device(),
         )
         net_block_counts = paused_block_counts_cumsum - remaining_paused_request_counts
         evict_request_count = torch.nonzero(net_block_counts >= 0)[0].item() + 1
@@ -2395,7 +2389,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         evict_start_idx = self.paused_request_count - evict_request_count
         evict_end_idx = self.paused_request_count
         evict_request_idxs = torch.arange(
-            evict_start_idx, evict_end_idx, device=cur_platform.current_device()
+            evict_start_idx, evict_end_idx, device=torch.cuda.current_device()
         )
         # Clone needed: subsequent release_memory_blocks_from_request_indexes and
         # _swap_book_keeping_tensors calls mutate self.request_ids in place.
@@ -2411,24 +2405,24 @@ class DynamicInferenceContext(BaseInferenceContext):
             src_idxs = torch.arange(
                 self.paused_request_count - evict_request_count,
                 self.paused_request_count,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
             dst_idxs = torch.arange(
                 self.total_request_count - evict_request_count,
                 self.total_request_count,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
         else:
             # Swap all active requests with left-most evicted requests.
             src_idxs = torch.arange(
                 self.paused_request_count - evict_request_count,
                 self.paused_request_count - evict_request_count + active_request_count,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
             dst_idxs = torch.arange(
                 self.paused_request_count,
                 self.paused_request_count + active_request_count,
-                device=cur_platform.current_device(),
+                device=torch.cuda.current_device(),
             )
 
         # Swap evicted and active requests.
@@ -2808,16 +2802,14 @@ class DynamicInferenceContext(BaseInferenceContext):
         self.token_to_pos_ids[: self.active_token_count] = self.request_kv_length_offsets[
             self.paused_request_count : self.total_request_count
         ].repeat_interleave(num_generated_tokens) + torch.arange(
-            num_generated_tokens, device=cur_platform.current_device()
+            num_generated_tokens, device=torch.cuda.current_device()
         ).repeat(
             active_request_count
         )
         #
         # Token to request idx : [0, 0, 0, 1, 1, 1, 2, 2, 2 ...]
         self.token_to_request_idx[: self.active_token_count] = torch.arange(
-            self.paused_request_count,
-            self.total_request_count,
-            device=cur_platform.current_device(),
+            self.paused_request_count, self.total_request_count, device=torch.cuda.current_device()
         ).repeat_interleave(num_generated_tokens)
 
         self.token_to_position_in_request[: self.active_token_count] = self.token_to_pos_ids[
@@ -2839,7 +2831,7 @@ class DynamicInferenceContext(BaseInferenceContext):
         raw_positions = (
             old_offsets[:, None]
             + 1  # Offset by 1 because old_offsets points to the LAST token
-            + torch.arange(num_generated_tokens, device=cur_platform.current_device())[None, :]
+            + torch.arange(num_generated_tokens, device=torch.cuda.current_device())[None, :]
         )
         #
         # A token crosses to the next block if its raw_position >= block_size

@@ -10,10 +10,6 @@ from enum import Enum, auto
 from pathlib import Path
 
 import torch
-
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
 from torch.cuda.memory import CUDAPluggableAllocator
 from torch.utils.cpp_extension import CUDA_HOME, load_inline
 
@@ -23,7 +19,7 @@ try:
     if is_torch_min_version("2.8.0"):
         from torch.cuda.memory import MemPool
     else:
-        from cur_platform import MemPool
+        from torch.cuda import MemPool
     _has_mem_pool = True
 except ImportError:
     _has_mem_pool = False
@@ -249,10 +245,10 @@ def compile_allocator():
         # Synchronize failure state across ranks. (For currently unknown reasons,
         # one rank can show as FAILURE while the remaining ranks show as SUCCESS.)
         local_state = torch.tensor(
-            [_compilation_state.value], dtype=torch.uint8, device=cur_platform.current_device()
+            [_compilation_state.value], dtype=torch.uint8, device=torch.cuda.current_device()
         )
         world_states = [
-            torch.empty(1, dtype=torch.uint8, device=cur_platform.current_device())
+            torch.empty(1, dtype=torch.uint8, device=torch.cuda.current_device())
             for _ in range(torch.distributed.get_world_size())
         ]
         torch.distributed.all_gather(world_states, local_state)
@@ -343,7 +339,7 @@ def prefetch_managed_tensor(tensor, *, device: int, stream=None) -> None:
     lib = _get_ctypes_lib()
     nbytes = tensor.nbytes
     if stream is None:
-        stream = cur_platform.current_stream()
+        stream = torch.cuda.current_stream()
     # torch.cuda.Stream exposes a cuda_stream integer handle.
     stream_ptr = ctypes.c_void_p(int(stream.cuda_stream))
     err = lib.managed_prefetch(
@@ -435,7 +431,7 @@ def prefetch_managed_module_parameters(
     # Avoid duplicate prefetch on shared tensors.
     seen_ptrs: set[int] = set()
     total_nbytes = 0
-    stream = cur_platform.current_stream()
+    stream = torch.cuda.current_stream()
 
     for name, p in module.named_parameters(recurse=True):
         if p is None:

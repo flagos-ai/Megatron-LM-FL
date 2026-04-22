@@ -11,9 +11,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 
 from megatron.core.inference.sampling_params import SamplingParams
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
 from megatron.core.tokenizers import MegatronTokenizer
 from megatron.core.utils import experimental_api
 

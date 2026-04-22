@@ -30,10 +30,6 @@ except ImportError:
     tqdm = MagicMock()
     HAVE_TQDM = False
 
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
-
 
 # pylint: disable=line-too-long
 class StaticInferenceEngine(AbstractEngine):
@@ -397,11 +393,11 @@ class StaticInferenceEngine(AbstractEngine):
         This is to ensure that the CUDA device is correctly propagated when running
         in a new thread context.
         """
-        cur_platform.set_device(cuda_device)
+        torch.cuda.set_device(cuda_device)
         self.run_engine()
 
     async def run_engine_async(self, loop: Optional[asyncio.AbstractEventLoop] = None):
         """Runs the engine asynchronously using asyncio"""
         loop = get_asyncio_loop(loop)
 
-        await loop.run_in_executor(None, self._wrapped_run_engine, cur_platform.current_device())
+        await loop.run_in_executor(None, self._wrapped_run_engine, torch.cuda.current_device())
