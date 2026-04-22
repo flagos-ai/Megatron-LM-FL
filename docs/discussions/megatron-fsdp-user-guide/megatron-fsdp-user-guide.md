@@ -43,7 +43,6 @@ We also recommend adding the following configurations to further improve perform
 ```bash
 unset CUDA_DEVICE_MAX_CONNECTIONS
 ```
-
 ```bash
 --calculate-per-token-loss
 --init-model-with-meta-device
