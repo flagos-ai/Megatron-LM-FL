@@ -47,13 +47,13 @@ except ImportError:
         multi_tensor_scale_tensor_impl = None
 
 
-########## FlagScale Begin ##########
-from megatron.plugin.decorators import overridable
-from megatron.plugin.platform import get_platform
-
 from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
 from ..transformer.module import param_is_not_shared
 from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
+
+########## FlagScale Begin ##########
+from megatron.plugin.decorators import overridable  # isort: skip
+from megatron.plugin.platform import get_platform  # isort: skip
 
 cur_platform = get_platform()
 ########## FlagScale End ##########

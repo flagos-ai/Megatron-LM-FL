@@ -15,11 +15,15 @@ import torch
 from megatron.core.inference.symmetric_memory import SymmetricMemoryManager
 from megatron.plugin.hetero.parallel_context import get_parallel_context
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
 from .utils import GlobalMemoryBuffer, is_torch_min_version
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform  # isort: skip
+
+########## FlagScale End ##########
+
+
+########## FlagScale Begin ##########
 cur_platform = get_platform()
 ########## FlagScale End ##########
 

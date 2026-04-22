@@ -37,9 +37,6 @@ except ImportError:
 
 from megatron.core.optimizer.cpu_offloading import HybridDeviceOptimizer
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
 from .. import tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..dist_checkpointing import ShardedTensor
@@ -60,6 +57,13 @@ from .grad_scaler import MegatronGradScaler
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper, param_group_identifier_keys
 from .optimizer_config import OptimizerConfig
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform  # isort: skip
+
+########## FlagScale End ##########
+
+
+########## FlagScale Begin ##########
 cur_platform = get_platform()
 ########## FlagScale End ##########
 

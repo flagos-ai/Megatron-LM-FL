@@ -6,9 +6,6 @@ from typing import Optional
 
 import torch
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..fp4_utils import is_nvfp4tensor
 from ..fp8_utils import is_float8tensor, post_all_gather_processing
@@ -20,6 +17,13 @@ from .data_parallel_base import _BaseDataParallel
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform  # isort: skip
+
+########## FlagScale End ##########
+
+
+########## FlagScale Begin ##########
 cur_platform = get_platform()
 ########## FlagScale End ##########
 

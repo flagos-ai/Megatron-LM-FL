@@ -158,8 +158,8 @@ def get_forward_backward_func(pp_size: Optional[int] = None, vp_size: Optional[i
             )
 
             forward_backward_func = forward_backward_pipelining_with_dualpipev
+        ######### FlagScale End #########
         elif vp_size is not None:
-            ######### FlagScale End #########
             forward_backward_func = forward_backward_pipelining_with_interleaving
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
