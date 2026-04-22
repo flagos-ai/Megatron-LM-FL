@@ -20,10 +20,6 @@ from .param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform  # isort: skip
 
-########## FlagScale End ##########
-
-
-########## FlagScale Begin ##########
 cur_platform = get_platform()
 ########## FlagScale End ##########
 

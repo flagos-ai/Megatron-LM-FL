@@ -20,10 +20,6 @@ from .utils import GlobalMemoryBuffer, is_torch_min_version
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform  # isort: skip
 
-########## FlagScale End ##########
-
-
-########## FlagScale Begin ##########
 cur_platform = get_platform()
 ########## FlagScale End ##########
 

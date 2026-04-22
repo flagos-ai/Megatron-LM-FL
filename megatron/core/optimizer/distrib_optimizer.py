@@ -60,10 +60,6 @@ from .optimizer_config import OptimizerConfig
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform  # isort: skip
 
-########## FlagScale End ##########
-
-
-########## FlagScale Begin ##########
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
