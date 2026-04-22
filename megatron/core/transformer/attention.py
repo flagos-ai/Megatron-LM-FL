@@ -1295,8 +1295,14 @@ class SelfAttention(Attention):
         )
 
         if submodules.q_layernorm is not None:
+            ######### FlagScale Begin #########
+            if self.config.qk_layernorm_hidden_dim:
+                q_layernorm_hidden_size = self.query_projection_size
+            else:
+                ######### FlagScale End #########
+                q_layernorm_hidden_size = self.hidden_size_per_attention_head
             self.q_layernorm = submodules.q_layernorm(
-                hidden_size=self.hidden_size_per_attention_head,
+                hidden_size=q_layernorm_hidden_size,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
@@ -1304,8 +1310,14 @@ class SelfAttention(Attention):
             self.q_layernorm = None
 
         if submodules.k_layernorm is not None:
+            ######### FlagScale Begin #########
+            if self.config.qk_layernorm_hidden_dim:
+                k_layernorm_hidden_size = self.kv_projection_size
+            else:
+                ######### FlagScale End #########
+                k_layernorm_hidden_size = self.hidden_size_per_attention_head
             self.k_layernorm = submodules.k_layernorm(
-                hidden_size=self.hidden_size_per_attention_head,
+                hidden_size=k_layernorm_hidden_size,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
