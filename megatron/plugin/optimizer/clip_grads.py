@@ -25,16 +25,20 @@ try:
     from transformer_engine.pytorch.optimizers import (
         multi_tensor_applier,
         multi_tensor_l2norm,
+        multi_tensor_scale_tensor,
     )
     l2_norm_impl = multi_tensor_l2norm
+    multi_tensor_scale_tensor_impl = multi_tensor_scale_tensor
 except ImportError:
     try:
         import amp_C
         from apex.multi_tensor_apply import multi_tensor_applier
         l2_norm_impl = amp_C.multi_tensor_l2norm
+        multi_tensor_scale_tensor_impl = None
     except ImportError:
         from megatron.core.utils import local_multi_tensor_applier as multi_tensor_applier
         from megatron.core.utils import local_multi_tensor_l2_norm as l2_norm_impl
+        multi_tensor_scale_tensor_impl = None
 
 try:
     from megatron.plugin.utils import get_device_type_for_comm
@@ -152,7 +156,10 @@ def get_grad_norm_fp32(
             torch.distributed.all_reduce(
                 total_norm, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
             )
-        total_norm = total_norm.item() ** (1.0 / norm_type)
+        if multi_tensor_scale_tensor_impl is not None:
+            total_norm = total_norm.pow(1.0 / norm_type)
+        else:
+            total_norm = total_norm.item() ** (1.0 / norm_type)
 
     return total_norm
 
@@ -185,7 +192,7 @@ def count_zeros_fp32(
     #   - grad should not be none
     #   - parameter should not be shared
     #   - should not be a replica due to tensor model parallelism
-    total_num_zeros = torch.zeros(1, dtype=torch.float, device=cur_platform.device_name())
+    total_num_zeros = torch.zeros(1, dtype=torch.int64, device=cur_platform.device_name())
     data_parallel_group = None
     use_megatron_fsdp = False
     for param in parameters:
