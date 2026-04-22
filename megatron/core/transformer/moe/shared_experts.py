@@ -2,7 +2,6 @@
 
 import warnings
 from copy import copy
-from re import M
 from typing import Optional
 
 import torch
