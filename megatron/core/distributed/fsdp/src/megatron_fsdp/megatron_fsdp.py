@@ -43,9 +43,12 @@ from .utils import FSDPDistributedIndex, log_single_rank
 
 logger = logging.getLogger(__name__)
 
+########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+########## FlagScale End ##########
+
 
 try:
     # Default to Megatron-LM FW.

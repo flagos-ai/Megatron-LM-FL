@@ -32,9 +32,6 @@ import torch
 from torch.distributed import _coalescing_manager
 from torch.distributed.tensor import DTensor, Replicate, Shard
 
-########## FlagScale Begin ##########
-from megatron.plugin.platform import get_platform
-
 from .mixed_precision import (
     MixedPrecisionPolicy,
     fp8_discard_transpose_cache,
@@ -59,10 +56,13 @@ from .utils import (
     log_single_rank,
 )
 
+logger = logging.getLogger(__name__)
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 ########## FlagScale End ##########
-
-logger = logging.getLogger(__name__)
 
 
 try:

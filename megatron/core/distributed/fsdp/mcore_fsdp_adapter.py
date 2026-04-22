@@ -44,6 +44,12 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import is_te_min_version, log_single_rank
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 try:
     from megatron.core.distributed.fsdp.src.megatron_fsdp import (
         FSDPDistributedIndex,
@@ -57,10 +63,6 @@ except ImportError as import_megatron_fsdp_error:
     HAVE_MEGATRON_FSDP = False
 
 logger = logging.getLogger(__name__)
-
-from megatron.plugin.platform import get_platform
-
-cur_platform = get_platform()
 
 
 class FullyShardedDataParallel(_BaseDataParallel):
