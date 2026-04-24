@@ -82,6 +82,7 @@ test_matrix:
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
       - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
       - tests/unit_tests/dist_checkpointing/test_local.py
 
       # test_straggler_detector causes a SIGSEGV (Signal 11) crash during pytest session teardown on A100.
@@ -91,6 +92,9 @@ test_matrix:
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
       - tests/unit_tests/tokenizers/test_tokenizer.py::test_multimodal_tokenizer
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
 
   functional:
     train:

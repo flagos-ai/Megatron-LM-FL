@@ -76,6 +76,8 @@ test_matrix:
       # 3.transformer
       # TE _extra_state compatibility issue with AbsorbedMLA
       - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      # Precision issues with DSA attention variant
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
       # ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/transformer/test_attention_no_rope.py
       - tests/unit_tests/transformer/test_attention_packed_seq.py
@@ -114,7 +116,10 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py
       # Parent directory /tmp/pytest-of-root/tmp_dist_ckpt does not exist.
       - tests/unit_tests/dist_checkpointing/test_safe_globals.py

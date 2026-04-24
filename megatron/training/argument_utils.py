@@ -117,7 +117,9 @@ class ArgumentGroupFactory:
                 raise TypeInferenceError(f"Unions not supported by argparse: {config_type}")
 
         elif origin is list:
-            if len(type_tuple) == 1:
+            if len(type_tuple) == 0:
+                return {"type": str, "nargs": "+"}
+            elif len(type_tuple) == 1:
                 kwargs = self._extract_type(type_tuple[0])
                 kwargs["nargs"] = "+"
                 return kwargs
