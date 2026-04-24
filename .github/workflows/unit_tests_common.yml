@@ -28,111 +28,9 @@ on:
         type: string
         default: ''
         description: JSON array of test files to ignore (e.g., '["tests/unit_tests/test_a.py", "tests/unit_tests/test_b.py"]')
-      # Whether to upload coverage report
-      upload_coverage:
-        description: "Whether to upload coverage report"
-        required: false
-        type: boolean
-        default: true
 
 jobs:
-  # Detect which test groups need to run based on changed files
-  detect_changes:
-    runs-on: ubuntu-latest
-    outputs:
-      core: ${{ steps.filter.outputs.core }}
-      transformer: ${{ steps.filter.outputs.transformer }}
-      models: ${{ steps.filter.outputs.models }}
-      distributed: ${{ steps.filter.outputs.distributed }}
-      dist_checkpointing: ${{ steps.filter.outputs.dist_checkpointing }}
-      tensor_parallel: ${{ steps.filter.outputs.tensor_parallel }}
-      pipeline_parallel: ${{ steps.filter.outputs.pipeline_parallel }}
-      data: ${{ steps.filter.outputs.data }}
-      fusions: ${{ steps.filter.outputs.fusions }}
-      others: ${{ steps.filter.outputs.others }}
-      ci_config: ${{ steps.filter.outputs.ci_config }}
-    steps:
-      - name: Checkout source code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      - name: Detect changed paths
-        id: filter
-        run: |
-          set -euo pipefail
-
-          # Get the base ref for comparison
-          if [ "${{ github.event_name }}" == "pull_request" ]; then
-            BASE_REF="origin/${{ github.base_ref }}"
-            git fetch origin ${{ github.base_ref }} --depth=1
-          else
-            # For push events, compare with the previous commit
-            BASE_REF="HEAD~1"
-          fi
-          # Get list of changed files
-          CHANGED_FILES=$(git diff --name-only $BASE_REF...HEAD 2>/dev/null || git diff --name-only $BASE_REF HEAD)
-
-          # Function to check if any pattern matches
-          check_patterns() {
-            local patterns="$1"
-            for pattern in $patterns; do
-              if echo "$CHANGED_FILES" | grep -qE "$pattern"; then
-                echo "true"
-                return
-              fi
-            done
-            echo "false"
-          }
-
-          # Core tests: root-level test files and core megatron files
-          CORE_PATTERNS="^tests/unit_tests/test_.*\.py$ ^megatron/core/[^/]*\.py$ ^megatron/core/__init__\.py$"
-          echo "core=$(check_patterns "$CORE_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Transformer tests
-          TRANSFORMER_PATTERNS="^tests/unit_tests/transformer/ ^megatron/core/transformer/"
-          echo "transformer=$(check_patterns "$TRANSFORMER_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Models tests
-          MODELS_PATTERNS="^tests/unit_tests/models/ ^megatron/core/models/"
-          echo "models=$(check_patterns "$MODELS_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Distributed tests
-          DISTRIBUTED_PATTERNS="^tests/unit_tests/distributed/ ^megatron/core/distributed/"
-          echo "distributed=$(check_patterns "$DISTRIBUTED_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Dist checkpointing tests
-          DIST_CKPT_PATTERNS="^tests/unit_tests/dist_checkpointing/ ^megatron/core/dist_checkpointing/"
-          echo "dist_checkpointing=$(check_patterns "$DIST_CKPT_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Tensor parallel tests
-          TP_PATTERNS="^tests/unit_tests/tensor_parallel/ ^megatron/core/tensor_parallel/"
-          echo "tensor_parallel=$(check_patterns "$TP_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Pipeline parallel tests
-          PP_PATTERNS="^tests/unit_tests/pipeline_parallel/ ^megatron/core/pipeline_parallel/"
-          echo "pipeline_parallel=$(check_patterns "$PP_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Data tests
-          DATA_PATTERNS="^tests/unit_tests/data/ ^megatron/core/datasets/"
-          echo "data=$(check_patterns "$DATA_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Fusions tests
-          FUSIONS_PATTERNS="^tests/unit_tests/fusions/ ^megatron/core/fusions/"
-          echo "fusions=$(check_patterns "$FUSIONS_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # Others tests (export, post_training, tokenizers, utils)
-          OTHERS_PATTERNS="^tests/unit_tests/export/ ^tests/unit_tests/post_training/ ^tests/unit_tests/tokenizers/ ^tests/unit_tests/utils/ ^megatron/core/export/ ^megatron/post_training/ ^megatron/tokenizer/ ^megatron/core/utils/"
-          echo "others=$(check_patterns "$OTHERS_PATTERNS")" >> $GITHUB_OUTPUT
-
-          # CI config: .github workflow and config files
-          CI_CONFIG_PATTERNS="^\.github/"
-          echo "ci_config=$(check_patterns "$CI_CONFIG_PATTERNS")" >> $GITHUB_OUTPUT
-
-          echo "=== Change detection complete ==="
-
   unit_test:
-    needs: detect_changes
     defaults:
       run:
         shell: bash
@@ -179,45 +77,8 @@ jobs:
       volumes: ${{ fromJson(inputs.container_volumes) }}
       options: ${{ inputs.container_options }}
     steps:
-      # Check if this test group should run based on changed files or "full ci" label
-      - name: Check if tests should run
-        id: should_run
-        run: |
-          TEST_GROUP='${{ matrix.test_group.name }}'
-          FULL_CI='${{ contains(github.event.pull_request.labels.*.name, 'full ci') }}'
-
-          # If "full ci" label is present, run all tests
-          if [ "$FULL_CI" == "true" ]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # If CI config files (.github/) changed, run all tests
-          CI_CONFIG_CHANGED='${{ needs.detect_changes.outputs.ci_config }}'
-          if [ "$CI_CONFIG_CHANGED" == "true" ]; then
-            echo "should_run=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Check change detection output for this test group
-          case "$TEST_GROUP" in
-            core) CHANGED='${{ needs.detect_changes.outputs.core }}' ;;
-            transformer) CHANGED='${{ needs.detect_changes.outputs.transformer }}' ;;
-            models) CHANGED='${{ needs.detect_changes.outputs.models }}' ;;
-            distributed) CHANGED='${{ needs.detect_changes.outputs.distributed }}' ;;
-            dist_checkpointing) CHANGED='${{ needs.detect_changes.outputs.dist_checkpointing }}' ;;
-            tensor_parallel) CHANGED='${{ needs.detect_changes.outputs.tensor_parallel }}' ;;
-            pipeline_parallel) CHANGED='${{ needs.detect_changes.outputs.pipeline_parallel }}' ;;
-            data) CHANGED='${{ needs.detect_changes.outputs.data }}' ;;
-            fusions) CHANGED='${{ needs.detect_changes.outputs.fusions }}' ;;
-            others) CHANGED='${{ needs.detect_changes.outputs.others }}' ;;
-            *) CHANGED="true" ;;
-          esac
-          echo "should_run=$CHANGED" >> $GITHUB_OUTPUT
-  
       - name: Checkout Source Code (attempt 1)
         id: checkout1
-        if: steps.should_run.outputs.should_run == 'true'
         uses: actions/checkout@v4
         continue-on-error: true
         with:
@@ -226,7 +87,7 @@ jobs:
           
       - name: Checkout Source Code (attempt 2)
         id: checkout2
-        if: steps.should_run.outputs.should_run == 'true' && steps.checkout1.outcome == 'failure'
+        if: steps.checkout1.outcome == 'failure'
         uses: actions/checkout@v4
         continue-on-error: true
         with:
@@ -235,15 +96,13 @@ jobs:
 
       - name: Checkout Source Code (attempt 3)
         id: checkout3
-        if: steps.should_run.outputs.should_run == 'true' && steps.checkout2.outcome == 'failure'
+        if: steps.checkout2.outcome == 'failure'
         uses: actions/checkout@v4
-        continue-on-error: true
         with:
           fetch-depth: 0
           set-safe-directory: true
 
       - name: Setup Python environment
-        if: steps.should_run.outputs.should_run == 'true'
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -259,14 +118,13 @@ jobs:
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
           # Install dependence package
-          pip install boto3 mock pytest-mock coverage --no-cache-dir
-
+          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb --no-cache-dir
+          
           # Build
           pip install -e . --no-deps --no-build-isolation --no-cache-dir
         timeout-minutes: 30
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
-        if: steps.should_run.outputs.should_run == 'true'
         id: unit_test
         working-directory: ${{ github.workspace }}
         run: |
@@ -320,29 +178,24 @@ jobs:
           # Coverage setup
           COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
           RUNNER_CMD="-m pytest"
-          if [ '${{ inputs.upload_coverage }}' = 'true' ]; then
-            mkdir -p "$COVERAGE_DIR"
-            printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
-              "$GITHUB_WORKSPACE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
-            RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
-          fi
-
+          mkdir -p "$COVERAGE_DIR"
+          printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
+            "$GITHUB_WORKSPACE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
+          RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
+          
           torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
           exit_code=$?
 
           # Combine coverage fragments and generate JSON report
-          if [ '${{ inputs.upload_coverage }}' = 'true' ]; then
-            coverage combine --rcfile="$COVERAGE_DIR/.coveragerc" "$COVERAGE_DIR" 2>/dev/null || true
-            coverage json --rcfile="$COVERAGE_DIR/.coveragerc" \
-              -o "$COVERAGE_DIR/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json" --include="megatron/*" 2>/dev/null || true
-          fi
+          coverage combine --rcfile="$COVERAGE_DIR/.coveragerc" "$COVERAGE_DIR" 2>/dev/null || true
+          coverage json --rcfile="$COVERAGE_DIR/.coveragerc" \
+            -o "$COVERAGE_DIR/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json" --include="megatron/*" 2>/dev/null || true
 
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
         timeout-minutes: 60
 
       - name: Upload Coverage Report
-        if: inputs.upload_coverage
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
@@ -350,7 +203,6 @@ jobs:
           path: coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json
 
       - name: Upload Coverage Report to FlagCICD
-        if: inputs.upload_coverage
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
         env:
@@ -360,11 +212,3 @@ jobs:
           user_id: '000000000000000000'
           report_path: 'coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json'
           fail_on_error: 'false'
-
-      # - name: Debug - keep container alive on failure
-      #   if: failure()
-      #   run: |
-      #     echo "Container sleeping for 10 minutes for debugging..."
-      #     echo "On host, run: docker ps  then  docker exec -it <container_id> bash"
-      #     sleep 600
-      #   timeout-minutes: 60

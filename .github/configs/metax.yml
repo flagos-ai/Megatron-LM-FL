@@ -5,26 +5,37 @@
 hardware_name: metax
 display_name: 'Metax Tests'
 
-ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
-# ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
+# CI image for Metax dev env
+# ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
 
-runner_labels:
-  - self-hosted
-  - Linux
-  - X64
-  - metax
-  - dev
+# CI image for online env
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
+
+# Runner labels for self-hosted Metax node
 # runner_labels:
-#   - mx-4g-cicd-megatron
+#   - self-hosted
+#   - Linux
+#   - X64
+#   - metax
+#   - dev
+
+# Runner labels for online env
+runner_labels:
+  - mx-4g-cicd-megatron
 
 # Container volumes (hardware-specific paths)
+# container_volumes:
+#   - /home/flagscale_cicd/flask/static:/workspace/report
+#   - /home/flagscale_cicd/flask/config:/workspace/config
+#   - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
+#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
+#   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
+#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+
+# Container volumes for online env
 container_volumes:
-  - /home/flagscale_cicd/flask/static:/workspace/report
-  - /home/flagscale_cicd/flask/config:/workspace/config
-  - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
-  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
-  - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
-  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+  - /mnt/op/cicd/baai_datasets:/home/gitlab-runner/data
+  - /mnt/op/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
 
 # Container options (hardware-specific settings)
 container_options: >-
@@ -35,6 +46,8 @@ container_options: >-
   --ulimit nofile=65535:65535
   --device=/dev/dri
   --device=/dev/mxcd
+
+# Device types to run tests on
 device_types:
   - c500
 
@@ -48,30 +61,17 @@ test_matrix:
     ignored_tests:
       # single test cases below are unstable on Metax now, need further investigation
       ## 1.core
-      - tests/unit_tests/test_checkpointing.py
-      - tests/unit_tests/test_fp8_utils.py ## ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/test_fp8_param.py
-      - tests/unit_tests/test_local_multi_tensor_fns.py ## RuntimeError: No CUDA GPUs are available
-      - tests/unit_tests/test_optimizer_cpu_offloading.py ## RuntimeError: No CUDA GPUs are available
       - tests/unit_tests/test_optimizer.py ## RuntimeError: No CUDA GPUs are available
-      # - tests/unit_tests/test_parallel_state.py
-      - tests/unit_tests/test_process_groups_config.py
-      - tests/unit_tests/test_rl_utils.py #No module named 'wandb'
-      # - tests/unit_tests/test_tokenizer.py    # No module named 'nltk'
       - tests/unit_tests/test_utils.py
-      - tests/unit_tests/test_training.py
+      - tests/unit_tests/test_rl_utils.py
+      - tests/unit_tests/test_rl_inference_megatron.py
 
       # 2.models
-      #ZeroDivisionError: integer modulo by zero
-      - tests/unit_tests/models/test_bert_model.py
-      - tests/unit_tests/models/test_clip_vit_model.py
+      # ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/models/test_heterogeneous_gpt_model.py
-      - tests/unit_tests/models/test_mimo_submodules.py
-      - tests/unit_tests/models/test_radio_model.py
-      - tests/unit_tests/models/test_base_embedding.py
       # need cuda
       - tests/unit_tests/models/test_mamba_model.py
-      - tests/unit_tests/models/test_mimo_submodules.py
 
       # 3.transformer
       # ZeroDivisionError: integer modulo by zero
@@ -79,110 +79,70 @@ test_matrix:
       - tests/unit_tests/transformer/test_attention_packed_seq.py
       - tests/unit_tests/transformer/test_attention.py
       - tests/unit_tests/transformer/test_mlp.py
-      - tests/unit_tests/transformer/test_module.py
       - tests/unit_tests/transformer/test_multi_latent_attention.py
       - tests/unit_tests/transformer/test_multi_token_prediction.py
-      - tests/unit_tests/transformer/test_relative_attention.py
       - tests/unit_tests/transformer/test_retro_attention.py
-      - tests/unit_tests/transformer/test_spec_customization.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_utils.py
-
       - tests/unit_tests/transformer/moe/test_grouped_mlp.py
       - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
       - tests/unit_tests/transformer/moe/test_routers.py
-      - tests/unit_tests/transformer/moe/test_shared_experts.py
       - tests/unit_tests/transformer/moe/test_upcycling.py
       - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
       - tests/unit_tests/transformer/moe/test_aux_loss.py
-
-      #need cuda
+      # need cuda
       - tests/unit_tests/transformer/test_cuda_graphs.py
       - tests/unit_tests/transformer/test_full_cuda_graph.py
 
-      - tests/unit_tests/transformer/moe/test_moe_layer.py
-      - tests/unit_tests/transformer/moe/test_multihot_indices_converter.py
-
       # 4.data
-      #need cuda. No module named 'nltk'
+      # need cuda. No module named 'nltk'
       - tests/unit_tests/data/test_bin_reader.py
       - tests/unit_tests/data/test_preprocess_data.py
       - tests/unit_tests/data/test_preprocess_mmdata.py
-
       # ZeroDivisionError: integer modulo by zero
-      - tests/unit_tests/data/test_builder.py
       - tests/unit_tests/data/test_fim_dataset.py
-      - tests/unit_tests/data/test_gpt_dataset.py
-      - tests/unit_tests/data/test_multimodal_dataset.py
 
       # 5.dist_checkpointing
-      - tests/unit_tests/dist_checkpointing/models/common.py
-      - tests/unit_tests/dist_checkpointing/conftest.py
-      - tests/unit_tests/dist_checkpointing/utils.py
       # ZeroDivisionError: integer modulo by zero
-      # - tests/unit_tests/dist_checkpointing/test_async_save.py
-      - tests/unit_tests/dist_checkpointing/test_checkpointable.py
-      # - tests/unit_tests/dist_checkpointing/test_flattened_resharding.py
-      # - tests/unit_tests/dist_checkpointing/test_replication.py
       - tests/unit_tests/dist_checkpointing/test_fp8.py
       - tests/unit_tests/dist_checkpointing/test_fully_parallel.py
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
-      # - tests/unit_tests/dist_checkpointing/test_msc.py
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
-      # - tests/unit_tests/dist_checkpointing/test_serialization.py
-      # - tests/unit_tests/dist_checkpointing/test_strict.py
-      # - tests/unit_tests/dist_checkpointing/test_torch_dist.py
-
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
       - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py
-      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py
-
-      #Parent directory /tmp/pytest-of-root/tmp_dist_ckpt does not exist.
+      # Parent directory /tmp/pytest-of-root/tmp_dist_ckpt does not exist.
       - tests/unit_tests/dist_checkpointing/test_safe_globals.py
-
-      #No CUDA GPUs are available
-      - tests/unit_tests/dist_checkpointing/test_mapping.py
-
+      # No CUDA GPUs are available
       - tests/unit_tests/dist_checkpointing/models/test_mamba.py
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
 
       # 6.distributed
       - tests/unit_tests/distributed/test_distributed_data_parallel.py
-      - tests/unit_tests/distributed/test_finalize_model_grads.py
       - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
       - tests/unit_tests/distributed/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py
       - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
-      - tests/unit_tests/distributed/test_torch_fully_sharded_parallel.py
       - tests/unit_tests/distributed/fsdp/test_mfsdp_fully_shard.py
 
       # 7.export
       - tests/unit_tests/export/trtllm/test_distributed_fp8.py
       - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
       - tests/unit_tests/export/trtllm/test_trtllm_helper.py
-      - tests/unit_tests/export/trtllm/test_trtllm_layers.py
-      - tests/unit_tests/export/trtllm/test_trtllm_single_device_converter.py
 
       #8.fusions
-      - tests/unit_tests/fusions/test_bias_dropout_fusion.py
       - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
-      - tests/unit_tests/fusions/test_swiglu_fusion.py
-      - tests/unit_tests/fusions/test_torch_softmax.py
-      - tests/unit_tests/fusions/test_weighted_squared_relu_fusion.py
 
-      #10.post training
+      #9.post training
       - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel::test_inference
 
-      #11.tokenizers
+      #10.tokenizers
       - tests/unit_tests/tokenizers/test_tokenizer.py
-      #12.unit_tests/utils
-      - tests/unit_tests/utils/test_experimental_log_once.py
+      #11.unit_tests/utils
 
       # === Need >2 GPU（model_size > 2） ===
       # core: tp=2,pp=4 or tp=world_size
@@ -229,16 +189,12 @@ test_matrix:
       # models
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
 
-  # functional:
-  #   train:
-  #     - device: c500
-  #       task: train
-  #       model: deepseek
-  #       case: tp2_pp2_ep2
-
-  # functional:
-  #   train:
-  #     - model: gpt
-  #       test_case: gpt3_mcore_te_tp1_pp1_resume_torch_dist_dist_optimizer
-  #       training_script: pretrain_gpt.py
-  #       n_repeat: 1
+  functional:
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: c500
+        enable_lightweight_mode: false

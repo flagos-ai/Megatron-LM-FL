@@ -5,14 +5,17 @@
 hardware_name: cuda
 display_name: 'CUDA Tests'
 
+# CI image for online env
 ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
 
+# Runner labels for self-hosted A100 node
 # runner_labels:
 #   - self-hosted
 #   - Linux
 #   - X64
 #   - nvidia
 #   - gpu-8
+
 runner_labels:
   - nv-8g-cicd-megatron
 
@@ -21,10 +24,13 @@ runner_labels:
 #   - /home/flagscale_cicd/flask/static:/workspace/report
 #   - /home/flagscale_cicd/flask/config:/workspace/config
 #   - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
+#   # Official functional recipes expect frozen checkpoints and artifacts here.
+#   - /home/flagscale_cicd/docker/docker_build/docker_data:/mnt/artifacts
 #   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
 #   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
 #   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
 
+# Container volumes for online env
 container_volumes:
   - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
   - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
@@ -83,9 +89,12 @@ test_matrix:
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
 
-  # functional:
-  #   train:
-  #     - device: a100
-  #       task: train
-  #       model: gpt
-  #       case: all
+  functional:
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: dgx_a100
+        enable_lightweight_mode: false

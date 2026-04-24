@@ -7,9 +7,20 @@ on:
         required: true
         type: string
         description: Platform name (e.g., cuda, default)
+      run_unit_tests:
+        required: false
+        type: boolean
+        default: true
+        description: Whether to run unit tests in this workflow
+      run_functional_tests:
+        required: false
+        type: boolean
+        default: true
+        description: Whether to run functional tests in this workflow
 
 jobs:
   checkout_and_config:
+    name: checkout_and_config
     defaults:
       run:
         shell: bash
@@ -67,15 +78,24 @@ jobs:
           # Read ignored tests list from test_matrix.unit (default to empty array if not defined)
           IGNORED_TESTS=$(yq '.test_matrix.unit.ignored_tests // [] | tojson(0)' "$CONFIG_FILE")
           echo "ignored_tests=$IGNORED_TESTS" >> $GITHUB_OUTPUT
-
+      
+  lint:
+    name: lint
+    needs: 
+      - checkout_and_config
+    uses: ./.github/workflows/lint_common.yml
+          
   unit_tests:
-    needs: checkout_and_config
+    name: unit_tests
+    if: inputs.run_unit_tests
+    needs: 
+      - checkout_and_config
+      - lint
     strategy:
       fail-fast: false
       matrix:
         device: ${{ fromJson(needs.checkout_and_config.outputs.device_types) }}
     uses: ./.github/workflows/unit_tests_common.yml
-    name: unit_tests
     with:
       platform: ${{ inputs.platform }}
       device: ${{ matrix.device }}
@@ -85,18 +105,58 @@ jobs:
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
 
-  # functional_tests:
-  #   needs:
-  #     - checkout_and_config
-  #   if: fromJson(needs.checkout_and_config.outputs.train_test_matrix)[0] != null
-  #   uses: ./.github/workflows/functional_tests_common.yml
-  #   with:
-  #     platform: ${{ inputs.platform }}
-  #     test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
-  #     image: ${{ needs.checkout_and_config.outputs.ci_image }}
-  #     runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
-  #     container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
-  #     container_options: ${{ needs.checkout_and_config.outputs.container_options }}
+  unit_tests_complete:
+    name: unit_tests_complete
+    if: always() && inputs.run_unit_tests
+    needs: 
+      - unit_tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check unit tests result
+        run: |
+          if [ "${{ needs.unit_tests.result }}" != "success" ] && \
+             [ "${{ needs.unit_tests.result }}" != "skipped" ]; then
+            echo "❌ Unit tests failed: ${{ needs.unit_tests.result }}"
+            exit 1
+          fi
+          echo "✅ Unit tests passed"
+
+  functional_tests:
+    name: functional_tests
+    if: inputs.run_functional_tests
+    needs:
+      - checkout_and_config
+      - lint
+      - unit_tests_complete
+    strategy:
+      fail-fast: false
+      matrix:
+        device: ${{ fromJson(needs.checkout_and_config.outputs.device_types) }}
+    uses: ./.github/workflows/functional_tests_common.yml
+    with:
+      platform: ${{ inputs.platform }}
+      device: ${{ matrix.device }}
+      image: ${{ needs.checkout_and_config.outputs.ci_image }}
+      runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
+      container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
+      container_options: ${{ needs.checkout_and_config.outputs.container_options }}
+      test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
+
+  functional_tests_complete:
+    name: functional_tests_complete
+    if: always() && inputs.run_functional_tests
+    needs: 
+      - functional_tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check functional tests result
+        run: |
+          if [ "${{ needs.functional_tests.result }}" != "success" ] && \
+             [ "${{ needs.functional_tests.result }}" != "skipped" ]; then
+            echo "❌ Functional tests failed: ${{ needs.functional_tests.result }}"
+            exit 1
+          fi
+          echo "✅ Functional tests passed"
 
   all_tests_complete:
     defaults:
@@ -104,25 +164,34 @@ jobs:
         shell: bash
     needs:
       - checkout_and_config
-      - unit_tests
-      # - functional_tests
+      - lint
+      - unit_tests_complete
+      - functional_tests_complete
     runs-on: ubuntu-latest
     if: always()
     steps:
       - name: Verify all tests passed
         run: |
-          # Check all test jobs (skip if not run)
+          # Check all test jobs
           failed=false
 
-          if [ "${{ needs.unit_tests.result }}" != "success" ]; then
-            echo "❌ Unit tests failed"
+          if [ "${{ needs.lint.result }}" != "success" ] && \
+            [ "${{ needs.lint.result }}" != "skipped" ]; then
+            echo "❌ Lint failed"
             failed=true
           fi
 
-          # if [ "${{ needs.functional_tests.result }}" != "success" ]; then
-          #   echo "❌ Training functional tests failed"
-          #   failed=true
-          # fi
+          if [ "${{ needs.unit_tests_complete.result }}" != "success" ] && \
+            [ "${{ needs.unit_tests_complete.result }}" != "skipped" ]; then
+            echo "❌ Unit tests failed or cancelled: ${{ needs.unit_tests_complete.result }}"
+            failed=true
+          fi
+
+          if [ "${{ needs.functional_tests_complete.result }}" != "success" ] && \
+            [ "${{ needs.functional_tests_complete.result }}" != "skipped" ]; then
+            echo "❌ Functional tests failed or cancelled: ${{ needs.functional_tests_complete.result }}"
+            failed=true
+          fi
 
           if [ "$failed" = "true" ]; then
             exit 1

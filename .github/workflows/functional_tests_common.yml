@@ -1,4 +1,3 @@
-# Disabled for compatibility issues
 name: Common Functional Tests - Training
 
 on:
@@ -8,10 +7,10 @@ on:
         required: true
         type: string
         description: Platform name (e.g., cuda, default)
-      test_matrix:
+      device:
         required: true
         type: string
-        description: JSON array of test configurations
+        description: Device type (e.g., a100, a800, h100, generic)
       image:
         required: true
         type: string
@@ -24,14 +23,17 @@ on:
       container_options:
         required: true
         type: string
+      test_matrix:
+        required: true
+        type: string
+        description: JSON array of test configurations
 
 jobs:
   functional_test_train:
+    name: functional-train-${{ inputs.device }}-${{ matrix.test_config.test_case }}
     defaults:
       run:
         shell: bash
-    env:
-      PROJECT_ROOT: ${{ github.workspace }}
     runs-on: ${{ fromJson(inputs.runs_on) }}
     strategy:
       fail-fast: false
@@ -45,103 +47,188 @@ jobs:
       options: ${{ inputs.container_options }}
 
     steps:
-      - name: Checkout source code
-        uses: actions/checkout@v6
+      - name: Checkout Source Code (attempt 1)
+        id: checkout1
+        uses: actions/checkout@v4
+        continue-on-error: true
         with:
           fetch-depth: 0
+          set-safe-directory: true
 
-      # - name: Set safe directory
-      #   run: |
-      #     git config --global --add safe.directory $PROJECT_ROOT
-      ## The above step is commented out because there is no git cli in the container, and it causes the step to fail. The safe directory is set in the next step with a conditional check.
-      - name: Set safe directory
-        run: |
-          command -v git && git config --global --add safe.directory $PROJECT_ROOT || true
+      - name: Checkout Source Code (attempt 2)
+        id: checkout2
+        if: steps.checkout1.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
 
-      - name: Activate Python environment
+      - name: Checkout Source Code (attempt 3)
+        id: checkout3
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Setup Python environment
+        working-directory: ${{ github.workspace }}
         run: |
+          set -euo pipefail
+
           if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
             source /opt/conda/etc/profile.d/conda.sh
             conda activate base
           fi
+          # Ensure python3 resolves to conda python (Makefile in megatron/core/datasets uses python3)
+          CONDA_PYTHON=$(which python 2>/dev/null)
+          if [ -n "$CONDA_PYTHON" ] && [ "$CONDA_PYTHON" != "/usr/bin/python3" ]; then
+            ln -sf "$CONDA_PYTHON" /usr/local/bin/python3
+          fi
           echo "PATH=$PATH" >> $GITHUB_ENV
           echo "Python: $(which python) ($(python --version 2>&1))"
+          python -c "import torch; print('Torch:', torch.__version__)"
 
-      - name: Setup Python environment
-        run: |
-          set -euo pipefail
-          cd $PROJECT_ROOT
-          pip install -e . --no-deps 
-        timeout-minutes: 30
-
-      - name: Install dependencies (yq, envsubst, uv shim)
-        run: |
-          # Install mikefarah/yq (v4)
+          # Install yq (required by run_ci_test.sh via yq_common.sh)
           if ! command -v yq &>/dev/null; then
-            ARCH=$(uname -m)
-            case "$ARCH" in x86_64) YQ_ARCH=amd64 ;; aarch64) YQ_ARCH=arm64 ;; *) YQ_ARCH=amd64 ;; esac
-            wget -qO /usr/local/bin/yq "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${YQ_ARCH}"
+            apt-get update -qq 2>/dev/null || true
+            apt-get install -y -qq wget 2>/dev/null || true
+            wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
             chmod +x /usr/local/bin/yq
           fi
-          yq --version
+          yq --version || echo "yq installed"
 
-          # Install envsubst (from gettext)
+          # Install envsubst (required by _run_training.sh)
           if ! command -v envsubst &>/dev/null; then
-            apt-get install -y -qq gettext-base 2>/dev/null || \
-            conda install -y -q gettext 2>/dev/null || true
+            echo "Installing envsubst..."
+            if apt-get update -qq && apt-get install -y -qq gettext-base; then
+              echo "envsubst installed via apt"
+            elif conda install -y -q gettext; then
+              echo "envsubst installed via conda"
+            else
+              echo "apt/conda failed, creating Python-based envsubst shim"
+              cat > /usr/local/bin/envsubst << 'ENVEOF'
+          #!/usr/bin/env python3
+          import os, sys, re
+          text = sys.stdin.read()
+          print(re.sub(r'\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z_0-9]*)',
+                lambda m: os.environ.get(m.group(1) or m.group(2), m.group(0)), text), end='')
+          ENVEOF
+              chmod +x /usr/local/bin/envsubst
+            fi
           fi
-          envsubst --version
+          envsubst --version 2>/dev/null || envsubst </dev/null || echo "envsubst shim ready"
 
-          # Create uv shim: run_ci_test.sh calls 'uv run --no-sync python/pytest ...'
-          # Translate to direct python/pytest invocation using the conda environment
+          # run_ci_test.sh calls 'uv run --no-sync python/pytest ...'
+          # Translate to direct invocation when uv is not installed
           if ! command -v uv &>/dev/null; then
-            cat > /usr/local/bin/uv << 'EOF'
+            PYTHON_BIN=$(which python 2>/dev/null || which python3 2>/dev/null || echo python3)
+            cat > /usr/local/bin/uv << SHIMEOF
           #!/bin/bash
-          # Shim: translate 'uv run [--no-sync] CMD ...' to 'CMD ...'
-          if [[ "$1" == "run" ]]; then
+          if [[ "\$1" == "run" ]]; then
             shift
-          [[ "$1" == "--no-sync" ]] && shift
-            exec "$@"
+            [[ "\$1" == "--no-sync" ]] && shift
+            if [[ "\$1" == "python" ]]; then shift; exec ${PYTHON_BIN} "\$@"; fi
+            if [[ "\$1" == "pytest" ]] && ! command -v pytest &>/dev/null; then
+              shift; exec ${PYTHON_BIN} -m pytest "\$@"
+            fi
+            exec "\$@"
           fi
-          echo "uv shim: unsupported command: $*" >&2
-          exit 1
-          EOF
+          echo "uv shim: unsupported command: \$*" >&2; exit 1
+          SHIMEOF
             chmod +x /usr/local/bin/uv
           fi
           uv --version || echo "uv shim installed"
 
-      - name: Run functional tests
-        id: functional_test
+          # Build
+          pip install pybind11 --no-cache-dir
+          pip install -e . --no-deps --no-build-isolation --no-cache-dir
+        timeout-minutes: 30
+
+      - name: Setup Metax toolchain compatibility
+        if: inputs.platform == 'metax'
         run: |
           set -euo pipefail
-          cd $PROJECT_ROOT
+
+          CUDA_BRIDGE_BIN=/opt/maca/tools/cu-bridge/bin
+          CUCC_PATH="${CUDA_BRIDGE_BIN}/cucc"
+          NVCC_PATH="${CUDA_BRIDGE_BIN}/nvcc"
+
+          if [ ! -x "${CUCC_PATH}" ]; then
+            echo "Metax compiler bridge not found at ${CUCC_PATH}" >&2
+            exit 1
+          fi
+
+          ln -sf "${CUCC_PATH}" "${NVCC_PATH}"
+          echo "${CUDA_BRIDGE_BIN}" >> "$GITHUB_PATH"
+
+          ls -l "${CUCC_PATH}" "${NVCC_PATH}"
+          "${NVCC_PATH}" -V
+        timeout-minutes: 10
+
+      - name: Run functional tests
+        id: functional_test
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
 
           MODEL='${{ matrix.test_config.model }}'
           TEST_CASE='${{ matrix.test_config.test_case }}'
           TRAINING_SCRIPT='${{ matrix.test_config.training_script }}'
           N_REPEAT='${{ matrix.test_config.n_repeat || 1 }}'
+          GOLDEN_ENV='${{ matrix.test_config.golden_environment }}'
+          GOLDEN_PLATFORM='${{ matrix.test_config.golden_platform }}'
+          ENABLE_LIGHTWEIGHT_MODE='${{ matrix.test_config.enable_lightweight_mode }}'
+          DATA_PATH='${{ matrix.test_config.data_path }}'
+          DATA_CACHE_PATH='${{ matrix.test_config.data_cache_path }}'
+          CHECKPOINT_LOAD_PATH='${{ matrix.test_config.checkpoint_load_path }}'
+          TENSORBOARD_SUBPATH='${{ matrix.test_config.tensorboard_subpath }}'
+          GPUS_PER_NODE='${{ matrix.test_config.gpus_per_node }}'
+
+          [[ -z "${N_REPEAT}" || "${N_REPEAT}" == "null" ]] && N_REPEAT='1'
+          [[ -z "${GOLDEN_ENV}" || "${GOLDEN_ENV}" == "null" ]] && GOLDEN_ENV='dev'
+          [[ -z "${GOLDEN_PLATFORM}" || "${GOLDEN_PLATFORM}" == "null" ]] && GOLDEN_PLATFORM='dgx_a100'
+          [[ -z "${ENABLE_LIGHTWEIGHT_MODE}" || "${ENABLE_LIGHTWEIGHT_MODE}" == "null" ]] && ENABLE_LIGHTWEIGHT_MODE='false'
+          [[ -z "${DATA_PATH}" || "${DATA_PATH}" == "null" ]] && DATA_PATH='/opt/data/datasets'
+          [[ -z "${DATA_CACHE_PATH}" || "${DATA_CACHE_PATH}" == "null" ]] && DATA_CACHE_PATH='/tmp/data_cache'
+          [[ -z "${CHECKPOINT_LOAD_PATH}" || "${CHECKPOINT_LOAD_PATH}" == "null" ]] && CHECKPOINT_LOAD_PATH='/tmp/checkpoints'
+          [[ -z "${TENSORBOARD_SUBPATH}" || "${TENSORBOARD_SUBPATH}" == "null" ]] && TENSORBOARD_SUBPATH='tensorboard'
+          [[ -z "${GPUS_PER_NODE}" || "${GPUS_PER_NODE}" == "null" ]] && GPUS_PER_NODE=''
 
           echo "Running functional test: ${MODEL}/${TEST_CASE}"
           echo "Training script: ${TRAINING_SCRIPT}"
+          echo "Golden target: ${GOLDEN_ENV}/${GOLDEN_PLATFORM}"
+          echo "Lightweight mode: ${ENABLE_LIGHTWEIGHT_MODE}"
+          echo "Data path: ${DATA_PATH}"
+          echo "Checkpoint load path: ${CHECKPOINT_LOAD_PATH}"
+          echo "GPUs per node: ${GPUS_PER_NODE:-default}"
 
-          export PYTHONPATH=$PROJECT_ROOT:${PYTHONPATH:-}
+          export PYTHONPATH=${{ github.workspace }}:${PYTHONPATH:-}
 
           OUTPUT_DIR="./test_output/${TEST_CASE}"
+          TENSORBOARD_PATH="${OUTPUT_DIR}/${TENSORBOARD_SUBPATH}"
           mkdir -p "${OUTPUT_DIR}"
+          echo "output_dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
+          echo "logs_dir=${OUTPUT_DIR}/logs" >> "$GITHUB_OUTPUT"
 
           ARGUMENTS=(
-            "DATA_PATH=/opt/data/datasets"
-            "DATA_CACHE_PATH=/tmp/data_cache"
+            "DATA_PATH=${DATA_PATH}"
+            "DATA_CACHE_PATH=${DATA_CACHE_PATH}"
             "OUTPUT_PATH=${OUTPUT_DIR}"
-            "TENSORBOARD_PATH=${OUTPUT_DIR}/tensorboard"
+            "TENSORBOARD_PATH=${TENSORBOARD_PATH}"
             "CHECKPOINT_SAVE_PATH=${OUTPUT_DIR}/checkpoints"
-            "CHECKPOINT_LOAD_PATH=/tmp/checkpoints"
+            "CHECKPOINT_LOAD_PATH=${CHECKPOINT_LOAD_PATH}"
             "TRAINING_SCRIPT_PATH=${TRAINING_SCRIPT}"
             "TRAINING_PARAMS_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/model_config.yaml"
-            "GOLDEN_VALUES_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/golden_values_dev_${{ inputs.platform }}.json"
+            "GOLDEN_VALUES_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/golden_values_${GOLDEN_ENV}_${GOLDEN_PLATFORM}.json"
             "N_REPEAT=${N_REPEAT}"
-            "ENABLE_LIGHTWEIGHT_MODE=1"
+            "ENABLE_LIGHTWEIGHT_MODE=${ENABLE_LIGHTWEIGHT_MODE}"
           )
+
+          if [[ -n "${GPUS_PER_NODE}" ]]; then
+            ARGUMENTS+=("GPUS_PER_NODE=${GPUS_PER_NODE}")
+          fi
 
           bash ./tests/functional_tests/shell_test_utils/run_ci_test.sh "${ARGUMENTS[@]}"
           exit_code=$?
@@ -155,3 +242,12 @@ jobs:
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
         timeout-minutes: 60
+
+      - name: Upload Functional Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional_tests-logs-${{ github.run_id }}-${{ inputs.device }}-${{ matrix.test_config.test_case }}
+          path: ${{ github.workspace }}/test_output/${{ matrix.test_config.test_case }}/logs/
+          retention-days: 7
+          if-no-files-found: warn
