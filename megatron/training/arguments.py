@@ -229,6 +229,22 @@ def no_rope_freq_type(x):
         # it's a single int but in str
         return int(x)
 
+
+def compress_ratios_type(x):
+    """Per-layer compress ratios for compressed sparse attention.
+
+    Accepts a string containing a Python list expression, e.g.:
+      "[1,1,4,128,4,128]"
+      "([1]+[4,128]*2)*3"
+    The result must be a list of integers. Each value represents the
+    compression ratio for the corresponding transformer layer.
+    """
+    if isinstance(x, list):
+        return x
+    assert isinstance(x, str)
+    return _eval_pattern(x)
+
+
 def moe_freq_type(x):
     """Frequency between MoE layers and Dense layers.
 
@@ -1951,6 +1967,7 @@ def _add_network_size_args(parser):
         "no_rope_freq",
         "moe_layer_freq",
         "linear_attention_freq",
+        "csa_compress_ratios",
         "moe_router_load_balancing_type",
         "moe_aux_loss_coeff",
         "cp_comm_type",
@@ -3121,24 +3138,66 @@ def _add_moe_args(parser):
 
 def _add_mla_args(parser):
     group = parser.add_argument_group(title="mla")
-    group.add_argument('--q-lora-rank', type=int, default=None,
-                       help="Rank of Query tensor's low rank representation.")
-    group.add_argument('--kv-lora-rank', type=int, default=32,
-                       help="Rank of Key and Value tensors' low rank representation.")
-    group.add_argument('--qk-head-dim', type=int, default=128,
-                       help="Dimension of the head in the QK projection. q_head_dim = qk_head_dim + qk_pos_emb_head_dim")
-    group.add_argument('--qk-pos-emb-head-dim', type=int, default=64,
-                       help="Dimension of the position embedding in the QK projection.")
-    group.add_argument('--v-head-dim', type=int, default=128,
-                       help="Dimension of the head in the V projection.")
-    group.add_argument('--rotary-scaling-factor', type=float, default=1.0,
-                       help="Rotary scaling factor for the rotary embeddings.")
-    group.add_argument('--mscale', type=float, default=1.0,
-                       help="Mscale for YaRN RoPE in multi-latent attention.")
-    group.add_argument('--mscale-all-dim', type=float, default=0.0,
-                       help="Mscale all dimensions for YaRN RoPE in multi-latent attention.")
-    group.add_argument('--cache-mla-latents', action='store_true', default=False,
-                       help="If set caches the mla down projected latents with mla flash decode.")
+    group.add_argument(
+        '--q-lora-rank',
+        type=int,
+        default=None,
+        help="Rank of Query tensor's low rank representation.",
+    )
+    group.add_argument(
+        '--kv-lora-rank',
+        type=int,
+        default=32,
+        help="Rank of Key and Value tensors' low rank representation.",
+    )
+    group.add_argument(
+        '--qk-head-dim',
+        type=int,
+        default=128,
+        help="Dimension of the head in the QK projection. q_head_dim = qk_head_dim + qk_pos_emb_head_dim",
+    )
+    group.add_argument(
+        '--qk-pos-emb-head-dim',
+        type=int,
+        default=64,
+        help="Dimension of the position embedding in the QK projection.",
+    )
+    group.add_argument(
+        '--v-head-dim', type=int, default=128, help="Dimension of the head in the V projection."
+    )
+    group.add_argument(
+        '--rotary-scaling-factor',
+        type=float,
+        default=1.0,
+        help="Rotary scaling factor for the rotary embeddings.",
+    )
+    group.add_argument(
+        '--mscale', type=float, default=1.0, help="Mscale for YaRN RoPE in multi-latent attention."
+    )
+    group.add_argument(
+        '--mscale-all-dim',
+        type=float,
+        default=0.0,
+        help="Mscale all dimensions for YaRN RoPE in multi-latent attention.",
+    )
+    group.add_argument(
+        '--o-groups',
+        type=int,
+        default=8,
+        help="Number of groups for grouped output (wo_a). 0 = single linear."
+    )
+    group.add_argument(
+        '--o-lora-rank',
+        type=int,
+        default=1024,
+        help="Low-rank dimension per group for grouped output (wo_a). Used when o-groups > 0."
+    )
+    group.add_argument(
+        '--cache-mla-latents',
+        action='store_true',
+        default=False,
+        help="If set caches the mla down projected latents with mla flash decode.",
+    )
     group.add_argument(
         '--mla-down-proj-fusion',
         action='store_true',
@@ -3152,15 +3211,30 @@ def _add_mla_args(parser):
 def _add_experimental_attention_variant_args(parser):
     group = parser.add_argument_group(title="experimental_attention_variant")
     # Linear attention
-    group.add_argument('--linear-attention-freq', type=la_freq_type, default=None,
-                       help='Frequency between LA (linear attention) layers and'
-                            ' SDPA (scaled dot-product attention) layers. Accepts either: '
-                            '- An integer N: Represents a (N-1):N ratio, meaning (N-1) LA layers for every 1 SDPA layer '
-                            '- A string containing a Python list expression that defines a custom pattern, e.g.: '
-                            '"([1]*3+[0]*1)*3" evaluates to [1,1,1,0,1,1,1,0,1,1,1,0] '
-                            'where 1 indicates an LA layer and 0 indicates a SDPA layer. '
-                            'Examples: "([0]+[1]*23)": 1 SDPA layer followed by 23 LA layers, '
-                            '"([1]*3+[0]*2)*2": Three LA layers followed by two SDPA layers, repeated twice.')
+    group.add_argument(
+        '--linear-attention-freq',
+        type=la_freq_type,
+        default=None,
+        help='Frequency between LA (linear attention) layers and'
+        ' SDPA (scaled dot-product attention) layers. Accepts either: '
+        '- An integer N: Represents a (N-1):N ratio, meaning (N-1) LA layers for every 1 SDPA layer '
+        '- A string containing a Python list expression that defines a custom pattern, e.g.: '
+        '"([1]*3+[0]*1)*3" evaluates to [1,1,1,0,1,1,1,0,1,1,1,0] '
+        'where 1 indicates an LA layer and 0 indicates a SDPA layer. '
+        'Examples: "([0]+[1]*23)": 1 SDPA layer followed by 23 LA layers, '
+        '"([1]*3+[0]*2)*2": Three LA layers followed by two SDPA layers, repeated twice.',
+    )
+    group.add_argument(
+        '--csa-compress-ratios',
+        type=compress_ratios_type,
+        default=None,
+        help='Per-layer compress ratios for compressed sparse attention. '
+            'Accepts a string containing a Python list expression, e.g.: '
+            '"[1,1,4,128,4,128]" or "([1]+[4,128]*2)*3". '
+            'Each value is the compression ratio for the corresponding '
+            'transformer layer (valid values: 1, 4, 128). '
+            'The list length must equal num_layers.'
+    )
     return parser
 
 def _add_heterogeneous_args(parser):
