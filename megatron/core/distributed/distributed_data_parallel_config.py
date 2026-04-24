@@ -76,6 +76,11 @@ class DistributedDataParallelConfig:
     """If true, keep the compute param in fp4 (do not use any other intermediate dtype) and
        perform the param all-gather in fp4."""
 
+    # FlagScale Begin
+    use_partial_reduce_for_shared_embedding: bool = False
+    """If true, use partial reduce for shared embedding gradient allreduce in hetero training."""
+    # FlagScale End
+
     reuse_grad_buf_for_mxfp8_param_ag: bool = False
     """If true, reuse the grad buffer for param AG when using mxfp8 recipe. Should be 
        set to True only when fp8_recipe is mxfp8 and fp8_param_gather is True."""
