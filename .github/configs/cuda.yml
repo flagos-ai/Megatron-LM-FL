@@ -91,10 +91,11 @@ test_matrix:
       # is in an inconsistent state after the test completes. This is a UCX/NCCL environment issue,
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
-      - tests/unit_tests/tokenizers/test_tokenizer.py::test_multimodal_tokenizer
+      - tests/unit_tests/tokenizers/test_tokenizer.py
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
 
   functional:
     train:

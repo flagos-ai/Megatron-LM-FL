@@ -118,7 +118,11 @@ jobs:
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
           # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai nvidia-resiliency-ext --no-cache-dir
+          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai --no-cache-dir
+
+          # Install nvidia-resiliency-ext from source
+          git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
+          pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
           
           # Build
           pip install -e . --no-deps --no-build-isolation --no-cache-dir
