@@ -498,6 +498,10 @@ class TestMambaMoEModel:
         return args
 
     def setup_method(self, method):
+        if torch.cuda.is_available():
+            free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+            if free_mem < 20:
+                pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
 
         os.environ['CUDA_DEVICE_MAX_CONNECTIONS'] = '1'
         args = self.create_test_args()
