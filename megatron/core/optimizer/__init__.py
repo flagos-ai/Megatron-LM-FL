@@ -407,6 +407,7 @@ def _get_param_groups(
             'params': params,
             'is_expert_parallel': is_expert_parallel,
             'is_engram_parallel': is_engram_parallel,  # FlagScale add is_engram_parallel
+            'is_vision_model_param': False,  # FlagScale add is_vision_model_param
             'default_config': uses_default_lr_schedule,
             **default_config,
             **param_override,  # keep **param_override last so that users can override other fields.

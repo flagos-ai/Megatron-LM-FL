@@ -83,6 +83,7 @@ def test_get_param_groups_no_overrides(mock_get_world_size):
         'params',
         'is_expert_parallel',
         'is_engram_parallel',
+        'is_vision_model_param',
         'default_config',
         'wd_mult',
         'lr_mult',
@@ -93,6 +94,7 @@ def test_get_param_groups_no_overrides(mock_get_world_size):
     assert pg0['params'] == list(net.parameters())
     assert pg0['is_expert_parallel'] == False
     assert pg0['is_engram_parallel'] == False
+    assert pg0['is_vision_model_param'] == False
     assert pg0['default_config'] == True
     assert pg0['wd_mult'] == 1.0
     assert pg0['lr_mult'] == 1.0
