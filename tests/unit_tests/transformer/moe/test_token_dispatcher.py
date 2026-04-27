@@ -355,7 +355,7 @@ if is_te_min_version("2.1.0"):
 
 class TestAllgatherDispatcher:
     def setup_method(self, method):
-        pass
+        torch.cuda.empty_cache()
 
     def teardown_method(self, method):
         Utils.destroy_model_parallel()
