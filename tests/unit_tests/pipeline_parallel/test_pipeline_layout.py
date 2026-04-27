@@ -207,8 +207,8 @@ def create_args():
 def test_forward_vpp(create_args, tmp_path_dist_ckpt, tp_pp_vpp, pp_layout, is_moe, with_mtp):
     if torch.cuda.is_available():
         free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
-        if free_mem < 10:
-            pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 10 GiB)")
+        if free_mem < 20:
+            pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
 
     from megatron.core.pipeline_parallel import get_forward_backward_func
 

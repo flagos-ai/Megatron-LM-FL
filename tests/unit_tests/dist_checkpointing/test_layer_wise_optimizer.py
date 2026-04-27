@@ -162,8 +162,8 @@ class TestLayerWiseOptimizer:
 
         if torch.cuda.is_available():
             free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
-            if free_mem < 10:
-                pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 10 GiB)")
+            if free_mem < 20:
+                pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
 
         Utils.initialize_model_parallel(tp, pp)
 
