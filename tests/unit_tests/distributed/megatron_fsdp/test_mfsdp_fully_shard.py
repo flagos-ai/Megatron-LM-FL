@@ -238,6 +238,7 @@ class TestMegatronFsdpFullyShard:
     def teardown_class(cls):
         Utils.destroy_model_parallel()
 
+    @pytest.mark.skip(reason="PyTorch DTensor does not support cross-mesh foreach operations yet")
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse('2.4.0'),
         reason="Requires DTensor and DeviceMesh support in (approximately) PyTorch 2.4.0 or later. Should not be run on 2.2.0a0+81ea7a4 (LTS).",
