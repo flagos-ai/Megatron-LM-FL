@@ -70,8 +70,8 @@ test_matrix:
       - tests/unit_tests/models/test_gpt_model.py
       - tests/unit_tests/models/test_mamba_model.py
       - tests/unit_tests/models/test_mamba_moe_model.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/models/test_mimo_1f1b_schedule.py ## MIMO test uses HyperCommGrid without initializing global parallel state, causing AssertionError
-      - tests/unit_tests/models/test_mimo_checkpoint.py ## same issue as test_mimo_1f1b_schedule, reuses get_mimo_model with HyperCommGrid
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py ## HyperCommGrid + TE attention: TE requires global _TENSOR_MODEL_PARALLEL_GROUP but HyperCommGrid only sets per-grid process groups
+      - tests/unit_tests/models/test_mimo_checkpoint.py ## same HyperCommGrid + TE attention issue as test_mimo_1f1b_schedule
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py ## HyperCommGrid + TE: TE attention requires global _TENSOR_MODEL_PARALLEL_GROUP but HyperCommGrid only sets per-grid process groups
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
       - tests/unit_tests/transformer/moe/test_upcycling.py ## tests passed locally but CI hits unhandled NCCL error
