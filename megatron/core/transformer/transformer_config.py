@@ -312,6 +312,10 @@ class TransformerConfig(ModelParallelConfig):
     csa_compress_rotary_base: float = 40000.0
     """RoPE base for compressed KV positions in compressed sparse attention."""
 
+    csa_dense_mode: bool = False
+    """Whether to use dense mode for compressed sparse attention. If True, the CSA indexer will be
+    disabled."""
+
     ####################
     # linear attention
     ####################
