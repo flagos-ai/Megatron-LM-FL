@@ -28,7 +28,6 @@ MODEL_ARGS:
   --split: 100,0,0
   --tokenizer-type: HuggingFaceTokenizer
   --tokenizer-model: /home/gitlab-runner/tokenizers/qwentokenizer
-  --legacy-tokenizer: true
   --trust-remote-code: true
   --distributed-backend: nccl
   --lr: 1.0e-5
