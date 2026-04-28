@@ -86,6 +86,7 @@ test_matrix:
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
       - tests/unit_tests/transformer/test_submodule_callables.py ## tests passed locally but CI hits NCCL error
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp4_sp] ## TE version does not support CP + THD format attention
       - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
       - tests/unit_tests/dist_checkpointing/test_local.py
