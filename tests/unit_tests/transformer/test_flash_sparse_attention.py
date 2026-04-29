@@ -363,11 +363,11 @@ class TestFlashSparseWithThreshold:
         Utils.destroy_model_parallel()
 
     def test_different_thresholds_produce_different_output(self):
-        seq_len = 64
+        seq_len = 512
         batch_size = 2
 
-        config_low = _make_config(sparse_softmax_threshold=0.001)
-        config_high = _make_config(sparse_softmax_threshold=0.5)
+        config_low = _make_config(sparse_softmax_threshold=0.0)
+        config_high = _make_config(sparse_softmax_threshold=0.9)
 
         attn_low = SelfAttention(
             config_low, _local_attn_submodules(),
@@ -396,5 +396,6 @@ class TestFlashSparseWithThreshold:
             out_low, _ = attn_low(hidden_states, attention_mask)
             out_high, _ = attn_high(hidden_states, attention_mask)
 
-        # With a very high threshold, many tiles are skipped → outputs should differ
+        # threshold=0.0 keeps all tiles, threshold=0.9 aggressively prunes
+        # At seq_len=512 this should produce measurably different outputs
         assert not torch.allclose(out_low, out_high, atol=1e-3)
