@@ -137,6 +137,11 @@ class TransformerConfig(ModelParallelConfig):
     If attention backend is local we use the local pytorch implementation in mcore.
     Users can specify exact backend by changing this config. """
 
+    sparse_softmax_threshold: Optional[float] = None
+    """Softmax threshold for flash-sparse-attention backend. Attention tiles whose
+    max score falls below this threshold are skipped. Only used when
+    attention_backend is flash_sparse. Typical values: 0.0 ~ 0.1."""
+
     softmax_scale: Optional[float] = None
     """Softmax scale for attention scaling."""
 
