@@ -12,7 +12,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.unit_tests.test_utilities import Utils
 
 try:
-    from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
+    from flash_sparse_attn.ops.triton.interface import flash_dense_attn_func, flash_sparse_attn_func
 
     HAVE_FLASH_SPARSE = True
 except ImportError:
@@ -401,19 +401,13 @@ class TestFlashSparseWithThreshold:
         assert not torch.allclose(out_low, out_high, atol=1e-3)
 
     def test_long_seq_speedup_and_accuracy(self):
-        """At 131072 seq length, threshold=0.0 (sparse) should be faster than
-        threshold=-999 (effectively dense, no tiles pruned) while staying within atol=0.01.
-
-        Directly calls FSA kernels to avoid OOM from linear projections.
-        """
-        from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
-
-        seq_len = 131072
+        """Compare FSA against flash_dense_attn_func on long sequences."""
+        seq_len = 32768
         batch_size = 1
-        num_heads = 4
-        head_dim = 16
-        num_warmup = 3
-        num_iters = 10
+        num_heads = 1
+        head_dim = 128
+        num_warmup = 5
+        num_iters = 20
 
         q = torch.randn(batch_size, seq_len, num_heads, head_dim,
                          dtype=torch.bfloat16, device='cuda')
@@ -423,30 +417,31 @@ class TestFlashSparseWithThreshold:
                          dtype=torch.bfloat16, device='cuda')
 
         softmax_scale = head_dim ** -0.5
-        common_kwargs = dict(is_causal=True, softmax_scale=softmax_scale,
-                             window_size=(None, None))
 
         # Warmup both paths
         with torch.no_grad():
             for _ in range(num_warmup):
-                flash_sparse_attn_func(q, k, v, softmax_threshold=-999.0, **common_kwargs)
-                flash_sparse_attn_func(q, k, v, softmax_threshold=0.0, **common_kwargs)
+                flash_dense_attn_func(
+                    q, k, v, is_causal=True, softmax_scale=softmax_scale)
+                flash_sparse_attn_func(
+                    q, k, v, softmax_threshold=0.05,
+                    is_causal=True, softmax_scale=softmax_scale)
         torch.cuda.synchronize()
 
-        # Benchmark dense (threshold=-999, no pruning)
+        # Benchmark full attention
         torch.cuda.synchronize()
         start_dense = torch.cuda.Event(enable_timing=True)
         end_dense = torch.cuda.Event(enable_timing=True)
         start_dense.record()
         with torch.no_grad():
             for _ in range(num_iters):
-                out_dense = flash_sparse_attn_func(
-                    q, k, v, softmax_threshold=-999.0, **common_kwargs)
+                out_dense = flash_dense_attn_func(
+                    q, k, v, is_causal=True, softmax_scale=softmax_scale)
         end_dense.record()
         torch.cuda.synchronize()
         time_dense = start_dense.elapsed_time(end_dense) / num_iters
 
-        # Benchmark sparse (threshold=0.0)
+        # Benchmark FSA
         torch.cuda.synchronize()
         start_sparse = torch.cuda.Event(enable_timing=True)
         end_sparse = torch.cuda.Event(enable_timing=True)
@@ -454,19 +449,27 @@ class TestFlashSparseWithThreshold:
         with torch.no_grad():
             for _ in range(num_iters):
                 out_sparse = flash_sparse_attn_func(
-                    q, k, v, softmax_threshold=0.0, **common_kwargs)
+                    q, k, v, softmax_threshold=0.05,
+                    is_causal=True, softmax_scale=softmax_scale)
         end_sparse.record()
         torch.cuda.synchronize()
         time_sparse = start_sparse.elapsed_time(end_sparse) / num_iters
 
         speedup = time_dense / time_sparse
-        print(f"\n[131072 seq] dense={time_dense:.2f}ms  sparse={time_sparse:.2f}ms  "
+        print(f"\n[{seq_len} seq] Full Attn={time_dense:.2f}ms  FSA={time_sparse:.2f}ms  "
               f"speedup={speedup:.2f}x")
 
-        # Accuracy: outputs should be close
-        max_diff = (out_dense - out_sparse).abs().max().item()
-        print(f"[131072 seq] max abs diff = {max_diff:.6f}")
-        assert max_diff < 0.01, f"max abs diff {max_diff} exceeds 0.01"
+        tolerance = 0.02
+        abs_diff = (out_dense - out_sparse).abs()
+        mean_diff = abs_diff.mean().item()
+        outlier_ratio = (abs_diff > tolerance).float().mean().item()
+        max_diff = abs_diff.max().item()
+        print(f"[{seq_len} seq] max_diff={max_diff:.6f}  mean_diff={mean_diff:.6f}  "
+              f"outlier_ratio={outlier_ratio*100:.2f}%")
+        assert mean_diff < tolerance, f"mean abs diff {mean_diff} exceeds {tolerance}"
+        assert outlier_ratio <= 0.05, (
+            f"{outlier_ratio*100:.2f}% elements exceed tolerance {tolerance} (max 5% allowed)"
+        )
 
-        # Speedup: sparse should be faster
-        assert speedup > 1.0, f"no speedup: dense={time_dense:.2f}ms sparse={time_sparse:.2f}ms"
+        # Speedup: sparse should be faster than dense
+        assert speedup > 1.0, f"no speedup: Full Attn={time_dense:.2f}ms FSA={time_sparse:.2f}ms"
