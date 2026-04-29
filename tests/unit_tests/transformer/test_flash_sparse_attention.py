@@ -399,3 +399,78 @@ class TestFlashSparseWithThreshold:
         # threshold=0.0 keeps all tiles, threshold=0.9 aggressively prunes
         # At seq_len=512 this should produce measurably different outputs
         assert not torch.allclose(out_low, out_high, atol=1e-3)
+
+    def test_long_seq_speedup_and_accuracy(self):
+        """At 131072 seq length, threshold=0.0 (sparse) should be faster than
+        threshold=-999 (effectively dense, no tiles pruned) while staying within atol=0.01."""
+        seq_len = 131072
+        batch_size = 1
+        num_warmup = 3
+        num_iters = 10
+
+        config_dense = _make_config(sparse_softmax_threshold=-999.0)
+        config_sparse = _make_config(sparse_softmax_threshold=0.0)
+
+        attn_dense = SelfAttention(
+            config_dense, _local_attn_submodules(),
+            layer_number=1, attn_mask_type=AttnMaskType.causal,
+        ).cuda()
+        attn_sparse = SelfAttention(
+            config_sparse, _local_attn_submodules(),
+            layer_number=1, attn_mask_type=AttnMaskType.causal,
+        ).cuda()
+
+        attn_sparse.load_state_dict(attn_dense.state_dict())
+        attn_dense.eval()
+        attn_sparse.eval()
+
+        hidden_states = torch.randn(
+            seq_len, batch_size, config_dense.hidden_size,
+            dtype=torch.bfloat16, device='cuda',
+        )
+        attention_mask = torch.ones(
+            batch_size, 1, 1, seq_len, dtype=bool, device='cuda',
+        )
+
+        # Warmup
+        with torch.no_grad():
+            for _ in range(num_warmup):
+                attn_dense(hidden_states, attention_mask)
+                attn_sparse(hidden_states, attention_mask)
+        torch.cuda.synchronize()
+
+        # Benchmark dense (threshold=-999, no pruning)
+        torch.cuda.synchronize()
+        start_dense = torch.cuda.Event(enable_timing=True)
+        end_dense = torch.cuda.Event(enable_timing=True)
+        start_dense.record()
+        with torch.no_grad():
+            for _ in range(num_iters):
+                out_dense, _ = attn_dense(hidden_states, attention_mask)
+        end_dense.record()
+        torch.cuda.synchronize()
+        time_dense = start_dense.elapsed_time(end_dense) / num_iters
+
+        # Benchmark sparse (threshold=0.0)
+        torch.cuda.synchronize()
+        start_sparse = torch.cuda.Event(enable_timing=True)
+        end_sparse = torch.cuda.Event(enable_timing=True)
+        start_sparse.record()
+        with torch.no_grad():
+            for _ in range(num_iters):
+                out_sparse, _ = attn_sparse(hidden_states, attention_mask)
+        end_sparse.record()
+        torch.cuda.synchronize()
+        time_sparse = start_sparse.elapsed_time(end_sparse) / num_iters
+
+        speedup = time_dense / time_sparse
+        print(f"\n[131072 seq] dense={time_dense:.2f}ms  sparse={time_sparse:.2f}ms  "
+              f"speedup={speedup:.2f}x")
+
+        # Accuracy: outputs should be close
+        max_diff = (out_dense - out_sparse).abs().max().item()
+        print(f"[131072 seq] max abs diff = {max_diff:.6f}")
+        assert max_diff < 0.01, f"max abs diff {max_diff} exceeds 0.01"
+
+        # Speedup: sparse should be faster
+        assert speedup > 1.0, f"no speedup: dense={time_dense:.2f}ms sparse={time_sparse:.2f}ms"
