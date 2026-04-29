@@ -12,7 +12,12 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.unit_tests.test_utilities import Utils
 
 try:
-    from flash_sparse_attn.ops.triton.interface import flash_dense_attn_func, flash_sparse_attn_func
+    from flash_sparse_attn.ops.triton.interface import (
+        flash_dense_attn_func,
+        flash_dense_attn_with_kvcache_func,
+        flash_sparse_attn_func,
+        flash_sparse_attn_with_kvcache_func,
+    )
 
     HAVE_FLASH_SPARSE = True
 except ImportError:
@@ -310,7 +315,7 @@ class TestFlashSparseNumerics:
         Utils.destroy_model_parallel()
 
     def test_sparse_vs_unfused(self):
-        seq_len = 32
+        seq_len = 1024
         batch_size = 2
 
         # Build sparse attention
@@ -400,14 +405,15 @@ class TestFlashSparseWithThreshold:
         # At seq_len=512 this should produce measurably different outputs
         assert not torch.allclose(out_low, out_high, atol=1e-3)
 
-    def test_long_seq_speedup_and_accuracy(self):
-        """Compare FSA against flash_dense_attn_func on long sequences."""
+    def test_prefill_speedup_and_accuracy(self):
+        """Prefill benchmark: full-length Q/K/V on a long sequence."""
         seq_len = 32768
         batch_size = 1
         num_heads = 1
         head_dim = 128
         num_warmup = 5
         num_iters = 20
+        tolerance = 0.02
 
         q = torch.randn(batch_size, seq_len, num_heads, head_dim,
                          dtype=torch.bfloat16, device='cuda')
@@ -418,7 +424,6 @@ class TestFlashSparseWithThreshold:
 
         softmax_scale = head_dim ** -0.5
 
-        # Warmup both paths
         with torch.no_grad():
             for _ in range(num_warmup):
                 flash_dense_attn_func(
@@ -428,8 +433,6 @@ class TestFlashSparseWithThreshold:
                     is_causal=True, softmax_scale=softmax_scale)
         torch.cuda.synchronize()
 
-        # Benchmark full attention
-        torch.cuda.synchronize()
         start_dense = torch.cuda.Event(enable_timing=True)
         end_dense = torch.cuda.Event(enable_timing=True)
         start_dense.record()
@@ -441,8 +444,6 @@ class TestFlashSparseWithThreshold:
         torch.cuda.synchronize()
         time_dense = start_dense.elapsed_time(end_dense) / num_iters
 
-        # Benchmark FSA
-        torch.cuda.synchronize()
         start_sparse = torch.cuda.Event(enable_timing=True)
         end_sparse = torch.cuda.Event(enable_timing=True)
         start_sparse.record()
@@ -456,20 +457,90 @@ class TestFlashSparseWithThreshold:
         time_sparse = start_sparse.elapsed_time(end_sparse) / num_iters
 
         speedup = time_dense / time_sparse
-        print(f"\n[{seq_len} seq] Full Attn={time_dense:.2f}ms  FSA={time_sparse:.2f}ms  "
-              f"speedup={speedup:.2f}x")
+        print(f"\n[prefill seq={seq_len}] Full Attn={time_dense:.2f}ms  "
+              f"FSA={time_sparse:.2f}ms  speedup={speedup:.2f}x")
 
-        tolerance = 0.02
         abs_diff = (out_dense - out_sparse).abs()
         mean_diff = abs_diff.mean().item()
         outlier_ratio = (abs_diff > tolerance).float().mean().item()
         max_diff = abs_diff.max().item()
-        print(f"[{seq_len} seq] max_diff={max_diff:.6f}  mean_diff={mean_diff:.6f}  "
-              f"outlier_ratio={outlier_ratio*100:.2f}%")
+        print(f"[prefill seq={seq_len}] max_diff={max_diff:.6f}  "
+              f"mean_diff={mean_diff:.6f}  outlier_ratio={outlier_ratio*100:.2f}%")
         assert mean_diff < tolerance, f"mean abs diff {mean_diff} exceeds {tolerance}"
         assert outlier_ratio <= 0.05, (
             f"{outlier_ratio*100:.2f}% elements exceed tolerance {tolerance} (max 5% allowed)"
         )
+        assert speedup > 1.0, (
+            f"no speedup: Full Attn={time_dense:.2f}ms FSA={time_sparse:.2f}ms"
+        )
 
-        # Speedup: sparse should be faster than dense
-        assert speedup > 1.0, f"no speedup: Full Attn={time_dense:.2f}ms FSA={time_sparse:.2f}ms"
+    def test_decode_speedup_and_accuracy(self):
+        """Decode benchmark: single new token attending to a long KV cache."""
+        kv_len = 262144
+        batch_size = 4
+        num_heads = 16
+        head_dim = 128
+        num_warmup = 5
+        num_iters = 20
+        tolerance = 0.02
+
+        # Decode API: query [batch, num_heads, head_dim], K/V [batch, seqlen_k, num_kv_heads, head_dim]
+        q = torch.randn(batch_size, num_heads, head_dim,
+                         dtype=torch.bfloat16, device='cuda')
+        k = torch.randn(batch_size, kv_len, 1, head_dim,
+                         dtype=torch.bfloat16, device='cuda')
+        v = torch.randn(batch_size, kv_len, 1, head_dim,
+                         dtype=torch.bfloat16, device='cuda')
+
+        softmax_scale = head_dim ** -0.5
+
+        with torch.no_grad():
+            for _ in range(num_warmup):
+                flash_dense_attn_with_kvcache_func(
+                    q, k, v, softmax_scale=softmax_scale)
+                flash_sparse_attn_with_kvcache_func(
+                    q, k, v, softmax_scale=softmax_scale,
+                    softmax_threshold=2.0)
+        torch.cuda.synchronize()
+
+        start_dense = torch.cuda.Event(enable_timing=True)
+        end_dense = torch.cuda.Event(enable_timing=True)
+        start_dense.record()
+        with torch.no_grad():
+            for _ in range(num_iters):
+                out_dense = flash_dense_attn_with_kvcache_func(
+                    q, k, v, softmax_scale=softmax_scale)
+        end_dense.record()
+        torch.cuda.synchronize()
+        time_dense = start_dense.elapsed_time(end_dense) / num_iters
+
+        start_sparse = torch.cuda.Event(enable_timing=True)
+        end_sparse = torch.cuda.Event(enable_timing=True)
+        start_sparse.record()
+        with torch.no_grad():
+            for _ in range(num_iters):
+                out_sparse = flash_sparse_attn_with_kvcache_func(
+                    q, k, v, softmax_scale=softmax_scale,
+                    softmax_threshold=2.0
+                )
+        end_sparse.record()
+        torch.cuda.synchronize()
+        time_sparse = start_sparse.elapsed_time(end_sparse) / num_iters
+
+        speedup = time_dense / time_sparse
+        print(f"\n[decode kv={kv_len}] Full Attn={time_dense:.2f}ms  "
+              f"FSA={time_sparse:.2f}ms  speedup={speedup:.2f}x")
+
+        abs_diff = (out_dense - out_sparse).abs()
+        mean_diff = abs_diff.mean().item()
+        outlier_ratio = (abs_diff > tolerance).float().mean().item()
+        max_diff = abs_diff.max().item()
+        print(f"[decode kv={kv_len}] max_diff={max_diff:.6f}  "
+              f"mean_diff={mean_diff:.6f}  outlier_ratio={outlier_ratio*100:.2f}%")
+        assert mean_diff < tolerance, f"mean abs diff {mean_diff} exceeds {tolerance}"
+        assert outlier_ratio <= 0.05, (
+            f"{outlier_ratio*100:.2f}% elements exceed tolerance {tolerance} (max 5% allowed)"
+        )
+        assert speedup > 1.0, (
+            f"no speedup: Full Attn={time_dense:.2f}ms FSA={time_sparse:.2f}ms"
+        )
