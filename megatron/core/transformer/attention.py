@@ -5,7 +5,8 @@ import copy
 import inspect
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Callable, Optional, Protocol, Tuple, Union
+import math
+from typing import Callable, NoReturn, Optional, Protocol, Tuple, Union
 
 import torch
 from torch import Tensor
@@ -52,7 +53,7 @@ from megatron.core.utils import (
 from ..models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
-from .enums import AttnMaskType, CudaGraphScope
+from .enums import AttnBackend, AttnMaskType, CudaGraphScope
 from .transformer_config import TransformerConfig
 
 try:
@@ -103,6 +104,22 @@ try:
 except:
     flash_attn_varlen_func = None
     flash_attn_with_kvcache = None
+
+try:
+    from flash_sparse_attn.ops.triton.interface import (
+        flash_sparse_attn_func,
+        flash_sparse_attn_varlen_func,
+        flash_sparse_attn_with_kvcache_func,
+        flash_sparse_attn_varlen_with_kvcache_func,
+    )
+
+    HAVE_FLASH_SPARSE = True
+except ImportError:
+    flash_sparse_attn_func = None
+    flash_sparse_attn_varlen_func = None
+    flash_sparse_attn_with_kvcache_func = None
+    flash_sparse_attn_varlen_with_kvcache_func = None
+    HAVE_FLASH_SPARSE = False
 
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine import (
@@ -654,6 +671,161 @@ class Attention(MegatronModule, ABC):
         is "self-attn" or "cross-attn".
         """
 
+    def _flash_sparse_attention(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attn_mask_type: AttnMaskType,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+    ) -> Tensor:
+        """Run flash-sparse-attention kernel for training and static inference.
+
+        Handles three sub-paths:
+        1. Varlen (thd packed sequences) → flash_sparse_attn_varlen_func
+        2. Static decode (sq == 1, non-packed) → flash_sparse_attn_with_kvcache_func
+        3. Standard (training / prefill) → flash_sparse_attn_func
+        """
+        assert HAVE_FLASH_SPARSE, (
+            "flash-sparse-attn is not installed. "
+            "pip install flash-sparse-attn"
+        )
+
+        softmax_scale = self.config.softmax_scale
+        if softmax_scale is None:
+            softmax_scale = 1.0 / math.sqrt(self.config.kv_channels)
+        softmax_threshold = self.config.sparse_softmax_threshold
+
+        is_causal = attn_mask_type in (
+            AttnMaskType.causal,
+            AttnMaskType.padding_causal,
+            AttnMaskType.causal_bottom_right,
+        )
+
+        window_size = (None, None)
+        if hasattr(self.config, 'window_size') and self.config.window_size is not None:
+            window_size = self.config.window_size
+
+        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
+            # Varlen path: query/key/value are [total, np, hn]
+            output = flash_sparse_attn_varlen_func(
+                query,
+                key,
+                value,
+                packed_seq_params.cu_seqlens_q,
+                packed_seq_params.cu_seqlens_kv,
+                packed_seq_params.max_seqlen_q,
+                packed_seq_params.max_seqlen_kv,
+                is_causal=is_causal,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                window_size=window_size,
+            )
+        elif query.size(0) == 1 and not self.training:
+            # Static decode path: query is [1, b, np, hn], key/value are [sk, b, np, hn]
+            # FSA kvcache expects q=[B, Hq, D], k/v=[B, Sk, Hkv, D]
+            q = query.squeeze(0).permute(0, 1, 2)       # [b, np, hn]
+            k = key.permute(1, 0, 2, 3)                  # [b, sk, np, hn]
+            v = value.permute(1, 0, 2, 3)                # [b, sk, np, hn]
+
+            output = flash_sparse_attn_with_kvcache_func(
+                q, k, v,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                window_size=window_size,
+            )
+            # [B, Hq, D] -> [1, B, Hq, D] -> [1, B, Hq*D]
+            output = output.unsqueeze(0)
+            output = output.reshape(output.size(0), output.size(1), -1)
+        else:
+            # Standard path: query/key/value are [sq, b, np, hn]
+            # FSA expects [B, S, H, D]
+            query = query.permute(1, 0, 2, 3)  # [b, sq, np, hn]
+            key = key.permute(1, 0, 2, 3)
+            value = value.permute(1, 0, 2, 3)
+
+            output = flash_sparse_attn_func(
+                query,
+                key,
+                value,
+                is_causal=is_causal,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                window_size=window_size,
+            )
+
+            # [B, S, H, D] -> [S, B, H, D] -> [S, B, H*D]
+            output = output.permute(1, 0, 2, 3).contiguous()
+            output = output.reshape(output.size(0), output.size(1), -1)
+
+        return output
+
+    def flash_sparse_decode_and_prefill(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        max_seqlen_q,
+        max_seqlen_k,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        seqlens_k,
+    ) -> Tensor:
+        """Flash-sparse-attention kernel for mixed decode and prefill (dynamic batching).
+
+        Mirrors flash_decode_and_prefill() but uses FSA kernels.
+        Note: paged KV cache (block_table) is not supported by FSA.
+        """
+        assert HAVE_FLASH_SPARSE, (
+            "flash-sparse-attn is not installed. "
+            "pip install flash-sparse-attn"
+        )
+        assert not self.training
+
+        softmax_scale = self.config.softmax_scale
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** -0.5
+        softmax_threshold = self.config.sparse_softmax_threshold
+
+        window_size = (None, None)
+        if hasattr(self.config, 'window_size') and self.config.window_size is not None:
+            window_size = self.config.window_size
+
+        if max_seqlen_q > 1:
+            # Prefill path: q/k/v are [total or sq, b, np, hn]
+            q = q.squeeze(1)  # [total, np, hn]
+            output_total = flash_sparse_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                is_causal=True,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                window_size=window_size,
+                seqused_k=seqlens_k,
+            )
+            output_total = output_total.unsqueeze(1)
+        else:
+            # Decode-only path: q is [b, 1, np, hn] squeezed to [b, np, hn]
+            # k/v are [total_k, np, hn] with cu_seqlens_k
+            q = q.squeeze(1)  # [b, np, hn]
+            output_total = flash_sparse_attn_varlen_with_kvcache_func(
+                q,
+                k,
+                v,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                window_size=window_size,
+                seqused_k=seqlens_k,
+            )
+        return output_total
+
     def flash_decode(
         self,
         sequence_len_offset: Tensor,
@@ -1146,7 +1318,15 @@ class Attention(MegatronModule, ABC):
         # ==================================
 
         nvtx_range_push(suffix="core_attention")
-        if self.checkpoint_core_attention and self.training:
+        if self.config.attention_backend == AttnBackend.flash_sparse:
+            core_attn_out = self._flash_sparse_attention(
+                query,
+                key,
+                value,
+                attn_mask_type=attn_mask_type if attn_mask_type is not None else self.attn_mask_type,
+                packed_seq_params=packed_seq_params,
+            )
+        elif self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
                 query,
                 key,
@@ -1178,18 +1358,30 @@ class Attention(MegatronModule, ABC):
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
                 cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
 
-                core_attn_out = self.flash_decode_and_prefill(
-                    q,
-                    k,
-                    v,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    cu_query_lengths,
-                    cu_kv_lengths,
-                    kv_lengths,
-                    block_table,
-                    inference_context.is_decode_only(),
-                )
+                if self.config.attention_backend == AttnBackend.flash_sparse:
+                    core_attn_out = self.flash_sparse_decode_and_prefill(
+                        q,
+                        k,
+                        v,
+                        max_seqlen_q,
+                        max_seqlen_k,
+                        cu_query_lengths,
+                        cu_kv_lengths,
+                        kv_lengths,
+                    )
+                else:
+                    core_attn_out = self.flash_decode_and_prefill(
+                        q,
+                        k,
+                        v,
+                        max_seqlen_q,
+                        max_seqlen_k,
+                        cu_query_lengths,
+                        cu_kv_lengths,
+                        kv_lengths,
+                        block_table,
+                        inference_context.is_decode_only(),
+                    )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
                 # Clear the outputs for padding tokens when using quantization scales
