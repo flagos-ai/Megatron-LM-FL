@@ -402,41 +402,35 @@ class TestFlashSparseWithThreshold:
 
     def test_long_seq_speedup_and_accuracy(self):
         """At 131072 seq length, threshold=0.0 (sparse) should be faster than
-        threshold=-999 (effectively dense, no tiles pruned) while staying within atol=0.01."""
+        threshold=-999 (effectively dense, no tiles pruned) while staying within atol=0.01.
+
+        Directly calls FSA kernels to avoid OOM from linear projections.
+        """
+        from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
+
         seq_len = 131072
         batch_size = 1
+        num_heads = 4
+        head_dim = 16
         num_warmup = 3
         num_iters = 10
 
-        config_dense = _make_config(sparse_softmax_threshold=-999.0)
-        config_sparse = _make_config(sparse_softmax_threshold=0.0)
+        q = torch.randn(batch_size, seq_len, num_heads, head_dim,
+                         dtype=torch.bfloat16, device='cuda')
+        k = torch.randn(batch_size, seq_len, num_heads, head_dim,
+                         dtype=torch.bfloat16, device='cuda')
+        v = torch.randn(batch_size, seq_len, num_heads, head_dim,
+                         dtype=torch.bfloat16, device='cuda')
 
-        attn_dense = SelfAttention(
-            config_dense, _local_attn_submodules(),
-            layer_number=1, attn_mask_type=AttnMaskType.causal,
-        ).cuda()
-        attn_sparse = SelfAttention(
-            config_sparse, _local_attn_submodules(),
-            layer_number=1, attn_mask_type=AttnMaskType.causal,
-        ).cuda()
+        softmax_scale = head_dim ** -0.5
+        common_kwargs = dict(is_causal=True, softmax_scale=softmax_scale,
+                             window_size=(None, None))
 
-        attn_sparse.load_state_dict(attn_dense.state_dict())
-        attn_dense.eval()
-        attn_sparse.eval()
-
-        hidden_states = torch.randn(
-            seq_len, batch_size, config_dense.hidden_size,
-            dtype=torch.bfloat16, device='cuda',
-        )
-        attention_mask = torch.ones(
-            batch_size, 1, 1, seq_len, dtype=bool, device='cuda',
-        )
-
-        # Warmup
+        # Warmup both paths
         with torch.no_grad():
             for _ in range(num_warmup):
-                attn_dense(hidden_states, attention_mask)
-                attn_sparse(hidden_states, attention_mask)
+                flash_sparse_attn_func(q, k, v, softmax_threshold=-999.0, **common_kwargs)
+                flash_sparse_attn_func(q, k, v, softmax_threshold=0.0, **common_kwargs)
         torch.cuda.synchronize()
 
         # Benchmark dense (threshold=-999, no pruning)
@@ -446,7 +440,8 @@ class TestFlashSparseWithThreshold:
         start_dense.record()
         with torch.no_grad():
             for _ in range(num_iters):
-                out_dense, _ = attn_dense(hidden_states, attention_mask)
+                out_dense = flash_sparse_attn_func(
+                    q, k, v, softmax_threshold=-999.0, **common_kwargs)
         end_dense.record()
         torch.cuda.synchronize()
         time_dense = start_dense.elapsed_time(end_dense) / num_iters
@@ -458,7 +453,8 @@ class TestFlashSparseWithThreshold:
         start_sparse.record()
         with torch.no_grad():
             for _ in range(num_iters):
-                out_sparse, _ = attn_sparse(hidden_states, attention_mask)
+                out_sparse = flash_sparse_attn_func(
+                    q, k, v, softmax_threshold=0.0, **common_kwargs)
         end_sparse.record()
         torch.cuda.synchronize()
         time_sparse = start_sparse.elapsed_time(end_sparse) / num_iters
