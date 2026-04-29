@@ -9,15 +9,15 @@ display_name: 'CUDA Tests'
 ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
 
 # Runner labels for self-hosted A100 node
-runner_labels:
-  - self-hosted
-  - Linux
-  - X64
-  - nvidia
-  - gpu-8
+# runner_labels:
+#   - self-hosted
+#   - Linux
+#   - X64
+#   - nvidia
+#   - gpu-8
 
- # runner_labels:
- #  - nv-8g-cicd-megatron
+runner_labels:
+  - nv-8g-cicd-megatron
 
 # Container volumes (hardware-specific paths)
 # container_volumes:
