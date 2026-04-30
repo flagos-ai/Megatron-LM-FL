@@ -1644,6 +1644,11 @@ def get_hybrid_data_context_parallel_groups(check_initialized=True, group_size=N
     """Get the hybrid context parallel groups the caller rank belongs to."""
     # If the group size is the same as the entire DPxCP group, return the original group
     if get_data_parallel_world_size(with_context_parallel=True) == group_size:
+        para_ctx = get_parallel_context()
+        if para_ctx is not None:
+            return para_ctx.get_data_parallel_group(
+                with_context_parallel=True, partial_data_parallel=False
+            )
         if check_initialized:
             assert _DATA_PARALLEL_GROUP_WITH_CP is not None
         return _DATA_PARALLEL_GROUP_WITH_CP
@@ -1678,7 +1683,7 @@ def get_amax_reduction_group(with_context_parallel=False, tp_only_amax_red=False
     """Get the FP8 amax reduction group the caller rank belongs to."""
     para_ctx = get_parallel_context()
     if para_ctx is not None:
-        return para_ctx.get_amax_reduction_group(with_context_parallel)
+        return para_ctx.get_amax_reduction_group(with_context_parallel, tp_only_amax_red)
 
     if with_context_parallel:
         if not tp_only_amax_red:
@@ -1761,7 +1766,7 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
     """Set the pipeline-model-parallel size"""
     para_ctx = get_parallel_context()
     if para_ctx is not None:
-        para_ctx = para_ctx.set_virtual_pipeline_model_parallel_world_size(world_size)
+        para_ctx.set_virtual_pipeline_model_parallel_world_size(world_size)
 
     global _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
     _VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = world_size
@@ -1769,6 +1774,10 @@ def set_virtual_pipeline_model_parallel_world_size(world_size):
 
 def get_tensor_model_parallel_world_size():
     """Return world size for the tensor-model-parallel group."""
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        return para_ctx.get_tensor_model_parallel_world_size()
+
     global _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
     if _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE is not None:
         return _MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE
@@ -2038,6 +2047,13 @@ def get_pipeline_model_parallel_prev_rank(group=None):
 
 def get_data_parallel_world_size(with_context_parallel=False, partial_data_parallel=False):
     """Return world size for the data parallel group."""
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        return para_ctx.get_data_parallel_world_size(
+            with_context_parallel=with_context_parallel,
+            partial_data_parallel=partial_data_parallel,
+        )
+
     global _MPU_DATA_PARALLEL_WORLD_SIZE
     if _MPU_DATA_PARALLEL_WORLD_SIZE is not None:
         return _MPU_DATA_PARALLEL_WORLD_SIZE
@@ -2051,12 +2067,23 @@ def get_data_parallel_world_size(with_context_parallel=False, partial_data_paral
 
 def set_data_parallel_rank(rank):
     """Return world size for the data parallel group."""
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        para_ctx.set_data_parallel_rank(rank)
+
     global _MPU_DATA_PARALLEL_RANK
     _MPU_DATA_PARALLEL_RANK = rank
 
 
 def get_data_parallel_rank(with_context_parallel=False, partial_data_parallel=False):
     """Return caller's rank in the data-parallel group."""
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        return para_ctx.get_data_parallel_rank(
+            with_context_parallel=with_context_parallel,
+            partial_data_parallel=partial_data_parallel,
+        )
+
     global _MPU_DATA_PARALLEL_RANK
     if _MPU_DATA_PARALLEL_RANK is not None:
         return _MPU_DATA_PARALLEL_RANK
@@ -2218,6 +2245,10 @@ def get_expert_tensor_parallel_world_size():
 
 def set_expert_tensor_parallel_world_size(world_size):
     "Set expert tensor model parallel size"
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        para_ctx.set_expert_tensor_parallel_world_size(world_size)
+
     global _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE
     _MPU_EXPERT_TENSOR_PARALLEL_WORLD_SIZE = world_size
 
@@ -2240,6 +2271,10 @@ def get_expert_tensor_parallel_rank():
 
 def set_expert_tensor_parallel_rank(rank):
     "Set expert tensor model parallel rank"
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        para_ctx.set_expert_tensor_parallel_rank(rank)
+
     global _MPU_EXPERT_TENSOR_PARALLEL_RANK
     _MPU_EXPERT_TENSOR_PARALLEL_RANK = rank
 
