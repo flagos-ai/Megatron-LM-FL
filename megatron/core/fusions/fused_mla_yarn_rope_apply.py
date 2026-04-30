@@ -92,6 +92,7 @@ def _mla_rope_fwd_inplace_kernel(
     cp_rank,
     cp_size,
     INVERSE: tl.constexpr,
+    REMOVE_INTERLEAVING: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """
@@ -144,8 +145,14 @@ def _mla_rope_fwd_inplace_kernel(
     x_left = x_1 * cos_left - x_2 * sin_left
     x_right = x_2 * cos_right + x_1 * sin_right
 
-    tl.store(Q + x_1_off, x_left, mask=mask)
-    tl.store(Q + x_2_off, x_right, mask=mask)
+    if REMOVE_INTERLEAVING:
+        tl.store(Q + x_1_off, x_left, mask=mask)
+        tl.store(Q + x_2_off, x_right, mask=mask)
+    else:
+        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+        x_right_off = x_left_off + emb_dim // 2
+        tl.store(Q + x_left_off, x_left, mask=mask)
+        tl.store(Q + x_right_off, x_right, mask=mask)
 
 
 @triton.autotune(
@@ -180,6 +187,7 @@ def _mla_rope_bwd_inplace_kernel(
     cp_rank,
     cp_size,
     INVERSE: tl.constexpr,
+    REMOVE_INTERLEAVING: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """
@@ -221,10 +229,18 @@ def _mla_rope_bwd_inplace_kernel(
 
     x_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads + nope_dim
     mask = x_off < head_num * stride_x_nheads
-    x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
-    x_2_off = x_1_off + 1
-    x_left = tl.load(DO + x_1_off, mask=mask)
-    x_right = tl.load(DO + x_2_off, mask=mask)
+    if REMOVE_INTERLEAVING:
+        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
+        x_2_off = x_1_off + 1
+        x_left = tl.load(DO + x_1_off, mask=mask)
+        x_right = tl.load(DO + x_2_off, mask=mask)
+    else:
+        x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+        x_right_off = x_left_off + emb_dim // 2
+        x_left = tl.load(DO + x_left_off, mask=mask)
+        x_right = tl.load(DO + x_right_off, mask=mask)
+        x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
+        x_2_off = x_1_off + 1
 
     x_1 = x_left * cos_left + x_right * sin_right
     x_2 = -x_left * sin_left + x_right * cos_right
@@ -252,6 +268,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
         cp_size,
         rotary_interleaved=False,
         inverse=False,
+        remove_interleaving=False,
     ):
         """
         Forward function for _FusedMLARoPEInplace.
@@ -301,6 +318,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             cp_rank,
             cp_size,
             INVERSE=inverse,
+            REMOVE_INTERLEAVING=remove_interleaving,
         )
         ctx.save_for_backward(cos, sin)
         ctx.nope_dim = nope_dim
@@ -308,6 +326,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
         ctx.cu_seqlens_q = cu_seqlens_q
         ctx.rotary_interleaved = rotary_interleaved
         ctx.inverse = inverse
+        ctx.remove_interleaving = remove_interleaving
         ctx.cp_rank = cp_rank
         ctx.cp_size = cp_size
         if cu_seqlens_q is None:
@@ -354,10 +373,11 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             ctx.cp_rank,
             ctx.cp_size,
             INVERSE=ctx.inverse,
+            REMOVE_INTERLEAVING=ctx.remove_interleaving,
         )
         if ctx.cu_seqlens_q is None:
             grad = grad.view(max_seqlen, batch_size, nheads, headdim)
-        return grad, None, None, None, None, None, None, None, None, None
+        return grad, None, None, None, None, None, None, None, None, None, None
 
 
 def fused_mla_rope_inplace(
@@ -371,6 +391,7 @@ def fused_mla_rope_inplace(
     cp_size: int = 1,
     rotary_interleaved: bool = False,
     inverse: bool = False,
+    remove_interleaving: bool = False,
 ):
     """
     Fused RoPE applied inplace to the trailing emb_dim elements of a tensor,
@@ -391,12 +412,23 @@ def fused_mla_rope_inplace(
         cu_seqlens_q: [seq_num + 1] accumulated sequence lengths for thd format
         rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
         inverse: if True, apply the inverse rotation
+        remove_interleaving: if True, output RoPE dims in non-interleaved layout
 
     Returns:
         t: inplace modified input tensor
     """
     return _FusedMLARoPEInplace.apply(
-        t, cos, sin, nope_dim, emb_dim, cu_seqlens_q, cp_rank, cp_size, rotary_interleaved, inverse
+        t,
+        cos,
+        sin,
+        nope_dim,
+        emb_dim,
+        cu_seqlens_q,
+        cp_rank,
+        cp_size,
+        rotary_interleaved,
+        inverse,
+        remove_interleaving,
     )
 
 
@@ -437,6 +469,7 @@ def _mla_rope_fwd_kv_split_kernel(
     stride_v_nheads,
     cp_rank,
     cp_size,
+    REMOVE_INTERLEAVING: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """
@@ -497,14 +530,24 @@ def _mla_rope_fwd_kv_split_kernel(
     x_left = x_left.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
     x_right = x_right.expand_dims(0).broadcast_to(BLOCK_H, emb_dim // 2)
 
-    x_1_off = (
-        tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
-        + k_dim
-        + tl.arange(0, emb_dim // 2)[None, :] * 2
-    )
-    x_2_off = x_1_off + 1
-    tl.store(K_ptr + x_1_off, x_left, mask=mask)
-    tl.store(K_ptr + x_2_off, x_right, mask=mask)
+    if REMOVE_INTERLEAVING:
+        x_1_off = (
+            tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
+            + k_dim
+            + tl.arange(0, emb_dim // 2)[None, :] * 2
+        )
+        x_2_off = x_1_off + 1
+        tl.store(K_ptr + x_1_off, x_left, mask=mask)
+        tl.store(K_ptr + x_2_off, x_right, mask=mask)
+    else:
+        x_left_off = (
+            tl.arange(0, BLOCK_H)[:, None] * stride_k_nheads
+            + k_dim
+            + tl.arange(0, emb_dim // 2)[None, :]
+        )
+        x_right_off = x_left_off + emb_dim // 2
+        tl.store(K_ptr + x_left_off, x_left, mask=mask)
+        tl.store(K_ptr + x_right_off, x_right, mask=mask)
 
 
 @triton.autotune(
@@ -544,6 +587,7 @@ def _mla_rope_bwd_kv_split_kernel(
     stride_demb_seq,
     cp_rank,
     cp_size,
+    REMOVE_INTERLEAVING: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """
@@ -592,10 +636,16 @@ def _mla_rope_bwd_kv_split_kernel(
             dK_ptr = dK + pid_m * stride_dk_seq + i * BLOCK_H * stride_dk_nheads
             x_off = tl.arange(0, BLOCK_H)[:, None] * stride_dk_nheads + k_dim
             mask = x_off < head_num * stride_dk_nheads
-            x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
-            x_2_off = x_1_off + 1
-            x_left = tl.load(dK_ptr + x_1_off, mask=mask)
-            x_right = tl.load(dK_ptr + x_2_off, mask=mask)
+            if REMOVE_INTERLEAVING:
+                x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
+                x_2_off = x_1_off + 1
+                x_left = tl.load(dK_ptr + x_1_off, mask=mask)
+                x_right = tl.load(dK_ptr + x_2_off, mask=mask)
+            else:
+                x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
+                x_right_off = x_left_off + emb_dim // 2
+                x_left = tl.load(dK_ptr + x_left_off, mask=mask)
+                x_right = tl.load(dK_ptr + x_right_off, mask=mask)
             x_left_accum += x_left
             x_right_accum += x_right
         x_left_accum = tl.sum(x_left_accum, axis=0)
@@ -635,6 +685,7 @@ class _FusedMLARoPEKVSplit(torch.autograd.Function):
         cp_rank,
         cp_size,
         rotary_interleaved=False,
+        remove_interleaving=False,
     ):
         """
         Forward function for _FusedMLARoPEKVSplit.
@@ -695,8 +746,10 @@ class _FusedMLARoPEKVSplit(torch.autograd.Function):
             o_value.stride(1),
             cp_rank,
             cp_size,
+            REMOVE_INTERLEAVING=remove_interleaving,
         )
         ctx.save_for_backward(cos, sin)
+        ctx.remove_interleaving = remove_interleaving
         ctx.rotary_interleaved = rotary_interleaved
         ctx.emb_dim = emb_dim
         ctx.k_dim = k_dim
@@ -763,11 +816,12 @@ class _FusedMLARoPEKVSplit(torch.autograd.Function):
             d_emb.stride(0),
             ctx.cp_rank,
             ctx.cp_size,
+            REMOVE_INTERLEAVING=ctx.remove_interleaving,
         )
         if ctx.cu_seqlens_kv is None:
             d_kv = d_kv.view(max_seqlen, batch_size, nheads, ctx.k_dim + ctx.v_dim)
             d_emb = d_emb.view(max_seqlen, batch_size, 1, ctx.emb_dim)
-        return d_kv, d_emb, None, None, None, None, None, None, None, None, None
+        return d_kv, d_emb, None, None, None, None, None, None, None, None, None, None
 
 
 def fused_mla_rope_kv_split(
@@ -782,6 +836,7 @@ def fused_mla_rope_kv_split(
     cp_rank: int = 0,
     cp_size: int = 1,
     rotary_interleaved: bool = False,
+    remove_interleaving: bool = False,
 ):
     """
     Fused function for applying RoPE to MLA's key and value.
@@ -799,6 +854,7 @@ def fused_mla_rope_kv_split(
         cos/sin: [max_seq_len, 1, 1, emb_dim]
         cu_seqlens_kv: [seq_num + 1] accumulated sequence lengths for thd format
         rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
+        remove_interleaving: if True, output RoPE dims in non-interleaved layout
 
     Returns:
         key: [seq_len, batch_size, head_num, emb_dim + k_dim]
@@ -817,6 +873,7 @@ def fused_mla_rope_kv_split(
         cp_rank,
         cp_size,
         rotary_interleaved,
+        remove_interleaving,
     )
 
 
