@@ -1,0 +1,221 @@
+name: Common Unit Tests
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+        description: Platform name (e.g., cuda, default)
+      device:
+        required: true
+        type: string
+        description: Device type (e.g., a100, a800, h100, generic)
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+      ignored_tests:
+        required: false
+        type: string
+        default: ''
+        description: JSON array of test files to ignore (e.g., '["tests/unit_tests/test_a.py", "tests/unit_tests/test_b.py"]')
+
+jobs:
+  unit_test:
+    defaults:
+      run:
+        shell: bash
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_group:
+          - name: core
+            path: "tests/unit_tests/test_*.py"
+            description: "Core unit tests"
+          # - name: transformer
+          #   path: "tests/unit_tests/transformer/"
+          #   description: "Transformer tests"
+          - name: models
+            path: "tests/unit_tests/models/"
+            description: "Model tests"
+          - name: distributed
+            path: "tests/unit_tests/distributed/"
+            description: "Distributed tests"
+          - name: dist_checkpointing
+            path: "tests/unit_tests/dist_checkpointing/"
+            description: "Distributed checkpointing tests"
+          - name: tensor_parallel
+            path: "tests/unit_tests/tensor_parallel/"
+            description: "Tensor parallel tests"
+          - name: pipeline_parallel
+            path: "tests/unit_tests/pipeline_parallel/"
+            description: "Pipeline parallel tests"
+          - name: data
+            path: "tests/unit_tests/data/"
+            description: "Data tests"
+          - name: fusions
+            path: "tests/unit_tests/fusions/"
+            description: "Fusion tests"
+          - name: others
+            path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
+            description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
+    name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
+    container:
+      image: ${{ inputs.image }}
+      ports:
+        - 80
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+    steps:
+      - name: Checkout Source Code (attempt 1)
+        id: checkout1
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+          
+      - name: Checkout Source Code (attempt 2)
+        id: checkout2
+        if: steps.checkout1.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Checkout Source Code (attempt 3)
+        id: checkout3
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Setup Python environment
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          
+          if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
+            source /opt/conda/etc/profile.d/conda.sh
+            conda activate base
+          fi
+          echo "PATH=$PATH" >> $GITHUB_ENV
+          echo "Python: $(which python) ($(python --version 2>&1))"
+
+          # Ensure curl is available (required by coverage upload action)
+          command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
+
+          # Install dependence package
+          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
+
+          # Install nvidia-resiliency-ext from source
+          git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
+          pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
+
+          # Install emerging-optimizers from source
+          pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
+          
+          # Build
+          pip install -e . --no-deps --no-build-isolation --no-cache-dir
+        timeout-minutes: 30
+
+      - name: Run unit tests - ${{ matrix.test_group.name }}
+        id: unit_test
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          PLATFORM='${{ inputs.platform }}'
+          DEVICE='${{ inputs.device }}'
+          TEST_GROUP='${{ matrix.test_group.name }}'
+          TEST_PATH='${{ matrix.test_group.path }}'
+
+          echo "Running unit tests: $TEST_GROUP"
+          echo "Test path: $TEST_PATH"
+          echo "Platform: $PLATFORM"
+          echo "Device: $DEVICE"
+
+          # Set environment variables
+          export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
+          export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
+          mkdir -p $TORCHINDUCTOR_CACHE_DIR
+
+          # Build ignore options from ignored_tests input
+          IGNORED_TESTS='${{ inputs.ignored_tests }}'
+          IGNORE_OPTS=""
+          FINAL_TEST_PATH="$TEST_PATH"
+          if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
+            echo "Parsing ignored tests list..."
+            if echo "$TEST_PATH" | grep -q '\*'; then
+              # Glob pattern: pytest --ignore does NOT skip explicitly-listed file args.
+              # Pre-filter the expanded file list in Python to exclude ignored files directly.
+              FINAL_TEST_PATH=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json, glob; ignored = json.load(sys.stdin); ignored_files = set(t for t in ignored if '::' not in t); files = sorted(f for f in glob.glob('$TEST_PATH') if f not in ignored_files); print(' '.join(files))")
+              # For glob mode, only --deselect applies (for specific test-case entries containing '::')
+              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--deselect=' + t for t in tests if '::' in t]; print(' '.join(opts))")
+            else
+              # Directory path: pytest auto-discovery respects --ignore for files/dirs
+              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]; print(' '.join(opts))")
+            fi
+            echo "Test paths: $FINAL_TEST_PATH"
+            if [ -n "$IGNORE_OPTS" ]; then
+              echo "Ignoring tests: $IGNORE_OPTS"
+            fi
+          fi
+
+          # Calc GPU num
+          if [ "$PLATFORM" = "metax" ]; then
+            NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if hasattr(torch, 'cuda') and torch.cuda.is_available() else 2)")
+          else
+            NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
+          fi
+          echo "=== Platform: ${{ inputs.platform }} | Device: ${{ inputs.device }} | GPUs: $NUM_GPUS ==="
+
+          # Coverage setup
+          COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
+          RUNNER_CMD="-m pytest"
+          mkdir -p "$COVERAGE_DIR"
+          printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
+            "$GITHUB_WORKSPACE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
+          RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
+          
+          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS -p no:randomly
+          exit_code=$?
+
+          # Combine coverage fragments and generate JSON report
+          coverage combine --rcfile="$COVERAGE_DIR/.coveragerc" "$COVERAGE_DIR" 2>/dev/null || true
+          coverage json --rcfile="$COVERAGE_DIR/.coveragerc" \
+            -o "$COVERAGE_DIR/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json" --include="megatron/*" 2>/dev/null || true
+
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          exit $exit_code
+        timeout-minutes: 60
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}
+          path: coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json
+
+      - name: Upload Coverage Report to FlagCICD
+        uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
+        continue-on-error: true
+        env:
+          NO_PROXY: "flagcicd-inner.flagos.net"
+        with:
+          backend_url: 'http://flagcicd-inner.flagos.net:8000/metrics/'
+          user_id: '000000000000000000'
+          report_path: 'coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json'
+          fail_on_error: 'false'

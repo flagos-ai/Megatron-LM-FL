@@ -1,0 +1,51 @@
+name: Common Build Check
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+
+jobs:
+  build_check:
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    container:
+      image: ${{ inputs.image }}
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build package
+        run: |
+          pip install -e . --no-deps --no-build-isolation --no-cache-dir
+
+      - name: Verify imports
+        run: |
+          python -c "import megatron.core; print(f'megatron.core {megatron.core.__version__}')"
+          python -c "from megatron.core.transformer import TransformerConfig; print('TransformerConfig OK')"
+          python -c "from megatron.core.models.gpt import GPTModel; print('GPTModel OK')"
+
+      - name: Check GPU availability
+        if: inputs.platform != 'cpu'
+        run: |
+          python -c "
+          import torch
+          print(f'CUDA available: {torch.cuda.is_available()}')
+          print(f'GPU count: {torch.cuda.device_count()}')
+          for i in range(torch.cuda.device_count()):
+              print(f'  GPU {i}: {torch.cuda.get_device_name(i)}')
+          "
