@@ -14,10 +14,11 @@
 name: Community Bot
 
 on:
-  issues:
-    types: [opened, edited, reopened, closed, deleted]
-  issue_comment:
-    types: [created, edited, deleted]
+#   issues:
+#     types: [opened, edited, reopened, closed, deleted]
+#   issue_comment:
+#     types: [created, edited, deleted]
+  workflow_dispatch: # Allows manual triggering
 
 jobs:
   community-bot:

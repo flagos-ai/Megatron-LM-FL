@@ -69,7 +69,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    is_dualpipev_first_chunk: Optional[bool] = False,
 ) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
@@ -709,6 +712,15 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                   extract_layer_indices.
         """
 
+        ########## FlagScale Begin ##########
+        # for refined recompute
+        self.current_microbatch = -1
+        if len(self.layers) > 0:
+            if hasattr(self.layers[0], 'current_microbatch'):
+                self.current_microbatch = self.layers[0].current_microbatch
+        saved_recompute_granularity = self.config.recompute_granularity
+        ########## FlagScale End ##########
+
         inference_context = deprecate_inference_params(inference_context, inference_params)
         # Remove 'dynamic_inference_decode_only' from kwargs if present
         # this is only used to uniquely identify decode and non-decode cuda graph
@@ -860,6 +872,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # on the computational graph and will lead to unexpected errors in pipeline schedules.
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
+        ########## FlagScale Begin ##########
+        self.config.recompute_granularity = saved_recompute_granularity
+        ########## FlagScale End ##########
 
         if len(extract_layer_indices) > 0:
             return hidden_states, intermediate_hidden_states

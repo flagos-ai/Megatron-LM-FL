@@ -160,6 +160,11 @@ class TestLayerWiseOptimizer:
         if tp * pp > 8:
             pytest.skip(f"TP*PP > 8 is larger than world size")
 
+        if torch.cuda.is_available():
+            free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+            if free_mem < 20:
+                pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
+
         Utils.initialize_model_parallel(tp, pp)
 
         model, optimizer = setup_model_and_optimizer(

@@ -19,6 +19,9 @@ from megatron.core.tensor_parallel import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import get_te_version, is_te_min_version
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
@@ -337,7 +340,7 @@ elif HAVE_TE and is_te_min_version("2.0"):
             scale_invs.append(model_param._scale_inv.view(1))
             model_param._reset_caches()
 
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device="cuda")
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
 
         # Update scaling factors.
         packed_scales = torch.empty(len(scales), dtype=torch.float32, device=scales[0].device)
@@ -424,7 +427,7 @@ elif HAVE_TE and is_te_min_version("1.0"):
             scale_invs.append(model_param._scale_inv.view(1))
             model_param._reset_caches()
 
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device="cuda")
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
 
         # Update scaling factors.
         packed_scales = torch.empty(len(scales), dtype=torch.float32, device=scales[0].device)

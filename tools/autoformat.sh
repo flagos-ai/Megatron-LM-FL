@@ -15,7 +15,7 @@ CHECK_ONLY=${CHECK_ONLY:-false}
 SKIP_DOCS=${SKIP_DOCS:-false}
 
 BASE_REF=${BASE_REF:-main}
-git remote add autoformatter-remote "https://github.com/NVIDIA/Megatron-LM.git" || true
+git remote add autoformatter-remote "https://github.com/flagos-ai/Megatron-LM-FL.git" || true
 git fetch autoformatter-remote ${BASE_REF}
 CHANGED_FILES=$(git diff --name-only --diff-filter=d --merge-base autoformatter-remote/${BASE_REF} megatron/core tests/ | grep '\.py$' || true)
 ADDITIONAL_ARGS=""

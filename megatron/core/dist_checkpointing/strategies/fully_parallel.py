@@ -40,6 +40,11 @@ from megatron.core.dist_checkpointing.validation import (
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
+
 T = TypeVar('T', ShardedObject, ShardedTensor)
 
 
@@ -277,7 +282,7 @@ class FullyParallelLoadStrategyWrapper:
                 )
 
             with debug_time("torch.cuda.synchronize", logger):
-                torch.cuda.synchronize()
+                cur_platform.synchronize()
 
         all_loaded_objects = exchange_loaded_objects_gather_object(loaded_objects)
 
@@ -286,7 +291,7 @@ class FullyParallelLoadStrategyWrapper:
             raise CheckpointingException(
                 f'Missing object shards after fully parallel loading: {missing_object_shards}'
             )
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
 
         self.fill_in_deferred_sharded_tensors(sharded_tensors, all_loaded_tensors)
         self.fill_in_deferred_sharded_objects(sharded_objects, all_loaded_objects)

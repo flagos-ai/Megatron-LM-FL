@@ -166,6 +166,7 @@ class TestBertModelAttentionDimensions:
             attn_mask_dimensions == "b11s"
         ), f"Expected b11s for attn_mask_dimensions but got {attn_mask_dimensions}"
 
+    @pytest.mark.skip(reason="TE >= 2.9 accepts rng_tracker_name, mocked version cannot reproduce the expected error")
     @pytest.mark.internal
     @pytest.mark.flaky
     @pytest.mark.flaky_in_dev

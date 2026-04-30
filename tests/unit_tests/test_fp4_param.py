@@ -6,7 +6,11 @@ from datetime import timedelta
 
 import pytest
 import torch
-from transformer_engine.pytorch.fp8 import check_nvfp4_support
+
+try:
+    from transformer_engine.pytorch.fp8 import check_nvfp4_support
+except ImportError:
+    check_nvfp4_support = None
 
 import megatron.core.parallel_state as ps
 from megatron.core.distributed import DistributedDataParallel as DDP
@@ -61,7 +65,10 @@ def should_disable_forward_pre_hook(args):
 
 
 _SEED = 1234
-is_nvfp4_available, reason_for_no_nvfp4 = check_nvfp4_support()
+if check_nvfp4_support is not None:
+    is_nvfp4_available, reason_for_no_nvfp4 = check_nvfp4_support()
+else:
+    is_nvfp4_available, reason_for_no_nvfp4 = False, "TransformerEngine version too low"
 
 
 class TestFP4Param:

@@ -322,7 +322,7 @@ def _get_param_groups(
         List of parameter groups.
     """
 
-    # Map (pg_overrides, is_expert_parallel) to params.
+    # Map (pg_overrides, is_expert_parallel, is_engram_parallel) to params.
     params_map = {}
 
     for model_chunk in model_chunks:
@@ -346,12 +346,15 @@ def _get_param_groups(
                 param_override = None
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
+            is_engram_parallel = getattr(
+                param, 'is_engram_embedding', False
+            )  # FlagScale add is_engram_parallel
 
             # Create config_tuple that is hash-able, and has a consistent ordering of the keys.
             param_override_tuple: tuple[tuple[str, Any], ...] | None = (
                 param_group_override_to_tuple(param_override)
             )
-            key = (param_override_tuple, is_expert_parallel)
+            key = (param_override_tuple, is_expert_parallel, is_engram_parallel)
             if key not in params_map:
                 params_map[key] = []
             params_map[key].append(param)
@@ -370,7 +373,7 @@ def _get_param_groups(
     param_groups = []
     # Sort keys, None first.
     for key in sorted(params_key, key=lambda x: (x[0] is not None, x[0])):
-        param_override_tuple, is_expert_parallel = key
+        param_override_tuple, is_expert_parallel, is_engram_parallel = key
         params = params_map[key] if key in params_map else []
         if param_override_tuple is None:
             param_override: ParamGroupOverride = {}
@@ -403,6 +406,8 @@ def _get_param_groups(
         param_group = {
             'params': params,
             'is_expert_parallel': is_expert_parallel,
+            'is_engram_parallel': is_engram_parallel,  # FlagScale add is_engram_parallel
+            'is_vision_model_param': False,  # FlagScale add is_vision_model_param
             'default_config': uses_default_lr_schedule,
             **default_config,
             **param_override,  # keep **param_override last so that users can override other fields.
@@ -922,10 +927,16 @@ def get_megatron_optimizer(
     intra_dp_cp_group = process_groups_dict['intra_dp_cp_group']
     intra_expt_dp_group = process_groups_dict['intra_expt_dp_group']
     mp_group = process_groups_dict['mp_group']
+    ########## FlagScale Begin ##########
+    mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
+    ########## FlagScale End ##########
     expt_tp_pp_group = process_groups_dict['expt_tp_pp_group']
     intra_dp_cp_group_gloo = process_groups_dict['intra_dp_cp_group_gloo']
     intra_expt_dp_group_gloo = process_groups_dict['intra_expt_dp_group_gloo']
     intra_dist_opt_group = process_groups_dict['intra_dist_opt_group']
+    engram_dp_group = process_groups_dict['engram_dp_group']
+    engram_mp_group = process_groups_dict['engram_mp_group']
+    engram_dp_group_gloo = process_groups_dict['engram_dp_group_gloo']
 
     model_parallel_rank = get_pg_rank(mp_group)
 
@@ -997,7 +1008,7 @@ def get_megatron_optimizer(
             model_chunk_offset=model_chunk_offset,
             config=config,
             config_overrides=config_overrides,
-            filter_fn=lambda g: not g['is_expert_parallel'],
+            filter_fn=lambda g: not g['is_expert_parallel'] and not g['is_engram_parallel'],
             buffer_name='buffers',
         )
         for model_chunk in dense_model_chunks:
@@ -1034,7 +1045,7 @@ def get_megatron_optimizer(
         model_chunk_offset=0,
         config=config,
         config_overrides=config_overrides,
-        filter_fn=lambda g: g['is_expert_parallel'],
+        filter_fn=lambda g: g['is_expert_parallel'] and not g['is_engram_parallel'],
         buffer_name='expert_parallel_buffers',
     )
     if dump_param_to_param_group_map is not None:
@@ -1060,6 +1071,48 @@ def get_megatron_optimizer(
                 data_parallel_group=intra_expt_dp_group,
                 data_parallel_group_gloo=expt_data_parallel_group_gloo,
                 data_parallel_group_idx=expt_model_parallel_rank,
+                intra_dist_opt_group=intra_dist_opt_group,
+                distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                pg_collection=pg_collection,
+            )
+        )
+
+    # Engram parallel param groups and buffers
+    engram_param_groups, engram_buffers = _get_param_groups_and_buffers(
+        model_chunks,
+        model_chunk_offset=0,
+        config=config,
+        config_overrides=config_overrides,
+        filter_fn=lambda g: g['is_engram_parallel'],
+        buffer_name='engram_embedding_buffers',
+    )
+    if dump_param_to_param_group_map is not None:
+        for param_group in engram_param_groups:
+            for param in param_group["params"]:
+                param_name = get_global_unique_param_name(model_chunks, param)
+                param_to_param_group[param_name] = param_group_id
+            param_group_id += 1
+    if len(engram_param_groups) > 0:
+        engram_model_parallel_rank = get_pg_rank(engram_mp_group)
+
+        # Pass Gloo process groups into optimizer only if needed.
+        if use_gloo_process_groups:
+            engram_data_parallel_group_gloo = engram_dp_group_gloo
+        else:
+            engram_data_parallel_group_gloo = None
+        assert (
+            distributed_optimizer_instance_id == 0
+        ), "Engram parallel optimizer only supports a single instance."
+        optimizers.append(
+            _get_megatron_optimizer_based_on_param_groups(
+                config=config,
+                model_chunks=model_chunks,
+                param_groups=engram_param_groups,
+                per_model_buffers=engram_buffers,
+                model_parallel_group=engram_mp_group,
+                data_parallel_group=engram_dp_group,
+                data_parallel_group_gloo=engram_data_parallel_group_gloo,
+                data_parallel_group_idx=engram_model_parallel_rank,
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
                 pg_collection=pg_collection,

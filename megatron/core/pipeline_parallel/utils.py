@@ -13,9 +13,13 @@ from megatron.core.utils import (
     get_pg_size,
     log_single_rank,
     make_viewless_tensor,
-    nvtx_range_pop,
-    nvtx_range_push,
 )
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 logger = logging.getLogger(__name__)
 
@@ -151,8 +155,8 @@ class ScheduleNode:
     def __init__(
         self,
         forward_func: Callable,
-        stream: torch.cuda.Stream,
-        event: torch.cuda.Event,
+        stream: cur_platform.Stream,
+        event: cur_platform.Event,
         backward_func: Optional[Callable] = None,
         free_input: bool = False,
         name: str = "schedule_node",
@@ -298,13 +302,13 @@ class ScheduleNode:
         """
         self.event.wait(self.stream)
         if name:
-            nvtx_range_push(name)
+            cur_platform.range_push(name)
         try:
-            with torch.cuda.stream(self.stream):
+            with cur_platform.stream(self.stream):
                 yield
         finally:
             if name:
-                nvtx_range_pop(name)
+                cur_platform.range_pop()
             self.event.record(self.stream)
 
     def _release_state(self):
@@ -348,13 +352,13 @@ def set_streams(comm_stream=None):
     # Set communication stream
     if _COMM_STREAM is None:
         if comm_stream is None:
-            comm_stream = torch.cuda.Stream(device="cuda")
+            comm_stream = cur_platform.Stream(device=cur_platform.device_name())
         _COMM_STREAM = comm_stream
 
 
 def get_comp_stream():
     """Get the stream for computation"""
-    return torch.cuda.current_stream()
+    return cur_platform.current_stream()
 
 
 def get_comm_stream():

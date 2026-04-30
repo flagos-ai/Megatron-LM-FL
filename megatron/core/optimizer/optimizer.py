@@ -37,6 +37,8 @@ except ImportError:
         multi_tensor_applier = local_multi_tensor_applier
         multi_tensor_scale_impl = local_multi_tensor_scale
 
+from megatron.plugin.decorators import overridable
+
 from .. import parallel_state, tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..dist_checkpointing.mapping import ShardedStateDict
@@ -53,6 +55,10 @@ from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
 
 logger = getLogger(__name__)
+
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 
 def _zero_grad_group_helper(
@@ -94,7 +100,14 @@ def _multi_tensor_copy_this_to_that(
             that_.copy_(this_)
 
 
-param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr')
+param_group_identifier_keys = (
+    'wd_mult',
+    'lr_mult',
+    'is_expert_parallel',
+    'is_decoupled_lr',
+    'is_vision_model_param',
+    'is_engram_parallel',
+)  ####FlagScale add is_vision_model_param
 
 
 class MegatronOptimizer(ABC):
@@ -387,7 +400,7 @@ class MegatronOptimizer(ABC):
                     if isinstance(v, torch.Tensor) and v.is_cuda:
                         state_dict[k] = v.cpu()
 
-            torch.cuda.empty_cache()
+            cur_platform.empty_cache()
 
     def restore_from_cpu(self):
         """Function used for RL training.
@@ -400,12 +413,12 @@ class MegatronOptimizer(ABC):
             for param_group in self.optimizer.param_groups:
                 for p in param_group['params']:
                     if isinstance(p, torch.Tensor) and not p.is_cuda:
-                        p.data = p.data.cuda()
+                        p.data = p.data.to(cur_platform.device())
 
             for state_dict in self.optimizer.state.values():
                 for k, v in state_dict.items():
                     if isinstance(v, torch.Tensor) and not v.is_cuda:
-                        state_dict[k] = v.cuda()
+                        state_dict[k] = v.to(cur_platform.device())
 
     @staticmethod
     def _filter_and_reorder_param_groups(
@@ -498,7 +511,9 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         # Note that we keep this for the cases that grad scaler is none.
         # We still record nan/inf if we have a bfloat16 with a grad scaler.
         if self.grad_scaler:
-            self.found_inf = torch.tensor([0.0], dtype=torch.float, device='cuda')
+            self.found_inf = torch.tensor(
+                [0.0], dtype=torch.float, device=cur_platform.device_name()
+            )
 
         # Dummy tensor needed for apex multi-apply tensor.
         # For bfloat, we don't have multi-tensor apply and for now
@@ -506,11 +521,15 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.config.bf16:
             self._dummy_overflow_buf = None
         else:
-            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+            self._dummy_overflow_buf = torch.tensor(
+                [0], dtype=torch.int, device=cur_platform.device_name()
+            )
 
         # In case grad scaler is not passed, define the unity scale.
         if self.grad_scaler is None:
-            self._scale_one = torch.tensor([1.0], dtype=torch.float, device='cuda')
+            self._scale_one = torch.tensor(
+                [1.0], dtype=torch.float, device=cur_platform.device_name()
+            )
 
     def get_loss_scale(self):
         if self.grad_scaler is None:
@@ -521,6 +540,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.param_groups:
             self._copy_model_params_to_main_params(state_dict=state_dict)
 
+    @overridable
     def _unscale_main_grads_and_check_for_nan(self):
 
         # Collect main grads.
@@ -696,7 +716,11 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                     if param.requires_grad:
 
                         # float16 params:
-                        if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                        # cuda check -> platform check
+                        if param.device.type == cur_platform.device_name() and param.dtype in (
+                            torch.float16,
+                            torch.bfloat16,
+                        ):
                             float16_params_this_group.append(param)
                             # Create a copy
                             main_param = param.detach().clone().float()
@@ -715,16 +739,17 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             if param in self.optimizer.state:
                                 self.optimizer.state[main_param] = self.optimizer.state.pop(param)
                         # fp32 params.
-                        elif param.type() == 'torch.cuda.FloatTensor':
+                        elif (
+                            param.device.type == cur_platform.device_name()
+                            and param.dtype == torch.float32
+                        ):
                             fp32_params_this_group.append(param)
                             param_group['params'][i] = param
 
                         else:
                             raise TypeError(
                                 'Wrapped parameters must be one of '
-                                'torch.cuda.FloatTensor,  '
-                                'torch.cuda.HalfTensor, or '
-                                'torch.cuda.BFloat16Tensor. '
+                                'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '
                                 'Received {}'.format(param.type())
                             )
 
@@ -932,7 +957,7 @@ class FP32Optimizer(MegatronOptimizer):
 
         super(FP32Optimizer, self).__init__(optimizer, config, init_state_fn)
 
-        self._scale = torch.tensor([1.0], dtype=torch.float, device='cuda')
+        self._scale = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device_name())
         self.is_stub_optimizer = True if optimizer is None else False
 
     def zero_grad(self, set_to_none=True):
@@ -1127,6 +1152,7 @@ class ChainedOptimizer(MegatronOptimizer):
             self.is_stub_optimizer = all(
                 getattr(optimizer, 'is_stub_optimizer', False) for optimizer in chained_optimizers
             )
+            self.convert_to_ep = False
 
         else:
             self.is_stub_optimizer = True
@@ -1174,7 +1200,7 @@ class ChainedOptimizer(MegatronOptimizer):
         if self.chained_optimizers:
             return self.chained_optimizers[0].get_loss_scale()
         else:
-            return torch.tensor([1.0], dtype=torch.float32, device=torch.cuda.current_device())
+            return torch.tensor([1.0], dtype=torch.float32, device=cur_platform.current_device())
 
     def _split_state_dict(self, state_dict):
         """Split the state dict into sub-state dicts according to the chunks of each sub-optimizer
@@ -1224,8 +1250,13 @@ class ChainedOptimizer(MegatronOptimizer):
             return [optimizer.state_dict() for optimizer in self.chained_optimizers]
 
     def sharded_state_dict(
-        self, model_sharded_state_dict: ShardedStateDict, is_loading: bool = False, **kwargs
+        self,
+        model_sharded_state_dict: ShardedStateDict,
+        is_loading: bool = False,
+        convert_to_ep: bool = False,
+        **kwargs,
     ):
+        self.convert_to_ep = convert_to_ep  ########## FlagScale Add ########
         metadata = kwargs.get('metadata') or {}
         # ChainedOptimizer should add its prefix to the tensor state keys only if
         # DistributedOptimizer is used (non-empty 'distrib_optim_sharding_type') and uses
@@ -1244,17 +1275,63 @@ class ChainedOptimizer(MegatronOptimizer):
                 model_sharded_state_dict, is_loading, **kwargs
             )
         else:
-            self._synchronize_steps()
-            sharded_state_dict = {}
-            for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
-                optim_state_dict = optimizer.sharded_state_dict(
-                    model_sharded_state_dict, is_loading, **kwargs
+            ######### FlagScale Begin #########
+            if convert_to_ep and is_loading:
+                logger.info(
+                    "sharded_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
                 )
-                if should_add_prefix:
-                    add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
-                sharded_state_dict[optimizer_idx] = optim_state_dict
-            return sharded_state_dict
+                # convert tp/pp chained_optimizers to ep chained_optimizers
+                sharded_state_dict = {}
+                fake_sharded_state_dict = {
+                    'optimizer': {},
+                    'param_state': {},
+                    'param_state_sharding_type': {},
+                }
+                global_pid = 0
+                mapping_idx = {}
+                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                    optim_state_dict = optimizer.sharded_state_dict(
+                        model_sharded_state_dict, is_loading, **kwargs
+                    )
+                    tmp_dict = {}
+                    for local_pid, v in optim_state_dict['param_state'].items():
+                        fake_sharded_state_dict['param_state'][global_pid] = v
+                        tmp_dict[local_pid] = global_pid
+                        global_pid += 1
+                    mapping_idx[optimizer_idx] = tmp_dict
 
+                    fake_sharded_state_dict['optimizer'] = optim_state_dict['optimizer']
+                    fake_sharded_state_dict['param_state_sharding_type'] = optim_state_dict[
+                        'param_state_sharding_type'
+                    ]
+
+                    sharded_state_dict[optimizer_idx] = {}
+                    sharded_state_dict[optimizer_idx]['optimizer'] = copy.deepcopy(
+                        optim_state_dict['optimizer']
+                    )
+                    sharded_state_dict[optimizer_idx]['param_state_sharding_type'] = copy.deepcopy(
+                        optim_state_dict['param_state_sharding_type']
+                    )
+                    sharded_state_dict[optimizer_idx]['len_param_state'] = len(
+                        optim_state_dict['param_state']
+                    )
+                    self.original_sharded_state_dict = sharded_state_dict
+                self.mapping_idx = mapping_idx
+                return fake_sharded_state_dict
+            ######### FlagScale End #########
+            else:  # megatron source apply ep
+                self._synchronize_steps()
+                sharded_state_dict = {}
+                for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                    optim_state_dict = optimizer.sharded_state_dict(
+                        model_sharded_state_dict, is_loading, **kwargs
+                    )
+                    if should_add_prefix:
+                        add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
+                    sharded_state_dict[optimizer_idx] = optim_state_dict
+                return sharded_state_dict
+
+    @overridable
     def load_state_dict(self, state_dict):
         # If there is only one optimizer, we read the state dict as a single optimizer.
         if len(self.chained_optimizers) == 1:

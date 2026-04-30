@@ -8,6 +8,9 @@ from typing import Callable, List, Optional, Tuple
 import torch
 
 from megatron.core import parallel_state
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 from megatron.core.rerun_state_machine import RerunDataIterator
 
 
@@ -518,7 +521,7 @@ def hybrid_context_parallel_forward_backward(
             )
 
     def _broadcast_num_samples_this_group(num_samples_this_group):
-        dev = torch.cuda.current_device()
+        dev = cur_platform.current_device()
         torch.distributed.barrier()
 
         n = 0 if num_samples_this_group is None else int(num_samples_this_group.numel())

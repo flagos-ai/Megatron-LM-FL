@@ -24,6 +24,12 @@ from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import internal_api, is_te_min_version
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine import (
         fused_compute_score_for_moe_aux_loss,
@@ -1206,7 +1212,7 @@ def maybe_move_tensor_to_cpu(
         if as_numpy:
             cpu_tensor = cpu_tensor.numpy()
         if record_stream:
-            tensor.record_stream(torch.cuda.current_stream())
+            tensor.record_stream(cur_platform.current_stream())
         tensor = cpu_tensor
     return tensor
 

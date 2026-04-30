@@ -116,6 +116,15 @@ class TransformerConfig(ModelParallelConfig):
     """If set, the loss layer will be treated as a standard transformer
     layer in the context of partition and placement for pipeline parallelism."""
 
+    use_dualpipev: bool = False
+    """Enable DualPipeV pipeline scheduling for MoE models."""
+
+    moe_fb_overlap: bool = False
+    """Enable MoE forward-backward overlap in DualPipeV scheduling."""
+
+    te_fl_prefer: Optional[str] = "vendor"
+    """TE-FL backend preference: 'flagos', 'vendor', or 'reference'."""
+
     hidden_size: int = field(default=0, metadata={"argparse_meta": {"default": None}})
     """Transformer hidden size."""
 
@@ -222,6 +231,9 @@ class TransformerConfig(ModelParallelConfig):
 
     qk_layernorm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
+
+    qk_layernorm_hidden_dim: bool = False
+    """Whether to layer normalize q and k on hidden dimension rather than head dimension."""
 
     qk_l2_norm: bool = False
     """Whether to apply llama 4-style qk L2 norm."""
@@ -476,6 +488,15 @@ class TransformerConfig(ModelParallelConfig):
     each uniformly divided recompute unit.  When recompute_method is block, recompute_num_layers is
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
+
+    recompute_granularity_per_stage_micro_batch: Optional[List] = None
+    """Fine-grained recompute granularity control per pipeline stage and micro-batch."""
+
+    recompute_method_per_stage_micro_batch: Optional[List] = None
+    """Fine-grained recompute method control per pipeline stage and micro-batch."""
+
+    recompute_num_layers_per_stage_micro_batch: Optional[List] = None
+    """Fine-grained recompute num_layers control per pipeline stage and micro-batch."""
 
     distribute_saved_activations: Optional[bool] = False
     """If True, distribute recomputed activations across the model parallel group."""
@@ -1023,6 +1044,31 @@ class TransformerConfig(ModelParallelConfig):
     """
     min_offloaded_tensor_size: int = 1024 * 1024
     """The minimum size of the tensor to be offloaded."""
+
+    # FlagScale PEFT/LoRA configuration
+    peft_type: Optional[str] = None
+    """PEFT type (e.g., 'lora'). None means no PEFT."""
+
+    lora_target_modules: Optional[List[str]] = None
+    """LoRA target modules list."""
+
+    lora_dim: int = 8
+    """LoRA rank dimension."""
+
+    lora_alpha: int = 16
+    """LoRA alpha scaling factor."""
+
+    lora_dropout: float = 0.0
+    """Dropout probability for LoRA layers."""
+
+    lora_dropout_position: str = "pre"
+    """Dropout position: 'pre' or 'post'."""
+
+    lora_in_init_method: str = "xavier"
+    """Initialization method for LoRA A matrix."""
+
+    lora_out_init_method: str = "zero"
+    """Initialization method for LoRA B matrix."""
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.

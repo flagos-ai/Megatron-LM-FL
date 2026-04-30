@@ -23,7 +23,13 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
 from megatron.core.typed_torch import apply_module, copy_signature
-from megatron.core.utils import internal_api, nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import internal_api
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 
 def weak_method(method):
@@ -332,12 +338,11 @@ class TransformerLayerNode(ScheduleNode):
             return
         if isinstance(self.stream, Callable):
             self.stream = self.stream()
-        with torch.cuda.stream(self.stream):
-            nvtx_msg = f"{self.name} wgrad"
-            nvtx_range_push(nvtx_msg)
+        with cur_platform.stream(self.stream):
+            cur_platform.range_push(f"{self.name} wgrad")
             for module in self.bwd_dw_callables:
                 module.backward_dw()
-            nvtx_range_pop(nvtx_msg)
+            cur_platform.range_pop()
 
         # the output grad memory is last used in wgrad compute, should be safe to release.
         assert self.delay_grads_release, "output grad memory should be valid before wgrad."
@@ -449,6 +454,18 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         computations between attention and dispatch:
             pre mlp layernorm->router->dispatch preprocess
         """
+
+        ########## FlagScale Begin ##########
+        if getattr(node.layer_state, "is_engram", False):
+            hash_input_ids = node.chunk_state.extra_block_kwargs["engram_hash_input_ids"]
+            hidden_states = (
+                node.layer_state.engram(
+                    hidden_states=hidden_states,
+                    hash_input_ids=hash_input_ids[node.layer_state.engram_hash_layer_id],
+                )
+                + hidden_states
+            )
+        ########## FlagScale End ##########
 
         if (
             isinstance(layer, GraphableMegatronModule)
@@ -613,9 +630,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         )
 
         # Need to record tensors created on comp stream to comm stream
-        node.layer_state.residual.record_stream(torch.cuda.current_stream())
+        node.layer_state.residual.record_stream(cur_platform.current_stream())
         if shared_expert_output is not None:
-            shared_expert_output.record_stream(torch.cuda.current_stream())
+            shared_expert_output.record_stream(cur_platform.current_stream())
 
         # release tensor reference after use
         node.layer_state.residual = None

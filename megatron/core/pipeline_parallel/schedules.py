@@ -26,6 +26,12 @@ from megatron.core.process_groups_config import (
 from megatron.core.transformer.cuda_graphs import create_cudagraphs, set_current_microbatch
 from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 from megatron.core.utils import (
     drain_embedding_wgrad_compute,
     get_attr_wrapped_model,
@@ -145,7 +151,15 @@ def get_forward_backward_func(pp_size: Optional[int] = None, vp_size: Optional[i
         vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
 
     if pp_size > 1:
-        if vp_size is not None:
+        ######### FlagScale Begin #########
+        if parallel_state.get_dualpipev_pipeline_model_parallel_world_size() is not None:
+            from megatron.plugin.dualpipev.dualpipev_schedules import (
+                forward_backward_pipelining_with_dualpipev,
+            )
+
+            forward_backward_func = forward_backward_pipelining_with_dualpipev
+        ######### FlagScale End #########
+        elif vp_size is not None:
             forward_backward_func = forward_backward_pipelining_with_interleaving
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
@@ -259,7 +273,7 @@ def forward_step_calc_loss(
         if is_last_stage:
             assert cp_group_size is not None, "cp_group_size must be provided on last stage"
 
-    num_tokens = torch.tensor(0, dtype=torch.int)
+    num_tokens = torch.tensor(0, dtype=torch.int, device=cur_platform.device_name())
     if is_last_stage:
         if loss_func is None:
             forward_data_store.append(output_tensor)
@@ -652,7 +666,7 @@ def forward_backward_no_pipelining(
 
     forward_data_store = []
     input_tensor, output_tensor_grad = None, None
-    total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
+    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())
 
     if config.overlap_moe_expert_parallel_comm and not forward_only:
         forward_data_store, total_num_tokens = combined_1f1b_schedule_for_no_pipelining(
@@ -1029,7 +1043,7 @@ def forward_backward_pipelining_with_interleaving(
 
     input_tensors = [[] for _ in range(len(model))]
     output_tensors = [[] for _ in range(len(model))]
-    total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
+    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())
 
     forward_data_store = []
     output_tensor_grads = None
@@ -2213,12 +2227,17 @@ def forward_backward_pipelining_without_interleaving(
     # Input, output tensors only need to be saved when doing backward passes
     input_tensors = None
     output_tensors = None
-    total_num_tokens = torch.zeros([], dtype=torch.int, device="cuda")
+    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())
 
     if not forward_only:
         input_tensors = []
         output_tensors = []
     forward_data_store = []
+
+    ######### FlagScale Begin #########
+    if hasattr(p2p_communicator, 'warm_up_comm_group'):
+        p2p_communicator.warm_up_comm_group()
+    ######### FlagScale End #########
 
     # Run warmup forward passes.
     for i in range(num_warmup_microbatches):

@@ -29,6 +29,9 @@ from megatron.core.utils import (
     is_torch_min_version,
     make_sharded_tensor_for_checkpoint,
 )
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine import TELinear, set_save_original_input
@@ -89,7 +92,7 @@ class _BackwardStreamWait(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output):
         """backward with stream wait"""
-        ctx.stream.wait_stream(torch.cuda.current_stream())
+        ctx.stream.wait_stream(cur_platform.current_stream())
         return grad_output, None
 
 
@@ -178,7 +181,7 @@ class SharedExpertMLP(MLP):
             self._overlap_state = SharedExpertState.IDLE
 
             if self.__class__.stream is None:
-                self.__class__.stream = torch.cuda.Stream()
+                self.__class__.stream = cur_platform.Stream()
             self.stream = self.__class__.stream
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -212,7 +215,7 @@ class SharedExpertMLP(MLP):
 
     def wait_current_stream(self):
         """Wait for the current stream to complete."""
-        self.stream.wait_stream(torch.cuda.current_stream())
+        self.stream.wait_stream(cur_platform.current_stream())
 
     @overlap_state_check(SharedExpertState.IDLE, SharedExpertState.PRE_FORWARD_COMM_DONE)
     def pre_forward_comm(self, input, wait_current_stream=True):
@@ -223,7 +226,7 @@ class SharedExpertMLP(MLP):
         """
         if wait_current_stream:
             self.wait_current_stream()
-        with torch.cuda.stream(self.stream):
+        with cur_platform.stream(self.stream):
             if self.use_shared_expert_gate:
                 logits = torch.nn.functional.linear(input, self.gate_weight)
                 self.gate_score = torch.nn.functional.sigmoid(logits)
@@ -244,7 +247,7 @@ class SharedExpertMLP(MLP):
         This function is used to overlap shared experts with the dispatcher.
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
-        with torch.cuda.stream(self.stream):
+        with cur_platform.stream(self.stream):
             # [s, b, 4 * h/p]
             intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
                 self.cached_fc1_input
@@ -304,7 +307,7 @@ class SharedExpertMLP(MLP):
         """
         if overlapped_comm_output is not None:
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
-        with torch.cuda.stream(self.stream):
+        with cur_platform.stream(self.stream):
             # [s, b, h]
             self.cached_fc2_output, _ = apply_module(self.linear_fc2)(self.cached_fc2_input)
             self.cached_fc2_input = None
@@ -318,7 +321,7 @@ class SharedExpertMLP(MLP):
         This function is used to overlap shared experts with the dispatcher.
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
-        with torch.cuda.stream(self.stream):
+        with cur_platform.stream(self.stream):
             if self.config.sequence_parallel:
                 self.cached_output = reduce_scatter_to_sequence_parallel_region(
                     self.cached_fc2_output
@@ -337,7 +340,7 @@ class SharedExpertMLP(MLP):
         This function is used to overlap shared experts with the dispatcher.
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
-        with torch.cuda.stream(self.stream):
+        with cur_platform.stream(self.stream):
             if self.use_shared_expert_gate:
                 assert self.gate_score is not None
                 output = self.cached_output * self.gate_score
@@ -345,7 +348,7 @@ class SharedExpertMLP(MLP):
             else:
                 output = self.cached_output
             self.cached_output = None
-        torch.cuda.current_stream().wait_stream(self.stream)
+        cur_platform.current_stream().wait_stream(self.stream)
         return output
 
 

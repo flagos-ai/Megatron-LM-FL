@@ -1,5 +1,8 @@
 include megatron/core/requirements.txt
 include megatron/core/README.md
 include megatron/core/package_info.py
+# Include C++ source files and Makefile for runtime compilation
+include megatron/core/datasets/helpers.cpp
+include megatron/core/datasets/Makefile
 global-exclude LICENSE
 recursive-include requirements *

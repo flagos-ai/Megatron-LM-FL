@@ -31,6 +31,10 @@ except:
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 
 class TimerBase(ABC):
     """Timer base class."""
@@ -149,7 +153,7 @@ class Timer(TimerBase):
         assert not self._started, 'timer has already been started'
         if barrier:
             torch.distributed.barrier(group=self._barrier_group)
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         self._start_time = time.time()
         self._started = True
 
@@ -162,7 +166,7 @@ class Timer(TimerBase):
         assert self._started, 'timer is not started'
         if barrier:
             torch.distributed.barrier(group=self._barrier_group)
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         elapsed = time.time() - self._start_time
         self._elapsed += elapsed
         self._active_time += elapsed
@@ -300,7 +304,7 @@ class Timers:
         # and since we are only gathering a small amount of data,
         # it should be ok to use all-gather instead of gather.
         rank_name_to_time = torch.zeros(
-            (world_size, len(names)), dtype=torch.float, device=torch.cuda.current_device()
+            (world_size, len(names)), dtype=torch.float, device=cur_platform.current_device()
         )
         for i, name in enumerate(names):
             if name in self._timers:
@@ -310,6 +314,8 @@ class Timers:
                 # groups inside their class.
                 rank_name_to_time[rank, i] = self._timers[name].elapsed(reset=reset)
 
+        if "cpu:gloo" == torch.distributed.get_backend():
+            rank_name_to_time = rank_name_to_time.cpu()
         # See the note above for why we are not using gather.
         dist_all_gather_func(rank_name_to_time.view(-1), rank_name_to_time[rank, :].view(-1))
 

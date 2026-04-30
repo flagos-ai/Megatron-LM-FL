@@ -296,6 +296,11 @@ def _get_should_context_be_quantized_params(
         )
 
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
+
 def _get_extra_te_kwargs(config: TransformerConfig):
     extra_transformer_engine_kwargs = {"params_dtype": config.params_dtype}
 
@@ -305,7 +310,7 @@ def _get_extra_te_kwargs(config: TransformerConfig):
         elif config.init_model_with_meta_device:
             extra_transformer_engine_kwargs["device"] = "meta"
         else:
-            extra_transformer_engine_kwargs["device"] = torch.cuda.current_device()
+            extra_transformer_engine_kwargs["device"] = cur_platform.current_device()
     return extra_transformer_engine_kwargs
 
 
@@ -1357,7 +1362,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
     via set_tensor_parallel_group() and set_context_parallel_group().
     """
 
-    cp_stream: torch.cuda.Stream = None
+    cp_stream: cur_platform.Stream = None
 
     def __init__(
         self,
@@ -1441,7 +1446,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 "1.0.0"
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttention, "cp_stream") is None:
-                TEDotProductAttention.cp_stream = torch.cuda.Stream()
+                TEDotProductAttention.cp_stream = cur_platform.Stream()
             extra_kwargs["cp_group"] = pg_collection.cp
             extra_kwargs["cp_global_ranks"] = torch.distributed.get_process_group_ranks(
                 pg_collection.cp
@@ -1915,7 +1920,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
         def _encode_extra_state(self, state):
             # TE 2.0 changed the format of extra_state to be a byte tensor
             if is_te_min_version("2.0.0"):
-                torch.cuda.synchronize()
+                cur_platform.synchronize()
                 state_serialized = bytearray(pickle.dumps(state))
                 state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
             else:
@@ -1933,7 +1938,9 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 return SafeUnpickler(io.BytesIO(state.detach().cpu().numpy().tobytes())).load()
             elif isinstance(state, io.BytesIO):
                 state.seek(0)
-                return torch.load(state, map_location="cuda")
+                return torch.load(
+                    state, map_location=cur_platform.device_name(), weights_only=False
+                )
             else:
                 raise RuntimeError("Unsupported checkpoint format.")
 
@@ -2559,27 +2566,34 @@ try:
         retain_pinned_cpu_buffers,
     ):
         """Get CPU offload context and sync function."""
-        if is_te_min_version("2.10.0"):
-            # TE 2.10+ supports retain_pinned_cpu_buffers
-            context, sync_func = _get_cpu_offload_context(
-                enabled,
-                num_layers,
-                model_layers,
-                activation_offloading,
-                weight_offloading,
-                double_buffering,
-                retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
-            )
-        elif is_te_min_version("2.5.0"):
-            # TE 2.5-2.9 supports double_buffering but not retain_pinned_cpu_buffers
-            context, sync_func = _get_cpu_offload_context(
-                enabled,
-                num_layers,
-                model_layers,
-                activation_offloading,
-                weight_offloading,
-                double_buffering,
-            )
+        if is_te_min_version("2.5.0"):
+            # FlagScale Begin
+            # Check whether the installed TE actually supports retain_pinned_cpu_buffers,
+            # since custom TE builds (e.g. v0.1.0+te2.9.0) may report >= 2.5.0 but
+            # lack this parameter.
+            import inspect
+
+            _sig = inspect.signature(_get_cpu_offload_context)
+            if "retain_pinned_cpu_buffers" in _sig.parameters:
+                context, sync_func = _get_cpu_offload_context(
+                    enabled,
+                    num_layers,
+                    model_layers,
+                    activation_offloading,
+                    weight_offloading,
+                    double_buffering,
+                    retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
+                )
+            else:
+                context, sync_func = _get_cpu_offload_context(
+                    enabled,
+                    num_layers,
+                    model_layers,
+                    activation_offloading,
+                    weight_offloading,
+                    double_buffering,
+                )
+            # FlagScale End
         elif is_te_min_version("1.10.0.dev0"):
             context, sync_func = _get_cpu_offload_context(
                 enabled, num_layers, model_layers, activation_offloading, weight_offloading

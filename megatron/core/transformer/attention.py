@@ -99,6 +99,12 @@ except ImportError:
 
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 try:
     from flash_attn import flash_attn_varlen_func, flash_attn_with_kvcache
 except:
@@ -458,7 +464,7 @@ class Attention(MegatronModule, ABC):
             self.num_query_groups_per_partition,
             dim,
             dtype=dtype,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
 
     def _get_pp_layer_offset_for_inference(self):
@@ -1402,9 +1408,19 @@ class SelfAttention(Attention):
                 )
             q_norm_cls = k_norm_cls = None
 
+        ######### FlagScale Begin #########
+        q_norm_hidden_size = self.hidden_size_per_attention_head
+        k_norm_hidden_size = self.hidden_size_per_attention_head
+        if getattr(self.config, 'qk_layernorm_hidden_dim', False):
+            tp_world_size = get_tensor_model_parallel_world_size()
+            assert tp_world_size <= 1, "TP world size must be less than 1 for qk_layernorm_hidden_dim"
+            q_norm_hidden_size = self.query_projection_size
+            k_norm_hidden_size = self.kv_projection_size
+        ######### FlagScale End #########
+
         self.q_layernorm = (
             q_norm_cls(
-                hidden_size=self.hidden_size_per_attention_head,
+                hidden_size=q_norm_hidden_size,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
@@ -1413,7 +1429,7 @@ class SelfAttention(Attention):
         )
         self.k_layernorm = (
             k_norm_cls(
-                hidden_size=self.hidden_size_per_attention_head,
+                hidden_size=k_norm_hidden_size,
                 config=self.config,
                 eps=self.config.layernorm_epsilon,
             )
@@ -1601,10 +1617,26 @@ class SelfAttention(Attention):
             query = query[:, :, idx * size : (idx + 1) * size, :]
 
         if self.q_layernorm is not None:
-            query = apply_module(self.q_layernorm)(query)
+            ######### FlagScale Begin #########
+            if not self.config.qk_layernorm_hidden_dim:
+                query = apply_module(self.q_layernorm)(query)
+            else:
+                query_shape = list(query.shape)
+                query = query.reshape(query.size(0), query.size(1), 1, -1)
+                query = apply_module(self.q_layernorm)(query)
+                query = query.reshape(*query_shape)
+            ######### FlagScale End #########
 
         if self.k_layernorm is not None:
-            key = apply_module(self.k_layernorm)(key)
+            ######### FlagScale Begin #########
+            if not self.config.qk_layernorm_hidden_dim:
+                key = apply_module(self.k_layernorm)(key)
+            else:
+                key_shape = list(key.shape)
+                key = key.reshape(key.size(0), key.size(1), 1, -1)
+                key = apply_module(self.k_layernorm)(key)
+                key = key.reshape(*key_shape)
+            ######### FlagScale End #########
 
         if self.config.test_mode:
             self.run_realtime_tests()

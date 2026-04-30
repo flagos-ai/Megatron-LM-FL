@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 
+from functools import partial
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -8,10 +9,22 @@ import torch.distributed as dist
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
-from megatron.core.utils import nvtx_decorator
+from megatron.core.utils import get_pg_rank, get_pg_size, nvtx_decorator
+from megatron.plugin.hetero.p2p_communication import (
+    recv_backward_hetero,
+    recv_forward_hetero,
+    send_backward_hetero,
+    send_backward_recv_forward_hetero,
+    send_forward_hetero,
+    send_forward_recv_backward_hetero,
+)
 
 # Types
 Shape = Union[List[int], torch.Size]
+
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 
 
 def _batched_p2p_ops(
@@ -148,20 +161,20 @@ class P2PCommunicator:
         # Basic attrs
         self.pp_group = pp_group
         self.config = config
+        if not isinstance(self.pp_group, list):
+            world_size = self.pp_group.size()
+            curr_rank_in_pg = self.pp_group.rank()
 
-        world_size = self.pp_group.size()
-        curr_rank_in_pg = self.pp_group.rank()
+            next_rank_pg = (curr_rank_in_pg + 1) % world_size
+            prev_rank_pg = (curr_rank_in_pg - 1) % world_size
 
-        next_rank_pg = (curr_rank_in_pg + 1) % world_size
-        prev_rank_pg = (curr_rank_in_pg - 1) % world_size
-
-        self.next_rank: int | None = dist.get_global_rank(self.pp_group, next_rank_pg)
-        self.prev_rank: int | None = dist.get_global_rank(self.pp_group, prev_rank_pg)
-        self.virtual_pipeline_model_parallel_size = (
-            config.virtual_pipeline_model_parallel_size
-            if config.virtual_pipeline_model_parallel_size is not None
-            else None
-        )
+            self.next_rank: int | None = dist.get_global_rank(self.pp_group, next_rank_pg)
+            self.prev_rank: int | None = dist.get_global_rank(self.pp_group, prev_rank_pg)
+            self.virtual_pipeline_model_parallel_size = (
+                config.virtual_pipeline_model_parallel_size
+                if config.virtual_pipeline_model_parallel_size is not None
+                else None
+            )
 
     @property
     def is_pp_first_stage(self) -> bool:
@@ -176,12 +189,12 @@ class P2PCommunicator:
     @property
     def total_stages(self) -> int:
         """Return total number of pipeline stages."""
-        return self.pp_group.size()
+        return get_pg_size(self.pp_group)
 
     @property
     def current_stage(self) -> int:
         """Return current pipeline stage index (0-indexed)."""
-        return self.pp_group.rank()
+        return get_pg_rank(self.pp_group)
 
     def _communicate_shapes(self, tensor_send_next, tensor_send_prev, recv_prev, recv_next):
         """Communicate tensor shapes between stages. Used to communicate
@@ -208,19 +221,19 @@ class P2PCommunicator:
         send_next_shape_tensor = None
         if recv_prev:
             recv_prev_shape_tensor = torch.empty(
-                (3,), device=torch.cuda.current_device(), dtype=torch.int64
+                (3,), device=cur_platform.current_device(), dtype=torch.int64
             )
         if recv_next:
             recv_next_shape_tensor = torch.empty(
-                (3,), device=torch.cuda.current_device(), dtype=torch.int64
+                (3,), device=cur_platform.current_device(), dtype=torch.int64
             )
         if tensor_send_prev is not None:
             send_prev_shape_tensor = torch.tensor(
-                tensor_send_prev.size(), device=torch.cuda.current_device(), dtype=torch.int64
+                tensor_send_prev.size(), device=cur_platform.current_device(), dtype=torch.int64
             )
         if tensor_send_next is not None:
             send_next_shape_tensor = torch.tensor(
-                tensor_send_next.size(), device=torch.cuda.current_device(), dtype=torch.int64
+                tensor_send_next.size(), device=cur_platform.current_device(), dtype=torch.int64
             )
 
         if config.use_ring_exchange_p2p:
@@ -260,7 +273,7 @@ class P2PCommunicator:
 
             # To protect against race condition when using batch_isend_irecv().
             # should take this out once the bug with batch_isend_irecv is resolved.
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
 
         recv_prev_shape = [0, 0, 0]
         if recv_prev_shape_tensor is not None:
@@ -281,6 +294,7 @@ class P2PCommunicator:
         recv_next: bool,
         tensor_shape: Shape,
         wait_on_reqs: bool = True,
+        group=None,  ######## FlagScale Add ########
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Communicate tensors between stages. Used as helper method in other
         communication methods that are used in megatron/schedules.py.
@@ -331,7 +345,7 @@ class P2PCommunicator:
             return torch.empty(
                 recv_prev_shape,
                 requires_grad=True,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
                 dtype=config.pipeline_dtype,
             )
 
@@ -339,7 +353,7 @@ class P2PCommunicator:
             return torch.empty(
                 recv_next_shape,
                 requires_grad=True,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
                 dtype=config.pipeline_dtype,
             )
 
@@ -377,9 +391,20 @@ class P2PCommunicator:
         else:
             p2p_func = _p2p_ops
 
-        pp_group = self.pp_group
-        next_rank = self.next_rank
-        prev_rank = self.prev_rank
+        ######### FlagScale Begin #########
+        if group is not None:
+            pp_group = group
+            curr_rank_in_pg = pp_group.rank()
+            world_size = pp_group.size()
+            next_rank_pg = (curr_rank_in_pg + 1) % world_size
+            prev_rank_pg = (curr_rank_in_pg - 1) % world_size
+            next_rank: int | None = dist.get_global_rank(pp_group, next_rank_pg)
+            prev_rank: int | None = dist.get_global_rank(pp_group, prev_rank_pg)
+        ######### FlagScale End #########
+        else:
+            pp_group = self.pp_group
+            next_rank = self.next_rank
+            prev_rank = self.prev_rank
 
         if config.use_ring_exchange_p2p or config.batch_p2p_comm:
             reqs = []
@@ -416,7 +441,7 @@ class P2PCommunicator:
         if config.batch_p2p_comm and config.batch_p2p_sync:
             # To protect against race condition when using batch_isend_irecv().
             # User should assert that we have a modern enough PyTorch to not need this
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
 
         return tensor_recv_prev, tensor_recv_next, reqs
 
@@ -425,6 +450,10 @@ class P2PCommunicator:
         self, tensor_shapes, is_first_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Receive tensor from previous rank in pipeline (forward receive)."""
+        if self.config.enable_hetero:
+            return recv_forward_hetero(
+                tensor_shapes, is_first_stage, self.config, partial(self._communicate)
+            )
         unwrap_tensor_shapes = False
         if is_single_shape(tensor_shapes):
             unwrap_tensor_shapes = True
@@ -456,6 +485,10 @@ class P2PCommunicator:
         self, tensor_shapes, is_last_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Receive tensor from next rank in pipeline (backward receive)."""
+        if self.config.enable_hetero:
+            return recv_backward_hetero(
+                tensor_shapes, is_last_stage, self.config, partial(self._communicate)
+            )
         unwrap_tensor_shapes = False
         if is_single_shape(tensor_shapes):
             unwrap_tensor_shapes = True
@@ -485,6 +518,10 @@ class P2PCommunicator:
     @nvtx_decorator()
     def send_forward(self, output_tensors, is_last_stage: bool) -> None:
         """Send tensor to next rank in pipeline (forward send)."""
+        if self.config.enable_hetero:
+            return send_forward_hetero(
+                output_tensors, is_last_stage, self.config, partial(self._communicate)
+            )
         config = self.config
         if not isinstance(output_tensors, list):
             output_tensors = [output_tensors]
@@ -506,6 +543,10 @@ class P2PCommunicator:
     @nvtx_decorator()
     def send_backward(self, input_tensor_grads, is_first_stage: bool) -> None:
         """Send tensor to previous rank in pipeline (backward send)."""
+        if self.config.enable_hetero:
+            return send_backward_hetero(
+                input_tensor_grads, is_first_stage, self.config, partial(self._communicate)
+            )
         if not isinstance(input_tensor_grads, list):
             input_tensor_grads = [input_tensor_grads]
         config = self.config
@@ -528,6 +569,14 @@ class P2PCommunicator:
         self, output_tensors, tensor_shapes, is_last_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Batched send and recv with next rank in pipeline."""
+        if self.config.enable_hetero:
+            return send_forward_recv_backward_hetero(
+                output_tensors,
+                tensor_shapes,
+                is_last_stage,
+                self.config,
+                partial(self._communicate),
+            )
         config = self.config
         unwrap_output_tensors = False
         if not isinstance(output_tensors, list):
@@ -561,6 +610,14 @@ class P2PCommunicator:
         self, input_tensor_grads, tensor_shapes, is_first_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Batched send and recv with previous rank in pipeline."""
+        if self.config.enable_hetero:
+            return send_backward_recv_forward_hetero(
+                input_tensor_grads,
+                tensor_shapes,
+                is_first_stage,
+                self.config,
+                partial(self._communicate),
+            )
         config = self.config
         unwrap_input_tensor_grads = False
         if not isinstance(input_tensor_grads, list):
@@ -664,3 +721,130 @@ class P2PCommunicator:
         if config.timers is not None:
             config.timers('forward-backward-send-forward-backward-recv').stop()
         return input_tensor, output_tensor_grad
+
+    ########## FlagScale Begin ##########
+    def warm_up_comm_group(self):
+        """Warm up the communication group by performing a dummy send and recv."""
+        if self.config.enable_hetero:
+            self.warm_up_comm_group_hetero()
+            return
+        # NOTE(lizhiyu): For enbale config.variable_seq_lengths and pp_size > 2
+        if not self.config.variable_seq_lengths or self.pp_group.size() <= 2:
+            return
+        self.config.variable_seq_lengths = False
+        rank = torch.distributed.get_rank()
+        # This is arbitrary because the shape of the recv tensor needs
+        # to be specified when communicating.
+        # It can be changed into any other shape.
+        tensor_shape = [1]
+        to_send_tensor = torch.empty(
+            tensor_shape,
+            requires_grad=True,
+            device=cur_platform.current_device(),
+            dtype=self.config.pipeline_dtype,
+        )
+        to_recv_tensor = torch.empty(
+            tensor_shape,
+            requires_grad=True,
+            device=cur_platform.current_device(),
+            dtype=self.config.pipeline_dtype,
+        )
+
+        group_ranks = torch.distributed.get_process_group_ranks(self.pp_group)
+        pipeline_rank = self.pp_group.rank()
+        if pipeline_rank == 0:
+            self._communicate(
+                tensor_send_next=to_send_tensor,
+                tensor_send_prev=None,
+                recv_prev=False,
+                recv_next=False,
+                tensor_shape=to_recv_tensor.shape,
+                group=self.pp_group,
+            )
+        elif pipeline_rank == len(group_ranks) - 1:
+            self._communicate(
+                tensor_send_next=None,
+                tensor_send_prev=None,
+                recv_prev=True,
+                recv_next=False,
+                tensor_shape=to_recv_tensor.shape,
+                group=self.pp_group,
+            )
+        elif rank in group_ranks:
+            self._communicate(
+                tensor_send_next=to_send_tensor,
+                tensor_send_prev=None,
+                recv_prev=True,
+                recv_next=False,
+                tensor_shape=to_recv_tensor.shape,
+                group=self.pp_group,
+            )
+        self.config.variable_seq_lengths = True
+
+    def warm_up_comm_group_hetero(self):
+        """Warm up the communication for all PP groups, to avoid the hang issue.
+
+        P2P comm would call batch_isend_irecv API, which requires
+        all ranks of the group to participate if this API is the
+        first collective call in the group passed to `dist.P2POp`.
+
+        See batch_isend_irecv for more details.
+        """
+        rank = torch.distributed.get_rank()
+        # This is arbitrary because the shape of the recv tensor needs
+        # to be specified when communicating.
+        # It can be changed into any other shape.
+        tensor_shape = [1]
+        to_send_tensor = torch.empty(
+            tensor_shape,
+            requires_grad=True,
+            device=(
+                cur_platform.current_device()
+                if "cpu:gloo" != torch.distributed.get_backend(self.pp_group[0])
+                else torch.device("cpu")
+            ),
+            dtype=self.config.pipeline_dtype,
+        )
+        to_recv_tensor = torch.empty(
+            tensor_shape,
+            requires_grad=True,
+            device=(
+                cur_platform.current_device()
+                if "cpu:gloo" != torch.distributed.get_backend(self.pp_group[0])
+                else torch.device("cpu")
+            ),
+            dtype=self.config.pipeline_dtype,
+        )
+
+        for pp_g in self.pp_group:
+            group_ranks = torch.distributed.get_process_group_ranks(pp_g)
+            pipeline_rank = pp_g.rank()
+            if pipeline_rank == 0:
+                self._communicate(
+                    tensor_send_next=to_send_tensor,
+                    tensor_send_prev=None,
+                    recv_prev=False,
+                    recv_next=False,
+                    tensor_shape=to_recv_tensor.shape,
+                    group=pp_g,
+                )
+            elif pipeline_rank == len(group_ranks) - 1:
+                self._communicate(
+                    tensor_send_next=None,
+                    tensor_send_prev=None,
+                    recv_prev=True,
+                    recv_next=False,
+                    tensor_shape=to_recv_tensor.shape,
+                    group=pp_g,
+                )
+            elif rank in group_ranks:
+                self._communicate(
+                    tensor_send_next=to_send_tensor,
+                    tensor_send_prev=None,
+                    recv_prev=True,
+                    recv_next=False,
+                    tensor_shape=to_recv_tensor.shape,
+                    group=pp_g,
+                )
+
+    ########## FlagScale End ##########

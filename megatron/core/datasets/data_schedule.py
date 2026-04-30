@@ -5,6 +5,9 @@ from typing import Any, List, Optional
 import torch
 
 from megatron.core import parallel_state
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
 from megatron.core.pipeline_parallel.hybrid_cp_schedule import BalancedCPScheduler
 from megatron.core.process_groups_config import ProcessGroupCollection
 
@@ -208,12 +211,14 @@ class HybridCPDataLoaderWrapper:
         def _pack_sample_by_key(key: str) -> torch.Tensor:
             flattened_tensors = []
             for gid in send_ids_sorted:
-                t = batch[gid2local_id[gid]][key].to(torch.cuda.current_device(), non_blocking=True)
+                t = batch[gid2local_id[gid]][key].to(
+                    cur_platform.current_device(), non_blocking=True
+                )
                 flattened_tensors.append(t)
             return (
                 torch.cat(flattened_tensors, dim=0)
                 if flattened_tensors
-                else torch.empty(0, device=torch.cuda.current_device(), dtype=batch[0][key].dtype)
+                else torch.empty(0, device=cur_platform.current_device(), dtype=batch[0][key].dtype)
             )
 
         def _unpack_sample_by_key(key: str, recv_tensor: torch.Tensor):
@@ -226,7 +231,7 @@ class HybridCPDataLoaderWrapper:
         for key in data_keys:
             send_tensor = _pack_sample_by_key(key)
             recv_tensor = torch.empty(
-                sum(recv_lens_split), device=torch.cuda.current_device(), dtype=send_tensor.dtype
+                sum(recv_lens_split), device=cur_platform.current_device(), dtype=send_tensor.dtype
             )
             torch.distributed.all_to_all_single(
                 output=recv_tensor,

@@ -36,6 +36,12 @@ from megatron.core.utils import (
     nvtx_range_push,
 )
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 if TYPE_CHECKING:
     from megatron.core.inference.contexts import BaseInferenceContext
 
@@ -43,7 +49,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_transformer_layer_offset(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    is_dualpipev_first_chunk: Optional[bool] = False,
 ):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
     if pp_rank is None:
@@ -997,7 +1006,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             slen_per_cp = seq_length // self.config.context_parallel_size
             static_inputs["attention_mask"] = (
                 ~(torch.tril(torch.ones((slen_per_cp, seq_length))).bool())
-                .to(torch.cuda.current_device())
+                .to(cur_platform.current_device())
                 .reshape(1, 1, slen_per_cp, seq_length)
                 .tile(micro_batch_size, 1, 1, 1)
             )
@@ -1217,7 +1226,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 return torch.zeros(
                     (micro_batch_size, 1, slen_per_cp, slen),
                     dtype=torch.bool,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                 )
 
             if not is_te_min_version("1.10.0"):
@@ -1344,7 +1353,7 @@ class MoETransformerLayer(TransformerLayer):
                 and self.config.cuda_graph_impl == "local"
             )
             if not hasattr(self, '_router_dtoh_event'):
-                self._router_dtoh_event = torch.cuda.Event()
+                self._router_dtoh_event = cur_platform.Event()
             if not hasattr(self, 'cudagraph_manager_router'):
                 self.cudagraph_manager_router = CudaGraphManager(
                     self.config, self, function_name="_forward_mlp_router"

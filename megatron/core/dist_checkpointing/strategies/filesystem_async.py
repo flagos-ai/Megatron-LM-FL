@@ -48,6 +48,10 @@ except ImportError:
 
 _results_queue = None
 
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
 
 @_disable_gc()
 def get_write_results_queue(mp_mode: str = 'spawn') -> mp.Queue:
@@ -245,7 +249,7 @@ class FileSystemWriterAsync(FileSystemWriter):
                 del tensor
             result.append((file_name, storage_key, (bytes_data, tensor_list)))
         if non_blocking:
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
         return result
 
     @staticmethod

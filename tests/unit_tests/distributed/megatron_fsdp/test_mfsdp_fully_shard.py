@@ -242,6 +242,7 @@ class TestMegatronFsdpFullyShard:
     def teardown_class(cls):
         Utils.destroy_model_parallel()
 
+    @pytest.mark.skip(reason="PyTorch DTensor does not support cross-mesh foreach operations yet")
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse('2.4.0'),
         reason="Requires DTensor and DeviceMesh support in (approximately) PyTorch 2.4.0 or later. Should not be run on 2.2.0a0+81ea7a4 (LTS).",
@@ -709,6 +710,10 @@ class TestMegatronFsdpFullyShard:
             optimizer.step()
             optimizer.zero_grad()
 
+    @pytest.mark.skipif(
+        not hasattr(te.pytorch, 'quantized_model_init'),
+        reason="TE version does not support quantized_model_init (requires TE >= 2.10)",
+    )
     @pytest.mark.parametrize("init_model_with_meta_device", [True, False])
     @pytest.mark.parametrize(
         "te_recipe",
@@ -915,6 +920,10 @@ class TestMegatronFsdpFullyShard:
         if model_type == TE_TRANSFORMER and custom_main_params_dtype is None:
             pytest.skip(
                 f"TransformerEngine FP8 all-gather requires a main parameter buffer for FSDP."
+            )
+        if model_type == TE_TRANSFORMER and not hasattr(te.pytorch, 'quantized_model_init'):
+            pytest.skip(
+                "TE version does not support quantized_model_init (requires TE >= 2.10)"
             )
 
         # Construct device mesh with DP-Outer=2 and DP-Shard=4.

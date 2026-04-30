@@ -15,6 +15,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+from megatron.plugin.decorators import overridable
+
 
 class ParamGroupOverride(TypedDict, total=False):
     """Override values for a parameter group. These values may be optimizer-state/scheduler related.
@@ -139,6 +141,7 @@ class OptimizerParamScheduler:
         override_opt_param_scheduler: Optional[bool] = False,
         wsd_decay_steps: Optional[int] = None,
         lr_wsd_decay_style: Optional[str] = None,
+        stablelm2_scheduler_config=None,
     ) -> None:
 
         # Class values.
@@ -176,6 +179,16 @@ class OptimizerParamScheduler:
             assert not self.use_checkpoint_opt_param_scheduler, (
                 'both override and ' 'use-checkpoint are set.'
             )
+
+        self.stablelm2_scheduler_config = stablelm2_scheduler_config
+        if self.stablelm2_scheduler_config is not None:
+            ## absolute samples
+            self.stablelm2_scheduler_config.rsqrt_samples += (
+                self.stablelm2_scheduler_config.cosine_samples
+            )
+            ## N of consine
+            if self.stablelm2_scheduler_config.cosine_period_samples == 0:
+                self.stablelm2_scheduler_config.cosine_period_samples = self.lr_decay_steps
 
         # Set the learning rate
         self.step(0)
@@ -215,6 +228,7 @@ class OptimizerParamScheduler:
 
         return start_wd + coeff * delta_wd
 
+    @overridable
     def get_lr(self, param_group: dict) -> float:
         """Learning rate decay functions from:
         https://openreview.net/pdf?id=BJYwwY9ll pg. 4

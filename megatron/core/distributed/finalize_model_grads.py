@@ -19,6 +19,7 @@ from megatron.core.pipeline_parallel.utils import (
     is_pp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.plugin.decorators import overridable
 
 from .. import parallel_state
 from ..transformer.moe.moe_utils import get_updated_expert_bias
@@ -101,6 +102,13 @@ def _allreduce_conditional_embedding_grads(
     if pp_group is None:
         pp_group = parallel_state.get_pipeline_model_parallel_group()
 
+    ######### FlagScale Begin #########
+    assert not (
+        isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)
+    ), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
+    if isinstance(pp_group, list):
+        return
+    ######### FlagScale End #########
     if pp_group.size() > 1 and getattr(config, "has_cond_embedder", False):
         grads_dict = {}
         for model_chunk in model:
@@ -201,6 +209,7 @@ def _allreduce_word_embedding_grads(
     )
 
 
+@overridable
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
     embd_group: torch.distributed.ProcessGroup,

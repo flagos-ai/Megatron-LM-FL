@@ -361,6 +361,10 @@ def run_multimodule_schedule_test(
         micro_batch_size: Micro batch size
         num_microbatches: Number of microbatches
     """
+    # TE attention reads global parallel state during __init__, so we need to
+    # bootstrap it even though the actual communication uses per-grid PGs.
+    Utils.initialize_model_parallel()
+
     # Create model
     model = MultiModuleModel(encoder_configs, llm_config, hidden_size)
     model.model_type = 'unit-test'
@@ -449,6 +453,7 @@ def run_multimodule_schedule_test(
         if is_pp_last_stage(model.llm_grid.get_pg("pp")):
             assert len(losses) > 0, "Expected losses on last LLM stage"
 
+    Utils.destroy_model_parallel()
     return losses
 
 
