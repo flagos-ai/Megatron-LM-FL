@@ -20,6 +20,7 @@ from megatron.core.utils import (
     get_pg_size,
 )
 from megatron.core.distributed.finalize_model_grads import _get_main_grad_attr, _unshard_if_dtensor, _reshard_if_dtensor
+from megatron.core.transformer.transformer_config import TransformerConfig
 
 
 from megatron.plugin.utils import get_device_type_for_comm
@@ -38,6 +39,7 @@ def _allreduce_embedding_grad(
     pp_group: torch.distributed.ProcessGroup,
     weight_getter: Callable[[torch.nn.Module], Optional[torch.nn.Parameter]],
     skip_if_none: bool = True,
+    config: TransformerConfig = None,
 ):
     """Unified helper to all-reduce embedding parameters across pipeline stages.
 
@@ -67,6 +69,8 @@ def _allreduce_embedding_grad(
             model_module = model[0]
         elif is_pp_last_stage(pp_group):
             model_module = model[-1]
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
 
@@ -95,6 +99,8 @@ def _allreduce_embedding_grad(
         if is_pp_first_stage(pp_group):
             model_module = model[0]
         elif is_pp_last_stage(pp_group):
+            model_module = model[-1]
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
             model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]

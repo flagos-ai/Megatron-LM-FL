@@ -1,6 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 from gettext import ngettext
+
 import torch
 
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
@@ -8,7 +9,9 @@ from megatron.core.utils import get_tensor_model_parallel_group_if_none
 _MAX_DATA_DIM = 5
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
 
 def _check_data_types(keys, data, target_dtype):
     """Check that all the keys have the same target data type."""
@@ -84,9 +87,14 @@ def broadcast_data(keys, data, datatype, tp_group=None):
         # Check that all keys have the same data type.
         _check_data_types(keys, data, datatype)
         # Flatten the data associated with the keys
-        flatten_data = torch.cat([data[key].to(cur_platform.current_device()).contiguous().view(-1) for key in keys], dim=0)
+        flatten_data = torch.cat(
+            [data[key].to(cur_platform.current_device()).contiguous().view(-1) for key in keys],
+            dim=0,
+        )
     else:
-        flatten_data = torch.empty(total_numel, device=cur_platform.current_device(), dtype=datatype)
+        flatten_data = torch.empty(
+            total_numel, device=cur_platform.current_device(), dtype=datatype
+        )
 
     # Broadcast
     group_ranks = torch.distributed.get_process_group_ranks(group=tp_group)

@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from functools import partial
 from typing import Callable, List, Optional, Union
@@ -19,6 +19,7 @@ from megatron.core.pipeline_parallel.utils import (
     is_pp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.plugin.decorators import overridable
 
 from .. import parallel_state
 from ..transformer.moe.moe_utils import get_updated_expert_bias
@@ -30,7 +31,6 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
 )
 
-from megatron.plugin.decorators import overridable
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
     if hasattr(param, "main_grad"):
@@ -103,7 +103,9 @@ def _allreduce_conditional_embedding_grads(
         pp_group = parallel_state.get_pipeline_model_parallel_group()
 
     ######### FlagScale Begin #########
-    assert not(isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
+    assert not (
+        isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)
+    ), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
     if isinstance(pp_group, list):
         return
     ######### FlagScale End #########
@@ -199,7 +201,11 @@ def _allreduce_word_embedding_grads(
             pp_group = parallel_state.get_pipeline_model_parallel_group()
 
     _allreduce_embedding_grad(
-        model, embd_group, pp_group, partial(_get_shared_word_embedding_weight, config=config)
+        model,
+        embd_group,
+        pp_group,
+        partial(_get_shared_word_embedding_weight, config=config),
+        config=config,
     )
 
 
@@ -210,6 +216,7 @@ def _allreduce_embedding_grad(
     pp_group: torch.distributed.ProcessGroup,
     weight_getter: Callable[[torch.nn.Module], Optional[torch.nn.Parameter]],
     skip_if_none: bool = True,
+    config: TransformerConfig = None,
 ):
     """Unified helper to all-reduce embedding parameters across pipeline stages.
 
@@ -235,6 +242,9 @@ def _allreduce_embedding_grad(
         if is_pp_first_stage(pp_group):
             model_module = model[0]
         elif is_pp_last_stage(pp_group):
+            model_module = model[-1]
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
             model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
@@ -298,7 +308,11 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
     expert_bias_list = []
     for model_chunk in model:
         for module in get_attr_wrapped_model(model_chunk, 'modules')():
-            if hasattr(module, 'expert_bias'):
+            # Only update expert_bias if this module is in the training mode. There are special
+            # cases where only the student is in training mode but the teacher is in eval mode
+            # when using online knoweldge-distillation with Model-Optimizer. In this case, we want
+            # to avoid updating teacher's expert_bias.
+            if hasattr(module, 'expert_bias') and module.training:
                 tokens_per_expert_list.append(module.local_tokens_per_expert)
                 expert_bias_list.append(module.expert_bias)
     # For hybrid models with both MoE and Dense layers, this list can be empty.
@@ -396,6 +410,7 @@ def finalize_model_grads(
     model: List[torch.nn.Module],
     num_tokens: Optional[torch.Tensor] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: Optional[bool] = False,
 ):
     """
     All-reduce all model grads across DP replicas, layernorm grads for sequence parallelism,
@@ -438,7 +453,7 @@ def finalize_model_grads(
     if config.timers is not None:
         config.timers('all-grads-sync', log_level=1).start(barrier=config.barrier_with_L1_time)
     for model_chunk in model:
-        model_chunk.finish_grad_sync()
+        model_chunk.finish_grad_sync(force_all_reduce=force_all_reduce)
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
 

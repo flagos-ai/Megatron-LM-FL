@@ -28,7 +28,6 @@ MODEL_ARGS:
   --split: 100,0,0
   --tokenizer-type: HuggingFaceTokenizer
   --tokenizer-model: /home/gitlab-runner/tokenizers/qwentokenizer
-  --legacy-tokenizer: true
   --trust-remote-code: true
   --distributed-backend: nccl
   --lr: 1.0e-5
@@ -49,7 +48,6 @@ MODEL_ARGS:
   --no-check-for-nan-in-loss-and-grad: true
   --no-gradient-accumulation-fusion: true
   --attention-softmax-in-fp32: true
-  --use-mcore-models: true
   --ckpt-format: torch
   --bf16: true
   --attention-backend: unfused
@@ -60,7 +58,6 @@ MODEL_ARGS:
   --normalization: RMSNorm
   --norm-epsilon: 1e-6
   --position-embedding-type: rope
-  --no-position-embedding: true
   --rotary-base: 1000000
   --rotary-percent: 1.0
   --no-rope-fusion: true

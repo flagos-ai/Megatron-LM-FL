@@ -5,7 +5,9 @@ from typing import Dict
 import torch
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
 
 def _param_generator(cpu_optimizer):
     for group in cpu_optimizer.param_groups:
@@ -124,7 +126,7 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                     for param in _param_generator(optimizer):
                         gpu_param = self.cpu_copys_map_gpu_param[param]
                         gpu_param.data.copy_(param.data, non_blocking=True)
-                self._d2h_stream.record_event().wait(cur_platform.current_stream())
+                self._h2d_stream.record_event().wait(cur_platform.current_stream())
 
             return param_copy_back_gpu_hook
 
@@ -272,7 +274,10 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
             for param in group["params"]:
                 orig_param = param
                 cpu_copy = False
-                if (getattr(param, "is_offloading_candidate", False) or offload_params_numel < offload_threshold) and param.is_cuda:
+                if (
+                    getattr(param, "is_offloading_candidate", False)
+                    or offload_params_numel < offload_threshold
+                ) and param.is_cuda:
                     # If the param is a candidate for offloading and enven if we have not offloaded enough params, we offload it to CPU.
                     param = param.detach().clone().cpu().pin_memory()
                     offload_params_numel += param.numel()

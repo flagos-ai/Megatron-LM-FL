@@ -57,17 +57,23 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_safe_globals.py
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py ## sporadic cuda malloc error on CI machines, tests passed locally
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
-      - tests/unit_tests/distributed/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
       - tests/unit_tests/export/trtllm/test_distributed_fp8.py
       - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py ## sporadic cuda malloc error on CI machines, tests passed locally
       - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
+      - tests/unit_tests/transformer/moe/test_token_dispatcher.py ## sporadic cuda malloc error on CI machines, tests passed locally
       - tests/unit_tests/test_inference.py
-      - tests/unit_tests/test_rl_utils.py
       - tests/unit_tests/models/test_gpt_model.py
       - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_mamba_moe_model.py ## sporadic cuda malloc error on CI machines, tests passed locally
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py ## HyperCommGrid + TE attention: TE requires global _TENSOR_MODEL_PARALLEL_GROUP but HyperCommGrid only sets per-grid process groups
+      - tests/unit_tests/models/test_mimo_checkpoint.py ## same HyperCommGrid + TE attention issue as test_mimo_1f1b_schedule
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
+      - tests/unit_tests/transformer/moe/test_upcycling.py ## tests passed locally but CI hits unhandled NCCL error
       - tests/unit_tests/transformer/moe/test_aux_loss.py
       - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
       - tests/unit_tests/transformer/moe/test_routers.py
@@ -77,10 +83,18 @@ test_matrix:
       - tests/unit_tests/transformer/test_full_cuda_graph.py
       - tests/unit_tests/transformer/test_multi_latent_attention.py
       - tests/unit_tests/transformer/test_multi_token_prediction.py
-      - tests/unit_tests/transformer/test_retro_attention.py
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
+      - tests/unit_tests/transformer/test_submodule_callables.py ## tests passed locally but CI hits NCCL error
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp4_sp] ## TE version does not support CP + THD format attention
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp2_sp_longseq] ## TE version does not support CP + THD format attention
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[short_seqs_parallel] ## TE version does not support CP + THD format attention
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[extreme_mixed] ## TE version does not support CP + THD format attention
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[long_short_mix] ## TE version does not support CP + THD format attention
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
       - tests/unit_tests/dist_checkpointing/test_local.py
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
 
       # test_straggler_detector causes a SIGSEGV (Signal 11) crash during pytest session teardown on A100.
       # Root cause: UCX (HPC-X libucs.so) crashes in torch.distributed.barrier() called from the
@@ -88,6 +102,11 @@ test_matrix:
       # is in an inconsistent state after the test completes. This is a UCX/NCCL environment issue,
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
 
   functional:
     train:

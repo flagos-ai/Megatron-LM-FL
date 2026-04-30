@@ -246,7 +246,7 @@ class ProcessMesh:
         self._order = order
         self._offset = offset
         self._args = args
-        self.create_gloo_process_groups = args.enable_gloo_process_groups
+        self.create_gloo_process_groups = getattr(args, 'use_gloo_process_groups', True)
 
         self._timeout = timedelta(minutes=distributed_timeout_minutes)
         self._rank = torch.distributed.get_rank()
@@ -1672,7 +1672,7 @@ class ParallelContext:
 
         def _build_optimzer_config(args):
             # Use specific optimizer config class based on optimizer type, matching Megatron-LM-FL behavior
-            from megatron.training.utils import get_megatron_optimizer_config
+            from megatron.training.training import get_megatron_optimizer_config
             config, config_overrides = get_megatron_optimizer_config(args)
             return config, config_overrides
 

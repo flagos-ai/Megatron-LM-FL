@@ -1,6 +1,8 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import os
+import gc
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -42,7 +44,10 @@ def pytest_sessionfinish(session, exitstatus):
 def cleanup():
     yield
     if torch.distributed.is_initialized():
-        torch.distributed.barrier()
+        try:
+            torch.distributed.barrier(timeout=timedelta(seconds=300))
+        except Exception:
+            return
         torch.distributed.destroy_process_group()
 
 
@@ -82,7 +87,7 @@ def ensure_test_data():
 
         try:
             # Download assets to /opt/data
-            download_and_extract_asset(assets_dir=str(data_path))
+            download_and_extract_asset(assets_dir=data_path)
 
             print("Test data downloaded successfully.")
 
@@ -108,3 +113,12 @@ def reset_env_vars():
     # After the test, restore the original environment
     os.environ.clear()
     os.environ.update(original_env)
+
+
+@pytest.fixture(autouse=True)
+def cleanup_gpu_memory():
+    """Clean up GPU memory after each test to prevent OOM in CI."""
+    yield
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()

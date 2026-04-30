@@ -44,6 +44,7 @@ except ImportError:
     HAVE_NVRX = False
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 
 

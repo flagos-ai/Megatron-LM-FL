@@ -64,8 +64,6 @@ test_matrix:
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_optimizer.py ## RuntimeError: No CUDA GPUs are available
       - tests/unit_tests/test_utils.py
-      - tests/unit_tests/test_rl_utils.py
-      - tests/unit_tests/test_rl_inference_megatron.py
 
       # 2.models
       # ZeroDivisionError: integer modulo by zero
@@ -74,6 +72,10 @@ test_matrix:
       - tests/unit_tests/models/test_mamba_model.py
 
       # 3.transformer
+      # TE _extra_state compatibility issue with AbsorbedMLA
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      # Precision issues with DSA attention variant
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
       # ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/transformer/test_attention_no_rope.py
       - tests/unit_tests/transformer/test_attention_packed_seq.py
@@ -81,7 +83,6 @@ test_matrix:
       - tests/unit_tests/transformer/test_mlp.py
       - tests/unit_tests/transformer/test_multi_latent_attention.py
       - tests/unit_tests/transformer/test_multi_token_prediction.py
-      - tests/unit_tests/transformer/test_retro_attention.py
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
       - tests/unit_tests/transformer/test_transformer_block.py
       - tests/unit_tests/transformer/test_utils.py
@@ -112,7 +113,10 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py
       # Parent directory /tmp/pytest-of-root/tmp_dist_ckpt does not exist.
       - tests/unit_tests/dist_checkpointing/test_safe_globals.py
@@ -124,10 +128,8 @@ test_matrix:
       - tests/unit_tests/distributed/test_distributed_data_parallel.py
       - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
-      - tests/unit_tests/distributed/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py
       - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
-      - tests/unit_tests/distributed/fsdp/test_mfsdp_fully_shard.py
 
       # 7.export
       - tests/unit_tests/export/trtllm/test_distributed_fp8.py
@@ -147,7 +149,6 @@ test_matrix:
       # === Need >2 GPU（model_size > 2） ===
       # core: tp=2,pp=4 or tp=world_size
       - tests/unit_tests/test_parallel_state.py
-      - tests/unit_tests/test_tokenizer.py ## No module named 'nltk'
       - tests/unit_tests/test_hyper_comm_grid.py
 
       # models: tp≥4
@@ -156,6 +157,7 @@ test_matrix:
       # transformer: tp*pp>2 or ep>2
       - tests/unit_tests/transformer/test_transformer_layer.py
       - tests/unit_tests/transformer/test_submodule_callables.py
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       - tests/unit_tests/transformer/moe/test_sequential_mlp.py
       - tests/unit_tests/transformer/moe/test_token_dispatcher.py
       # tensor_parallel: tp≥4 or tp*pp=8
@@ -172,7 +174,6 @@ test_matrix:
       - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
       # distributed: pp=4
       - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
-      - tests/unit_tests/distributed/fsdp/test_mfsdp_fully_shard.py
       # dist_checkpointing: tp*pp=8
       - tests/unit_tests/dist_checkpointing/test_serialization.py
       - tests/unit_tests/dist_checkpointing/test_strict.py
@@ -180,7 +181,6 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_msc.py
       - tests/unit_tests/dist_checkpointing/test_torch_dist.py
       - tests/unit_tests/dist_checkpointing/test_replication.py
-      - tests/unit_tests/dist_checkpointing/test_flattened_resharding.py
       # ssm: cp≥4 or tp=4
       - tests/unit_tests/ssm/test_mamba_mixer.py
       - tests/unit_tests/ssm/test_mamba_context_parallel.py

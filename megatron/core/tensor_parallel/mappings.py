@@ -19,6 +19,7 @@ except:
     dist_reduce_scatter_func = torch.distributed._reduce_scatter_base
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 
 

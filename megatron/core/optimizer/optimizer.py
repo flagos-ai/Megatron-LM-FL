@@ -5,7 +5,6 @@
 import copy
 import logging
 import math
-from re import M
 import warnings
 from abc import ABC, abstractmethod
 from itertools import chain
@@ -13,6 +12,7 @@ from logging import getLogger
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
 import torch
+from typing_extensions import override
 
 try:
     from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_scale
@@ -37,6 +37,8 @@ except ImportError:
         multi_tensor_applier = local_multi_tensor_applier
         multi_tensor_scale_impl = local_multi_tensor_scale
 
+from megatron.plugin.decorators import overridable
+
 from .. import parallel_state, tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..dist_checkpointing.mapping import ShardedStateDict
@@ -52,12 +54,12 @@ from .clip_grads import clip_grad_by_total_norm_fp32, count_zeros_fp32, get_grad
 from .grad_scaler import MegatronGradScaler
 from .optimizer_config import OptimizerConfig
 
-from megatron.plugin.decorators import overridable
-
 logger = getLogger(__name__)
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
 
 def _zero_grad_group_helper(
     group: List[torch.nn.Parameter], set_to_none: bool, use_decoupled_grad: bool = False
@@ -98,7 +100,14 @@ def _multi_tensor_copy_this_to_that(
             that_.copy_(this_)
 
 
-param_group_identifier_keys = ('wd_mult', 'lr_mult', 'is_expert_parallel', 'is_decoupled_lr', 'use_muon', 'is_vision_model_param', 'is_engram_parallel') ####FlagScale add is_vision_model_param
+param_group_identifier_keys = (
+    'wd_mult',
+    'lr_mult',
+    'is_expert_parallel',
+    'is_decoupled_lr',
+    'is_vision_model_param',
+    'is_engram_parallel',
+)  ####FlagScale add is_vision_model_param
 
 
 class MegatronOptimizer(ABC):
@@ -158,7 +167,9 @@ class MegatronOptimizer(ABC):
                 grad = param.grad
             grad_not_none = grad is not None
             is_not_shared = param_is_not_shared(param)
-            is_not_tp_duplicate = tensor_parallel.param_is_not_tensor_parallel_duplicate(param)
+            is_not_tp_duplicate = tensor_parallel.param_is_not_tensor_parallel_duplicate(
+                param, getattr(self, 'tp_group', None)
+            )
             if grad_not_none and is_not_shared and is_not_tp_duplicate:
                 grads_for_norm.append(grad)
 
@@ -230,6 +241,7 @@ class MegatronOptimizer(ABC):
             params,
             grad_stats_parallel_group=self.get_grad_stats_parallel_group(),
             use_decoupled_grad=self.config.use_precision_aware_optimizer_no_fp8_or_ds_fp8,
+            tp_group=getattr(self, 'tp_group', None),
         )
 
     @abstractmethod
@@ -472,7 +484,9 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         # Note that we keep this for the cases that grad scaler is none.
         # We still record nan/inf if we have a bfloat16 with a grad scaler.
         if self.grad_scaler:
-            self.found_inf = torch.tensor([0.0], dtype=torch.float, device=cur_platform.device_name())
+            self.found_inf = torch.tensor(
+                [0.0], dtype=torch.float, device=cur_platform.device_name()
+            )
 
         # Dummy tensor needed for apex multi-apply tensor.
         # For bfloat, we don't have multi-tensor apply and for now
@@ -480,11 +494,15 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.config.bf16:
             self._dummy_overflow_buf = None
         else:
-            self._dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
+            self._dummy_overflow_buf = torch.tensor(
+                [0], dtype=torch.int, device=cur_platform.device_name()
+            )
 
         # In case grad scaler is not passed, define the unity scale.
         if self.grad_scaler is None:
-            self._scale_one = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device_name())
+            self._scale_one = torch.tensor(
+                [1.0], dtype=torch.float, device=cur_platform.device_name()
+            )
 
     def get_loss_scale(self):
         if self.grad_scaler is None:
@@ -673,8 +691,8 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                         # float16 params:
                         # cuda check -> platform check
                         if param.device.type == cur_platform.device_name() and param.dtype in (
-                                torch.float16,
-                                torch.bfloat16,
+                            torch.float16,
+                            torch.bfloat16,
                         ):
                             float16_params_this_group.append(param)
                             # Create a copy
@@ -694,7 +712,10 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             if param in self.optimizer.state:
                                 self.optimizer.state[main_param] = self.optimizer.state.pop(param)
                         # fp32 params.
-                        elif param.device.type == cur_platform.device_name() and param.dtype == torch.float32:
+                        elif (
+                            param.device.type == cur_platform.device_name()
+                            and param.dtype == torch.float32
+                        ):
                             fp32_params_this_group.append(param)
                             param_group['params'][i] = param
 
@@ -1128,6 +1149,14 @@ class ChainedOptimizer(MegatronOptimizer):
             param_groups += optimizer.param_groups
         return param_groups
 
+    @override
+    def get_parameters(self) -> List[torch.nn.Parameter]:
+        """Get list of parameters wrapped in all chained optimizers."""
+        params = []
+        for optimizer in self.chained_optimizers:
+            params.extend(optimizer.get_parameters())
+        return params
+
     @property
     def state(self) -> ProxyDict:
         """
@@ -1188,9 +1217,13 @@ class ChainedOptimizer(MegatronOptimizer):
             return [optimizer.state_dict() for optimizer in self.chained_optimizers]
 
     def sharded_state_dict(
-        self, model_sharded_state_dict: ShardedStateDict, is_loading: bool = False, convert_to_ep: bool = False, **kwargs
+        self,
+        model_sharded_state_dict: ShardedStateDict,
+        is_loading: bool = False,
+        convert_to_ep: bool = False,
+        **kwargs,
     ):
-        self.convert_to_ep = convert_to_ep ########## FlagScale Add ########
+        self.convert_to_ep = convert_to_ep  ########## FlagScale Add ########
         metadata = kwargs.get('metadata') or {}
         # ChainedOptimizer should add its prefix to the tensor state keys only if
         # DistributedOptimizer is used (non-empty 'distrib_optim_sharding_type') and uses
@@ -1213,7 +1246,7 @@ class ChainedOptimizer(MegatronOptimizer):
             if convert_to_ep and is_loading:
                 logger.info(
                     "sharded_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
-                    )
+                )
                 # convert tp/pp chained_optimizers to ep chained_optimizers
                 sharded_state_dict = {}
                 fake_sharded_state_dict = {
@@ -1253,7 +1286,7 @@ class ChainedOptimizer(MegatronOptimizer):
                 self.mapping_idx = mapping_idx
                 return fake_sharded_state_dict
             ######### FlagScale End #########
-            else: # megatron source apply ep
+            else:  # megatron source apply ep
                 self._synchronize_steps()
                 sharded_state_dict = {}
                 for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
@@ -1435,7 +1468,7 @@ class ChainedOptimizer(MegatronOptimizer):
 
             # Lazy loading checkpoint, state dict is needed only when DP rank = 0.
             if optimizer.data_parallel_group.rank() == 0 and states is None:
-                states = torch.load(filename, weights_only=False)
+                states = torch.load(filename)
 
             state_dict = states[idx] if states else None
             optimizer.load_parameter_state_from_dp_zero(

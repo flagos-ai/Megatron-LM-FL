@@ -1,18 +1,20 @@
 name: Auto Update Copy PR Bot
 
 on:
-#   schedule:
-#     - cron: "0 0 * * *"
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:
+  schedule:
+    - cron: "0 0 * * *"
 
 jobs:
   auto-update-copy-pr-bot:
     runs-on: ubuntu-latest
-    environment: nemo-ci
     if: github.repository == 'NVIDIA/Megatron-LM'
     steps:
       - name: Checkout code
-        uses: actions/checkout@v3
+        uses: actions/checkout@v6
+        with:
+          token: ${{ secrets.PAT }}
+          ref: main
 
       - name: Fetch list of members in mcore-reviewers team
         shell: bash -euxo pipefail {0}

@@ -1,3 +1,4 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import os
 from datetime import timedelta
 
@@ -6,24 +7,6 @@ from torch._C._distributed_c10d import PrefixStore
 from torch.distributed import rendezvous
 
 import megatron.core.parallel_state as ps
-
-
-def _get_device_backend():
-
-    platform = os.environ.get('MEGATRON_TEST_PLATFORM', 'cuda').strip().lower()
-    
-    #choose device and distributed backend based on platform
-    match platform:
-        case 'metax':
-            return 'cuda', 'mccl'
-        case _:  
-            return 'cuda', 'nccl'
-            # raise ValueError(
-            #     f"Unsupported platform: {platform}! "
-            #     "Currently supported platforms are: cuda, metax. Please add adaptation code for other platforms."
-            # )
-        
-DEVICE_TYPE, DIST_BACKEND = _get_device_backend()
 
 
 class TestModel(torch.nn.Module):
@@ -45,8 +28,8 @@ class TestModel(torch.nn.Module):
 
 class Utils:
 
-    world_size = int(os.environ['WORLD_SIZE'])
-    rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    rank = int(os.environ.get('LOCAL_RANK', '0'))
     inited = False
     store = None
 
@@ -62,10 +45,7 @@ class Utils:
                 f'Initializing torch.distributed with rank: {Utils.rank}, '
                 f'world_size: {Utils.world_size}'
             )
-            # Set the device before initializing torch.distributed since the initialization
-            device_module = getattr(torch, DEVICE_TYPE)  # torch.cuda / torch.npu
-            device_module.set_device(Utils.rank % device_module.device_count())
-            # torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
+            torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
             init_method = 'tcp://'
             master_ip = os.getenv('MASTER_ADDR', 'localhost')
             master_port = os.getenv('MASTER_PORT', '6000')
@@ -82,8 +62,7 @@ class Utils:
             Utils.store = store
 
             torch.distributed.init_process_group(
-                # backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store  
-                backend=DIST_BACKEND, world_size=Utils.world_size, rank=Utils.rank, store=store
+                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
             torch.distributed.barrier()
@@ -91,7 +70,7 @@ class Utils:
 
     @staticmethod
     def set_world_size(world_size=None, rank=None):
-        Utils.world_size = getattr(torch, DEVICE_TYPE).device_count() if world_size is None else world_size
+        Utils.world_size = torch.cuda.device_count() if world_size is None else world_size
         if (
             torch.distributed.is_initialized()
             and Utils.world_size != torch.distributed.get_world_size()
@@ -112,7 +91,16 @@ class Utils:
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
         if not Utils.inited:
             return
-        torch.distributed.barrier()
+
+        try:
+            # Flush pending CUDA work before the barrier so slow ranks don't
+            # time out while fast ranks tear down process groups.
+            # NOTE(zhaoyinglia): there is not keyword argument 'timeout' in torch.distributed.barrier()
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
+        except Exception:
+            Utils.inited = False
+            return
         ps.destroy_model_parallel()
         Utils.inited = False
 

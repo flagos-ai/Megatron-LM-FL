@@ -16,5 +16,10 @@ onelogger.err
 runs/
 /test_cases/
 **/dist/
-# Mac OS
-.DS_Store
+
+# Sphinx documentation
+docs/_build
+docs/apidocs
+
+# Git worktrees
+.worktrees/

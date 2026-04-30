@@ -8,6 +8,12 @@ import torch
 
 from megatron.core.tensor_parallel.random import get_all_rng_states
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 logger = logging.getLogger(__name__)
 
 # The below functions traverse through nested data structures (tuples, lists, dicts)
@@ -15,8 +21,6 @@ logger = logging.getLogger(__name__)
 # detached from the computation graph, and moved to CUDA device. Non-tensor objects
 # are returned as-is.
 
-from megatron.plugin.platform import get_platform
-cur_platform = get_platform()
 
 def copy_tensors_in_struct(src):
     """Copy src to new tensors."""
@@ -27,7 +31,7 @@ def copy_tensors_in_struct(src):
     elif isinstance(src, dict):
         return {k: copy_tensors_in_struct(src[k]) for k in src}
     elif isinstance(src, torch.Tensor):
-        return src.clone().detach().to(cur_platform.device())
+        return src.clone().detach().cuda()
     else:
         return src
 
@@ -72,6 +76,7 @@ class StaticBufferLoader:
 
         assert isinstance(inputs, dict)
         if microbatch == len(StaticBufferLoader.static_buffers[stage]):
+            self.stream.wait_stream(cur_platform.current_stream())
             with cur_platform.stream(self.stream):
                 StaticBufferLoader.static_buffers[stage].append(copy_tensors_in_struct(inputs))
         else:
@@ -80,11 +85,12 @@ class StaticBufferLoader:
                 if k not in StaticBufferLoader.static_buffers[stage][microbatch]:
                     if isinstance(inputs[k], torch.Tensor):
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = torch.empty_like(
-                            inputs[k], device=cur_platform.device_name()
+                            inputs[k], device="cuda"
                         )
                     else:
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = inputs[k]
 
+            self.stream.wait_stream(cur_platform.current_stream())
             with cur_platform.stream(self.stream):
                 clone_tensors_in_struct(
                     StaticBufferLoader.static_buffers[stage][microbatch], inputs
@@ -181,7 +187,7 @@ class FullCudaGraphWrapper:
                 )
             cur_platform.synchronize()
             torch.distributed.barrier()
-            logger.info(f'CUDA graph capture done!!!')
+            logger.info(f'CUDA graph capture done for {training_str}!!!')
 
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)

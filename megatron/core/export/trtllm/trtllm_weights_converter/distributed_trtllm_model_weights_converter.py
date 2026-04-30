@@ -20,7 +20,9 @@ except ImportError:
     HAVE_TQDM = False
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
 
 def str_dtype_to_torch(dtype: DataType):
     """Get torch datatype from input datatype"""

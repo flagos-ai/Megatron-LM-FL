@@ -35,6 +35,8 @@ def _is_in_embd_group(self):
         if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
             self.embd_group
         ):
+            if getattr(self, 'mtp_process', False):
+                return True
             if (
                 torch.distributed.get_rank()
                 == torch.distributed.get_process_group_ranks(self.embd_group)[0]
@@ -57,6 +59,8 @@ def _is_in_embd_group(self):
         if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
             self.embd_group[0]
         ):
+            if getattr(self, 'mtp_process', False):
+                return True
             if (
                 torch.distributed.get_rank()
                 == torch.distributed.get_process_group_ranks(self.embd_group[0])[0]
@@ -85,13 +89,37 @@ def setup_embeddings_and_output_layer(self) -> None:
     This function initalizes word embeddings in the final stage when we are
     using pipeline parallelism and sharing word embeddings, and sets up param
     attributes on the embedding and output layers.
+
+    Parameter attributes set:
+    - `is_embedding_or_output_parameter`: True for embedding + output layer weights.
+      Used by decoupled_lr, Muon optimizer, and other Megatron features.
+    - `is_embedding_parameter`: True for MuP "embedding-class" parameters.
+      Used by MuP for table-8 style optimizer grouping (base LR/eps for vector-like params).
     """
     logger.debug(f"Megatron-LM-FL Plugins: setup_embeddings_and_output_layer")
-    # Set `is_embedding_or_output_parameter` attribute.
-    if self.pre_process:
+
+    # Mark embedding and output layer for decoupled_lr and other features.
+    if self.pre_process and hasattr(self, 'embedding'):
         self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
-    if self.post_process and self.output_layer.weight is not None:
+    if (
+        self.post_process
+        and hasattr(self, 'output_layer')
+        and self.output_layer.weight is not None
+    ):
         self.output_layer.weight.is_embedding_or_output_parameter = True
+
+    # Mark embedding-class parameters for MuP optimizer grouping.
+    mtp_process = getattr(self, 'mtp_process', False)
+    if self.config.use_mup and (self.pre_process or mtp_process) and hasattr(self, 'embedding'):
+        for param in self.embedding.parameters():
+            param.is_embedding_parameter = True
+    if (
+        self.config.use_mup
+        and self.post_process
+        and hasattr(self, 'output_layer')
+        and self.output_layer.weight is not None
+    ):
+        self.output_layer.weight.is_embedding_parameter = True
 
     # If share_embeddings_and_output_weights is True, we need to maintain duplicated
     # embedding weights in post processing stage. If use Multi-Token Prediction (MTP),
@@ -119,7 +147,7 @@ def setup_embeddings_and_output_layer(self) -> None:
     ):
         self.shared_embedding_or_output_weight().shared_embedding = True
 
-    if (self.post_process or getattr(self, 'mtp_process', False)) and not self.pre_process:
+    if ((self.post_process and self.share_embeddings_and_output_weights) or getattr(self, 'mtp_process', False)) and not self.pre_process:
         assert not (
             is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(self.pp_group)
         )
@@ -129,6 +157,9 @@ def setup_embeddings_and_output_layer(self) -> None:
         weight.data.fill_(0)
         weight.shared = True
         weight.shared_embedding = True
+        # Keep optimizer grouping consistent for tied embedding/output copies.
+        if self.config.use_mup:
+            weight.is_embedding_parameter = True
 
     # Parameters are shared between the word embeddings layers, and the
     # heads at the end of the model. In a pipelined setup with more than
@@ -146,7 +177,7 @@ def setup_embeddings_and_output_layer(self) -> None:
     # Ensure that first and last stages have the same initial parameter
     # values.
     if torch.distributed.is_initialized():
-        if self._is_in_embd_group():
+        if self._is_in_embd_group() and not self.config.init_model_with_meta_device:
             weight = self.shared_embedding_or_output_weight()
             weight.data = weight.data.to(cur_platform.device())
             embedding_group = self.embd_group

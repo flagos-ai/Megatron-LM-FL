@@ -2,16 +2,15 @@
 
 
 MAJOR = 0
-MINOR = 1
-PATCH = 0
-PRE_RELEASE = ''
-LOCAL = 'megatron0.15.0rc7'
+MINOR = 17
+PATCH = 1
+PRE_RELEASE = ""
 
 # Use the following formatting: (major, minor, patch, pre-release)
 VERSION = (MAJOR, MINOR, PATCH, PRE_RELEASE)
 
 __shortversion__ = '.'.join(map(str, VERSION[:3]))
-__version__ = '.'.join(map(str, VERSION[:3])) + ''.join(VERSION[3:]) + (f'+{LOCAL}' if LOCAL else '')
+__version__ = '.'.join(map(str, VERSION[:3])) + ''.join(VERSION[3:])
 
 __package_name__ = 'megatron_core'
 __contact_names__ = 'NVIDIA'

@@ -1,14 +1,14 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
-from re import M
 import warnings
-from copy import deepcopy
+from copy import copy
 from typing import Optional
 
 import torch
 import torch.nn.functional as F
 
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl
@@ -21,14 +21,21 @@ from megatron.core.tensor_parallel.mappings import (
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.moe.moe_utils import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.typed_torch import apply_module
 from megatron.core.utils import (
     is_te_min_version,
     is_torch_min_version,
     make_sharded_tensor_for_checkpoint,
 )
-
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
+if HAVE_TE:
+    from megatron.core.extensions.transformer_engine import TELinear, set_save_original_input
+else:
+    TELinear, set_save_original_input = None, None
+
 
 class SharedExpertMLP(MLP):
     """
@@ -46,13 +53,13 @@ class SharedExpertMLP(MLP):
         gate: bool,
         pg_collection: Optional[ProcessGroupCollection] = None,
     ):
-        config = deepcopy(config)
+        config = copy(config)
         assert config.add_bias_linear == False, "bias is not supported in the shared experts, "
         "please set '--disable-bias-linear' instead."
 
         config.ffn_hidden_size = config.moe_shared_expert_intermediate_size
         # TODO(Hepteract): pass pg_collection to MLP after refactoring MLP
-        super().__init__(config=config, submodules=submodules)
+        super().__init__(config=config, submodules=submodules, tp_group=pg_collection.tp)
 
         self.use_shared_expert_gate = gate
         if self.use_shared_expert_gate:
@@ -65,9 +72,11 @@ class SharedExpertMLP(MLP):
         else:
             self.gate_weight = None
 
-        if (self.config.fp8 and is_te_min_version("2.6.0dev0")) or (
-            self.config.fp4 and is_te_min_version("2.7.0.dev0")
-        ):
+        if (
+            self.config.fp8
+            and self.config.fp8_recipe != 'delayed'
+            and is_te_min_version("2.6.0dev0")
+        ) or (self.config.fp4 and is_te_min_version("2.7.0.dev0")):
             # For fp8/fp4 training, the output of pre_mlp_layernorm is saved by router, and
             # the shared expert linear_fc1 also saves the quantized tensor of this output.
             # Here we set the linear_fc1 to save the original input tensors to avoid the extra
@@ -76,19 +85,8 @@ class SharedExpertMLP(MLP):
                 config.recompute_granularity == 'selective'
                 and "shared_experts" in config.recompute_modules
             )
-            if not shared_experts_recompute:
-                try:
-                    HAVE_TE = True
-                    from megatron.core.extensions.transformer_engine import (
-                        TELinear,
-                        set_save_original_input,
-                    )
-                except ImportError:
-                    HAVE_TE = False
-                    TELinear, set_save_original_input = None, None
-
-                if HAVE_TE and isinstance(self.linear_fc1, TELinear):
-                    set_save_original_input(self.linear_fc1)
+            if not shared_experts_recompute and HAVE_TE and isinstance(self.linear_fc1, TELinear):
+                set_save_original_input(self.linear_fc1)
 
         if self.config.moe_shared_expert_overlap:
             # disable TP related AG/RS communications in the linear module
@@ -123,7 +121,7 @@ class SharedExpertMLP(MLP):
             if self.stream is None:
                 self.stream = cur_platform.Stream()
 
-    def forward(self, hidden_states):
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward function"""
         output, _ = super().forward(hidden_states)
         if self.use_shared_expert_gate:
@@ -142,7 +140,11 @@ class SharedExpertMLP(MLP):
             state_dict = self.state_dict(prefix='', keep_vars=True)
             sub_sd = {
                 f'{prefix}{name}': make_sharded_tensor_for_checkpoint(
-                    state_dict[name], f'{prefix}{name}', prepend_offsets=sharded_offsets
+                    state_dict[name],
+                    f'{prefix}{name}',
+                    prepend_offsets=sharded_offsets,
+                    tp_group=self.tp_group,
+                    dp_cp_group=metadata['dp_cp_group'],
                 )
             }
             sharded_state_dict.update(sub_sd)
@@ -181,7 +183,9 @@ class SharedExpertMLP(MLP):
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with cur_platform.stream(self.stream):
             # [s, b, 4 * h/p]
-            intermediate_parallel, bias_parallel = self.linear_fc1(self.cached_fc1_input)
+            intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
+                self.cached_fc1_input
+            )
             self.cached_fc1_input = None
 
             if self.config.use_te_activation_func:
@@ -232,7 +236,7 @@ class SharedExpertMLP(MLP):
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with cur_platform.stream(self.stream):
             # [s, b, h]
-            self.cached_fc2_output, _ = self.linear_fc2(self.cached_fc2_input)
+            self.cached_fc2_output, _ = apply_module(self.linear_fc2)(self.cached_fc2_input)
             self.cached_fc2_input = None
 
     def post_forward_comm(self):

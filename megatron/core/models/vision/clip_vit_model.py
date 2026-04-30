@@ -22,7 +22,9 @@ except:
     NORM_IMPL = torch.nn.LayerNorm
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
 
 # Note: This is under development and is missing features like position embedding interpolation.
 class CLIPViTModel(VisionModule):

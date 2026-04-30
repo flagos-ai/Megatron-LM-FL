@@ -24,6 +24,7 @@ logger = getLogger(__name__)
 from dataclasses import fields
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 
 
@@ -204,7 +205,9 @@ def verify_global_md_reuse(
                 f"local_verify_reuse is False: diffs -"
                 f" {_compare_dataclasses(local_plan, loaded_all_plans[rank])}"
             )
-        all_results = torch.tensor([local_verify_reuse], dtype=torch.int, device=cur_platform.device_name())
+        all_results = torch.tensor(
+            [local_verify_reuse], dtype=torch.int, device=cur_platform.device_name()
+        )
         torch.distributed.all_reduce(all_results, op=torch.distributed.ReduceOp.MIN)
         # Check if all reduced results are True
         global_md_verify_reuse = all_results.item() == 1

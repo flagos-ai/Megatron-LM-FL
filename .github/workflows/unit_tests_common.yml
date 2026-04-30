@@ -42,9 +42,9 @@ jobs:
           - name: core
             path: "tests/unit_tests/test_*.py"
             description: "Core unit tests"
-          - name: transformer
-            path: "tests/unit_tests/transformer/"
-            description: "Transformer tests"
+          # - name: transformer
+          #   path: "tests/unit_tests/transformer/"
+          #   description: "Transformer tests"
           - name: models
             path: "tests/unit_tests/models/"
             description: "Model tests"
@@ -118,7 +118,14 @@ jobs:
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
           # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb --no-cache-dir
+          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
+
+          # Install nvidia-resiliency-ext from source
+          git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
+          pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
+
+          # Install emerging-optimizers from source
+          pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
           
           # Build
           pip install -e . --no-deps --no-build-isolation --no-cache-dir

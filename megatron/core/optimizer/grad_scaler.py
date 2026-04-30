@@ -8,13 +8,17 @@ from typing import Dict
 import torch
 
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+
 
 class MegatronGradScaler(ABC):
     def __init__(self, initial_scale: float):
         """Initialize scale value with the input initial scale."""
         assert initial_scale > 0.0
-        self._scale = torch.tensor([initial_scale], dtype=torch.float, device=cur_platform.device_name())
+        self._scale = torch.tensor(
+            [initial_scale], dtype=torch.float, device=cur_platform.device_name()
+        )
 
     @property
     def scale(self):
@@ -87,13 +91,19 @@ class DynamicGradScaler(MegatronGradScaler):
         # Lower bound on the scale.
         assert min_scale > 0.0
         assert min_scale <= initial_scale
-        self.min_scale = torch.tensor([min_scale], dtype=torch.float, device=cur_platform.device_name())
+        self.min_scale = torch.tensor(
+            [min_scale], dtype=torch.float, device=cur_platform.device_name()
+        )
         # Growth and backoff factors for the scale.
         assert growth_factor > 1.0
-        self.growth_factor = torch.tensor([growth_factor], dtype=torch.float, device=cur_platform.device_name())
+        self.growth_factor = torch.tensor(
+            [growth_factor], dtype=torch.float, device=cur_platform.device_name()
+        )
         assert backoff_factor < 1.0
         assert backoff_factor > 0.0
-        self.backoff_factor = torch.tensor([backoff_factor], dtype=torch.float, device=cur_platform.device_name())
+        self.backoff_factor = torch.tensor(
+            [backoff_factor], dtype=torch.float, device=cur_platform.device_name()
+        )
         # Interval over which if we don't see any inf/nan,
         # we will scale the grad scale by the growth factor.
         assert growth_interval > 0
