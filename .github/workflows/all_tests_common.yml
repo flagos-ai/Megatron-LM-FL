@@ -123,7 +123,7 @@ jobs:
 
   functional_tests:
     name: functional_tests
-    if: inputs.run_functional_tests
+    if: always() && inputs.run_functional_tests && needs.lint.result == 'success' && (inputs.run_unit_tests == false || needs.unit_tests_complete.result == 'success' || needs.unit_tests_complete.result == 'skipped')
     needs:
       - checkout_and_config
       - lint

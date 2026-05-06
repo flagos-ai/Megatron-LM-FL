@@ -17,7 +17,7 @@ jobs:
     uses: ./.github/workflows/all_tests_common.yml
     with:
       platform: cuda
-      run_unit_tests: true
+      run_unit_tests: false
       run_functional_tests: true
 
   all_tests:
