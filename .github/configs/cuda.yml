@@ -106,6 +106,9 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      # A100 CI hits an NCCL ALLREDUCE watchdog timeout followed by UCX/libucs SIGSEGV while
+      # re-initializing TP/PP process groups in this dist checkpointing reconfiguration case.
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModelReconfiguration::test_parallel_reconfiguration_e2e[False-tp-dp-pp-tp-dp-pp-src_tp_pp3-dest_tp_pp3-True-get_gpt_layer_with_transformer_engine_spec-get_gpt_layer_with_transformer_engine_spec]
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
 
   functional:
