@@ -185,16 +185,16 @@ jobs:
           # Coverage setup
           COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
           RUNNER_CMD="-m pytest"
-          MARKER_EXPR=""
+          MARKER_OPTS=()
           if [ "$PLATFORM" = "cuda" ]; then
-            MARKER_EXPR="-m not flaky_in_dev"
+            MARKER_OPTS=(-m "not flaky_in_dev")
           fi
           mkdir -p "$COVERAGE_DIR"
           printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
             "$GITHUB_WORKSPACE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
           RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
           
-          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS $MARKER_EXPR -p no:randomly
+          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
           exit_code=$?
 
           # Combine coverage fragments and generate JSON report
