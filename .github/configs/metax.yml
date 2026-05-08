@@ -80,6 +80,9 @@ test_matrix:
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp4_to_dp1_llm_tp2_pp2_8gpu
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_out_dp1_to_dp4_enc_tp2_pp2_8gpu
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp2_to_dp1_llm_pp3_8gpu
+      # Metax C500 MIMO checkpoint follows the same HyperCommGrid + TE attention path and fails with
+      # "tensor model parallel group is not initialized" when GPTModel/SelfAttention is instantiated.
+      - tests/unit_tests/models/test_mimo_checkpoint.py
 
       # 3.transformer
       # TE _extra_state compatibility issue with AbsorbedMLA
@@ -142,6 +145,9 @@ test_matrix:
       - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
       # Metax C500 lacks TE FP8/fused-topk features required by this MCore FSDP E2E matrix.
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_compatible_with_nd_parallel
+      # test_fully_shard leaves behind corrupted NCCL state according to the test file itself and CI shows
+      # sporadic SIGSEGV during torchrun teardown after otherwise passing cases on Metax C500.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_ez
       # TE quantized FP8 FSDP path uses FP8 recipes without a C500-compatible support gate.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
 
