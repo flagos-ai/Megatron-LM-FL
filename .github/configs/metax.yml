@@ -151,8 +151,8 @@ test_matrix:
       # test_fully_shard leaves behind corrupted NCCL state according to the test file itself and CI shows
       # sporadic SIGSEGV during torchrun teardown after otherwise passing cases on Metax C500.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_ez
-      # Metax C500 still hits NCCL internal errors in the custom main_grads_dtype + ZeRO-3 transformer case.
-      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[custom_main_grads_dtype1-None-no_shard-optim_grads_params-transformer]
+      # Metax C500 still hits NCCL internal errors in the custom dtype FSDP matrix.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
       # TE quantized FP8 FSDP path uses FP8 recipes without a C500-compatible support gate.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
 
@@ -206,6 +206,7 @@ test_matrix:
       # Metax C500 TE package misses transformer_engine_torch.get_fused_attn_backend, so the 8-GPU
       # multimodule schedule path aborts inside TE attention backend selection.
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
       # Metax C500 pipeline CI hits flaky fine-grained activation offload paths.
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
