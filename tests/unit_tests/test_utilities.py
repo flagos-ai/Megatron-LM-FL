@@ -8,6 +8,11 @@ from torch.distributed import rendezvous
 
 import megatron.core.parallel_state as ps
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 class TestModel(torch.nn.Module):
     def __init__(
@@ -45,7 +50,7 @@ class Utils:
                 f'Initializing torch.distributed with rank: {Utils.rank}, '
                 f'world_size: {Utils.world_size}'
             )
-            torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
+            cur_platform.set_device(Utils.rank % cur_platform.device_count())
             init_method = 'tcp://'
             master_ip = os.getenv('MASTER_ADDR', 'localhost')
             master_port = os.getenv('MASTER_PORT', '6000')
@@ -70,7 +75,7 @@ class Utils:
 
     @staticmethod
     def set_world_size(world_size=None, rank=None):
-        Utils.world_size = torch.cuda.device_count() if world_size is None else world_size
+        Utils.world_size = cur_platform.device_count() if world_size is None else world_size
         if (
             torch.distributed.is_initialized()
             and Utils.world_size != torch.distributed.get_world_size()
@@ -96,7 +101,7 @@ class Utils:
             # Flush pending CUDA work before the barrier so slow ranks don't
             # time out while fast ranks tear down process groups.
             # NOTE(zhaoyinglia): there is not keyword argument 'timeout' in torch.distributed.barrier()
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
             torch.distributed.barrier()
         except Exception:
             Utils.inited = False
