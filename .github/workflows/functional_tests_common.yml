@@ -87,23 +87,6 @@ jobs:
             ln -sf "$CONDA_PYTHON" /usr/local/bin/python3
           fi
 
-          # Megatron dataset helpers query python3-config for the extension suffix.
-          # Some Metax images ship conda Python without the python3-config executable.
-          if ! command -v python3-config &>/dev/null; then
-            cat > /usr/local/bin/python3-config << 'PYCONFIGEOF'
-          #!/usr/bin/env python3
-          import sys
-          import sysconfig
-
-          if "--extension-suffix" in sys.argv:
-              print(sysconfig.get_config_var("EXT_SUFFIX") or "")
-          else:
-              raise SystemExit("python3-config shim only supports --extension-suffix")
-          PYCONFIGEOF
-            chmod +x /usr/local/bin/python3-config
-          fi
-          python3-config --extension-suffix
-
           echo "PATH=$PATH" >> $GITHUB_ENV
           echo "Python: $(which python) ($(python --version 2>&1))"
           python -c "import torch; print('Torch:', torch.__version__)"
