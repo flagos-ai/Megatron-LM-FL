@@ -10,7 +10,6 @@ import megatron.core.parallel_state as ps
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
-
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
@@ -33,8 +32,15 @@ class TestModel(torch.nn.Module):
 
 class Utils:
 
-    world_size = int(os.environ.get('WORLD_SIZE', '1'))
-    rank = int(os.environ.get('LOCAL_RANK', '0'))
+    # Platform-specific distributed backend mapping
+    PLATFORM_BACKEND_MAP = {
+        'musa': 'mccl',
+        'cuda': 'nccl',
+        'cpu': 'gloo',
+    }
+
+    world_size = int(os.environ['WORLD_SIZE'])
+    rank = int(os.environ['LOCAL_RANK'])
     inited = False
     store = None
 
@@ -66,8 +72,12 @@ class Utils:
             store = PrefixStore("default_pg", store)
             Utils.store = store
 
+            backend = os.getenv(
+                'DISTRIBUTED_BACKEND',
+                Utils.PLATFORM_BACKEND_MAP.get(cur_platform._name, 'nccl'),
+            )
             torch.distributed.init_process_group(
-                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
+                backend=backend, world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
             torch.distributed.barrier()
@@ -128,6 +138,7 @@ class Utils:
             tensor_model_parallel_size,
             pipeline_model_parallel_size,
             virtual_pipeline_model_parallel_size,
+            create_gloo_process_groups=False,       # Avoid RuntimeError when destroy_model_parallel on musa
             **kwargs,
         )
         Utils.inited = True
