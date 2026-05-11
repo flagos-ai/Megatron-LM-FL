@@ -8,7 +8,7 @@ display_name: 'CUDA Tests'
 # CI image for online env
 ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
 
-# Runner labels for online env
+# Runner labels for A100 node
 runner_labels:
   - nv-8g-cicd-megatron
 
