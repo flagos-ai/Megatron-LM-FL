@@ -19,6 +19,7 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.enums import CudaGraphScope, LayerType
+from megatron.core.transformer.hyper_connection import HyperConnectionModule
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.module import GraphableMegatronModule
@@ -241,14 +242,17 @@ class TransformerLayerSubmodules:
     input_layernorm: LayerNormBuilder = IdentityOp
     self_attention: Union[ModuleSpec, type] = IdentityOp
     self_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
+    self_attention_hyper_connection: Union[ModuleSpec, type] = IdentityOp
 
     pre_cross_attn_layernorm: LayerNormBuilder = IdentityOp
     cross_attention: Union[ModuleSpec, type] = IdentityOp
     cross_attn_bda: Union[ModuleSpec, type] = IdentityFuncOp
+    cross_attention_hyper_connection: Union[ModuleSpec, type] = IdentityOp
 
     pre_mlp_layernorm: LayerNormBuilder = IdentityOp
     mlp: Union[ModuleSpec, type] = IdentityOp
     mlp_bda: Union[ModuleSpec, type] = IdentityFuncOp
+    mlp_hyper_connection: Union[ModuleSpec, type] = IdentityOp
 
     # Mapping for sharded tensor keys to be applied in `sharded_state_dict` method
     sharded_state_dict_keys_map: Dict[str, str] = field(default_factory=dict)
@@ -1389,6 +1393,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         self.mhc_checkpoint_input_layernorm = not isinstance(self.input_layernorm, IdentityOp)
         self.mhc_checkpoint_pre_mlp_layernorm = not isinstance(self.pre_mlp_layernorm, IdentityOp)
 
+        from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
+            FineGrainedActivationOffloadingInterface as off_interface,
+        )
+        self.off_interface = off_interface
+
     def get_layer_static_inputs(self, seq_length, micro_batch_size):
         """Override to produce n-stream hidden_states of shape [s, b, n*C].
 
@@ -1547,7 +1556,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
         nvtx_range_pop(suffix="self_attention_fused_h_res_h_post_bda")
 
-        hidden_states = attn_norm_manager.group_offload(hidden_states)
+        # NOTE: No implement in megatron version core_v0.17.0
+        # hidden_states = attn_norm_manager.group_offload(hidden_states)
+        # NOTE: Implement in main(temporary)
+        if self.offload_attn_norm:
+            hidden_states = attn_norm_manager.group_commit(hidden_states, "attn_norm")
 
         # Cross-attention (no hyper connection support).
         residual = hidden_states
@@ -1722,7 +1735,11 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             )
         nvtx_range_pop(suffix="mlp_fused_h_res_h_post_bda")
 
-        hidden_states = self.mlp_norm_manager.group_offload(hidden_states)
+        # NOTE: No implement in megatron version core_v0.17.0
+        # hidden_states = self.mlp_norm_manager.group_offload(hidden_states)
+        # NOTE: Implement in main(temporary)
+        if self.offload_mlp_norm:
+            hidden_states = self.mlp_norm_manager.group_commit(hidden_states, "mlp_norm")
 
         output = make_viewless_tensor(
             inp=hidden_states, requires_grad=hidden_states.requires_grad, keep_graph=True

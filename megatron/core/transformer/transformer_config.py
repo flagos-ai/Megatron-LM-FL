@@ -276,6 +276,70 @@ class TransformerConfig(ModelParallelConfig):
     For example, [0,1,1,0] means: apply RoPE, skip RoPE, skip RoPE, apply RoPE."""
 
     ####################
+    # mHC
+    ####################
+    enable_hyper_connections: bool = False
+    """Whether to enable hyper connections in the transformer block."""
+
+    num_residual_streams: int = 4
+    """Number of residual branches for hyper connections. Only used when enable_hyper_connections is True."""
+
+    mhc_sinkhorn_iterations: int = 10
+    """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
+
+    mhc_init_gating_factor: float = 0.01
+    """Initial value of Gating Factor (alpha in paper)."""
+
+    use_fused_mhc: bool = False
+    """Use cuTile fused kernels for mHC operations."""
+
+    mhc_recompute_layer_num: Optional[int] = None
+    """Number of layers per MHC recompute block."""
+
+    ###################
+    # Engram
+    ###################
+    use_engram: bool = False
+    """Use Engram module."""
+
+    engram_tokenizer_name_or_path: Optional[str] = None
+    """Tokenizer name or path used by Engram"""
+
+    engram_vocab_size: Optional[List[int]] = None
+    """Engram vocab size per layer (list of ints)"""
+
+    max_ngram_size: int = 1
+    """Maximum n-gram size for Engram"""
+
+    n_embed_per_ngram: Optional[int] = None
+    """Embedding dimension per n-gram"""
+
+    n_head_per_ngram: int = 1
+    """Number of heads per n-gram"""
+
+    engram_layer_ids: Optional[List[int]] = None
+    """Layer ids where Engram is applied"""
+
+    engram_pad_id: int = 0
+    """Pad token id for Engram hashing"""
+
+    engram_seed: int = 0
+    """Random seed for Engram hashing"""
+
+    engram_kernel_size: int = 1
+    """Kernel size for Engram short convolution"""
+
+    engram_embedding_parallel_size: int = 1
+    """Parallel size for Engram embedding"""
+
+    engram_embedding_parallel_method: Literal["alltoall", "allreduce"] = "alltoall"
+    """Parallel method for Engram embedding across embedding parallel(alltoall) / tensor parallel(allreduce) groups"""
+
+    engram_offload_embedding_optimizer_states: bool = False
+    """Whether to offload Engram embedding optimizer states to CPU when using alltoall for Engram embedding parallelism.
+    This is typically used to save GPU memory when Engram embedding is large while accelerators are limited."""
+
+    ####################
     # attention variant
     ####################
     experimental_attention_variant: Optional[Literal['gated_delta_net', 'dsa', 'dsv4_hybrid']] = (
