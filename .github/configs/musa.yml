@@ -1,0 +1,70 @@
+# MUSA Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Moore Threads MUSA-based unit testing.
+
+hardware_name: musa
+display_name: 'MUSA Tests'
+
+# Runner labels for Moore Threads node
+runner_labels:
+  - mt-8g-cicd-megatron
+
+# CI image for online env
+ci_image: registry.mthreads.com/presale/devtech/flagsclae:0318_debug
+
+# No dataset/tokenizer volumes are required for the initial unit-test bring-up.
+container_volumes: []
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ulimit nofile=65535:65535
+
+# Device types to run tests on
+device_types:
+  - musa
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    devices:
+      - musa
+    # Start with a conservative CPU-safe core smoke set while validating the MUSA runtime image.
+    ignored_tests:
+      # Core tests that require CUDA/NCCL, Transformer Engine GPU paths, or distributed setup.
+      - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_fp8_utils.py
+      - tests/unit_tests/test_fp4_param.py
+      - tests/unit_tests/test_optimizer.py
+      - tests/unit_tests/test_inference.py
+      - tests/unit_tests/test_utils.py
+      - tests/unit_tests/test_utilities.py
+      - tests/unit_tests/test_parallel_state.py
+      - tests/unit_tests/test_hyper_comm_grid.py
+      - tests/unit_tests/test_process_groups_config.py
+      - tests/unit_tests/test_nccl_allocator.py
+      - tests/unit_tests/test_muon_optimizer.py
+      - tests/unit_tests/test_optimizer_cpu_offloading.py
+      - tests/unit_tests/test_layer_wise_optimizer.py
+      - tests/unit_tests/test_training.py
+      - tests/unit_tests/test_local_multi_tensor_fns.py
+      - tests/unit_tests/test_checkpointing.py
+      - tests/unit_tests/test_typed_torch.py
+
+      # Non-core groups are enabled after the base MUSA unit environment is stable.
+      - tests/unit_tests/models/
+      - tests/unit_tests/distributed/
+      - tests/unit_tests/dist_checkpointing/
+      - tests/unit_tests/tensor_parallel/
+      - tests/unit_tests/pipeline_parallel/
+      - tests/unit_tests/data/
+      - tests/unit_tests/fusions/
+      - tests/unit_tests/export/
+      - tests/unit_tests/post_training/
+      - tests/unit_tests/tokenizers/
+      - tests/unit_tests/utils/
+
+  functional:
+    train: []

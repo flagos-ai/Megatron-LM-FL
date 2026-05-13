@@ -118,22 +118,30 @@ jobs:
           # Ensure curl is available (required by coverage upload action)
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
-          # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
-          if [ "$PLATFORM" = "metax" ]; then
+          # Install dependence package. MUSA images provide their own torch/torch_musa stack.
+          if [ "$PLATFORM" = "musa" ]; then
+            pip install boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
+          else
+            pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
+          fi
+          if [ "$PLATFORM" = "metax" ] || [ "$PLATFORM" = "musa" ]; then
             pip install fastapi uvicorn --no-cache-dir
           fi
 
           # Install nvidia-resiliency-ext from source
-          if [ "$PLATFORM" != "metax" ]; then
+          if [ "$PLATFORM" = "cuda" ]; then
             git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
             STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
           else
-            echo "Skipping nvidia-resiliency-ext on Metax because it requires NVIDIA CUPTI."
+            echo "Skipping nvidia-resiliency-ext on $PLATFORM because it requires NVIDIA CUPTI."
           fi
 
           # Install emerging-optimizers from source
-          pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
+          if [ "$PLATFORM" != "musa" ]; then
+            pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
+          else
+            echo "Skipping Emerging-Optimizers on MUSA during initial environment bring-up."
+          fi
           
           # Build
           pip install -e . --no-deps --no-build-isolation --no-cache-dir
@@ -185,6 +193,8 @@ jobs:
           # Calc GPU num
           if [ "$PLATFORM" = "metax" ]; then
             NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if hasattr(torch, 'cuda') and torch.cuda.is_available() else 2)")
+          elif [ "$PLATFORM" = "musa" ]; then
+            NUM_GPUS=$(python3 -c "import importlib.util, torch; spec = importlib.util.find_spec('torch_musa'); __import__('torch_musa') if spec else None; musa = getattr(torch, 'musa', None); print(max(1, musa.device_count() if musa is not None and musa.is_available() else 1))")
           else
             NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
           fi
