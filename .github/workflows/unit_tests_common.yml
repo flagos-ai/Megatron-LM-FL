@@ -167,11 +167,18 @@ jobs:
           echo "Platform: $PLATFORM"
           echo "Device: $DEVICE"
 
+          if [ "$PLATFORM" = "musa" ] && [ "$TEST_GROUP" != "core" ]; then
+            echo "Skipping $TEST_GROUP during initial MUSA unit smoke."
+            exit 0
+          fi
+
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
           if [ "$PLATFORM" = "musa" ]; then
             export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+            export TORCHDYNAMO_DISABLE=1
+            export TORCH_COMPILE_DISABLE=1
           fi
           mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
