@@ -120,7 +120,7 @@ jobs:
 
           # Install dependence package. MUSA images provide their own torch/torch_musa stack.
           if [ "$PLATFORM" = "musa" ]; then
-            pip install boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
+            pip install boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk --no-cache-dir
           else
             pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
           fi
