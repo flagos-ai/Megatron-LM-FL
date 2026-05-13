@@ -170,6 +170,9 @@ jobs:
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
+          if [ "$PLATFORM" = "musa" ]; then
+            export TORCH_DEVICE_BACKEND_AUTOLOAD=0
+          fi
           mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
           # Build ignore options from ignored_tests input
@@ -198,7 +201,7 @@ jobs:
           if [ "$PLATFORM" = "metax" ]; then
             NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if hasattr(torch, 'cuda') and torch.cuda.is_available() else 2)")
           elif [ "$PLATFORM" = "musa" ]; then
-            NUM_GPUS=$(python3 -c "import importlib.util, torch; spec = importlib.util.find_spec('torch_musa'); __import__('torch_musa') if spec else None; musa = getattr(torch, 'musa', None); print(max(1, musa.device_count() if musa is not None and musa.is_available() else 1))")
+            NUM_GPUS=1
           else
             NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
           fi
