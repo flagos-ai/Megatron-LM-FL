@@ -13,6 +13,7 @@ from megatron.core import parallel_state
 from megatron.core.hyper_comm_grid import HyperCommGrid
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.pipeline_parallel.multimodule_communicator import MultiModulePipelineCommunicator
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.pipeline_parallel.test_bridge_communicator import (
     _avg_params,
     _create_transformer_block,
@@ -23,7 +24,16 @@ from tests.unit_tests.pipeline_parallel.test_bridge_communicator import (
 )
 from tests.unit_tests.test_utilities import Utils
 
+cur_platform = get_platform()
 
+
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason=(
+        "MultiModulePipelineCommunicator tests depend on CUDA/NCCL paths and construct "
+        "BridgeCommunicator, whose broadcast process groups are still hardcoded to NCCL."
+    ),
+)
 class TestMultiModulePipelineCommunicator:
 
     @classmethod
