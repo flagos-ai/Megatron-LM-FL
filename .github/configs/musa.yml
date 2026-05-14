@@ -9,7 +9,7 @@ runner_labels:
   - mt-8g-cicd-megatron
 
 # CI image for online env
-ci_image: registry.mthreads.com/presale/devtech/flagsclae:0318_debug
+ci_image: registry.mthreads.com/presale/devtech/flagsclae:0206
 
 # No dataset/tokenizer volumes are required for the initial unit-test bring-up.
 container_volumes: []
@@ -31,12 +31,12 @@ test_matrix:
   unit:
     devices:
       - musa
-    # Start with a conservative CPU-safe core smoke set while validating the MUSA runtime image.
+    # Start with a conservative MUSA smoke set while validating runtime and TE plugin coverage.
     ignored_tests:
       # Core tests that require CUDA/NCCL, Transformer Engine GPU paths, or distributed setup.
-      # The initial MUSA image is missing flash_attn_2_cuda in the TransformerEngine import path,
-      # so tests importing megatron.core or megatron.training are disabled until the plugin/TE
-      # environment is adapted.
+      # The current MUSA image does not provide te_musa, so tests importing Megatron paths that
+      # enter TransformerEngine CUDA flash-attn code are disabled until the plugin/TE environment
+      # is adapted.
       - tests/unit_tests/test_argument_utils.py
       - tests/unit_tests/test_arguments.py
       - tests/unit_tests/test_fp8_param.py
