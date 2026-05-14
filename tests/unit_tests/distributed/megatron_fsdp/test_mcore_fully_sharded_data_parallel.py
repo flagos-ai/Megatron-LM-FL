@@ -592,7 +592,8 @@ class TestFullyShardedDataParallel:
 
     @pytest.mark.parametrize("num_fsdp_group", [2])
     @pytest.mark.skipif(
-        cur_platform.device_count() % 2 == 0, "This test requires an odd number of GPUs"
+        cur_platform.device_count() % 2 == 0,
+        reason="This test requires an odd number of GPUs",
     )
     def test_fsdp_with_hybrid_sharding(self, num_fsdp_group):
         """Test that FSDP works correctly with hybrid sharding."""

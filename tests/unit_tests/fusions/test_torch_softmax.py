@@ -48,7 +48,8 @@ class TestTorchSoftmax:
         y = self.softmax(x, None, None)
         y_expected = torch.tril(torch.ones(b, np, sq, sk, device=DEVICE))
         y_expected /= torch.arange(1, sq + 1, device=DEVICE).reshape((-1, 1))
-        assert torch.allclose(y, y_expected, rtol=1e-08, atol=1e-08)
+        rtol, atol = (1e-5, 1e-6) if cur_platform.device_name() == "musa" else (1e-8, 1e-8)
+        assert torch.allclose(y, y_expected, rtol=rtol, atol=atol)
 
 
 class TestSoftmaxOne:

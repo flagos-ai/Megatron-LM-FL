@@ -9,6 +9,8 @@ from typing import Any, Dict
 import nltk
 import pytest
 
+from megatron.core import msc_utils
+
 try:
     import boto3
     import botocore.exceptions as exceptions
@@ -140,6 +142,20 @@ def _msc_resolve_storage_client(path):
 setattr(msc, "open", open)
 setattr(msc, "download_file", _msc_download_file)
 setattr(msc, "resolve_storage_client", _msc_resolve_storage_client)
+
+
+@pytest.fixture(autouse=True)
+def enable_mock_msc():
+    """Keep msc_utils in sync when this test installs a dummy multistorageclient module."""
+    previous_msc = msc_utils.msc
+    previous_feature_state = msc_utils.MultiStorageClientFeature.__getstate__()
+    msc_utils.msc = msc
+    msc_utils.MultiStorageClientFeature.enable()
+    try:
+        yield
+    finally:
+        msc_utils.msc = previous_msc
+        msc_utils.MultiStorageClientFeature.__setstate__(previous_feature_state)
 
 
 @pytest.mark.flaky

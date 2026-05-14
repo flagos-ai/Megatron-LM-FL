@@ -40,7 +40,7 @@ class TestBertModel:
             tensor_model_parallel_size=tp,
             pipeline_model_parallel_size=pp,
             pipeline_dtype=torch.bfloat16,
-            attention_backend=AttnBackend.unfused,
+            attention_backend=AttnBackend.local if MUSA_WITHOUT_TE else AttnBackend.unfused,
         )
         self.bert_model = BertModel(
             config=transformer_config,

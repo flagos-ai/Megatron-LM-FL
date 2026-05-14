@@ -19,11 +19,17 @@ from megatron.core.extensions.transformer_engine import (
     TERowParallelLinear,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.ssm.mamba_mixer import MambaMixer, MambaMixerSubmodules
+from megatron.core.ssm.mamba_mixer import HAVE_MAMBA_SSM, MambaMixer, MambaMixerSubmodules
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+
+pytestmark = pytest.mark.skipif(
+    not HAVE_MAMBA_SSM,
+    reason="MambaSSM is required for dist checkpointing Mamba reconfiguration tests.",
+)
 
 
 def initialize_mamba(seed, glu=True, **config_kwargs):

@@ -26,6 +26,7 @@ from megatron.core.process_groups_config import (
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 # ============================================================================
@@ -33,6 +34,7 @@ from tests.unit_tests.test_utilities import Utils
 # ============================================================================
 
 
+cur_platform = get_platform()
 _active_grids: list = []
 
 
@@ -465,6 +467,14 @@ def run_multimodule_schedule_test(
 @pytest.mark.skipif(
     version.parse(torch.__version__) < version.parse('2.3.0'),
     reason="Device mesh requires PyTorch 2.3+",
+)
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason=(
+        "MultiModule schedule tests depend on CUDA/NCCL paths and construct "
+        "MultiModulePipelineCommunicator/BridgeCommunicator, whose process groups are still "
+        "hardcoded to NCCL."
+    ),
 )
 class TestMultimoduleSchedules:
     """Test multimodule pipeline schedules."""
