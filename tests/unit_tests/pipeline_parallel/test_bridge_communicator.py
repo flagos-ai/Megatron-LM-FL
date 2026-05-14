@@ -29,8 +29,9 @@ from tests.unit_tests.test_utilities import Utils
 
 cur_platform = get_platform()
 DEVICE = cur_platform.device()
-BACKEND = {'cuda': 'nccl', 'musa': 'mccl', 'cpu': 'gloo'}.get(
-    cur_platform.device_name(), 'gloo'
+BACKEND = os.getenv(
+    "DISTRIBUTED_BACKEND",
+    {'cuda': 'nccl', 'musa': 'mccl', 'cpu': 'gloo'}.get(cur_platform.device_name(), 'gloo'),
 )
 
 

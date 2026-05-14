@@ -1,5 +1,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 import copy
+import os
 import random
 
 import numpy as np
@@ -19,6 +20,7 @@ from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer import TransformerConfig
 from megatron.core.utils import is_torch_min_version
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.distributed.megatron_fsdp.utils import (
     make_gpt_mock_data_iterator,
     make_moe_args_model_and_optimizer,
@@ -26,6 +28,13 @@ from tests.unit_tests.distributed.megatron_fsdp.utils import (
     set_manual_seed,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
+BACKEND = os.getenv(
+    "DISTRIBUTED_BACKEND",
+    {'cuda': 'nccl', 'musa': 'mccl', 'cpu': 'gloo'}.get(cur_platform.device_name(), 'gloo'),
+)
 
 
 # Test model for testing FSDP
@@ -72,10 +81,11 @@ def setup_seed(seed):
     random.seed(seed)  # Set Python's built-in random seed
     np.random.seed(seed)  # Set NumPy's random seed
     torch.manual_seed(seed)  # Set PyTorch's CPU seed
-    torch.cuda.manual_seed(seed)  # Set PyTorch's GPU seed (if using CUDA)
-    torch.cuda.manual_seed_all(seed)  # Set seed for all GPUs
-    torch.backends.cudnn.deterministic = True  # Ensure deterministic behavior
-    torch.backends.cudnn.benchmark = False  # Disable auto-tuner for reproducibility
+    cur_platform.manual_seed(seed)
+    cur_platform.manual_seed_all(seed)
+    if hasattr(torch.backends, "cudnn"):
+        torch.backends.cudnn.deterministic = True  # Ensure deterministic behavior
+        torch.backends.cudnn.benchmark = False  # Disable auto-tuner for reproducibility
 
 
 @pytest.mark.flaky
@@ -108,7 +118,7 @@ class TestFullyShardedDataParallel:
             megatron_fsdp_main_grads_dtype=main_grads_dtype,
             megatron_fsdp_grad_comm_dtype=grad_comm_dtype,
         )
-        model = TestModel(input_dim=13, output_dim=17).cuda()
+        model = TestModel(input_dim=13, output_dim=17).to(DEVICE)
         transformer_config = TransformerConfig(
             num_attention_heads=1, num_layers=1, context_parallel_size=1
         )
@@ -197,7 +207,7 @@ class TestFullyShardedDataParallel:
 
         # Initialize torch.distributed if not already initialized
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend='nccl')
+            torch.distributed.init_process_group(backend=BACKEND)
 
         # Skip test if we don't have enough GPUs
         world_size = torch.distributed.get_world_size()
@@ -227,8 +237,8 @@ class TestFullyShardedDataParallel:
         )
 
         # Create two identical models
-        model1 = TestModel(input_dim=input_dim, output_dim=output_dim).cuda()
-        model2 = TestModel(input_dim=input_dim, output_dim=output_dim).cuda()
+        model1 = TestModel(input_dim=input_dim, output_dim=output_dim).to(DEVICE)
+        model2 = TestModel(input_dim=input_dim, output_dim=output_dim).to(DEVICE)
 
         # Ensure identical weights
         for p1, p2 in zip(model1.parameters(), model2.parameters()):
@@ -286,7 +296,7 @@ class TestFullyShardedDataParallel:
 
         # Create identical inputs
         batch_size = 2
-        input_data = torch.randint(0, 10, (batch_size, input_dim), device='cuda', dtype=torch.long)
+        input_data = torch.randint(0, 10, (batch_size, input_dim), device=DEVICE, dtype=torch.long)
         input_data = input_data.float()
         input_data.requires_grad = True
 
@@ -345,7 +355,7 @@ class TestFullyShardedDataParallel:
 
         # Initialize torch.distributed if not already initialized
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend='nccl')
+            torch.distributed.init_process_group(backend=BACKEND)
 
         # Skip test if we don't have enough GPUs
         world_size = torch.distributed.get_world_size()
@@ -388,8 +398,8 @@ class TestFullyShardedDataParallel:
         )
 
         # Create two identical models
-        model1 = TestModelUniform(hidden_dim=hidden_dim).cuda()
-        model2 = TestModelUniform(hidden_dim=hidden_dim).cuda()
+        model1 = TestModelUniform(hidden_dim=hidden_dim).to(DEVICE)
+        model2 = TestModelUniform(hidden_dim=hidden_dim).to(DEVICE)
 
         # Ensure identical weights
         for p1, p2 in zip(model1.parameters(), model2.parameters()):
@@ -445,7 +455,7 @@ class TestFullyShardedDataParallel:
 
         # Create identical inputs
         batch_size = 2
-        input_data = torch.randint(0, 10, (batch_size, hidden_dim), device='cuda', dtype=torch.long)
+        input_data = torch.randint(0, 10, (batch_size, hidden_dim), device=DEVICE, dtype=torch.long)
         input_data = input_data.float()
         input_data.requires_grad = True
 
@@ -500,7 +510,7 @@ class TestFullyShardedDataParallel:
             # Create two identical models
             input_dim = 13
             output_dim = 17
-            model = TestModel(input_dim=input_dim, output_dim=output_dim).cuda()
+            model = TestModel(input_dim=input_dim, output_dim=output_dim).to(DEVICE)
 
             # Setup FSDP config - using optim_grads_params for full sharding test
             fsdp_config = DistributedDataParallelConfig(
@@ -552,7 +562,7 @@ class TestFullyShardedDataParallel:
             # Create identical inputs
             batch_size = 2
             input_data = torch.randint(
-                0, 10, (batch_size, input_dim), device='cuda', dtype=torch.long
+                0, 10, (batch_size, input_dim), device=DEVICE, dtype=torch.long
             )
             input_data = input_data.float()
             input_data.requires_grad = True
@@ -577,8 +587,8 @@ class TestFullyShardedDataParallel:
             Utils.destroy_model_parallel()
 
     @pytest.mark.parametrize("num_fsdp_group", [2])
-    @pytest.mark.skipIf(
-        torch.cuda.device_count() % 2 == 0, "This test requires an odd number of GPUs"
+    @pytest.mark.skipif(
+        cur_platform.device_count() % 2 == 0, "This test requires an odd number of GPUs"
     )
     def test_fsdp_with_hybrid_sharding(self, num_fsdp_group):
         """Test that FSDP works correctly with hybrid sharding."""

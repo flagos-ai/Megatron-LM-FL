@@ -19,12 +19,14 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.tokenizers import MegatronTokenizer
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 VOCAB_SIZE = 256
 SEQUENCE_LENGTH = 64
 NUM_LAYERS = 2
-DEVICE = torch.device("cuda")
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 DTYPE = torch.bfloat16
 
 
@@ -110,6 +112,10 @@ def _forward_step_func(data_iterator, model):
     return output_tensor, partial(loss_func, loss_mask)
 
 
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason="TRT-LLM FP8 export relies on the CUDA/TE FP8 path; current MUSA CI image lacks te_musa.",
+)
 class TestTRTLLMSingleDeviceConverterFP8:
     QUANTIZED_LAYERS = [
         'transformer.layers.*.attention.dense.weight',

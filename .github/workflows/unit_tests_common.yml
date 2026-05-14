@@ -120,9 +120,9 @@ jobs:
 
           # Install dependence package. MUSA images provide their own torch/torch_musa stack.
           if [ "$PLATFORM" = "musa" ]; then
-            pip install boto3 mock pytest-mock coverage pytest-asyncio pytest-timeout anyio wandb openai httpx nltk --no-cache-dir
+            pip install boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk --no-cache-dir
           else
-            pip install torch boto3 mock pytest-mock coverage pytest-asyncio pytest-timeout anyio wandb openai httpx --no-cache-dir
+            pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
           fi
           if [ "$PLATFORM" = "metax" ] || [ "$PLATFORM" = "musa" ]; then
             pip install fastapi uvicorn --no-cache-dir
@@ -170,7 +170,6 @@ jobs:
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
-          export TOKENIZERS_PARALLELISM=false
           if [ "$PLATFORM" = "musa" ]; then
             export DISTRIBUTED_BACKEND=mccl
             export TORCHDYNAMO_DISABLE=1
@@ -221,7 +220,7 @@ jobs:
             # Avoid loading tests/unit_tests/conftest.py during the initial MUSA smoke.
             # That conftest imports megatron.core, which currently enters a TE flash-attn path
             # missing from the MUSA image before any individual test case is collected.
-            PYTEST_EXTRA_OPTS=(--noconftest --timeout=300 --timeout-method=thread)
+            PYTEST_EXTRA_OPTS=(--noconftest)
           fi
           mkdir -p "$COVERAGE_DIR"
           printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
