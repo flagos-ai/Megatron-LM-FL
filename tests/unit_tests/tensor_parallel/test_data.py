@@ -1,20 +1,24 @@
 import torch
 
 from megatron.core.tensor_parallel.data import broadcast_data
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 def test_broadcast_data():
     Utils.initialize_model_parallel(2, 4)
+    device = cur_platform.device()
     input_data = {
-        0: torch.ones((8, 8)).cuda() * 0.0,
-        1: torch.ones((8, 8)).cuda() * 1.0,
-        2: torch.ones((8, 8)).cuda() * 2.0,
-        3: torch.ones((8, 8)).cuda() * 3.0,
-        4: torch.ones((8, 8)).cuda() * 4.0,
-        5: torch.ones((8, 8)).cuda() * 5.0,
-        6: torch.ones((8, 8)).cuda() * 6.0,
-        7: torch.ones((8, 8)).cuda() * 7.0,
+        0: torch.ones((8, 8), device=device) * 0.0,
+        1: torch.ones((8, 8), device=device) * 1.0,
+        2: torch.ones((8, 8), device=device) * 2.0,
+        3: torch.ones((8, 8), device=device) * 3.0,
+        4: torch.ones((8, 8), device=device) * 4.0,
+        5: torch.ones((8, 8), device=device) * 5.0,
+        6: torch.ones((8, 8), device=device) * 6.0,
+        7: torch.ones((8, 8), device=device) * 7.0,
     }
     dtype = torch.float32
     actual_output = broadcast_data([0, 1], input_data, dtype)
