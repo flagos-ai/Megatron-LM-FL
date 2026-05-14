@@ -35,6 +35,10 @@ BACKEND = os.getenv(
     "DISTRIBUTED_BACKEND",
     {'cuda': 'nccl', 'musa': 'mccl', 'cpu': 'gloo'}.get(cur_platform.device_name(), 'gloo'),
 )
+pytestmark = pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason="Megatron FSDP still enters CUDA-specific runtime paths in the current MUSA CI image.",
+)
 
 
 # Test model for testing FSDP

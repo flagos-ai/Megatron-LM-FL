@@ -5,6 +5,10 @@ import torch
 from transformer_engine.pytorch import RMSNorm
 
 from megatron.core.extensions.transformer_engine import TEFusedResidualRMSNorm
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 def baseline_rmsnorm_residual(x, rmsnorm: RMSNorm):
@@ -13,15 +17,19 @@ def baseline_rmsnorm_residual(x, rmsnorm: RMSNorm):
 
 @pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("normalized_shape", [256, 256 * 2, 256 * 4])
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason="TE RMSNorm fusion still enters CUDA-specific TransformerEngine paths without te_musa.",
+)
 def test_rmsnorm_residual_fusion(input_dtype, normalized_shape):
-    x_baseline = torch.randn(16, 32, normalized_shape, dtype=input_dtype, device="cuda")
+    x_baseline = torch.randn(16, 32, normalized_shape, dtype=input_dtype, device=DEVICE)
     x_baseline.requires_grad = True
     x_fused = x_baseline.detach()
     x_fused.requires_grad = True
-    baseline_rmsnorm = RMSNorm(normalized_shape=normalized_shape, dtype=input_dtype).cuda()
+    baseline_rmsnorm = RMSNorm(normalized_shape=normalized_shape, dtype=input_dtype).to(DEVICE)
     fused_rmsnorm = TEFusedResidualRMSNorm(
         normalized_shape=normalized_shape, dtype=input_dtype
-    ).cuda()
+    ).to(DEVICE)
 
     # baseline
     baseline_y, baseline_residual = baseline_rmsnorm_residual(x_baseline, baseline_rmsnorm)

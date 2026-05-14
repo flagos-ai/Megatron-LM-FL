@@ -14,6 +14,7 @@ from megatron.core.models.bert.bert_model import BertModel
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing.models.common import (
     common_test_parallel_reconfiguration_e2e,
     common_test_simple_sharded_state_dict_save_load,
@@ -21,6 +22,63 @@ from tests.unit_tests.dist_checkpointing.models.common import (
     common_test_vocab_size_padding_change,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+MUSA_WITHOUT_TE = cur_platform.device_name() == "musa"
+BERT_LAYER_SPECS = (
+    [bert_layer_local_spec]
+    if MUSA_WITHOUT_TE
+    else [bert_layer_with_transformer_engine_spec, bert_layer_local_spec]
+)
+RECONFIG_CASES = (
+    [(True, (2, 1), (1, 8), bert_layer_local_spec, bert_layer_local_spec)]
+    if MUSA_WITHOUT_TE
+    else [
+        (
+            False,
+            (2, 4),
+            (4, 2),
+            bert_layer_with_transformer_engine_spec,
+            bert_layer_with_transformer_engine_spec,
+        ),
+        (
+            False,
+            (1, 8),
+            (8, 1),
+            bert_layer_with_transformer_engine_spec,
+            bert_layer_with_transformer_engine_spec,
+        ),
+        (
+            True,
+            (2, 1),
+            (1, 8),
+            bert_layer_with_transformer_engine_spec,
+            bert_layer_with_transformer_engine_spec,
+        ),
+        (
+            False,
+            (1, 1),
+            (2, 2),
+            bert_layer_with_transformer_engine_spec,
+            bert_layer_with_transformer_engine_spec,
+        ),
+        (True, (2, 1), (1, 8), bert_layer_local_spec, bert_layer_local_spec),
+        (
+            True,
+            (1, 1),
+            (2, 4),
+            bert_layer_with_transformer_engine_spec,
+            bert_layer_local_spec,
+        ),
+        (
+            False,
+            (1, 8),
+            (2, 1),
+            bert_layer_local_spec,
+            bert_layer_with_transformer_engine_spec,
+        ),
+    ]
+)
 
 
 def initialize_bert_model(
@@ -58,12 +116,8 @@ def initialize_bert_model(
 
 
 class TestBertModel:
-    @pytest.mark.parametrize(
-        'src_layer_spec', [bert_layer_with_transformer_engine_spec, bert_layer_local_spec]
-    )
-    @pytest.mark.parametrize(
-        'dst_layer_spec', [bert_layer_with_transformer_engine_spec, bert_layer_local_spec]
-    )
+    @pytest.mark.parametrize('src_layer_spec', BERT_LAYER_SPECS)
+    @pytest.mark.parametrize('dst_layer_spec', BERT_LAYER_SPECS)
     @pytest.mark.internal
     def test_sharded_state_dict_save_load(self, tmp_path_dist_ckpt, src_layer_spec, dst_layer_spec):
         common_test_simple_sharded_state_dict_save_load(
@@ -80,39 +134,7 @@ class TestBERTModelReconfiguration:
 
     @pytest.mark.parametrize(
         ('use_fpsl', 'src_tp_pp', 'dest_tp_pp', 'src_layer_spec', 'dst_layer_spec'),
-        [
-            (
-                False,
-                (2, 4),
-                (4, 2),
-                bert_layer_with_transformer_engine_spec,
-                bert_layer_with_transformer_engine_spec,
-            ),
-            (
-                False,
-                (1, 8),
-                (8, 1),
-                bert_layer_with_transformer_engine_spec,
-                bert_layer_with_transformer_engine_spec,
-            ),
-            (
-                True,
-                (2, 1),
-                (1, 8),
-                bert_layer_with_transformer_engine_spec,
-                bert_layer_with_transformer_engine_spec,
-            ),
-            (
-                False,
-                (1, 1),
-                (2, 2),
-                bert_layer_with_transformer_engine_spec,
-                bert_layer_with_transformer_engine_spec,
-            ),
-            (True, (2, 1), (1, 8), bert_layer_local_spec, bert_layer_local_spec),
-            (True, (1, 1), (2, 4), bert_layer_with_transformer_engine_spec, bert_layer_local_spec),
-            (False, (1, 8), (2, 1), bert_layer_local_spec, bert_layer_with_transformer_engine_spec),
-        ],
+        RECONFIG_CASES,
     )
     @pytest.mark.internal
     def test_parallel_reconfiguration_e2e(

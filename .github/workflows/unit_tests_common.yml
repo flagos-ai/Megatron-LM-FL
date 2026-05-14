@@ -216,11 +216,6 @@ jobs:
           PYTEST_EXTRA_OPTS=()
           if [ "$PLATFORM" = "cuda" ]; then
             MARKER_OPTS=(-m "not flaky_in_dev")
-          elif [ "$PLATFORM" = "musa" ]; then
-            # Avoid loading tests/unit_tests/conftest.py during the initial MUSA smoke.
-            # That conftest imports megatron.core, which currently enters a TE flash-attn path
-            # missing from the MUSA image before any individual test case is collected.
-            PYTEST_EXTRA_OPTS=(--noconftest)
           fi
           mkdir -p "$COVERAGE_DIR"
           printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \

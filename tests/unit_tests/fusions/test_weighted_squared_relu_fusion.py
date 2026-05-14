@@ -5,10 +5,13 @@ import torch
 
 from megatron.core.activations import squared_relu
 from megatron.core.fusions.fused_weighted_squared_relu import weighted_squared_relu_impl
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 @pytest.mark.internal
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float32])
 def test_weighted_squared_relu_fusion(input_dtype):
     # Tolerances depend on dtype precision
@@ -20,9 +23,9 @@ def test_weighted_squared_relu_fusion(input_dtype):
         raise ValueError(f"Unsupported dtype {input_dtype}")
 
     # Inputs
-    x = torch.randn(16, 64, dtype=input_dtype, device="cuda", requires_grad=True)
-    weights = torch.randn(16, 1, dtype=torch.float32, device="cuda", requires_grad=True)
-    grad_output = torch.randn(16, 64, dtype=input_dtype, device="cuda")
+    x = torch.randn(16, 64, dtype=input_dtype, device=DEVICE, requires_grad=True)
+    weights = torch.randn(16, 1, dtype=torch.float32, device=DEVICE, requires_grad=True)
+    grad_output = torch.randn(16, 64, dtype=input_dtype, device=DEVICE)
 
     # Baseline: legacy squared_relu followed by weighting.
     y_baseline = squared_relu(x) * weights

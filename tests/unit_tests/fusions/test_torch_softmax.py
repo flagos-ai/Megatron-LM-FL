@@ -7,6 +7,10 @@ from megatron.core.fusions.fused_softmax import FusedScaleMaskSoftmax
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.utils import attention_mask_func, get_default_causal_mask
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 class TestTorchSoftmax:
@@ -24,12 +28,12 @@ class TestTorchSoftmax:
         )
 
     def test_output_shape(self):
-        x = torch.randn(8, 2, 4, 4, device="cuda")
+        x = torch.randn(8, 2, 4, 4, device=DEVICE)
         y = self.softmax(x, None, None)
         assert x.shape == y.shape
 
     def test_causal_mask_input_shape_assert(self):
-        x = torch.randn(1, 1, 4, 16, device="cuda")
+        x = torch.randn(1, 1, 4, 16, device=DEVICE)
         with pytest.raises(AssertionError):
             self.softmax(x, None, None)
 
@@ -40,10 +44,10 @@ class TestTorchSoftmax:
         # [[1.0, 0.0],
         #  [0.5, 0.5]]
         b, np, sq, sk = 8, 2, 32, 32
-        x = torch.zeros([b, np, sq, sk]).cuda()
+        x = torch.zeros([b, np, sq, sk], device=DEVICE)
         y = self.softmax(x, None, None)
-        y_expected = torch.tril(torch.ones(b, np, sq, sk, device="cuda"))
-        y_expected /= torch.arange(1, sq + 1, device="cuda").reshape((-1, 1))
+        y_expected = torch.tril(torch.ones(b, np, sq, sk, device=DEVICE))
+        y_expected /= torch.arange(1, sq + 1, device=DEVICE).reshape((-1, 1))
         assert torch.allclose(y, y_expected, rtol=1e-08, atol=1e-08)
 
 
@@ -60,16 +64,18 @@ class TestSoftmaxOne:
         )
 
     def test_output_shape(self):
-        x = torch.randn(8, 2, 4, 4, device="cuda")
-        softmax_offset = torch.zeros(x.size(1), device="cuda")
+        x = torch.randn(8, 2, 4, 4, device=DEVICE)
+        softmax_offset = torch.zeros(x.size(1), device=DEVICE)
         y = self.softmax(x, None, softmax_offset)
         assert x.shape == y.shape
 
     def test_fixed_offset(self):
-        x = torch.tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]], device="cuda")
+        x = torch.tensor(
+            [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]], device=DEVICE
+        )
 
         # Use logit offset of 0.0 per head so denominator adds 1.0 per position
-        softmax_offset = torch.zeros(x.size(1), device="cuda")
+        softmax_offset = torch.zeros(x.size(1), device=DEVICE)
         output = self.softmax(x, None, softmax_offset)
 
         # Manual computation matching implementation semantics
@@ -81,10 +87,12 @@ class TestSoftmaxOne:
         assert torch.allclose(output, expected, rtol=1e-5)
 
     def test_learnable_offset(self):
-        x = torch.tensor([[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]], device="cuda")
+        x = torch.tensor(
+            [[[[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]]]], device=DEVICE
+        )
 
         # Learnable offset provided externally (logit space)
-        learnable_offset = torch.nn.Parameter(torch.empty(x.size(1), device="cuda"))
+        learnable_offset = torch.nn.Parameter(torch.empty(x.size(1), device=DEVICE))
         learnable_offset.data.normal_(mean=0.0, std=0.01)
         output = self.softmax(x, None, learnable_offset)
 
@@ -98,10 +106,11 @@ class TestSoftmaxOne:
 
     def test_numerical_stability(self):
         x = torch.tensor(
-            [[[[1e10, -1e10, 1e10], [-1e10, 1e10, -1e10], [1e10, -1e10, 1e10]]]], device="cuda"
+            [[[[1e10, -1e10, 1e10], [-1e10, 1e10, -1e10], [1e10, -1e10, 1e10]]]],
+            device=DEVICE,
         )
 
-        softmax_offset = torch.zeros(x.size(1), device="cuda")
+        softmax_offset = torch.zeros(x.size(1), device=DEVICE)
         output = self.softmax(x, None, softmax_offset)
 
         assert torch.all(torch.isfinite(output))
@@ -111,13 +120,13 @@ class TestSoftmaxOne:
         # For equal input values (e.g. zero) correctly masked softmax should
         # produce equal scores among non-masked elements
         b, np, sq, sk = 8, 2, 32, 32
-        x = torch.zeros([b, np, sq, sk], device="cuda")
-        softmax_offset = torch.zeros(x.size(1), device="cuda")
+        x = torch.zeros([b, np, sq, sk], device=DEVICE)
+        softmax_offset = torch.zeros(x.size(1), device=DEVICE)
         y = self.softmax(x, None, softmax_offset)
 
         # Expected: lower triangular matrix with rows normalized
-        y_expected = torch.tril(torch.ones(b, np, sq, sk, device="cuda"))
-        y_expected /= 1.0 + torch.arange(1, sq + 1, device="cuda").reshape((-1, 1))
+        y_expected = torch.tril(torch.ones(b, np, sq, sk, device=DEVICE))
+        y_expected /= 1.0 + torch.arange(1, sq + 1, device=DEVICE).reshape((-1, 1))
 
         assert torch.allclose(y, y_expected, rtol=1e-5)
 
@@ -127,7 +136,7 @@ class TestFusedScaleMaskSoftmaxComprehensive:
 
     def test_scaling_factor(self):
         """Test softmax with different scaling factors."""
-        x = torch.randn(2, 4, 8, 8, device="cuda")
+        x = torch.randn(2, 4, 8, 8, device=DEVICE)
 
         for scale in [0.5, 1.0, 2.0]:
             softmax = FusedScaleMaskSoftmax(
@@ -157,7 +166,7 @@ class TestFusedScaleMaskSoftmaxComprehensive:
             scale=None,
         )
 
-        x = torch.randn(2, 4, 16, 16, device="cuda")
+        x = torch.randn(2, 4, 16, 16, device=DEVICE)
         y = softmax(x, None, None)
         assert x.shape == y.shape
 
@@ -192,10 +201,10 @@ class TestFusedScaleMaskSoftmaxComprehensive:
                 scale=None,
             )
 
-            x = torch.randn(2, 4, 8, 8, device="cuda")
+            x = torch.randn(2, 4, 8, 8, device=DEVICE)
             if mask_type == AttnMaskType.padding:
                 # Create a padding mask
-                mask = torch.ones(2, 1, 8, 8, dtype=torch.bool, device="cuda")
+                mask = torch.ones(2, 1, 8, 8, dtype=torch.bool, device=DEVICE)
                 mask[:, :, :, -2:] = False  # Mask last 2 positions
             else:
                 mask = None
@@ -222,7 +231,7 @@ class TestFusedScaleMaskSoftmaxComprehensive:
                 scale=None,
             )
 
-            x = torch.randn(2, 4, 8, 8, device="cuda")
+            x = torch.randn(2, 4, 8, 8, device=DEVICE)
             if config_params["fp16"]:
                 x = x.half()
             elif config_params["bf16"]:
@@ -242,7 +251,7 @@ class TestFusedScaleMaskSoftmaxComprehensive:
             softmax_in_fp32=True,
             scale=1.0,
         )
-        x = torch.randn(2, 4, 8, 8, device="cuda", requires_grad=True)
+        x = torch.randn(2, 4, 8, 8, device=DEVICE, requires_grad=True)
         y = softmax(x, None, None)
         loss = y.sum()
         loss.backward()

@@ -21,6 +21,7 @@ from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 cur_platform = get_platform()
+MUSA_WITHOUT_TE = cur_platform.device_name() == "musa"
 
 
 class TestBertModel:
@@ -44,7 +45,11 @@ class TestBertModel:
         self.bert_model = BertModel(
             config=transformer_config,
             num_tokentypes=0,
-            transformer_layer_spec=get_bert_layer_with_transformer_engine_spec(),
+            transformer_layer_spec=(
+                bert_layer_local_spec
+                if MUSA_WITHOUT_TE
+                else get_bert_layer_with_transformer_engine_spec()
+            ),
             vocab_size=100,
             max_sequence_length=4,
         )
