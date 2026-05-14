@@ -201,6 +201,13 @@ def get_transformer_block_and_grid(
     return block, grid
 
 
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason=(
+        "BridgeCommunicator creates broadcast process groups with backend='nccl' internally; "
+        "MUSA requires that source path to be platformized to mccl."
+    ),
+)
 class TestBridgeCommunicator:
 
     @classmethod
