@@ -4,9 +4,11 @@
 # Compile megatron.core.datasets.helpers_cpp dependencies before BlendedDataset import
 ##
 
+import hashlib
 import os
 import random
 import tempfile
+import time
 from argparse import Namespace
 from collections import defaultdict
 from typing import Dict, Optional
@@ -39,6 +41,43 @@ for split in Split:
         _SIZES[split].append({Split.train: 1000, Split.valid: 100, Split.test: 10}[split] * (i + 1))
 
 _MARGIN = 0.005
+
+
+def _align_torchrun_ranks_before_init(timeout_s=300):
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size <= 1:
+        return
+
+    rank = int(os.environ.get("LOCAL_RANK", "0"))
+    test_id = os.environ.get("PYTEST_CURRENT_TEST", "test_builder").split(" ")[0]
+    run_id = os.environ.get("TORCHELASTIC_RUN_ID") or os.environ.get("GITHUB_RUN_ID", "local")
+    master = f"{os.environ.get('MASTER_ADDR', 'localhost')}:{os.environ.get('MASTER_PORT', '')}"
+    key = hashlib.sha1(f"{run_id}:{master}:{world_size}:{test_id}".encode()).hexdigest()
+    barrier_dir = os.path.join(tempfile.gettempdir(), "megatron_data_test_barriers", key)
+    os.makedirs(barrier_dir, exist_ok=True)
+
+    with open(os.path.join(barrier_dir, f"rank_{rank}"), "w", encoding="utf-8") as marker:
+        marker.write(str(os.getpid()))
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if len([name for name in os.listdir(barrier_dir) if name.startswith("rank_")]) >= world_size:
+            return
+        time.sleep(0.25)
+
+    raise TimeoutError(f"Timed out waiting for {world_size} torchrun ranks before distributed init")
+
+
+def initialize_distributed_and_compile_helpers():
+    if torch.distributed.is_available():
+        if not torch.distributed.is_initialized():
+            _align_torchrun_ranks_before_init()
+        Utils.initialize_distributed()
+        if torch.distributed.get_rank() == 0:
+            compile_helpers()
+        torch.distributed.barrier()
+    else:
+        compile_helpers()
 
 
 def create_file_prefixes(tokenizer, number_of_files, maximum_number_of_documents, dataset_dir):
@@ -82,13 +121,7 @@ def do_setup(odir):
 
 
 def test_builder():
-    if torch.distributed.is_available():
-        Utils.initialize_distributed()
-        if torch.distributed.get_rank() == 0:
-            compile_helpers()
-        torch.distributed.barrier()
-    else:
-        compile_helpers()
+    initialize_distributed_and_compile_helpers()
 
     # Define the class here to avoid pytest warnings
 
@@ -353,13 +386,7 @@ def test_fast_builder(
     if use_split and fast_cache_load:
         pytest.skip("Skipping test case when both use_split and fast_cache_load are True")
 
-    if torch.distributed.is_available():
-        Utils.initialize_distributed()
-        if torch.distributed.get_rank() == 0:
-            compile_helpers()
-        torch.distributed.barrier()
-    else:
-        compile_helpers()
+    initialize_distributed_and_compile_helpers()
 
     tokenizer = build_tokenizer(
         Namespace(

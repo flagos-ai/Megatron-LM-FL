@@ -1,11 +1,13 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
 
 import os
+from dataclasses import replace
 
 import pytest
 import torch
 from packaging.version import Version as PkgVersion
 
+import megatron.core.models.bert.bert_lm_head as bert_lm_head_module
 from megatron.core.models.bert.bert_layer_specs import (
     bert_layer_local_spec,
     get_bert_layer_with_transformer_engine_spec,
@@ -15,6 +17,7 @@ from megatron.core.models.bert.bert_model import BertModel
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import AttnBackend, AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec
+from megatron.core.transformer.torch_norm import WrappedTorchNorm
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.plugin.platform import get_platform
@@ -24,13 +27,31 @@ cur_platform = get_platform()
 MUSA_WITHOUT_TE = cur_platform.device_name() == "musa"
 
 
+def get_bert_layer_local_spec_for_platform():
+    if not MUSA_WITHOUT_TE:
+        return bert_layer_local_spec
+
+    return replace(
+        bert_layer_local_spec,
+        submodules=replace(
+            bert_layer_local_spec.submodules,
+            input_layernorm=WrappedTorchNorm,
+            pre_mlp_layernorm=WrappedTorchNorm,
+        ),
+    )
+
+
 class TestBertModel:
 
     def setup_method(self, method):
+        self._bert_lm_head_ln_impl = None
         tp = 1
         pp = 1
         Utils.initialize_model_parallel(tp, pp)
         model_parallel_cuda_manual_seed(123)
+        if MUSA_WITHOUT_TE:
+            self._bert_lm_head_ln_impl = bert_lm_head_module.LNImpl
+            bert_lm_head_module.LNImpl = WrappedTorchNorm
         transformer_config = TransformerConfig(
             num_layers=2,
             hidden_size=12,
@@ -46,7 +67,7 @@ class TestBertModel:
             config=transformer_config,
             num_tokentypes=0,
             transformer_layer_spec=(
-                bert_layer_local_spec
+                get_bert_layer_local_spec_for_platform()
                 if MUSA_WITHOUT_TE
                 else get_bert_layer_with_transformer_engine_spec()
             ),
@@ -55,6 +76,8 @@ class TestBertModel:
         )
 
     def teardown_method(self, method):
+        if self._bert_lm_head_ln_impl is not None:
+            bert_lm_head_module.LNImpl = self._bert_lm_head_ln_impl
         Utils.destroy_model_parallel()
 
     @pytest.mark.internal

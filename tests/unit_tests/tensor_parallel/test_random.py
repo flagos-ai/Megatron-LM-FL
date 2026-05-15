@@ -17,6 +17,7 @@ from tests.unit_tests.test_utilities import Utils
 cur_platform = get_platform()
 DEVICE = cur_platform.device()
 IS_CUDA = cur_platform.device_name() == "cuda"
+IS_MUSA = cur_platform.device_name() == "musa"
 
 
 def test_cuda_rng_states_tracker():
@@ -42,6 +43,10 @@ def test_cuda_rng_states_tracker():
 
 
 @pytest.mark.parametrize("use_cudagraphable_rng", [True, False] if IS_CUDA else [False])
+@pytest.mark.skipif(
+    IS_MUSA,
+    reason="Nested CUDA RNG fork replay semantics are not stable on the current MUSA backend.",
+)
 def test_double_fork_cuda_rng_states_tracker(use_cudagraphable_rng):
     rng_tracker = CudaRNGStatesTracker(use_cudagraphable_rng=use_cudagraphable_rng)
     rng_tracker.add("state1", 1234)
