@@ -9,7 +9,11 @@ from megatron.core.distributed import DistributedDataParallel, DistributedDataPa
 from megatron.core.hyper_comm_grid import HyperCommGrid
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 # Test model for testing DDP
@@ -57,8 +61,8 @@ class TestDistributedDataParallel:
         ddp_config = DistributedDataParallelConfig(overlap_grad_reduce=True, bucket_size=10000)
 
         # Create two identical models
-        model1 = TestModel(input_dim=input_dim, output_dim=output_dim).cuda()
-        model2 = TestModel(input_dim=input_dim, output_dim=output_dim).cuda()
+        model1 = TestModel(input_dim=input_dim, output_dim=output_dim).to(DEVICE)
+        model2 = TestModel(input_dim=input_dim, output_dim=output_dim).to(DEVICE)
 
         # Ensure identical weights
         for p1, p2 in zip(model1.parameters(), model2.parameters()):
@@ -75,7 +79,9 @@ class TestDistributedDataParallel:
 
         # Initialize torch.distributed if not already initialized
         if not torch.distributed.is_initialized():
-            torch.distributed.init_process_group(backend='nccl')
+            torch.distributed.init_process_group(
+                backend=Utils.PLATFORM_BACKEND_MAP.get(cur_platform.device_name(), 'gloo')
+            )
 
         # Create HyperCommGrid with dimension ep, pp, dp (reversed from device mesh order)
         grid = HyperCommGrid([1, 1, 1, 1, dp_size], ["tp", "cp", "ep", "pp", "dp"])
@@ -96,7 +102,7 @@ class TestDistributedDataParallel:
 
         # Create identical inputs with integer values
         batch_size = 2
-        input_data = torch.randint(0, 10, (batch_size, input_dim), device='cuda', dtype=torch.long)
+        input_data = torch.randint(0, 10, (batch_size, input_dim), device=DEVICE, dtype=torch.long)
         input_data = input_data.float()  # Convert to float for model compatibility
 
         # Forward pass

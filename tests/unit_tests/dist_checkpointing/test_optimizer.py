@@ -29,6 +29,7 @@ from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.mlp import apply_swiglu_sharded_factory
 from megatron.core.utils import is_torch_min_version
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from tests.unit_tests.dist_checkpointing import (
@@ -40,6 +41,8 @@ from tests.unit_tests.dist_checkpointing import (
     setup_moe_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+
+DEVICE = get_platform().device()
 
 
 class Model(torch.nn.Module):
@@ -812,7 +815,7 @@ class TestDistributedOptimizer:
             diffs = None
             is_equal = True
 
-        all_equal = torch.tensor(int(is_equal), device='cuda')
+        all_equal = torch.tensor(int(is_equal), device=DEVICE)
         torch.distributed.all_reduce(all_equal, op=torch.distributed.ReduceOp.MIN)
         if bool(all_equal.item()):
             return True

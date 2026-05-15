@@ -24,8 +24,12 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 from megatron.core.utils import get_te_version
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 def model_forward(model: torch.nn.Module, config: TransformerConfig, micro_batch_size: int = 2):
@@ -43,11 +47,15 @@ def model_forward(model: torch.nn.Module, config: TransformerConfig, micro_batch
         inference_context.sequence_len_offset = offset
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        input_ids = torch.tensor(data, dtype=torch.int64, device=DEVICE).repeat(
+            (micro_batch_size, 1)
+        )
+        position_ids = torch.tensor(data, dtype=torch.int64, device=DEVICE).repeat(
+            (micro_batch_size, 1)
+        )
         attention_mask = torch.ones(
-            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        ).cuda()
+            (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool, device=DEVICE
+        )
 
         logits = model.forward(
             input_ids=input_ids,
@@ -107,7 +115,7 @@ class TestModelOptGPTModel:
         if not self._test_inference:
             return
         config: TransformerConfig = self.modelopt_model.config
-        model = self.modelopt_model.cuda()
+        model = self.modelopt_model.to(DEVICE)
         model_forward(model, config)
 
     def teardown_method(self, method):

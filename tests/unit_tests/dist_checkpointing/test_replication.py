@@ -28,6 +28,7 @@ from nvidia_resiliency_ext.checkpointing.local.replication.strategies import (
 
 from megatron.training.async_utils import maybe_finalize_async_save
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import (
     TempNamedDir,
     init_basic_mock_args,
@@ -35,6 +36,9 @@ from tests.unit_tests.dist_checkpointing import (
     setup_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 def equal_(a, b):
@@ -55,10 +59,10 @@ def equal_(a, b):
 @pytest.mark.parametrize(('tp,pp'), [(2, 4), (1, 1)])
 def test_all_gather_batch(tp, pp):
     Utils.initialize_model_parallel(tp, pp)
-    torch.cuda.set_device(dist.get_rank())
-    t0 = torch.arange(4, device="cuda").reshape((2, 2))
-    t1 = torch.arange(6, device="cuda").reshape((3, 1, 2))
-    t2 = torch.arange(12, device="cuda").reshape((2, 3, 2))
+    cur_platform.set_device(dist.get_rank())
+    t0 = torch.arange(4, device=DEVICE).reshape((2, 2))
+    t1 = torch.arange(6, device=DEVICE).reshape((3, 1, 2))
+    t2 = torch.arange(12, device=DEVICE).reshape((2, 3, 2))
     test_ranks = [0, 3, 7]
     test_group = GroupWrapper(dist.new_group(test_ranks))
     rank = dist.get_rank()

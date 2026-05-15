@@ -35,6 +35,7 @@ def get_bert_layer_local_spec_for_platform():
         bert_layer_local_spec,
         submodules=replace(
             bert_layer_local_spec.submodules,
+            layer_norm=WrappedTorchNorm,
             input_layernorm=WrappedTorchNorm,
             pre_mlp_layernorm=WrappedTorchNorm,
         ),

@@ -1,6 +1,7 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
 import json
+import fcntl
 import os
 import runpy
 import sys
@@ -26,6 +27,39 @@ __LOCAL_BERT_VOCAB = "/home/gitlab-runner/data/bert_data/vocab.txt"
 __LOCAL_GPT2_MERGE = "/home/gitlab-runner/data/gpt3_data/gpt2-merges.txt"
 
 __LOCAL_GPT2_VOCAB = "/home/gitlab-runner/data/gpt3_data/gpt2-vocab.json"
+
+__OPT_DATA_BERT_VOCAB = "/opt/data/tokenizers/bert/vocab.txt"
+
+__OPT_DATA_GPT2_MERGE = "/opt/data/tokenizers/megatron/gpt2-merges.txt"
+
+__OPT_DATA_GPT2_VOCAB = "/opt/data/tokenizers/megatron/gpt2-vocab.json"
+
+os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+
+
+def _first_existing_path(*paths):
+    for path in paths:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _download_once(url, filename):
+    cache_dir = os.path.join(tempfile.gettempdir(), "megatron_unit_test_assets")
+    os.makedirs(cache_dir, exist_ok=True)
+    path = os.path.join(cache_dir, filename)
+    lock_path = path + ".lock"
+
+    with open(lock_path, "w", encoding="utf-8") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if not os.path.exists(path):
+            response = requests.get(url, timeout=60)
+            response.raise_for_status()
+            tmp_path = f"{path}.{os.getpid()}.tmp"
+            with open(tmp_path, "wb") as writer:
+                writer.write(response.content)
+            os.replace(tmp_path, path)
+    return path
 
 
 def dummy_jsonl(odir):
@@ -164,21 +198,19 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
 
 
 def gpt2_vocab(odir):
-    if os.path.exists(__LOCAL_GPT2_VOCAB):
-        return __LOCAL_GPT2_VOCAB
-    path = os.path.join(odir, "vocab.json")
-    with open(path, "wb") as writer:
-        writer.write(requests.get(MEGATRON_CONFIG_MAP['GPT2BPETokenizer']['vocab']).content)
-    return path
+    local_path = _first_existing_path(__LOCAL_GPT2_VOCAB, __OPT_DATA_GPT2_VOCAB)
+    if local_path is not None:
+        return local_path
+    return _download_once(MEGATRON_CONFIG_MAP['GPT2BPETokenizer']['vocab'], "gpt2-vocab.json")
 
 
 def gpt2_merge(odir):
-    if os.path.exists(__LOCAL_GPT2_MERGE):
-        return __LOCAL_GPT2_MERGE
-    path = os.path.join(odir, "merge.txt")
-    with open(path, "wb") as writer:
-        writer.write(requests.get(MEGATRON_CONFIG_MAP['GPT2BPETokenizer']['merges_file']).content)
-    return path
+    local_path = _first_existing_path(__LOCAL_GPT2_MERGE, __OPT_DATA_GPT2_MERGE)
+    if local_path is not None:
+        return local_path
+    return _download_once(
+        MEGATRON_CONFIG_MAP['GPT2BPETokenizer']['merges_file'], "gpt2-merges.txt"
+    )
 
 
 def test_preprocess_data_gpt():
@@ -235,12 +267,10 @@ def test_preprocess_data_gpt_optimal_workers():
 
 
 def bert_vocab(odir):
-    if os.path.exists(__LOCAL_BERT_VOCAB):
-        return __LOCAL_BERT_VOCAB
-    path = os.path.join(odir, "vocab.txt")
-    with open(path, "wb") as writer:
-        writer.write(requests.get(__HUGGINGFACE_BERT_BASE_UNCASED_VOCAB).content)
-    return path
+    local_path = _first_existing_path(__LOCAL_BERT_VOCAB, __OPT_DATA_BERT_VOCAB)
+    if local_path is not None:
+        return local_path
+    return _download_once(__HUGGINGFACE_BERT_BASE_UNCASED_VOCAB, "bert-base-uncased-vocab.txt")
 
 
 @pytest.mark.flaky

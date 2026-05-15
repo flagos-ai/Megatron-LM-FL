@@ -1,5 +1,6 @@
 import os
 import random
+import shutil
 import sys
 import tempfile
 from dataclasses import dataclass
@@ -74,7 +75,9 @@ class _LocalClient(S3Client):
 
     def download_file(self, Bucket: str, Key: str, Filename: str) -> None:
         os.makedirs(os.path.dirname(Filename), exist_ok=True)
-        os.system(f"cp {os.path.join('/', Bucket, Key)} {Filename}")
+        source = os.path.join("/", Bucket, Key)
+        if os.path.abspath(source) != os.path.abspath(Filename):
+            shutil.copyfile(source, Filename)
         assert os.path.exists(Filename)
 
     def upload_file(self, Filename: str, Bucket: str, Key: str) -> None:
@@ -126,7 +129,8 @@ setattr(exceptions, "ClientError", _LocalClientError)
 def _msc_download_file(remote_path, local_path):
     remote_path = remote_path.removeprefix(MSC_PREFIX + "default")
     os.makedirs(os.path.dirname(local_path), exist_ok=True)
-    os.system(f"cp {remote_path} {local_path}")
+    if os.path.abspath(remote_path) != os.path.abspath(local_path):
+        shutil.copyfile(remote_path, local_path)
 
 
 def _msc_resolve_storage_client(path):

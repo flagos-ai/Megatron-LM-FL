@@ -2,7 +2,6 @@
 
 import pytest
 import torch
-from transformer_engine.pytorch.float8_tensor import Float8Tensor
 
 from megatron.core.dist_checkpointing import ShardedTensor, load, save
 from megatron.core.dist_checkpointing.strategies.fully_parallel import (
@@ -13,8 +12,23 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     TorchDistLoadShardedStrategy,
     TorchDistSaveShardedStrategy,
 )
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
+MUSA_WITHOUT_TE = cur_platform.device_name() == 'musa'
+
+pytestmark = pytest.mark.skipif(
+    MUSA_WITHOUT_TE,
+    reason="Current MUSA CI image does not provide CUDA-backed Transformer Engine FP8.",
+)
+
+if not MUSA_WITHOUT_TE:
+    from transformer_engine.pytorch.float8_tensor import Float8Tensor
+else:
+    Float8Tensor = object
 
 
 def to_float8(tensor: torch.Tensor) -> Float8Tensor:
@@ -32,13 +46,13 @@ def to_float8(tensor: torch.Tensor) -> Float8Tensor:
 
         # Create a quantizer for FP8 conversion
         quantizer = Float8Quantizer(
-            scale=torch.full([1], scale, dtype=torch.float32, device="cuda"),
-            amax=torch.empty([1], dtype=torch.float32, device="cuda"),
+            scale=torch.full([1], scale, dtype=torch.float32, device=DEVICE),
+            amax=torch.empty([1], dtype=torch.float32, device=DEVICE),
             fp8_dtype=fp8_dtype,
         )
 
         # Return the quantized tensor
-        return quantizer(tensor.cuda())
+        return quantizer(tensor.to(DEVICE))
 
 
 class TestFP8:
@@ -49,11 +63,11 @@ class TestFP8:
 
         def get_ten(dtype: str = 'fp8'):
             if dtype == 'fp8':
-                return to_float8(torch.full((3,), Utils.rank, dtype=torch.bfloat16, device='cuda'))
+                return to_float8(torch.full((3,), Utils.rank, dtype=torch.bfloat16, device=DEVICE))
             elif dtype == 'bf16':
-                return torch.full((3,), Utils.rank, dtype=torch.bfloat16, device='cuda')
+                return torch.full((3,), Utils.rank, dtype=torch.bfloat16, device=DEVICE)
             elif dtype == 'fp16':
-                return torch.full((3,), Utils.rank, dtype=torch.float16, device='cuda')
+                return torch.full((3,), Utils.rank, dtype=torch.float16, device=DEVICE)
             else:
                 raise NotImplementedError(dtype)
 
@@ -79,7 +93,7 @@ class TestFP8:
         Utils.initialize_model_parallel(*src_tp_pp)
 
         def get_fp8_tensor(fill_val=1):
-            return to_float8(torch.full((3,), fill_val, dtype=torch.bfloat16, device='cuda'))
+            return to_float8(torch.full((3,), fill_val, dtype=torch.bfloat16, device=DEVICE))
 
         def get_state_dict(fill_val=1):
             return {

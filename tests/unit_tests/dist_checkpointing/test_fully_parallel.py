@@ -43,8 +43,12 @@ from megatron.core.dist_checkpointing.strategies.torch import (
     TorchDistSaveShardedStrategy,
 )
 from megatron.core.utils import get_pg_rank
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 class MockSaveStrategy(SaveShardedStrategy):
@@ -325,6 +329,10 @@ class TestFullyParallelSaveAndLoad:
 
         assert loaded_state_dict.keys() == state_dict.keys()
 
+    @pytest.mark.skipif(
+        cur_platform.device_name() != 'cuda',
+        reason="This test checks CUDA allocator memory usage.",
+    )
     @pytest.mark.parametrize('state_dict_device', ['cpu', 'cuda'])
     @pytest.mark.flaky
     @pytest.mark.flaky_in_dev
@@ -387,12 +395,12 @@ class TestFullyParallelSaveAndLoad:
         sharded_state_dict_baseline_two_exchanges = {
             'needed_by_all_A': ShardedTensor.from_rank_offsets(
                 'needed_by_all_A',
-                torch.ones(4, dtype=torch.float, device='cuda'),
+                torch.ones(4, dtype=torch.float, device=DEVICE),
                 replica_id=Utils.rank,
             ),
             'needed_by_all_B': ShardedTensor.from_rank_offsets(
                 'needed_by_all_B',
-                torch.ones(4, dtype=torch.float, device='cuda'),
+                torch.ones(4, dtype=torch.float, device=DEVICE),
                 replica_id=Utils.rank,
             ),
         }
@@ -404,7 +412,7 @@ class TestFullyParallelSaveAndLoad:
         sharded_state_dict_test_one_exchange = sharded_state_dict_baseline_one_exchange.copy()
         sharded_state_dict_test_one_exchange['unique'] = ShardedTensor.from_rank_offsets(
             'unique',
-            torch.ones(4, dtype=torch.float, device='cuda'),
+            torch.ones(4, dtype=torch.float, device=DEVICE),
             (0, Utils.rank, Utils.world_size),
         )
 

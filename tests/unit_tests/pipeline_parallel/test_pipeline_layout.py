@@ -23,6 +23,7 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from megatron.training.global_vars import set_args
 from tests.unit_tests.dist_checkpointing import TempNamedDir
@@ -30,6 +31,10 @@ from tests.unit_tests.dist_checkpointing.models.common import (
     common_test_parallel_reconfiguration_e2e,
 )
 from tests.unit_tests.test_utilities import Utils
+
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 def initialize_gpt_model(
@@ -101,7 +106,7 @@ def initialize_gpt_model(
                 share_embeddings_and_output_weights=False,
             )
             .bfloat16()
-            .cuda()
+            .to(DEVICE)
         )
         this_model.model_type = ModelType.encoder_or_decoder
         model.append(this_model)
@@ -235,8 +240,8 @@ def test_forward_vpp(create_args, tmp_path_dist_ckpt, tp_pp_vpp, pp_layout, is_m
 
     def forward_step_func(data_iterator, model: GPTModel):
         """Forward training step. Copied from `pretrain_gpt.py`"""
-        tokens = torch.LongTensor([[2, 1, 2, 3, 4, 5, 7, 6]]).cuda()
-        position_ids = torch.arange(8).view(1, -1).cuda()
+        tokens = torch.LongTensor([[2, 1, 2, 3, 4, 5, 7, 6]]).to(DEVICE)
+        position_ids = torch.arange(8, device=DEVICE).view(1, -1)
         labels = torch.ones_like(position_ids)
         attention_mask = None
 
@@ -336,17 +341,20 @@ def get_batch_iterator(seq_length, micro_batch_size, num_batches=None):
     while num_batches is None or batch_count < num_batches:
         # Generate different data for each batch by adding batch_count offset
         data = list(range(batch_count, batch_count + seq_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        labels = 1 + torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        input_ids = torch.tensor(data, dtype=torch.int64, device=DEVICE).repeat(
+            (micro_batch_size, 1)
+        )
+        labels = 1 + torch.tensor(data, dtype=torch.int64, device=DEVICE).repeat(
+            (micro_batch_size, 1)
+        )
         position_ids = (
-            torch.tensor(list(range(seq_length)), dtype=torch.int64)
+            torch.tensor(list(range(seq_length)), dtype=torch.int64, device=DEVICE)
             .repeat((micro_batch_size, 1))
-            .cuda()
         )
         attention_mask = torch.ones(
-            (micro_batch_size, 1, seq_length, seq_length), dtype=bool
-        ).cuda()
-        loss_mask = torch.ones(seq_length).repeat((micro_batch_size, 1)).cuda()
+            (micro_batch_size, 1, seq_length, seq_length), dtype=bool, device=DEVICE
+        )
+        loss_mask = torch.ones(seq_length, device=DEVICE).repeat((micro_batch_size, 1))
 
         yield input_ids, labels, position_ids, attention_mask, loss_mask
         batch_count += 1
