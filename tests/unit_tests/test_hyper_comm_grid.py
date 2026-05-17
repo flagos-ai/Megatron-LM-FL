@@ -119,11 +119,15 @@ class TestHyperCommGrid:
         expected = [[4, 5], [6, 7]]
         assert rank_enum == expected
 
+    @patch('torch.distributed.is_initialized')
+    @patch('torch.distributed.get_rank')
     @patch('torch.distributed.new_subgroups_by_enumeration')
-    def test_create_pg_single_dim(self, mock_new_subgroups):
+    def test_create_pg_single_dim(self, mock_new_subgroups, mock_get_rank, mock_is_initialized):
         """Test create_pg for single dimension."""
         mock_pg = MagicMock(spec=dist.ProcessGroup)
         mock_new_subgroups.return_value = (mock_pg, None)
+        mock_get_rank.return_value = 0
+        mock_is_initialized.return_value = True
 
         grid = HyperCommGrid([2, 4], ["tp", "dp"])
 
@@ -139,11 +143,15 @@ class TestHyperCommGrid:
         assert args[0] == expected_enum
         assert kwargs["backend"] is None
 
+    @patch('torch.distributed.is_initialized')
+    @patch('torch.distributed.get_rank')
     @patch('torch.distributed.new_subgroups_by_enumeration')
-    def test_create_pg_multiple_dims(self, mock_new_subgroups):
+    def test_create_pg_multiple_dims(self, mock_new_subgroups, mock_get_rank, mock_is_initialized):
         """Test create_pg for multiple dimensions."""
         mock_pg = MagicMock(spec=dist.ProcessGroup)
         mock_new_subgroups.return_value = (mock_pg, None)
+        mock_get_rank.return_value = 0
+        mock_is_initialized.return_value = True
 
         grid = HyperCommGrid([2, 2, 2], ["tp", "cp", "dp"])
 
@@ -156,11 +164,15 @@ class TestHyperCommGrid:
         expected_enum = [[0, 1, 2, 3], [4, 5, 6, 7]]
         assert args[0] == expected_enum
 
+    @patch('torch.distributed.is_initialized')
+    @patch('torch.distributed.get_rank')
     @patch('torch.distributed.new_subgroups_by_enumeration')
-    def test_create_pg_with_options(self, mock_new_subgroups):
+    def test_create_pg_with_options(self, mock_new_subgroups, mock_get_rank, mock_is_initialized):
         """Test create_pg with additional options."""
         mock_pg = MagicMock(spec=dist.ProcessGroup)
         mock_new_subgroups.return_value = (mock_pg, None)
+        mock_get_rank.return_value = 0
+        mock_is_initialized.return_value = True
 
         grid = HyperCommGrid([2, 4], ["tp", "dp"], backend="nccl")
 
@@ -175,11 +187,15 @@ class TestHyperCommGrid:
         assert kwargs["backend"] == "nccl"
         assert kwargs["pg_options"] == mock_options
 
+    @patch('torch.distributed.is_initialized')
+    @patch('torch.distributed.get_rank')
     @patch('torch.distributed.new_subgroups_by_enumeration')
-    def test_create_pg_duplicate_error(self, mock_new_subgroups):
+    def test_create_pg_duplicate_error(self, mock_new_subgroups, mock_get_rank, mock_is_initialized):
         """Test create_pg raises error when trying to recreate existing process group."""
         mock_pg = MagicMock(spec=dist.ProcessGroup)
         mock_new_subgroups.return_value = (mock_pg, None)
+        mock_get_rank.return_value = 0
+        mock_is_initialized.return_value = True
 
         grid = HyperCommGrid([2, 4], ["tp", "dp"])
 
@@ -190,11 +206,15 @@ class TestHyperCommGrid:
         with pytest.raises(KeyError, match="Process group.*has already been created"):
             grid.create_pg("tp")
 
+    @patch('torch.distributed.is_initialized')
+    @patch('torch.distributed.get_rank')
     @patch('torch.distributed.new_subgroups_by_enumeration')
-    def test_get_pg_success(self, mock_new_subgroups):
+    def test_get_pg_success(self, mock_new_subgroups, mock_get_rank, mock_is_initialized):
         """Test get_pg returns existing process group."""
         mock_pg = MagicMock(spec=dist.ProcessGroup)
         mock_new_subgroups.return_value = (mock_pg, None)
+        mock_get_rank.return_value = 0
+        mock_is_initialized.return_value = True
 
         grid = HyperCommGrid([2, 4], ["tp", "dp"])
 

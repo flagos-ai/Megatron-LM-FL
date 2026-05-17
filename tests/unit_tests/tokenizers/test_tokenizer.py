@@ -1,5 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+import os
+
 import pytest
 import torch
 from packaging import version
@@ -14,6 +16,12 @@ try:
 except Exception:
     HAVE_TRANSFORMERS = False
     HuggingFaceTokenizer = None
+
+SP_TOKENIZER_PATH = "/opt/data/tokenizers/sentencepiece/tokenizer.model"
+SP_METADATA_PATH = "/opt/data/tokenizers/sentencepiece/metadata.json"
+HF_TOKENIZER_PATH = "/opt/data/tokenizers/huggingface"
+MEGATRON_TOKENIZER_VOCAB = "/opt/data/tokenizers/megatron/gpt2-vocab.json"
+TIKTOKEN_TOKENIZER_PATH = "/opt/data/tokenizers/tiktoken/tiktoken.vocab.json"
 
 
 def get_conversation():
@@ -56,10 +64,12 @@ def get_chat_template():
 
 
 def test_sp_tokenizer():
+    # Check if required data files exist
+    if not os.path.isfile(SP_TOKENIZER_PATH):
+        pytest.skip(f"Tokenizer data not available: {SP_TOKENIZER_PATH}")
+
     # Load SP tokenizer
-    tokenizer = MegatronTokenizer.from_pretrained(
-        "/opt/data/tokenizers/sentencepiece/tokenizer.model"
-    )
+    tokenizer = MegatronTokenizer.from_pretrained(SP_TOKENIZER_PATH)
 
     # Load SP tokenizer with custom metadata
     metadata = {"library": "sentencepiece", "model_type": "gpt"}
