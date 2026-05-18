@@ -369,6 +369,12 @@ class TestGPTModelWithCustomPG:
             == 1024 / tp_size
         )
 
+        if MUSA_WITHOUT_TE:
+            pytest.skip(
+                "MUSA custom PG local attention forward requires global memory buffer "
+                "from model-parallel init."
+            )
+
         # Check that the logits output shape is correct
         sequence_length = self.gpt_model.max_sequence_length
         micro_batch_size = 2

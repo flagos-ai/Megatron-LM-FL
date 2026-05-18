@@ -204,6 +204,10 @@ def test_nvtx_decorator():
 
 @pytest.mark.flaky
 @pytest.mark.flaky_in_dev
+@pytest.mark.skipif(
+    cur_platform.device_name() != 'cuda',
+    reason="check_param_hashes_across_dp_replicas moves hashes with .cuda(), requires CUDA",
+)
 def test_check_param_hashes_across_dp_replicas():
     world = int(os.getenv('WORLD_SIZE', '1'))
     rank = int(os.getenv('RANK', '0'))
@@ -230,6 +234,10 @@ def test_check_param_hashes_across_dp_replicas():
 
 @pytest.mark.flaky
 @pytest.mark.flaky_in_dev
+@pytest.mark.skipif(
+    cur_platform.device_name() != 'cuda',
+    reason="check_param_hashes_across_dp_replicas moves hashes with .cuda(), requires CUDA",
+)
 def test_cross_check_param_hashes_across_dp_replicas():
     world = int(os.getenv('WORLD_SIZE', '1'))
     rank = int(os.getenv('RANK', '0'))
