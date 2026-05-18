@@ -694,17 +694,15 @@ class Attention(MegatronModule, ABC):
         softmax_scale = self.config.softmax_scale
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(self.config.kv_channels)
-        softmax_threshold = self.config.sparse_softmax_threshold
-
+        softmax_threshold = self.config.softmax_threshold
+        is_quant = self.config.is_quant
+        is_local = self.config.is_local
+        is_autotune = self.config.is_autotune
         is_causal = attn_mask_type in (
             AttnMaskType.causal,
             AttnMaskType.padding_causal,
             AttnMaskType.causal_bottom_right,
         )
-
-        window_size = (None, None)
-        if hasattr(self.config, 'window_size') and self.config.window_size is not None:
-            window_size = self.config.window_size
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # Varlen path: query/key/value are [total, np, hn]
@@ -719,7 +717,9 @@ class Attention(MegatronModule, ABC):
                 is_causal=is_causal,
                 softmax_scale=softmax_scale,
                 softmax_threshold=softmax_threshold,
-                window_size=window_size,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
             )
         elif query.size(0) == 1 and not self.training:
             # Static decode path: query is [1, b, np, hn], key/value are [sk, b, np, hn]
@@ -732,7 +732,9 @@ class Attention(MegatronModule, ABC):
                 q, k, v,
                 softmax_scale=softmax_scale,
                 softmax_threshold=softmax_threshold,
-                window_size=window_size,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
             )
             # [B, Hq, D] -> [1, B, Hq, D] -> [1, B, Hq*D]
             output = output.unsqueeze(0)
@@ -751,7 +753,9 @@ class Attention(MegatronModule, ABC):
                 is_causal=is_causal,
                 softmax_scale=softmax_scale,
                 softmax_threshold=softmax_threshold,
-                window_size=window_size,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
             )
 
             # [B, S, H, D] -> [S, B, H, D] -> [S, B, H*D]
@@ -785,11 +789,10 @@ class Attention(MegatronModule, ABC):
         softmax_scale = self.config.softmax_scale
         if softmax_scale is None:
             softmax_scale = q.shape[-1] ** -0.5
-        softmax_threshold = self.config.sparse_softmax_threshold
-
-        window_size = (None, None)
-        if hasattr(self.config, 'window_size') and self.config.window_size is not None:
-            window_size = self.config.window_size
+        softmax_threshold = self.config.softmax_threshold
+        is_quant = self.config.is_quant
+        is_local = self.config.is_local
+        is_autotune = self.config.is_autotune
 
         if max_seqlen_q > 1:
             # Prefill path: q/k/v are [total or sq, b, np, hn]
@@ -804,9 +807,11 @@ class Attention(MegatronModule, ABC):
                 max_seqlen_k,
                 is_causal=True,
                 softmax_scale=softmax_scale,
-                softmax_threshold=softmax_threshold,
-                window_size=window_size,
                 seqused_k=seqlens_k,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
             )
             output_total = output_total.unsqueeze(1)
         else:
@@ -820,9 +825,11 @@ class Attention(MegatronModule, ABC):
                 cu_seqlens_k=cu_seqlens_k,
                 max_seqlen_k=max_seqlen_k,
                 softmax_scale=softmax_scale,
-                softmax_threshold=softmax_threshold,
-                window_size=window_size,
                 seqused_k=seqlens_k,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
             )
         return output_total
 
