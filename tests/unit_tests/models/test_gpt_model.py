@@ -187,6 +187,10 @@ def test_get_mlp_module_spec_interface():
 @pytest.mark.skipif(
     not is_te_min_version("1.13.0"), reason="TEFusedMLP is only supported with TE 1.13+."
 )
+@pytest.mark.skipif(
+    MUSA_WITHOUT_TE,
+    reason="Transformer Engine fused-op GPT forward path calls CUDA graph APIs in MUSA CI",
+)
 class TestGPTWithFusedOps:
     """GPT model with Transformer Engine operation-based API"""
 
@@ -235,6 +239,10 @@ class TestGPTWithFusedOps:
 
 @pytest.mark.skipif(
     not is_te_min_version("1.13.0"), reason="TEFusedMLP is only supported with TE 1.13+."
+)
+@pytest.mark.skipif(
+    MUSA_WITHOUT_TE,
+    reason="Transformer Engine activation-function GPT forward path calls CUDA graph APIs in MUSA CI",
 )
 @pytest.mark.parametrize("num_experts", [None, 4])
 @pytest.mark.parametrize("gated_linear_unit", [True, False])
@@ -330,11 +338,19 @@ class TestGPTModelWithCustomPG:
             1234, tp_rank=tp_group.rank(), ep_rank=ep_group.rank(), etp_rank=tp_group.rank()
         )
         transformer_config = TransformerConfig(
-            num_layers=2, hidden_size=1024, num_attention_heads=16, use_cpu_initialization=False
+            num_layers=2,
+            hidden_size=1024,
+            num_attention_heads=16,
+            use_cpu_initialization=False,
+            attention_backend=AttnBackend.local if MUSA_WITHOUT_TE else AttnBackend.unfused,
         )
         self.gpt_model = GPTModel(
             config=transformer_config,
-            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(),
+            transformer_layer_spec=(
+                get_gpt_layer_local_spec_for_platform(transformer_config.num_layers)
+                if MUSA_WITHOUT_TE
+                else get_gpt_layer_with_transformer_engine_spec()
+            ),
             vocab_size=100,
             max_sequence_length=512,
             pg_collection=pg_collection,

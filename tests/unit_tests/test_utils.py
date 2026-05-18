@@ -152,12 +152,18 @@ def test_nvtx_range(msg, suffix):
     _call_nvtx_range()
     assert execution_tracker['ranges']
 
+    if cur_platform.device_name() != 'cuda':
+        return
+
     # Reset tracker
     execution_tracker['ranges'] = False
 
     # Test with NVTX enabled
-    util.configure_nvtx_profiling(True)
-    _call_nvtx_range()
+    try:
+        util.configure_nvtx_profiling(True)
+        _call_nvtx_range()
+    finally:
+        util.configure_nvtx_profiling(False)
     assert execution_tracker['ranges']
 
 
@@ -180,13 +186,19 @@ def test_nvtx_decorator():
     nvtx_decorated_function_with_message()
     assert all(execution_tracker.values())
 
+    if cur_platform.device_name() != 'cuda':
+        return
+
     # Reset tracker
     execution_tracker = {'decorated': False, 'decorated_with_message': False}
 
     # Test with NVTX enabled
-    util.configure_nvtx_profiling(True)
-    nvtx_decorated_function()
-    nvtx_decorated_function_with_message()
+    try:
+        util.configure_nvtx_profiling(True)
+        nvtx_decorated_function()
+        nvtx_decorated_function_with_message()
+    finally:
+        util.configure_nvtx_profiling(False)
     assert all(execution_tracker.values())
 
 
