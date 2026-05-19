@@ -973,7 +973,22 @@ class TestNonStrictLoad:
             assert unexpected_keys == set()
             assert missing_keys == {'TenA', 'ObjB'}
 
-    @pytest.mark.parametrize('validate_integrity', [True, False])
+    @pytest.mark.parametrize(
+        'validate_integrity',
+        [
+            True,
+            pytest.param(
+                False,
+                marks=pytest.mark.skipif(
+                    cur_platform.device_name() == "musa",
+                    reason=(
+                        "MUSA CI with torch 2.5.0 currently segfaults in this non-strict "
+                        "exact load path."
+                    ),
+                ),
+            ),
+        ],
+    )
     def test_exact_load_handling(self, caplog, tmp_path_dist_ckpt, validate_integrity):
         sharded_state_dict = self._get_base_state_dict()
         with TempNamedDir(tmp_path_dist_ckpt / 'test_exact_load_handling') as ckpt_dir:
