@@ -37,8 +37,11 @@ from megatron.core.dist_checkpointing.strategies.base import StrategyAction, get
 from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
 from megatron.core.dist_checkpointing.validation import StrictHandling
 from megatron.core.utils import is_torch_min_version
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 class TestSerialization:
@@ -60,7 +63,7 @@ class TestSerialization:
             ),
         }
 
-        if HAVE_DTENSOR:
+        if HAVE_DTENSOR and cur_platform.device_name() == "cuda":
             mesh = DeviceMesh.from_group(
                 parallel_state.get_data_parallel_group(with_context_parallel=True), "cuda"
             )
