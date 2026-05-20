@@ -6,12 +6,25 @@ from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet, GatedDeltaNetSubmodules
 from megatron.core.transformer.enums import AttnMaskType, LayerType
+from megatron.core.transformer.experimental_attention_variant.csa import (
+    CompressedSparseAttention,
+    CompressedSparseAttentionSubmodules,
+    Compressor,
+    CompressorSubmodules,
+    CSAIndexer,
+    CSAIndexerSubmodules,
+)
+from megatron.core.transformer.experimental_attention_variant.deepseek_v4_hybrid_attention import (
+    DSv4HybridSelfAttention,
+    DSv4HybridSelfAttentionSubmodules,
+)
 from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAIndexer,
     DSAIndexerSubmodules,
     DSAttention,
     DSAttentionSubmodules,
 )
+from megatron.core.transformer.hyper_connection import HyperConnectionModule
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -24,6 +37,7 @@ from megatron.core.transformer.transformer_block import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
+    HyperConnectionTransformerLayer,
     TransformerLayer,
     TransformerLayerSubmodules,
     get_transformer_layer_offset,
@@ -128,6 +142,63 @@ def get_dsa_module_spec_for_backend(
     return attention
 
 
+def get_dsv4_hybrid_module_spec_for_backend(
+    config: TransformerConfig, backend: BackendSpecProvider = None
+) -> ModuleSpec:
+    """Helper function to get module spec for DSv4 Hybrid Sparse Attention."""
+    assert config.multi_latent_attention, "Currently only MLA supports sparse attention."
+    assert config.qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
+
+    # Adjust for RMS norm.
+    rms_norm = config.normalization == "RMSNorm"
+    # DSA indexer requires normalized q as input, so here we cannot fuse qk layernorm
+    # with linear projection and have to use unfused qk layernorm.
+    qk_norm = (
+        backend.layer_norm(rms_norm=rms_norm, for_qk=True) if config.qk_layernorm else IdentityOp
+    )
+
+    compressor_spec = ModuleSpec(
+        module=Compressor,
+        submodules=CompressorSubmodules(
+            linear_wkv=backend.linear(),
+            linear_wgate=backend.linear(),
+            norm=backend.layer_norm(rms_norm=True, for_qk=False),
+        ),
+    )
+
+    indexer_spec = ModuleSpec(
+        module=CSAIndexer,
+        submodules=CSAIndexerSubmodules(
+            linear_wq_b=backend.linear(),
+            linear_weights_proj=backend.linear(),
+            compressor=compressor_spec,
+        ),
+    )
+
+    core_attention = ModuleSpec(
+        module=CompressedSparseAttention,
+        submodules=CompressedSparseAttentionSubmodules(
+            compressor=compressor_spec, indexer=indexer_spec
+        ),
+    )
+
+    attention = ModuleSpec(
+        module=DSv4HybridSelfAttention,
+        params={"attn_mask_type": AttnMaskType.causal},
+        submodules=DSv4HybridSelfAttentionSubmodules(
+            linear_q_down_proj=backend.linear(),
+            linear_q_up_proj=backend.column_parallel_linear(),
+            linear_kv_proj=backend.column_parallel_linear(),
+            core_attention=core_attention,
+            linear_proj=backend.row_parallel_linear(),
+            q_layernorm=qk_norm,
+            kv_layernorm=qk_norm,
+        ),
+        metainfo={"fuse_input_layernorm": False},
+    )
+    return attention
+
+
 def get_experimental_attention_variant_module_spec(
     config: TransformerConfig, backend: BackendSpecProvider = None
 ) -> ModuleSpec:
@@ -138,6 +209,10 @@ def get_experimental_attention_variant_module_spec(
 
     if config.experimental_attention_variant == "gated_delta_net":
         return get_gated_delta_net_module_spec(config=config, backend=backend)
+    elif config.experimental_attention_variant == "dsa":
+        return get_dsa_module_spec_for_backend(config=config, backend=backend)
+    elif config.experimental_attention_variant == "dsv4_hybrid":
+        return get_dsv4_hybrid_module_spec_for_backend(config=config, backend=backend)
     else:
         raise ValueError(
             f"Invalid experimental attention variant: {config.experimental_attention_variant}"
@@ -224,6 +299,10 @@ def get_transformer_block_with_experimental_attention_variant_spec(
 
     # Get GPT decoder block layer specs
     rms_norm = config.normalization == "RMSNorm"
+    enable_hc = config.enable_hyper_connections
+    hc_module = HyperConnectionModule if enable_hc else IdentityOp
+    layer_module = HyperConnectionTransformerLayer if enable_hc else TransformerLayer
+    
     layer_specs = []
     for layer_number in range(config.num_layers):
         attention = (
@@ -245,14 +324,16 @@ def get_transformer_block_with_experimental_attention_variant_spec(
 
         layer_specs.append(
             ModuleSpec(
-                module=TransformerLayer,
+                module=layer_module,
                 submodules=TransformerLayerSubmodules(
                     input_layernorm=input_layernorm,
                     self_attention=attention,
                     self_attn_bda=get_bias_dropout_add,
+                    self_attention_hyper_connection=hc_module,
                     pre_mlp_layernorm=pre_mlp_layernorm,
                     mlp=mlp,
                     mlp_bda=get_bias_dropout_add,
+                    mlp_hyper_connection=hc_module,
                 ),
             )
         )
