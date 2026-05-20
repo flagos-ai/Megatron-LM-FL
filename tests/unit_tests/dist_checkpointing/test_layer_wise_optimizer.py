@@ -21,6 +21,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.utils import get_pg_size
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from tests.unit_tests.dist_checkpointing import (
@@ -32,6 +33,8 @@ from tests.unit_tests.dist_checkpointing import (
     setup_moe_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 def check_equal(input_1, input_2):
@@ -121,6 +124,10 @@ def load_checkpoint_no_arg_checks(*args, **kwargs):
             return load_checkpoint(*args, **kwargs)
 
 
+@pytest.mark.skipif(
+    cur_platform.device_name() != 'cuda',
+    reason="Layer-wise optimizer checkpointing tests build models through CUDA-only get_model path",
+)
 class TestLayerWiseOptimizer:
     """Tests for LayerWiseDistributedOptimizer functionality."""
 

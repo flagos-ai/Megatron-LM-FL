@@ -11,8 +11,11 @@ import torch
 from megatron.core.dist_checkpointing import ShardedTensor, load, save
 from megatron.core.dist_checkpointing.dict_utils import diff
 from megatron.core.dist_checkpointing.strategies.torch import TorchDistSaveShardedStrategy
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+DEVICE = get_platform().device()
 
 
 class TestCachedMetadata:
@@ -99,7 +102,7 @@ class TestCPUTensors:
         Utils.destroy_model_parallel()
 
     def test_cpu_tensors_dont_take_too_much_space(self, tmp_path_dist_ckpt):
-        large_cuda_tensor = torch.ones(1_000_000, dtype=torch.float, device='cuda')
+        large_cuda_tensor = torch.ones(1_000_000, dtype=torch.float, device=DEVICE)
         large_cpu_tensor = torch.ones(1_000_000, dtype=torch.float)
         # Create small tensors which are a view of a large tensor
         sharded_state_dict = {

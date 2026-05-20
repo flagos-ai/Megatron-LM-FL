@@ -12,8 +12,11 @@ from megatron.core.dist_checkpointing.mapping import (
     apply_factory_merges,
     is_main_replica,
 )
+from megatron.plugin.platform import get_platform
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.unit_tests.test_utilities import Utils
+
+DEVICE = get_platform().device()
 
 
 class TestShardedTensor:
@@ -26,7 +29,7 @@ class TestShardedTensor:
     # def teardown_method(self, method):
     #     Utils.destroy_model_parallel()
 
-    def test_from_rank_offsets_constructor(self, dtype=torch.float, device='cuda'):
+    def test_from_rank_offsets_constructor(self, dtype=torch.float, device=DEVICE):
         data = torch.ones((1, 3, 7, 9), dtype=dtype, device=device)
         shape = data.shape
         rank_offsets = [(0, 0, 10), (2, 3, 6)]

@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import sys
+from importlib.util import find_spec
 from typing import Any, Dict, Mapping, Tuple
 
 import pytest  # type: ignore[import]
@@ -16,6 +17,7 @@ from megatron.core.num_microbatches_calculator import destroy_num_microbatches_c
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.enums import AttnBackend
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import core_transformer_config_from_args, parse_args, validate_args
 from megatron.training.global_vars import (
     destroy_global_vars,
@@ -24,6 +26,9 @@ from megatron.training.global_vars import (
     set_global_variables,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+MAMBA_SSM_AVAILABLE = find_spec("mamba_ssm") is not None
 
 GOLDEN_CONFIG: Dict[str, Any] = {
     "_cpu_offloading_context": None,
@@ -406,6 +411,7 @@ def _diff_configs(expected: Mapping[str, Any], actual: Mapping[str, Any]) -> Tup
     return added, removed, changed
 
 
+@pytest.mark.skipif(not MAMBA_SSM_AVAILABLE, reason="MambaSSM is not installed.")
 class TestMambaMoEModel:
     """Test the initialization and use of an MoE Mamba model."""
 
@@ -563,6 +569,10 @@ class TestMambaMoEModel:
         assert self.model.decoder.input_tensor.shape[1] == micro_batch_size
         assert self.model.decoder.input_tensor.shape[2] == config.hidden_size
 
+    @pytest.mark.skipif(
+        cur_platform.device_name() != "cuda",
+        reason="Mamba MoE forward test calls CUDA-only tensor APIs.",
+    )
     def test_forward(self):
         """Basic smoke test for the forward pass of the Mamba MoE model."""
 

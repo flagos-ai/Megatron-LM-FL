@@ -713,7 +713,7 @@ class CheckpointWithoutOutput(object):
     """
 
     def __init__(self, fp8=False):
-        self.fp8 = fp8 is not None
+        self.fp8 = fp8
         self.run_function = None
         self.fwd_cpu_rng_state = None
         self.fwd_cuda_rng_state = None

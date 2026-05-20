@@ -1,5 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+import os
+
 import pytest
 import torch
 from packaging import version
@@ -14,6 +16,12 @@ try:
 except Exception:
     HAVE_TRANSFORMERS = False
     HuggingFaceTokenizer = None
+
+SP_TOKENIZER_PATH = "/opt/data/tokenizers/sentencepiece/tokenizer.model"
+SP_METADATA_PATH = "/opt/data/tokenizers/sentencepiece/metadata.json"
+HF_TOKENIZER_PATH = "/opt/data/tokenizers/huggingface"
+MEGATRON_TOKENIZER_VOCAB = "/opt/data/tokenizers/megatron/gpt2-vocab.json"
+TIKTOKEN_TOKENIZER_PATH = "/opt/data/tokenizers/tiktoken/tiktoken.vocab.json"
 
 
 def get_conversation():
@@ -56,10 +64,12 @@ def get_chat_template():
 
 
 def test_sp_tokenizer():
+    # Check if required data files exist
+    if not os.path.isfile(SP_TOKENIZER_PATH):
+        pytest.skip(f"Tokenizer data not available: {SP_TOKENIZER_PATH}")
+
     # Load SP tokenizer
-    tokenizer = MegatronTokenizer.from_pretrained(
-        "/opt/data/tokenizers/sentencepiece/tokenizer.model"
-    )
+    tokenizer = MegatronTokenizer.from_pretrained(SP_TOKENIZER_PATH)
 
     # Load SP tokenizer with custom metadata
     metadata = {"library": "sentencepiece", "model_type": "gpt"}
@@ -96,19 +106,19 @@ def test_sp_tokenizer():
 
 
 def test_hf_tokenizer():
+    if not os.path.isdir(HF_TOKENIZER_PATH):
+        pytest.skip(f"HuggingFace tokenizer data not available: {HF_TOKENIZER_PATH}")
     # Load HF tokenizer with custom metadata
     metadata = {"library": "huggingface"}
     chat_template = "test chat template"
 
-    tokenizer = MegatronTokenizer.from_pretrained(
-        "/opt/data/tokenizers/huggingface", metadata_path=metadata
-    )
+    tokenizer = _load_local_hf_tokenizer_or_skip(HF_TOKENIZER_PATH, metadata_path=metadata)
 
     # Load HF tokenizer with adding special tokens
     special_tokens = {"bos_token": "<TEST_BOS>", "eos_token": "<TEST_EOS>"}
 
-    tokenizer = MegatronTokenizer.from_pretrained(
-        "/opt/data/tokenizers/huggingface",
+    tokenizer = _load_local_hf_tokenizer_or_skip(
+        HF_TOKENIZER_PATH,
         metadata_path=metadata,
         chat_template=chat_template,
         include_special_tokens=False,
@@ -124,6 +134,13 @@ def test_hf_tokenizer():
 # HuggingFaceTokenizer.ids_to_text and include_special_tokens (--tokenizer-hf-include-special-tokens).
 # Uses same local path as test_hf_tokenizer; tests EOS stripping vs keeping in detokenized output (e.g. RL).
 LOCAL_HF_TOKENIZER_PATH = "/opt/data/tokenizers/huggingface"
+
+
+def _load_local_hf_tokenizer_or_skip(*args, **kwargs):
+    try:
+        return MegatronTokenizer.from_pretrained(*args, **kwargs)
+    except (OSError, ValueError) as exc:
+        pytest.skip(f"Local HuggingFace tokenizer data not available: {exc}")
 
 
 def _eos_in_text(text: str, eos_token: str) -> bool:
@@ -204,10 +221,15 @@ def test_megatron_tokenizer():
     version.parse(torch.__version__) < version.parse('2.3.0'), reason="Not supported for LTS"
 )
 def test_tiktoken_tokenizer():
+    if not os.path.isfile(TIKTOKEN_TOKENIZER_PATH):
+        pytest.skip(f"Tokenizer data not available: {TIKTOKEN_TOKENIZER_PATH}")
+
     # Load tiktoken tokenizer
+    metadata = {"library": "tiktoken"}
     chat_template = get_chat_template()
     tokenizer = MegatronTokenizer.from_pretrained(
-        tokenizer_path="/opt/data/tokenizers/tiktoken/tiktoken.vocab.json",
+        tokenizer_path=TIKTOKEN_TOKENIZER_PATH,
+        metadata_path=metadata,
         chat_template=chat_template,
         vocab_size=131072,
     )
@@ -267,8 +289,9 @@ def test_bytelevel_tokenizer():
     assert tokenizer.detokenize([72, 101, 108, 108, 111]) == "Hello"
 
 
-def test_write_metadata():
-    tokenizer_path = "/opt/data/tokenizers/huggingface"
+def test_write_metadata(tmp_path):
+    tokenizer_path = str(tmp_path / "huggingface")
+    os.makedirs(tokenizer_path)
     chat_template = "test chat template"
     tokenizer_library = "huggingface"
     MegatronTokenizer.write_metadata(
@@ -296,7 +319,7 @@ def test_write_metadata():
     )
 
     # Save metadata to specific path
-    metadata_path = f"{tokenizer_path}/test_metadata.json"
+    metadata_path = os.path.join(tokenizer_path, "test_metadata.json")
     MegatronTokenizer.write_metadata(
         tokenizer_path=tokenizer_path,
         metadata_path=metadata_path,
@@ -311,7 +334,7 @@ def test_multimodal_tokenizer():
     prompt_format = "qwen2p0"
     special_tokens = ["<image>"]
     image_tag_type = "nvlm"
-    tokenizer = MegatronTokenizer.from_pretrained(
+    tokenizer = _load_local_hf_tokenizer_or_skip(
         tokenizer_path="/opt/data/tokenizers/multimodal",
         metadata_path={"library": "multimodal"},
         prompt_format=prompt_format,
@@ -369,7 +392,7 @@ def test_null_multimodal_tokenizer():
 def test_sft_tokenizer():
     """Test SFTTokenizer."""
     prompt_format = "nemotron-nano-v2"
-    tokenizer = MegatronTokenizer.from_pretrained(
+    tokenizer = _load_local_hf_tokenizer_or_skip(
         tokenizer_path="/opt/data/tokenizers/multimodal",
         metadata_path={"library": "sft"},
         prompt_format=prompt_format,

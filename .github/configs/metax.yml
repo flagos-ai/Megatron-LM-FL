@@ -5,24 +5,12 @@
 hardware_name: metax
 display_name: 'Metax Tests'
 
-# CI image for Metax dev env
-# ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
-
-# CI image for online env
-ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
-
 # Runner labels for Metax node
 runner_labels:
   - mx-4g-cicd-megatron
 
-# Container volumes (hardware-specific paths)
-# container_volumes:
-#   - /home/flagscale_cicd/flask/static:/workspace/report
-#   - /home/flagscale_cicd/flask/config:/workspace/config
-#   - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
-#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
-#   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
-#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+# CI image for online env
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
 
 # Container volumes for online env
 container_volumes:

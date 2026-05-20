@@ -2,6 +2,7 @@
 
 import inspect
 import os
+from dataclasses import replace
 from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
@@ -18,16 +19,43 @@ from megatron.core.inference.contexts.dynamic_context import DynamicInferenceCon
 from megatron.core.inference.inference_request import DynamicInferenceRequest
 from megatron.core.inference.sampling_params import SamplingParams
 from megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_layer_local_spec,
     get_gpt_layer_with_transformer_engine_spec,
     get_mlp_module_spec,
 )
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.torch_norm import WrappedTorchNorm
+from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_fa_min_version, is_te_min_version
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+MUSA_WITHOUT_TE = cur_platform.device_name() == "musa"
+
+
+def get_gpt_layer_local_spec_for_platform(num_layers):
+    local_layer_spec = get_gpt_layer_local_spec()
+    if not MUSA_WITHOUT_TE:
+        return local_layer_spec
+
+    local_layer_spec = replace(
+        local_layer_spec,
+        submodules=replace(
+            local_layer_spec.submodules,
+            input_layernorm=WrappedTorchNorm,
+            pre_mlp_layernorm=WrappedTorchNorm,
+        ),
+    )
+    return TransformerBlockSubmodules(
+        layer_specs=[local_layer_spec] * num_layers,
+        layer_norm=WrappedTorchNorm,
+    )
 
 
 class TestGPTModel:
@@ -44,10 +72,15 @@ class TestGPTModel:
             num_attention_heads=4,
             use_cpu_initialization=True,
             embedding_init_method_std=1.0,  # Test that we can initialize the embedding weights to something else.
+            attention_backend=AttnBackend.local if MUSA_WITHOUT_TE else AttnBackend.unfused,
         )
         self.gpt_model = GPTModel(
             config=transformer_config,
-            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(),
+            transformer_layer_spec=(
+                get_gpt_layer_local_spec_for_platform(transformer_config.num_layers)
+                if MUSA_WITHOUT_TE
+                else get_gpt_layer_with_transformer_engine_spec()
+            ),
             vocab_size=100,
             max_sequence_length=4,
         )
@@ -95,14 +128,14 @@ class TestGPTModel:
         sequence_length = self.gpt_model.max_sequence_length
         micro_batch_size = 2
 
-        self.gpt_model.cuda()
+        self.gpt_model.to(cur_platform.device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(cur_platform.device())
+        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(cur_platform.device())
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        ).cuda()
+        ).to(cur_platform.device())
 
         logits = self.gpt_model.forward(
             input_ids=input_ids, position_ids=position_ids, attention_mask=attention_mask
@@ -154,6 +187,10 @@ def test_get_mlp_module_spec_interface():
 @pytest.mark.skipif(
     not is_te_min_version("1.13.0"), reason="TEFusedMLP is only supported with TE 1.13+."
 )
+@pytest.mark.skipif(
+    MUSA_WITHOUT_TE,
+    reason="Transformer Engine fused-op GPT forward path calls CUDA graph APIs in MUSA CI",
+)
 class TestGPTWithFusedOps:
     """GPT model with Transformer Engine operation-based API"""
 
@@ -182,14 +219,14 @@ class TestGPTWithFusedOps:
         sequence_length = self.gpt_model.max_sequence_length
         micro_batch_size = 2
 
-        self.gpt_model.cuda()
+        self.gpt_model.to(cur_platform.device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(cur_platform.device())
+        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(cur_platform.device())
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-        ).cuda()
+        ).to(cur_platform.device())
 
         logits = self.gpt_model.forward(
             input_ids=input_ids, position_ids=position_ids, attention_mask=attention_mask
@@ -202,6 +239,10 @@ class TestGPTWithFusedOps:
 
 @pytest.mark.skipif(
     not is_te_min_version("1.13.0"), reason="TEFusedMLP is only supported with TE 1.13+."
+)
+@pytest.mark.skipif(
+    MUSA_WITHOUT_TE,
+    reason="Transformer Engine activation-function GPT forward path calls CUDA graph APIs in MUSA CI",
 )
 @pytest.mark.parametrize("num_experts", [None, 4])
 @pytest.mark.parametrize("gated_linear_unit", [True, False])
@@ -239,14 +280,14 @@ def test_gpt_with_te_activation_func(num_experts, gated_linear_unit):
     sequence_length = gpt_model.max_sequence_length
     micro_batch_size = 2
 
-    gpt_model.cuda()
+    gpt_model.to(cur_platform.device())
 
     data = list(range(sequence_length))
-    input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-    position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+    input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(cur_platform.device())
+    position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(cur_platform.device())
     attention_mask = torch.ones(
         (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
-    ).cuda()
+    ).to(cur_platform.device())
 
     logits = gpt_model.forward(
         input_ids=input_ids, position_ids=position_ids, attention_mask=attention_mask
@@ -297,11 +338,19 @@ class TestGPTModelWithCustomPG:
             1234, tp_rank=tp_group.rank(), ep_rank=ep_group.rank(), etp_rank=tp_group.rank()
         )
         transformer_config = TransformerConfig(
-            num_layers=2, hidden_size=1024, num_attention_heads=16, use_cpu_initialization=False
+            num_layers=2,
+            hidden_size=1024,
+            num_attention_heads=16,
+            use_cpu_initialization=False,
+            attention_backend=AttnBackend.local if MUSA_WITHOUT_TE else AttnBackend.unfused,
         )
         self.gpt_model = GPTModel(
             config=transformer_config,
-            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(),
+            transformer_layer_spec=(
+                get_gpt_layer_local_spec_for_platform(transformer_config.num_layers)
+                if MUSA_WITHOUT_TE
+                else get_gpt_layer_with_transformer_engine_spec()
+            ),
             vocab_size=100,
             max_sequence_length=512,
             pg_collection=pg_collection,
@@ -320,15 +369,21 @@ class TestGPTModelWithCustomPG:
             == 1024 / tp_size
         )
 
+        if MUSA_WITHOUT_TE:
+            pytest.skip(
+                "MUSA custom PG local attention forward requires global memory buffer "
+                "from model-parallel init."
+            )
+
         # Check that the logits output shape is correct
         sequence_length = self.gpt_model.max_sequence_length
         micro_batch_size = 2
 
-        self.gpt_model.cuda()
+        self.gpt_model.to(cur_platform.device())
 
-        input_ids = torch.ones(micro_batch_size, sequence_length, dtype=torch.int64, device="cuda")
+        input_ids = torch.ones(micro_batch_size, sequence_length, dtype=torch.int64, device=cur_platform.device())
         position_ids = torch.ones(
-            micro_batch_size, sequence_length, dtype=torch.int64, device="cuda"
+            micro_batch_size, sequence_length, dtype=torch.int64, device=cur_platform.device()
         )
 
         logits = self.gpt_model.forward(
@@ -387,7 +442,7 @@ class TestGPTWithDynamicInference:
         """
         Tests that logits for padded tokens are zeroed out for fp8 inference.
         """
-        self.gpt_model.cuda()
+        self.gpt_model.to(cur_platform.device())
         self.gpt_model.eval()
         config = self.gpt_model.config
 
@@ -411,7 +466,7 @@ class TestGPTWithDynamicInference:
         active_token_count = 10
         request = DynamicInferenceRequest(
             request_id=0,
-            prompt_tokens=torch.arange(0, active_token_count, dtype=torch.long, device='cuda'),
+            prompt_tokens=torch.arange(0, active_token_count, dtype=torch.long, device=cur_platform.device()),
             sampling_params=SamplingParams(num_tokens_to_generate=1),
         )
         inference_context.add_request(request)

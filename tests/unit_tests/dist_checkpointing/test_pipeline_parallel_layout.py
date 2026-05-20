@@ -19,6 +19,7 @@ from megatron.core.num_microbatches_calculator import (
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from megatron.training.global_vars import set_args
 from tests.unit_tests.dist_checkpointing import TempNamedDir
@@ -26,6 +27,8 @@ from tests.unit_tests.dist_checkpointing.models.common import (
     common_test_parallel_reconfiguration_e2e,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 def initialize_gpt_model(
@@ -271,6 +274,10 @@ def create_args():
             True,
         ),
     ],
+)
+@pytest.mark.skipif(
+    cur_platform.device_name() != 'cuda',
+    reason="VPP checkpointing path initializes CUDA state through Transformer Engine specs.",
 )
 def test_save_and_load_checkpoint_vpp(
     create_args,

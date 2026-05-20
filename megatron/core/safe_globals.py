@@ -38,5 +38,8 @@ SAFE_GLOBALS = [
 
 def register_safe_globals():
     """Register megatron-core safe classes with torch serialization."""
+    if not hasattr(torch.serialization, "add_safe_globals"):
+        return
+
     for cls in SAFE_GLOBALS:
         torch.serialization.add_safe_globals([cls])

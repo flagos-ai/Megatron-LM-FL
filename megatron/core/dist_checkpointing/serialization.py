@@ -280,7 +280,7 @@ def load_content_metadata(
 def remove_sharded_tensors(checkpoint_dir: str, key_prefix: str):
     """determine the appropriate sharding strategy and delegate removal to the sharded strategy"""
     verify_checkpoint(checkpoint_dir)
-    TorchDistSaveShardedStrategy.remove_sharded_tensors(checkpoint_dir, key_prefix)
+    TorchDistLoadShardedStrategy().remove_sharded_tensors(checkpoint_dir, key_prefix)
 
 
 def save(

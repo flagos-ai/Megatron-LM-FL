@@ -1,4 +1,5 @@
 import torch
+import pytest
 from pytest_mock import mocker
 
 from megatron.core.export.data_type import DataType
@@ -14,12 +15,21 @@ from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 _SEQUENCE_LENGTH = 64
 _VOCAB_SIZE = 256
+cur_platform = get_platform()
 
 
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason=(
+        "TRT-LLM distributed GPU export test uses CUDA tensors and TensorRT-LLM CUDA paths; "
+        "current MUSA CI image has no CUDA backend."
+    ),
+)
 class TestTRTLLMDistributedGPUConverter:
     """
     Test Distributed converter

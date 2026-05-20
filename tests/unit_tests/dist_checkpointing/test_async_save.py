@@ -17,6 +17,15 @@ from megatron.core.dist_checkpointing.strategies.torch import (
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
 
+# Check if nvrx async strategy is available
+try:
+    from nvidia_resiliency_ext.checkpointing.async_ckpt.core import (
+        AsyncRequest,
+    )
+    HAVE_NVRX = True
+except ImportError:
+    HAVE_NVRX = False
+
 
 def write_data_os_err_mock_fn(
     transform_list, local_proc_idx, write_bucket, results_queue, count_queue, use_fsync, **kwargs
@@ -82,6 +91,8 @@ class TestAsyncSave:
 
     @pytest.mark.parametrize('async_strategy', ["nvrx", "mcore"])
     def test_get_async_strategy(self, async_strategy):
+        if async_strategy == "nvrx" and not HAVE_NVRX:
+            pytest.skip("nvidia-resiliency-ext is not installed.")
         strategy, modules = get_async_strategy(async_strategy)
 
         assert len(modules) > 1
@@ -92,6 +103,8 @@ class TestAsyncSave:
 
     @pytest.mark.parametrize('async_strategy', ["nvrx", "mcore"])
     def test_get_async_strategy_no_nvrx_installed(self, async_strategy):
+        if async_strategy == "nvrx" and not HAVE_NVRX:
+            pytest.skip("nvidia-resiliency-ext is not installed.")
         with mock.patch.dict(
             'sys.modules', {'nvidia_resiliency_ext.checkpointing.async_ckpt.core': None}
         ):

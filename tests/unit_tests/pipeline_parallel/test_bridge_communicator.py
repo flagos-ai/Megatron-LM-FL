@@ -23,7 +23,16 @@ from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParall
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
+BACKEND = os.getenv(
+    "DISTRIBUTED_BACKEND",
+    {'cuda': 'nccl', 'musa': 'mccl', 'cpu': 'gloo'}.get(cur_platform.device_name(), 'gloo'),
+)
 
 
 def _create_transformer_block(
@@ -61,8 +70,7 @@ def _create_transformer_block(
             get_gpt_layer_with_transformer_engine_spec(),
             pg_collection=pg_collection,
         )
-        .cuda()
-        .to(dtype)
+        .to(device=DEVICE, dtype=dtype)
     )
     with torch.no_grad():
         for mod in block.modules():
@@ -126,7 +134,7 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
         shape=[tp, cp, pp, dp],
         dim_names=["tp", "cp", "pp", "dp"],
         rank_offset=offset,
-        backend="nccl",
+        backend=BACKEND,
     )
     _ = grid.create_pg(["tp"])
     _ = grid.create_pg(["cp"])
@@ -193,15 +201,21 @@ def get_transformer_block_and_grid(
     return block, grid
 
 
+@pytest.mark.skipif(
+    cur_platform.device_name() == "musa",
+    reason=(
+        "BridgeCommunicator creates broadcast process groups with backend='nccl' internally; "
+        "MUSA requires that source path to be platformized to mccl."
+    ),
+)
 class TestBridgeCommunicator:
 
     @classmethod
     def setup_class(cls):
         """Set up distributed environment for the entire test class."""
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
-        if torch.cuda.is_available():
-            torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+            dist.init_process_group(backend=BACKEND)
+        cur_platform.set_device(int(os.environ["LOCAL_RANK"]))
 
         world_size = dist.get_world_size()
         if world_size != 8:
@@ -235,7 +249,7 @@ class TestBridgeCommunicator:
 
         random_hidden_state = torch.randn(16, 128, 512)
         if bridge_communicator.is_current_rank_in_grid(bridge_communicator.src_grid):
-            random_hidden_state = random_hidden_state.cuda()
+            random_hidden_state = random_hidden_state.to(DEVICE)
             bridge_communicator.send_forward(random_hidden_state)
 
         else:
@@ -259,7 +273,7 @@ class TestBridgeCommunicator:
         bridge_communicator = BridgeCommunicator(grid1, grid2, comm_dtype=torch.float32)
 
         if bridge_communicator.is_current_rank_in_grid(bridge_communicator.dest_grid):
-            random_grad_state = random_grad_state.cuda()
+            random_grad_state = random_grad_state.to(DEVICE)
             bridge_communicator.send_backward(random_grad_state)
 
         else:
@@ -279,14 +293,14 @@ class TestBridgeCommunicator:
         bridge_communicator = BridgeCommunicator(grid1, grid2, comm_dtype=torch.float32)
 
         if bridge_communicator.is_current_rank_in_grid(bridge_communicator.src_grid):
-            random_hidden_state = torch.randn(16, 128, 512).cuda()
+            random_hidden_state = torch.randn(16, 128, 512, device=DEVICE)
             received_grad = bridge_communicator.send_forward_recv_backward(random_hidden_state)
             assert (
                 received_grad.shape == random_hidden_state.shape
             ), f"Expected gradient shape {random_hidden_state.shape}, got {received_grad.shape}"
 
         else:
-            random_grad_state = torch.randn(32, 128, 512).cuda()
+            random_grad_state = torch.randn(32, 128, 512, device=DEVICE)
             received_activation = bridge_communicator.send_backward_recv_forward(random_grad_state)
 
             assert received_activation.shape == (
@@ -318,7 +332,7 @@ class TestBridgeCommunicator:
         torch.manual_seed(12345)
         dtype = torch.float32
         hidden_states = torch.randn(
-            (sequence_length, micro_batch_size, hidden_size), device="cuda"
+            (sequence_length, micro_batch_size, hidden_size), device=DEVICE
         ).to(dtype)
         current_rank = dist.get_rank()
 
@@ -500,11 +514,11 @@ class TestBridgeCommunicator:
 
         rank = dist.get_rank()
         if bridge.is_current_rank_in_grid(src_grid):
-            tensor = torch.full((577, 128), float(rank + 1), device='cuda')
+            tensor = torch.full((577, 128), float(rank + 1), device=DEVICE)
             grad = bridge.send_forward_recv_backward(tensor)
             assert grad.shape == (577, 128)
         else:
-            grad = torch.randn(577 * 4, 128, device='cuda')
+            grad = torch.randn(577 * 4, 128, device=DEVICE)
             activation = bridge.send_backward_recv_forward(grad)
             assert activation.shape == (577 * 4, 128)
 
@@ -522,10 +536,10 @@ class TestBridgeCommunicator:
 
         rank = dist.get_rank()
         if bridge.is_current_rank_in_grid(src_grid):
-            tensor = torch.randn(577 * 4, 128, device='cuda')
+            tensor = torch.randn(577 * 4, 128, device=DEVICE)
             grad = bridge.send_forward_recv_backward(tensor)
             assert grad.shape == (577 * 4, 128)
         else:
-            grad = torch.full((577, 128), float(rank), device='cuda')
+            grad = torch.full((577, 128), float(rank), device=DEVICE)
             activation = bridge.send_backward_recv_forward(grad)
             assert activation.shape == (577, 128)

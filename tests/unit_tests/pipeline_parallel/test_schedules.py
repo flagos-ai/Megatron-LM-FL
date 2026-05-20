@@ -19,9 +19,11 @@ from megatron.core.transformer.cuda_graphs import (
     convert_schedule_table_to_order,
     get_overlap_moe_expert_parallel_comm_order,
 )
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 rank = Utils.rank
+cur_platform = get_platform()
 
 
 def _populate_embedding_and_position_groups(pp_group):
@@ -248,7 +250,7 @@ def test_forward_backward_func_with_pipeline_parallel(mocker):
         def loss_func(output_tensor):
             return rank, {'loss_reduced': rank}
 
-        return torch.rand(512, 8, 256).cuda(), loss_func
+        return torch.rand(512, 8, 256).to(cur_platform.device()), loss_func
 
     model = torch.nn.Linear(4, 1)
     model.model_type = 'unit-test'
@@ -315,7 +317,7 @@ def test_forward_backward_func_with_interleaving(mocker):
         def loss_func(output_tensor):
             return rank, {'loss_reduced': rank}
 
-        return torch.rand(512, 8, 256).cuda(), loss_func
+        return torch.rand(512, 8, 256).to(cur_platform.device()), loss_func
 
     model = torch.nn.Linear(4, 1)
 
@@ -419,7 +421,7 @@ def test_forward_backward_func_with_uneven_interleaving(mocker):
         def loss_func(output_tensor):
             return rank, {'loss_reduced': rank}
 
-        return torch.rand(512, 8, 256).cuda(), loss_func
+        return torch.rand(512, 8, 256).to(cur_platform.device()), loss_func
 
     model_a = torch.nn.Linear(4, 1)
     model_b = torch.nn.Linear(8, 1)
@@ -530,7 +532,7 @@ def test_forward_backward_pipelining_without_interleaving_with_custom_pgs(mocker
         def loss_func(output_tensor):
             return rank, {'loss_reduced': rank}
 
-        return torch.rand(512, 8, 256).cuda(), loss_func
+        return torch.rand(512, 8, 256).to(cur_platform.device()), loss_func
 
     # Create model
     model = torch.nn.Linear(4, 1)
@@ -631,7 +633,7 @@ def test_forward_backward_pipelining_with_interleaving_with_custom_pgs(mocker):
         def loss_func(output_tensor):
             return rank, {'loss_reduced': rank}
 
-        return torch.rand(512, 8, 256).cuda(), loss_func
+        return torch.rand(512, 8, 256).to(cur_platform.device()), loss_func
 
     model = torch.nn.Linear(4, 1)
 

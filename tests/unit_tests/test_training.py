@@ -3,15 +3,19 @@
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
 from megatron.core.tokenizers.utils.build_tokenizer import vocab_size_with_padding
+from megatron.plugin.platform import get_platform
 from megatron.training.checkpointing import save_grads
 from megatron.training.global_vars import set_args
 from megatron.training.training import build_train_valid_test_data_iterators
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 def mock_train_valid_test_datasets_provider(train_val_test_num_samples):
@@ -46,9 +50,18 @@ class TestTraining:
         set_args(args)
 
     def test_build_train_valid_test_data_iterators(self):
-        train_iter, valid_iter, test_iter = build_train_valid_test_data_iterators(
-            mock_train_valid_test_datasets_provider
-        )
+        torch_tensor = torch.tensor
+
+        def tensor_for_platform(*args, **kwargs):
+            if kwargs.get("device") == "cuda" and cur_platform.device_name() != "cuda":
+                kwargs = dict(kwargs)
+                kwargs["device"] = cur_platform.device()
+            return torch_tensor(*args, **kwargs)
+
+        with patch("megatron.training.training.torch.tensor", new=tensor_for_platform):
+            train_iter, valid_iter, test_iter = build_train_valid_test_data_iterators(
+                mock_train_valid_test_datasets_provider
+            )
         train_data = next(train_iter)
         valid_data = next(valid_iter)
         test_data = next(test_iter)

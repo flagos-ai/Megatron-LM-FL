@@ -14,8 +14,11 @@ from megatron.core import parallel_state
 from megatron.core.dist_checkpointing import ShardedTensor, load, save
 from megatron.core.dist_checkpointing.strategies.base import StrategyAction, get_default_strategy
 from megatron.core.msc_utils import MultiStorageClientFeature
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 class TestSerializationWithMultiStorageClient:
@@ -38,7 +41,7 @@ class TestSerializationWithMultiStorageClient:
             ),
         }
 
-        if HAVE_DTENSOR:
+        if HAVE_DTENSOR and cur_platform.device_name() == "cuda":
             mesh = DeviceMesh.from_group(
                 parallel_state.get_data_parallel_group(with_context_parallel=True), "cuda"
             )

@@ -20,6 +20,7 @@ from megatron.core.dist_checkpointing import load, save
 from megatron.core.dist_checkpointing.validation import StrictHandling
 from megatron.core.models.mimo.optimizer import get_mimo_optimizer
 from megatron.core.optimizer.optimizer_config import OptimizerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.models.test_mimo_1f1b_schedule import (
     create_all_embedding_groups,
     create_hypercomm_grid,
@@ -30,6 +31,7 @@ from tests.unit_tests.models.test_mimo_1f1b_schedule import (
 from tests.unit_tests.test_utilities import Utils
 
 ENCODER_NAME = "images"
+cur_platform = get_platform()
 
 
 def _get_shared_tmpdir():
@@ -208,6 +210,10 @@ def run_checkpoint_test(
 @pytest.mark.skipif(
     version.parse(torch.__version__) < version.parse('2.3.0'),
     reason="Device mesh requires PyTorch 2.3+",
+)
+@pytest.mark.skipif(
+    cur_platform.device_name() != "cuda",
+    reason="MIMO checkpoint integration creates NCCL-backed HyperCommGrid process groups.",
 )
 class TestMimoCheckpoint:
     """Distributed checkpoint save/load tests for non-colocated MiMo (8 GPUs)."""

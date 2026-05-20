@@ -1,0 +1,78 @@
+# MUSA Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Moore Threads MUSA-based unit testing.
+
+hardware_name: musa
+display_name: 'S5000 Tests'
+
+# Runner labels for Moore Threads node
+runner_labels:
+  - mt-8g-cicd-megatron
+
+# CI image for online env
+ci_image: registry.mthreads.com/presale/devtech/flagsclae:0206
+
+# Dataset/tokenizer volumes for test data
+container_volumes:
+  - /home/flagscale_cicd/flask/static:/workspace/report
+  - /home/flagscale_cicd/flask/config:/workspace/config
+  - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
+  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
+  - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
+  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ulimit nofile=65535:65535
+
+# Device types to run tests on
+device_types:
+  - s5000
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    devices:
+      - s5000
+    # Start with a conservative MUSA smoke set while validating runtime and TE plugin coverage.
+    ignored_tests:
+      # ── Core tests that genuinely require CUDA/NCCL/Apex/TE GPU paths ──────────
+      - tests/unit_tests/test_fp8_param.py          # FP8 training with TE + CUDA graphs
+      - tests/unit_tests/test_fp8_utils.py           # TestFP8Padding needs CUDA/TE
+      - tests/unit_tests/test_fp4_param.py           # NVFP4 requires Blackwell+ TE
+      - tests/unit_tests/test_imports.py             # Import chains hit TE/CUDA modules
+      - tests/unit_tests/test_nccl_allocator.py      # NCCL-specific memory allocator
+      - tests/unit_tests/test_local_multi_tensor_fns.py  # Apex amp_C CUDA kernels
+      - tests/unit_tests/test_muon_optimizer.py      # Hardcoded device='cuda', Newton-Schulz
+      - tests/unit_tests/test_optimizer.py           # FusedAdam + fp8_autocast + DDP
+      - tests/unit_tests/test_optimizer_cpu_offloading.py  # CPU-GPU offloading, .cuda()
+      - tests/unit_tests/test_layer_wise_optimizer.py      # .cuda() + multi-rank
+      - tests/unit_tests/test_inference.py           # InferenceEngineHarness + Flask
+      # ── Import chain risk: megatron.training.arguments → TE/CUDA modules ───────
+      - tests/unit_tests/test_arguments.py
+      - tests/unit_tests/test_api_backwards_compat_setup.py::test_decorator_module
+      - tests/unit_tests/test_api_backwards_compat_setup.py::test_decorators_work
+      # PyTorch 2.5 _coalescing_manager compatibility issue with MUSA torch_musa
+      # Mocked all_reduce returns None → op_list empty → work never assigned → UnboundLocalError
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_force_all_reduce_uses_correct_collective[False]
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_force_all_reduce_uses_correct_collective[True]
+      # fused_layer_norm_cuda (Apex CUDA kernel) not available in MUSA image;
+      # test_pipeline_layout.py invokes GPT forward which enters fused_layer_norm
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py
+      # test_forward_backward_func_with_pipeline_parallel calls torch.rand(...).cuda() in test code
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_pipeline_parallel
+      # test_bin_reader downloads GPT2 tokenizer from s3.amazonaws.com, unreachable from MUSA CI
+      - tests/unit_tests/data/test_bin_reader.py
+      # TestModelOptMambaModel requires mamba-ssm (CUDA-compiled SSM library) not present in MUSA image
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel
+      # test_checkpointing: _load_base_checkpoint → read_metadata uses device='cuda' tensor
+      - tests/unit_tests/test_checkpointing.py
+      # test_bert_model: TE layernorm_fwd reference impl calls tensor.to(odtype) where torch_musa
+      # _to() misinterprets DType enum as device ID → "Invalid device string: 'musa:DType.kFloat32'"
+      - tests/unit_tests/models/test_bert_model.py::TestBertModel::test_post_process_forward
+
+  functional:
+    train: []

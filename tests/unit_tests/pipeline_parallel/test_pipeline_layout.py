@@ -10,6 +10,7 @@ import torch.distributed
 
 from megatron.core import mpu, parallel_state
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_decoder_block_spec
+from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_spec as gpt_te_spec,
 )
@@ -23,6 +24,7 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.enums import ModelType
 from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from megatron.training.global_vars import set_args
 from tests.unit_tests.dist_checkpointing import TempNamedDir
@@ -32,15 +34,23 @@ from tests.unit_tests.dist_checkpointing.models.common import (
 from tests.unit_tests.test_utilities import Utils
 
 
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
+USE_TRANSFORMER_ENGINE = cur_platform.device_name() == "cuda"
+
+
 def initialize_gpt_model(
     seed,
-    layer_spec_fn=gpt_te_spec,
+    layer_spec_fn=None,
     vocab_size=128,
     virtual_pipeline_model_parallel_size=None,
     is_moe=False,
     with_mtp=False,
     **config_kwargs,
 ):
+    if layer_spec_fn is None:
+        layer_spec_fn = gpt_te_spec if USE_TRANSFORMER_ENGINE else get_gpt_layer_local_spec
+
     torch.manual_seed(seed)
     model_parallel_cuda_manual_seed(seed)
 
@@ -67,19 +77,28 @@ def initialize_gpt_model(
     model = []
     for i in range(virtual_pipeline_model_parallel_size or 1):
         if is_moe:
-            layer_spec = layer_spec_fn(transformer_config, use_transformer_engine=True, vp_stage=i)
+            layer_spec = layer_spec_fn(
+                transformer_config, use_transformer_engine=USE_TRANSFORMER_ENGINE, vp_stage=i
+            )
         else:
             layer_spec = layer_spec_fn()
 
         if with_mtp and mtp_on_this_rank(transformer_config, ignore_virtual=False, vp_stage=i):
             if is_moe:
-                transformer_layer_spec_for_mtp = gpt_te_spec(transformer_config)
+                if USE_TRANSFORMER_ENGINE:
+                    transformer_layer_spec_for_mtp = gpt_te_spec(transformer_config)
+                else:
+                    transformer_layer_spec_for_mtp = get_gpt_layer_local_spec(
+                        qk_layernorm=transformer_config.qk_layernorm,
+                        multi_latent_attention=transformer_config.multi_latent_attention,
+                        normalization=transformer_config.normalization,
+                    )
             else:
                 transformer_layer_spec_for_mtp = layer_spec
             mtp_block_spec = get_gpt_mtp_block_spec(
                 transformer_config,
                 transformer_layer_spec_for_mtp,
-                use_transformer_engine=True,
+                use_transformer_engine=USE_TRANSFORMER_ENGINE,
                 vp_stage=i,
             )
         else:
@@ -101,7 +120,7 @@ def initialize_gpt_model(
                 share_embeddings_and_output_weights=False,
             )
             .bfloat16()
-            .cuda()
+            .to(DEVICE)
         )
         this_model.model_type = ModelType.encoder_or_decoder
         model.append(this_model)
@@ -235,8 +254,8 @@ def test_forward_vpp(create_args, tmp_path_dist_ckpt, tp_pp_vpp, pp_layout, is_m
 
     def forward_step_func(data_iterator, model: GPTModel):
         """Forward training step. Copied from `pretrain_gpt.py`"""
-        tokens = torch.LongTensor([[2, 1, 2, 3, 4, 5, 7, 6]]).cuda()
-        position_ids = torch.arange(8).view(1, -1).cuda()
+        tokens = torch.LongTensor([[2, 1, 2, 3, 4, 5, 7, 6]]).to(DEVICE)
+        position_ids = torch.arange(8, device=DEVICE).view(1, -1)
         labels = torch.ones_like(position_ids)
         attention_mask = None
 
@@ -249,7 +268,8 @@ def test_forward_vpp(create_args, tmp_path_dist_ckpt, tp_pp_vpp, pp_layout, is_m
         return output_tensor, loss_func
 
     iteration = 123
-    layer_spec_fn = get_gpt_decoder_block_spec if is_moe else gpt_te_spec
+    dense_layer_spec_fn = gpt_te_spec if USE_TRANSFORMER_ENGINE else get_gpt_layer_local_spec
+    layer_spec_fn = get_gpt_decoder_block_spec if is_moe else dense_layer_spec_fn
     model = initialize_gpt_model(
         1,
         layer_spec_fn=layer_spec_fn,
@@ -336,17 +356,20 @@ def get_batch_iterator(seq_length, micro_batch_size, num_batches=None):
     while num_batches is None or batch_count < num_batches:
         # Generate different data for each batch by adding batch_count offset
         data = list(range(batch_count, batch_count + seq_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        labels = 1 + torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
+        input_ids = torch.tensor(data, dtype=torch.int64, device=DEVICE).repeat(
+            (micro_batch_size, 1)
+        )
+        labels = 1 + torch.tensor(data, dtype=torch.int64, device=DEVICE).repeat(
+            (micro_batch_size, 1)
+        )
         position_ids = (
-            torch.tensor(list(range(seq_length)), dtype=torch.int64)
+            torch.tensor(list(range(seq_length)), dtype=torch.int64, device=DEVICE)
             .repeat((micro_batch_size, 1))
-            .cuda()
         )
         attention_mask = torch.ones(
-            (micro_batch_size, 1, seq_length, seq_length), dtype=bool
-        ).cuda()
-        loss_mask = torch.ones(seq_length).repeat((micro_batch_size, 1)).cuda()
+            (micro_batch_size, 1, seq_length, seq_length), dtype=bool, device=DEVICE
+        )
+        loss_mask = torch.ones(seq_length, device=DEVICE).repeat((micro_batch_size, 1))
 
         yield input_ids, labels, position_ids, attention_mask, loss_mask
         batch_count += 1

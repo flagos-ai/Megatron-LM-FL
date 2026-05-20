@@ -4,7 +4,11 @@ import torch
 
 from megatron.core.tensor_parallel.layers import linear_with_frozen_weight
 from megatron.core.tensor_parallel.mappings import gather_from_tensor_model_parallel_region
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 @pytest.mark.parametrize("tensor_parallel,allreduce_dgrad", [(1, False), (8, True)])
@@ -14,14 +18,14 @@ def test_LinearWithFrozenWeight(tensor_parallel, allreduce_dgrad):
     size_per_partition = int(8 / tensor_parallel)
 
     # Input is an 8x8 identity matrix.
-    input_data = torch.eye(8).cuda()
+    input_data = torch.eye(8, device=DEVICE)
     input_data.requires_grad = True
 
     # Weight is an 8x8 matrix of all ones. If tensor parallelism > 1, the weight is partitioned evenly across GPUs.
-    weight = torch.ones((size_per_partition, 8)).cuda()
+    weight = torch.ones((size_per_partition, 8), device=DEVICE)
 
     # Bias is a vector of length 8 of all zeros. If tensor parallelism > 1, the bias is partitioned evenly across GPUs
-    bias = torch.zeros((size_per_partition)).cuda()
+    bias = torch.zeros((size_per_partition), device=DEVICE)
 
     gradient_accumulation_fusion = False
     sequence_parallel = False
@@ -43,8 +47,8 @@ def test_LinearWithFrozenWeight(tensor_parallel, allreduce_dgrad):
     )  # no-op if tensor_parallel == 1.
     output.sum().backward()
 
-    expected_output = torch.ones(8).cuda()
-    expected_grad = 8 * torch.ones(8).cuda()
+    expected_output = torch.ones(8, device=DEVICE)
+    expected_grad = 8 * torch.ones(8, device=DEVICE)
 
     assert torch.allclose(output, expected_output)
     assert torch.allclose(input_data.grad, expected_grad)

@@ -19,8 +19,11 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.mlp import MLP, apply_swiglu_sharded_factory
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 def initialize_mlp(glu=True):
@@ -93,6 +96,10 @@ class TestParallelMLPWithGLU:
             diffs = diff(state_dict_A, state_dict_B)
             assert not any(map(bool, diffs)), diffs
 
+    @pytest.mark.skipif(
+        cur_platform.device_name() == "musa",
+        reason="OOM handling test uses CUDA memory APIs and expects CUDA OOM log text.",
+    )
     def test_oom_is_handled(self, caplog):
         Utils.initialize_model_parallel(Utils.world_size, 1)
         dtype = torch.bfloat16

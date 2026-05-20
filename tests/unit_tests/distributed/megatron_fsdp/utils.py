@@ -14,11 +14,15 @@ from megatron.core.num_microbatches_calculator import destroy_num_microbatches_c
 from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.utils import get_attr_wrapped_model
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.global_vars import destroy_global_vars, set_global_variables
 from megatron.training.training import setup_model_and_optimizer
 from megatron.training.utils import is_first_or_last_pipeline_stage
 from model_provider import model_provider
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 def pretrain_forward_backward(
@@ -163,7 +167,7 @@ class GPTMockDataset(Dataset):
         }
 
 
-def _forward_step_func(data_iterator, model, device="cuda"):
+def _forward_step_func(data_iterator, model, device=DEVICE):
 
     def loss_func(loss_mask: torch.Tensor, output_tensor: torch.Tensor):
 

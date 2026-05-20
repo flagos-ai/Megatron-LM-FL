@@ -118,25 +118,37 @@ jobs:
           # Ensure curl is available (required by coverage upload action)
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
-          # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
-          if [ "$PLATFORM" = "metax" ]; then
+          # Install dependence package. MUSA images provide their own torch/torch_musa stack.
+          if [ "$PLATFORM" = "musa" ]; then
+            pip install boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk --no-cache-dir
+          else
+            pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx --no-cache-dir
+          fi
+          if [ "$PLATFORM" = "metax" ] || [ "$PLATFORM" = "musa" ]; then
             pip install fastapi uvicorn --no-cache-dir
           fi
 
           # Install nvidia-resiliency-ext from source
-          if [ "$PLATFORM" != "metax" ]; then
+          if [ "$PLATFORM" = "cuda" ]; then
             git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
-            pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
+            STRAGGLER_DET_SKIP_CUPTI_EXT_BUILD=1 pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
           else
-            echo "Skipping nvidia-resiliency-ext on Metax because it requires NVIDIA CUPTI."
+            echo "Skipping nvidia-resiliency-ext on $PLATFORM because it requires NVIDIA CUPTI."
           fi
 
           # Install emerging-optimizers from source
-          pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
+          if [ "$PLATFORM" != "musa" ]; then
+            pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
+          else
+            echo "Skipping Emerging-Optimizers on MUSA during initial environment bring-up."
+          fi
           
           # Build
-          pip install -e . --no-deps --no-build-isolation --no-cache-dir
+          if [ "$PLATFORM" = "musa" ]; then
+            pip install -e . --no-deps --no-build-isolation --no-cache-dir --ignore-requires-python
+          else
+            pip install -e . --no-deps --no-build-isolation --no-cache-dir
+          fi
         timeout-minutes: 30
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
@@ -158,6 +170,11 @@ jobs:
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
+          if [ "$PLATFORM" = "musa" ]; then
+            export DISTRIBUTED_BACKEND=mccl
+            export TORCHDYNAMO_DISABLE=1
+            export TORCH_COMPILE_DISABLE=1
+          fi
           mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
           # Build ignore options from ignored_tests input
@@ -185,6 +202,8 @@ jobs:
           # Calc GPU num
           if [ "$PLATFORM" = "metax" ]; then
             NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if hasattr(torch, 'cuda') and torch.cuda.is_available() else 2)")
+          elif [ "$PLATFORM" = "musa" ]; then
+            NUM_GPUS=$(python3 -c "import torch; print(torch.musa.device_count())")
           else
             NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
           fi
@@ -194,6 +213,7 @@ jobs:
           COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
           RUNNER_CMD="-m pytest"
           MARKER_OPTS=()
+          PYTEST_EXTRA_OPTS=()
           if [ "$PLATFORM" = "cuda" ]; then
             MARKER_OPTS=(-m "not flaky_in_dev")
           fi
@@ -202,7 +222,7 @@ jobs:
             "$GITHUB_WORKSPACE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
           RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
           
-          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
+          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS "${MARKER_OPTS[@]}" "${PYTEST_EXTRA_OPTS[@]}" -p no:randomly
           exit_code=$?
 
           # Combine coverage fragments and generate JSON report

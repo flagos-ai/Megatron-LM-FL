@@ -6,11 +6,17 @@ import pytest
 import torch
 
 import megatron.core.parallel_state as ps
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
+cur_platform = get_platform()
 rank = Utils.rank
 world_size = Utils.world_size
 test_parallel_order = ['tp-cp-ep-dp-pp', 'tp-cp-pp-ep-dp']
+
+
+def _musa_no_gloo_kwargs():
+    return {'create_gloo_process_groups': False} if cur_platform.device_name() == 'musa' else {}
 
 
 @pytest.mark.parametrize('order', test_parallel_order)
@@ -18,22 +24,27 @@ test_parallel_order = ['tp-cp-ep-dp-pp', 'tp-cp-pp-ep-dp']
 @pytest.mark.flaky_in_dev
 def test_initialize_and_destroy_model_parallel(order):
     with pytest.raises(AssertionError):
-        assert ps.initialize_model_parallel(order=order)
+        assert ps.initialize_model_parallel(order=order, **_musa_no_gloo_kwargs())
     Utils.initialize_distributed()
     with pytest.raises(RuntimeError):
-        assert ps.initialize_model_parallel(tensor_model_parallel_size=2 * world_size, order=order)
+        assert ps.initialize_model_parallel(
+            tensor_model_parallel_size=2 * world_size, order=order, **_musa_no_gloo_kwargs()
+        )
     with pytest.raises(RuntimeError):
         assert ps.initialize_model_parallel(
-            pipeline_model_parallel_size=2 * world_size, order=order
+            pipeline_model_parallel_size=2 * world_size, order=order, **_musa_no_gloo_kwargs()
         )
     with pytest.raises(RuntimeError):
         assert ps.initialize_model_parallel(
             pipeline_model_parallel_size=world_size,
             tensor_model_parallel_size=world_size,
             order=order,
+            **_musa_no_gloo_kwargs(),
         )
     with pytest.raises(RuntimeError):
-        assert ps.initialize_model_parallel(virtual_pipeline_model_parallel_size=2, order=order)
+        assert ps.initialize_model_parallel(
+            virtual_pipeline_model_parallel_size=2, order=order, **_musa_no_gloo_kwargs()
+        )
     Utils.initialize_model_parallel(
         tensor_model_parallel_size=2, pipeline_model_parallel_size=4, order=order
     )

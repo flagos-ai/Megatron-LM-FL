@@ -7,6 +7,7 @@ from unittest import mock
 import pytest
 import torch
 
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args
 from megatron.training.checkpointing import (
     _NON_PERSISTENT_CKPT_SUBDIR,
@@ -20,6 +21,8 @@ from tests.unit_tests.dist_checkpointing import (
     setup_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 class TestNonPersistentSaveAndLoad:
@@ -124,6 +127,10 @@ class TestNonPersistentSaveAndLoad:
 
 class TestLegacySaveAndLoad:
     @pytest.mark.parametrize(('tp,pp'), [(2, 4)])
+    @pytest.mark.skipif(
+        cur_platform.device_name() != 'cuda',
+        reason="setup_model_and_optimizer calls model.cuda(), requires CUDA",
+    )
     def test_basic_save_load_scenario(self, tmp_path_dist_ckpt, tp, pp):
         Utils.initialize_model_parallel(tp, pp)
         num_floating_point_operations_so_far = 0

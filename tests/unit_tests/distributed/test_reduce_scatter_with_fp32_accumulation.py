@@ -10,7 +10,11 @@ from megatron.core.distributed.param_and_grad_buffer import (
     reduce_scatter_with_fp32_accumulation,
     shard_buffer,
 )
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
 
 
 def get_non_matching_values(tensor1_shard, tensor2_shard):
@@ -38,7 +42,7 @@ class TestReduceScatterWithFP32Accumulation:
         world_size = Utils.world_size
         for _ in range(num_tests):
             # Initialize input tensors.
-            tensor1 = torch.rand(100000, device='cuda', dtype=torch.bfloat16)
+            tensor1 = torch.rand(100000, device=DEVICE, dtype=torch.bfloat16)
             tensor2 = tensor1.clone()
 
             # Make sure the two APIs are *identical*.

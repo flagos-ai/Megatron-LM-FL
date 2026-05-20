@@ -19,7 +19,10 @@ from megatron.core.models.vision.clip_vit_model import CLIPViTModel
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 class MockModalitySubmodule(ModalitySubmodules):
@@ -167,6 +170,10 @@ class TestBaseSubmodule:
 
 
 @pytest.mark.experimental
+@pytest.mark.skipif(
+    cur_platform.device_name() != "cuda",
+    reason="Vision submodule forward exercises CLIP ViT / TE CUDA-only paths in MUSA CI.",
+)
 class TestVisionSubmodule:
     """Test the VisionModalitySubmodules class with forward passes."""
 

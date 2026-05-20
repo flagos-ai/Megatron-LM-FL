@@ -4,9 +4,11 @@
 from unittest import mock
 
 import pytest
+import torch
 
 from megatron.training.arguments import parse_args
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import (
     TempNamedDir,
     init_basic_mock_args,
@@ -14,6 +16,8 @@ from tests.unit_tests.dist_checkpointing import (
     setup_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 
 class TestGlobalMetadataReuse:
@@ -26,6 +30,10 @@ class TestGlobalMetadataReuse:
     @pytest.mark.flaky
     @pytest.mark.flaky_in_dev  # Issue #2856
     @pytest.mark.parametrize(('tp,pp'), [(2, 4)])
+    @pytest.mark.skipif(
+        get_platform().device_name() != 'cuda',
+        reason="setup_model_and_optimizer calls model.cuda(), requires CUDA",
+    )
     def test_global_metadata_reuse(self, tmp_path_dist_ckpt, tp, pp):
         Utils.initialize_model_parallel(tp, pp)
         num_floating_point_operations_so_far = 0
@@ -98,6 +106,10 @@ class TestGlobalMetadataReuse:
     @pytest.mark.flaky
     @pytest.mark.flaky_in_dev  # Issue #2856
     @pytest.mark.parametrize(('tp,pp'), [(2, 4)])
+    @pytest.mark.skipif(
+        get_platform().device_name() != 'cuda',
+        reason="setup_model_and_optimizer calls model.cuda(), requires CUDA",
+    )
     def test_no_global_metadata_reuse_on_different_parallelism(self, tmp_path_dist_ckpt, tp, pp):
         Utils.initialize_model_parallel(tp, pp)
         num_floating_point_operations_so_far = 0

@@ -14,6 +14,7 @@ try:
     from megatron.post_training.model_builder import modelopt_gpt_mamba_builder
     has_nvidia_modelopt = True
 except ImportError:
+    modelopt_gpt_mamba_builder = None
     has_nvidia_modelopt = False
 
 import megatron.legacy.model  # isort: skip

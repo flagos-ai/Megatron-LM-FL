@@ -5,6 +5,7 @@ import torch
 from megatron.core import parallel_state
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 from megatron.core.distributed.torch_fully_sharded_data_parallel import (
+    HAVE_FSDP,
     TorchFullyShardedDataParallel,
 )
 from megatron.core.num_microbatches_calculator import (
@@ -50,6 +51,8 @@ def test_fsdp2_constructor(init_model_parallel):
     """Test the FSDP2 constructor."""
     if not is_torch_min_version("2.4.0"):
         pytest.skip("FSDP2 is not supported on this version of PyTorch.")
+    if not HAVE_FSDP:
+        pytest.skip("FSDP2 is not available in this PyTorch build.")
 
     # Create a dummy model and configs.
     config = TransformerConfig(num_layers=1, kv_channels=1, bf16=True)
@@ -78,6 +81,8 @@ def test_fsdp2_constructor_with_process_group(init_model_parallel):
     """Test the FSDP2 constructor with explicit process group parameter."""
     if not is_torch_min_version("2.4.0"):
         pytest.skip("FSDP2 is not supported on this version of PyTorch.")
+    if not HAVE_FSDP:
+        pytest.skip("FSDP2 is not available in this PyTorch build.")
 
     # Create a dummy model and configs.
     config = TransformerConfig(num_layers=1, kv_channels=1, bf16=True)

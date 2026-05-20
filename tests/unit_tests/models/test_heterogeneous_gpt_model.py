@@ -14,9 +14,11 @@ from megatron.core.transformer.heterogeneous.heterogeneous_config import (
     HeterogeneousTransformerConfig,
 )
 from megatron.core.utils import is_torch_min_version
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 TORCH_VERSION_GE_2_4 = is_torch_min_version("2.4.0")
+cur_platform = get_platform()
 
 first_layer = {
     "attention": {"no_op": False, "replace_with_linear": False, "num_query_groups": 8},
@@ -128,6 +130,10 @@ class TestHeterogeneousGPTModel:
         num_weights = sum([p.numel() for p in heterogeneous_gpt_model.parameters()])
         assert num_weights == expected_num_parameters
 
+    @pytest.mark.skipif(
+        cur_platform.device_name() != "cuda",
+        reason="Heterogeneous GPT forward test calls CUDA-only tensor APIs.",
+    )
     def test_post_process_forward(self, heterogeneous_gpt_model, expected_num_parameters):
         sequence_length = heterogeneous_gpt_model.max_sequence_length
         micro_batch_size = 2

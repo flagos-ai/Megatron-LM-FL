@@ -29,6 +29,7 @@ from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
 from megatron.core.transformer.mlp import apply_swiglu_sharded_factory
 from megatron.core.utils import is_torch_min_version
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from tests.unit_tests.dist_checkpointing import (
@@ -40,6 +41,10 @@ from tests.unit_tests.dist_checkpointing import (
     setup_moe_model_and_optimizer,
 )
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
+CUDA_ONLY_DIST_OPT_REASON = "Distributed optimizer checkpointing setup moves models through CUDA-only paths."
 
 
 class Model(torch.nn.Module):
@@ -339,6 +344,7 @@ def load_checkpoint_no_arg_checks(*args, **kwargs):
             return load_checkpoint(*args, **kwargs)
 
 
+@pytest.mark.skipif(cur_platform.device_name() != 'cuda', reason=CUDA_ONLY_DIST_OPT_REASON)
 class TestDistributedOptimizer:
     def setup_method(self, method):
         pass
@@ -812,7 +818,7 @@ class TestDistributedOptimizer:
             diffs = None
             is_equal = True
 
-        all_equal = torch.tensor(int(is_equal), device='cuda')
+        all_equal = torch.tensor(int(is_equal), device=DEVICE)
         torch.distributed.all_reduce(all_equal, op=torch.distributed.ReduceOp.MIN)
         if bool(all_equal.item()):
             return True
@@ -878,6 +884,7 @@ class TestDistributedOptimizer:
         assert same_groups == set(range(num_dest_dp_groups))
 
 
+@pytest.mark.skipif(cur_platform.device_name() != 'cuda', reason=CUDA_ONLY_DIST_OPT_REASON)
 class TestFP32Optimizer:
     def setup_method(self, method):
         pass
@@ -958,6 +965,7 @@ class TestFP32Optimizer:
                 assert not any(map(bool, diffs)), diffs
 
 
+@pytest.mark.skipif(cur_platform.device_name() != 'cuda', reason=CUDA_ONLY_DIST_OPT_REASON)
 class TestOptimizerResharding:
     def setup_method(self, method):
         pass

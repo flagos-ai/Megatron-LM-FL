@@ -26,10 +26,19 @@ from megatron.core.transformer.moe.moe_utils import get_default_pg_collection
 from megatron.core.transformer.spec_utils import get_submodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
 
-fp8_available, reason_for_no_fp8 = check_fp8_support()
+cur_platform = get_platform()
+DEVICE = cur_platform.device()
+MUSA_WITHOUT_TE = cur_platform.device_name() == 'musa'
+
+if MUSA_WITHOUT_TE:
+    fp8_available = False
+    reason_for_no_fp8 = "Current MUSA CI image does not provide te_musa; TE FP8 checks use CUDA."
+else:
+    fp8_available, reason_for_no_fp8 = check_fp8_support()
 
 
 def initialize_expert_layer(seed, glu=True, expert_type='sequential', fp8=False, **config_kwargs):
@@ -94,11 +103,11 @@ def initialize_expert_layer(seed, glu=True, expert_type='sequential', fp8=False,
 
 expert_type = ['sequential']
 src_dest_expert_type = []
-if is_te_min_version("1.7.0.dev0"):
+if not MUSA_WITHOUT_TE and is_te_min_version("1.7.0.dev0"):
     expert_type.append('te_sequential')
     src_dest_expert_type.append(('sequential', 'te_sequential'))
     src_dest_expert_type.append(('te_sequential', 'sequential'))
-if is_te_min_version("1.9.0.dev0"):
+if not MUSA_WITHOUT_TE and is_te_min_version("1.9.0.dev0"):
     expert_type.append('te_grouped')
     src_dest_expert_type.append(('te_sequential', 'te_grouped'))
     src_dest_expert_type.append(('te_grouped', 'te_sequential'))
@@ -160,6 +169,11 @@ class TestExpertLayerReconfiguration:
         """Test model saving and loading with different TP/PP/EP/ETP(expert-tensor-parallel)"""
         src_tp, src_pp, src_ep, src_etp = src_tp_pp_ep_etp
         dest_tp, dest_pp, dest_ep, dest_etp = dest_tp_pp_ep_etp
+        if MUSA_WITHOUT_TE and src_ep > 1 and src_etp == 1 and dest_ep == 1 and dest_etp > 1:
+            pytest.skip(
+                "MUSA CI aborts while reconfiguring SequentialMLP checkpoints from EP-only "
+                "source shards to ETP destination shards."
+            )
         metadata = {'singleton_local_shards': singleton_local_shards}
         # Save checkpoint A
         Utils.initialize_model_parallel(
@@ -310,6 +324,7 @@ class TestExpertLayerReconfiguration:
         not is_te_min_version("1.11.0"),
         reason="FP8 support of TEGroupedMLP is only available in TE 1.11.0 and later.",
     )
+    @pytest.mark.skipif(MUSA_WITHOUT_TE, reason=reason_for_no_fp8)
     @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
     @pytest.mark.parametrize(
         "src_module,dst_module,src_tp_pp_exp,dest_tp_pp_exp",
@@ -343,13 +358,13 @@ class TestExpertLayerReconfiguration:
             fp8_autocast(),
         ):
             tokens_per_expert = torch.tensor([16] * (8 // src_exp))
-            input_tensor = torch.randn(tokens_per_expert.sum(), 16, device="cuda")
-            probs = torch.rand((tokens_per_expert.sum(),), dtype=torch.float32, device="cuda")
+            input_tensor = torch.randn(tokens_per_expert.sum(), 16, device=DEVICE)
+            probs = torch.rand((tokens_per_expert.sum(),), dtype=torch.float32, device=DEVICE)
 
             # Save checkpoint A
             layer_prefix = f'{parallel_state.get_pipeline_model_parallel_rank()}.'
             model_A = initialize_expert_layer(1, use_glu, expert_type=src_module, fp8=True)
-            model_A = model_A.cuda()
+            model_A = model_A.to(DEVICE)
             # fp8 meta is initialized at the first step
             model_A(input_tensor, tokens_per_expert, probs)
             sharded_state_dict = model_A.sharded_state_dict(prefix=layer_prefix, metadata=metadata)
@@ -366,7 +381,7 @@ class TestExpertLayerReconfiguration:
 
             # model_A load checkpoint A
             model_A = initialize_expert_layer(1, use_glu, expert_type=src_module, fp8=True)
-            model_A = model_A.cuda()
+            model_A = model_A.to(DEVICE)
             state_dict = load(
                 model_A.sharded_state_dict(prefix=layer_prefix, metadata=metadata),
                 ckpt_dir_A,
@@ -378,7 +393,7 @@ class TestExpertLayerReconfiguration:
 
             # model_B load checkpoint A
             model_B = initialize_expert_layer(1, use_glu, expert_type=dst_module, fp8=True)
-            model_B = model_B.cuda()
+            model_B = model_B.to(DEVICE)
             state_dict = load(
                 model_B.sharded_state_dict(prefix=layer_prefix, metadata=metadata),
                 ckpt_dir_A,
@@ -429,6 +444,7 @@ class TestExpertLayerReconfiguration:
         not is_te_min_version("1.9.0"),
         reason="TEGroupedMLP is only supported in TE 1.9.0 and later.",
     )
+    @pytest.mark.skipif(MUSA_WITHOUT_TE, reason=reason_for_no_fp8)
     @pytest.mark.parametrize("ep_size", [1, 2])
     def test_te_grouped_linear_torch_native(self, tmp_path_dist_ckpt, ep_size):
         """Test saving and loading torch native checkpoints"""
@@ -436,12 +452,12 @@ class TestExpertLayerReconfiguration:
         Utils.initialize_model_parallel(1, 1, expert_model_parallel_size=ep_size)
         with TempNamedDir(tmp_path_dist_ckpt / 'test_te_grouped_linear_torch_native') as ckpt_dir:
             tokens_per_expert = torch.tensor([16] * (8 // ep_size))
-            input_tensor = torch.randn(tokens_per_expert.sum(), 16, device="cuda")
-            probs = torch.rand((tokens_per_expert.sum(),), dtype=torch.float32, device="cuda")
+            input_tensor = torch.randn(tokens_per_expert.sum(), 16, device=DEVICE)
+            probs = torch.rand((tokens_per_expert.sum(),), dtype=torch.float32, device=DEVICE)
 
             # Save checkpoint
             model = initialize_expert_layer(1, use_glu, expert_type="te_grouped")
-            model = model.cuda()
+            model = model.to(DEVICE)
             model(input_tensor, tokens_per_expert, probs)
             torch.save(model.state_dict(), ckpt_dir / f"model_ep{torch.distributed.get_rank()}.pt")
 

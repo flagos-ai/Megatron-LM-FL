@@ -28,6 +28,7 @@ from megatron.core.models.mimo.optimizer import get_mimo_optimizer
 from megatron.core.models.mimo.submodules.vision import VisionModalitySubmodules
 from megatron.core.models.vision.multimodal_projector import MultimodalProjector
 from megatron.core.optimizer.optimizer_config import OptimizerConfig
+from megatron.plugin.platform import get_platform
 from megatron.core.pipeline_parallel.bridge_communicator import BridgeCommunicator
 from megatron.core.pipeline_parallel.multimodule_communicator import MultiModulePipelineCommunicator
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
@@ -629,6 +630,10 @@ def run_mimo_1f1b_test(
 @pytest.mark.skipif(
     version.parse(torch.__version__) < version.parse('2.3.0'),
     reason="Device mesh requires PyTorch 2.3+",
+)
+@pytest.mark.skipif(
+    get_platform().device_name() != "cuda",
+    reason="MIMO 1F1B schedule integration test builds CUDA tensors directly.",
 )
 class TestMimo1F1BSchedule:
     """Test MIMO model with 1F1B pipeline schedule."""
