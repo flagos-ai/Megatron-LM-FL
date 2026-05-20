@@ -295,9 +295,9 @@ class EngramMemory(nn.Module):
 
 
 class MultiHeadEmbedding(nn.Module):
-    def __init__(self, engram_cfg, list_of_N: list[int], D: int):
+    def __init__(self, config, list_of_N: list[int], D: int):
         super().__init__()
-        self.engram_cfg = engram_cfg
+        self.config = config
         self.num_heads = len(list_of_N)
         self.embedding_dim = D
 
@@ -310,9 +310,9 @@ class MultiHeadEmbedding(nn.Module):
         total_N = sum(list_of_N)
 
         # embeddings (parallel).
-        if self.engram_cfg.engram_embedding_parallel_method == "allreduce":
+        if self.config.engram_embedding_parallel_method == "allreduce":
             self.tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
-            self.reduce_scatter_embeddings = self.engram_cfg.sequence_parallel
+            self.reduce_scatter_embeddings = self.config.sequence_parallel
 
             padded_total_N = _vocab_size_with_padding(
                 total_N, get_pg_size(self.tp_group)
@@ -324,16 +324,16 @@ class MultiHeadEmbedding(nn.Module):
             self.memory = tensor_parallel.VocabParallelEmbedding(
                 num_embeddings=padded_total_N,
                 embedding_dim=D,
-                init_method=self.engram_cfg.embedding_init_method,
+                init_method=self.config.embedding_init_method,
                 reduce_scatter_embeddings=self.reduce_scatter_embeddings,
-                config=self.engram_cfg,
+                config=self.config,
                 tp_group=self.tp_group,
             )
         else:
             self.embedding_parallel_group = (
                 parallel_state.get_engram_embedding_parallel_group()
             )
-            self.reduce_scatter_embeddings = self.engram_cfg.sequence_parallel
+            self.reduce_scatter_embeddings = self.config.sequence_parallel
             padded_total_N = _vocab_size_with_padding(
                 total_N, get_pg_size(self.embedding_parallel_group)
             )
@@ -343,18 +343,18 @@ class MultiHeadEmbedding(nn.Module):
             self.memory = EngramMemory(
                 num_embeddings=padded_total_N,
                 embedding_dim=D,
-                init_method=self.engram_cfg.embedding_init_method,
+                init_method=self.config.embedding_init_method,
                 reduce_scatter_embeddings=self.reduce_scatter_embeddings,
-                config=self.engram_cfg,
+                config=self.config,
                 embedding_parallel_group=self.embedding_parallel_group,
             )
-            if self.engram_cfg.engram_embedding_parallel_method == "alltoall":
+            if self.config.engram_embedding_parallel_method == "alltoall":
                 self.memory.enable_parallel()
-                if self.engram_cfg.engram_offload_embedding_optimizer_states:
+                if self.config.engram_offload_embedding_optimizer_states:
                     self.memory.enable_offloading()
             else:
                 raise ValueError(
-                    f"Unsupported engram_embedding_parallel_method: {self.engram_cfg.engram_embedding_parallel_method}"
+                    f"Unsupported engram_embedding_parallel_method: {self.config.engram_embedding_parallel_method}"
                 )
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
@@ -706,64 +706,68 @@ class ShortConv(nn.Module):
         return y.permute(1, 0, 2, 3).contiguous()  # (L, B, G, C)
 
 
-class EngramMoule(nn.Module):
-    def __init__(self, engram_cfg: TransformerConfig, layer_id):
+class EngramModule(nn.Module):
+    def __init__(self, config: TransformerConfig, layer_id):
         super().__init__()
-        self.engram_cfg = engram_cfg
-        self.backbone_config = copy.deepcopy(engram_cfg)
+        self.config = config
+        self.enable_mhc = self.config.enable_hyper_connections
+        if self.enable_mhc:
+            self.hc_mult = self.config.num_residual_streams
+        else:
+            self.hc_mult = 1
 
         self.layer_id = layer_id
         global_hash_mapping = get_or_create_hash_mapping(
-            engram_vocab_size=engram_cfg.engram_vocab_size,
-            max_ngram_size=engram_cfg.max_ngram_size,
-            n_embed_per_ngram=engram_cfg.n_embed_per_ngram,
-            n_head_per_ngram=engram_cfg.n_head_per_ngram,
-            layer_ids=engram_cfg.engram_layer_ids,
-            tokenizer_name_or_path=engram_cfg.engram_tokenizer_name_or_path,
-            pad_id=engram_cfg.engram_pad_id,
-            seed=engram_cfg.engram_seed,
+            engram_vocab_size=config.engram_vocab_size,
+            max_ngram_size=config.max_ngram_size,
+            n_embed_per_ngram=config.n_embed_per_ngram,
+            n_head_per_ngram=config.n_head_per_ngram,
+            layer_ids=config.engram_layer_ids,
+            tokenizer_name_or_path=config.engram_tokenizer_name_or_path,
+            pad_id=config.engram_pad_id,
+            seed=config.engram_seed,
         )
         self.memory = MultiHeadEmbedding(
-            engram_cfg,
+            config,
             list_of_N=[
                 x
                 for y in global_hash_mapping.vocab_size_across_layers[self.layer_id]
                 for x in y
             ],
-            D=engram_cfg.n_embed_per_ngram // engram_cfg.n_head_per_ngram,
+            D=config.n_embed_per_ngram // config.n_head_per_ngram,
         )
         self.embedding_cache = None  # Cache for pre-computed embeddings
         self.embedding_stream = None  # Stream for pre-computing embeddings
         if torch.cuda.is_available():
             self.embedding_stream = torch.cuda.Stream()
         self.short_conv = ShortConv(
-            hidden_size=self.backbone_config.hidden_size,
-            kernel_size=engram_cfg.engram_kernel_size,
-            dilation=engram_cfg.max_ngram_size,
-            hc_mult=self.backbone_config.num_residual_streams,
+            hidden_size=self.config.hidden_size,
+            kernel_size=config.engram_kernel_size,
+            dilation=config.max_ngram_size,
+            hc_mult=self.hc_mult,
         )
         engram_hidden_size = (
-            engram_cfg.max_ngram_size - 1
-        ) * engram_cfg.n_embed_per_ngram
+            config.max_ngram_size - 1
+        ) * config.n_embed_per_ngram
         self.value_proj = nn.Linear(
-            engram_hidden_size, self.backbone_config.hidden_size
+            engram_hidden_size, self.config.hidden_size
         )
         self.key_projs = nn.ModuleList(
             [
-                nn.Linear(engram_hidden_size, self.backbone_config.hidden_size)
-                for _ in range(self.backbone_config.num_residual_streams)
+                nn.Linear(engram_hidden_size, self.config.hidden_size)
+                for _ in range(self.hc_mult)
             ]
         )
         self.norm1 = nn.ModuleList(
             [
-                nn.RMSNorm(self.backbone_config.hidden_size)
-                for _ in range(self.backbone_config.num_residual_streams)
+                nn.RMSNorm(self.config.hidden_size)
+                for _ in range(self.hc_mult)
             ]
         )
         self.norm2 = nn.ModuleList(
             [
-                nn.RMSNorm(self.backbone_config.hidden_size)
-                for _ in range(self.backbone_config.num_residual_streams)
+                nn.RMSNorm(self.config.hidden_size)
+                for _ in range(self.hc_mult)
             ]
         )
 
@@ -778,7 +782,7 @@ class EngramMoule(nn.Module):
         # fake hyper-connection
         seq_len, batch_size, expanded_hidden_size = hidden_states.shape
         hidden_states = hidden_states.view(
-            seq_len, batch_size, self.backbone_config.num_residual_streams, -1
+            seq_len, batch_size, self.hc_mult, -1
         )
         if self.embedding_cache is not None:
             embeddings, embedding_event = self.embedding_cache
@@ -797,9 +801,9 @@ class EngramMoule(nn.Module):
         # [L/tp_size, B, N_GRAM * N_EMBED_PER_NGRAM]
 
         # Pre-compute scaling factor for efficiency
-        scale = 1.0 / math.sqrt(self.backbone_config.hidden_size)
+        scale = 1.0 / math.sqrt(self.config.hidden_size)
         gates = []
-        for hc_idx in range(self.backbone_config.num_residual_streams):
+        for hc_idx in range(self.hc_mult):
             key = self.key_projs[hc_idx](embeddings)
             # [L/tp_size, B, HIDDEN_SIZE]
             normed_key = self.norm1[hc_idx](key)
