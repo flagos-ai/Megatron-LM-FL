@@ -268,8 +268,8 @@ def _apply_rotary_pos_emb_thd(
         return _apply_rotary_pos_emb_bshd(
             t.unsqueeze(1),
             freqs_packed,
-                rotary_interleaved=rotary_interleaved,
-                mla_rotary_interleaved=mla_rotary_interleaved,
+            rotary_interleaved=rotary_interleaved,
+            mla_rotary_interleaved=mla_rotary_interleaved,
             mscale=mscale,
             inverse=inverse,
             mla_output_remove_interleaving=mla_output_remove_interleaving,
