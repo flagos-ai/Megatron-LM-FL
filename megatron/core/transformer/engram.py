@@ -1,3 +1,5 @@
+# Copyright (c) 2026, FlagScale CORPORATION. All rights reserved.
+
 ## built-in
 import copy
 from typing import Optional, Callable, Tuple

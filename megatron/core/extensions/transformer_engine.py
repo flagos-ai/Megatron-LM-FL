@@ -80,6 +80,7 @@ except ImportError:
         HAVE_TE = False
 
 _TE_CONFIG_TYPE_KEY = "transformer_engine_config_type"
+from megatron.plugin.hetero.parallel_context import get_parallel_context    ##### FlagScale add #####
 
 
 class TransformerEngineConfigType(enum.Enum):
@@ -1033,7 +1034,7 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
             sequence_parallel=self.config.sequence_parallel,
             fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
             tp_group=tp_group if torch.distributed.is_initialized() else None,
-            tp_size=self.config.tensor_model_parallel_size,
+            tp_size=self.config.tensor_model_parallel_size if get_parallel_context() is None else get_tensor_model_parallel_world_size(), ##### FlagScale Add #####
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
@@ -1543,7 +1544,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             ),
             attn_mask_type=attn_mask_type.name,
             sequence_parallel=self.config.sequence_parallel,
-            tp_size=self.config.tensor_model_parallel_size,
+            tp_size=self.config.tensor_model_parallel_size if get_parallel_context() is None else get_tensor_model_parallel_world_size(), ##### FlagScale Add #####
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),

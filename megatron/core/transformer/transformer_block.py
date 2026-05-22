@@ -670,7 +670,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             return super().__call__(*args, **kwargs)[0]
         return super().__call__(*args, **kwargs)
 
-    ##### Flagscale begin #####
     def _build_mhc_recompute_layer_plan(
         self, use_mhc_recompute: bool
     ) -> Tuple[List[Optional[CheckpointManager]], List[bool]]:
@@ -710,7 +709,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         """Finalize MHC recompute state for the current layer when block ends."""
         if mhc_manager is not None and is_last_in_recompute_block:
             mhc_manager.discard_all_outputs_and_register_unified_recompute(hidden_states)
-    ##### Flagscale end #####
 
     def forward(
         self,
@@ -832,14 +830,12 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         #   is called here to be future-proof and corner-case-proof.
         hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
 
-        ##### Flagscale begin #####
         # Expand hidden states for hyper connections at the start of the block
         # Only expand at the first PP stage; subsequent stages receive n-stream from previous stage
         if self.config.enable_hyper_connections and self.pre_process:
             hidden_states = HyperConnectionModule.input_expand(
                 hidden_states, self.config.num_residual_streams
             )  # [s, b, C] -> [s, b, n*C]
-        ##### Flagscale end #####
 
         if self.config.sequence_parallel:
             rng_context = tensor_parallel.get_cuda_rng_tracker().fork()
@@ -867,7 +863,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             use_outer_quantization_context = False
             use_inner_quantization_context = False
             outer_quantization_context = nullcontext()
-        ###### Flagscale begin #####
+
         # Determine if MHC recompute should be used
         # Only enable when: training mode AND hyper connections AND 'mhc' in recompute_modules
         use_mhc_recompute = (
@@ -879,7 +875,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         mhc_layer_managers, mhc_is_last_in_recompute_block = self._build_mhc_recompute_layer_plan(
             use_mhc_recompute
         )
-        ##### Flagscale end #####
 
         with rng_context, outer_quantization_context:
             # Forward pass.
@@ -953,13 +948,11 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             mhc_recompute_manager=mhc_manager,
                             input_ids=input_ids,
                         )
-                    ##### Flagscale begin #####
                     self._finalize_mhc_recompute_layer(
                         mhc_manager=mhc_manager,
                         hidden_states=hidden_states,
                         is_last_in_recompute_block=mhc_is_last_in_recompute_block[l_no],
                     )
-                    ##### Flagscal end #####
 
                     if (
                         torch.is_grad_enabled()

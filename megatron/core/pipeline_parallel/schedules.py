@@ -2021,11 +2021,13 @@ def get_tensor_shapes(
 
     if config.sequence_parallel:
         effective_seq_length = effective_seq_length // tp_group.size()
+    ##### FlagScale begin #####
     # Determine hidden dimension for P2P communication
     # For hyper connections with multiple PP stages, use n-stream dimension
     hidden_dim = config.hidden_size
     if getattr(config, 'enable_hyper_connections', False):
         hidden_dim = config.hidden_size * getattr(config, 'num_residual_streams', 1)
+    ##### FlagScale end #####
     tensor_shapes.append((effective_seq_length, micro_batch_size, hidden_dim))
     return tensor_shapes
 

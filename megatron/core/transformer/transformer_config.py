@@ -296,6 +296,7 @@ class TransformerConfig(ModelParallelConfig):
     mhc_recompute_layer_num: Optional[int] = None
     """Number of layers per MHC recompute block."""
 
+    ##### FlagScale Begin #####
     ###################
     # Engram
     ###################
@@ -338,6 +339,7 @@ class TransformerConfig(ModelParallelConfig):
     engram_offload_embedding_optimizer_states: bool = False
     """Whether to offload Engram embedding optimizer states to CPU when using alltoall for Engram embedding parallelism.
     This is typically used to save GPU memory when Engram embedding is large while accelerators are limited."""
+    ##### FlagScale End #####
 
     ####################
     # attention variant
