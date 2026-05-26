@@ -50,7 +50,7 @@ logger = logging.getLogger(__name__)
 
 
 def get_transformer_layer_offset(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None,
     dualpipev_stage: Optional[int] = None, # FlagScale Add
 ):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
