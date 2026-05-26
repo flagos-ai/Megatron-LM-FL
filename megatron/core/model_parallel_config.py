@@ -36,6 +36,8 @@ class ModelParallelConfig:
        arxiv.org/pdf/2104.04473.pdf for more details.
     """
 
+    dualpipev_pipeline_model_parallel_size: Optional[int] = None
+
     sequence_parallel: bool = False
     """Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms
        and dropout sequentially.  See Reducing Activation Recomputation in Large Transformer Models

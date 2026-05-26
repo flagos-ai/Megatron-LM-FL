@@ -474,7 +474,8 @@ def get_mtp_layer_spec_for_backend(
 
 
 def mtp_on_this_rank(
-    config: TransformerConfig, ignore_virtual: Optional[bool] = True, vp_stage: Optional[int] = None
+    config: TransformerConfig, ignore_virtual: Optional[bool] = True, vp_stage: Optional[int] = None,
+    ignore_dualpipev: Optional[bool] = False, dualpipev_stage: Optional[int] = None,
 ) -> bool:
     """
     Check if there is MTP on the current rank.
@@ -491,6 +492,7 @@ def mtp_on_this_rank(
     mtp_on_this_rank = False
     pp_rank = parallel_state.get_pipeline_model_parallel_rank()
     if config.pipeline_model_parallel_layout is not None:
+        assert dualpipev_stage is None
         # with custom PP layout, we support put MTP layers on any pipeline stage
         layout = config.pipeline_model_parallel_layout.layout
         if (
@@ -510,7 +512,8 @@ def mtp_on_this_rank(
         # without custom PP layout, we only support put all of MTP layers on the last pipeline stage
         if config.mtp_num_layers is not None:
             mtp_on_this_rank = parallel_state.is_pipeline_last_stage(
-                ignore_virtual=ignore_virtual, vp_stage=vp_stage
+                ignore_virtual=ignore_virtual, vp_stage=vp_stage,
+                ignore_dualpipev=ignore_dualpipev, dualpipev_stage=dualpipev_stage
             )
         else:
             mtp_on_this_rank = False
@@ -533,10 +536,11 @@ def get_mtp_ranks(pp_ranks: List[int], config: TransformerConfig) -> List[int]:
     return list(mtp_ranks)
 
 
-def get_mtp_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None) -> int:
+def get_mtp_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None, dualpipev_stage: Optional[int] = None) -> int:
     """Get the offset of the MTP layer."""
     if config.pipeline_model_parallel_size > 1:
         if config.pipeline_model_parallel_layout:
+            assert dualpipev_stage is None
             offset = config.pipeline_model_parallel_layout.get_layer_offset(
                 layer_type=LayerType.mtp, vp_stage=vp_stage
             )
@@ -548,10 +552,11 @@ def get_mtp_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = No
 
 
 def get_mtp_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None, dualpipev_stage: Optional[int] = None,
 ) -> int:
     """Get the number of MTP layers to build."""
     if config.pipeline_model_parallel_layout is not None:
+        assert dualpipev_stage is None
         # If we have a custom PP layout, get the number of mtp layers in the layout array.
         num_layers_to_build = config.pipeline_model_parallel_layout.get_num_layers_to_build(
             layer_type=LayerType.mtp, vp_stage=vp_stage
@@ -562,7 +567,7 @@ def get_mtp_num_layers_to_build(
             f"mtp_num_layers ({config.mtp_num_layers}) or be 0."
         )
     else:
-        if parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage):
+        if parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage):
             num_layers_to_build = config.mtp_num_layers if config.mtp_num_layers else 0
         else:
             num_layers_to_build = 0

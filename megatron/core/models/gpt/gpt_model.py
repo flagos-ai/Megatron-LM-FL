@@ -112,6 +112,7 @@ class GPTModel(LanguageModule):
         mtp_block_spec: Optional[ModuleSpec] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
+        dualpipev_stage: Optional[int] = None,
     ) -> None:
         super().__init__(config=config, pg_collection=pg_collection)
 
@@ -128,6 +129,7 @@ class GPTModel(LanguageModule):
         self.share_embeddings_and_output_weights = share_embeddings_and_output_weights
         self.vp_stage = vp_stage
         self.disable_param_offloading = True
+        self.dualpipev_stage = dualpipev_stage
 
         if hasattr(self.config, 'position_embedding_type'):
             self.position_embedding_type = self.config.position_embedding_type
@@ -149,7 +151,8 @@ class GPTModel(LanguageModule):
         self.rotary_scaling = rope_scaling
         self.mtp_block_spec = mtp_block_spec
         self.mtp_process = mtp_block_spec is not None and mtp_on_this_rank(
-            self.config, ignore_virtual=False, vp_stage=vp_stage
+            self.config, ignore_virtual=False, vp_stage=vp_stage, 
+            ignore_dualpipev=False, dualpipev_stage=dualpipev_stage
         )
 
         if self.pre_process or self.mtp_process:
@@ -219,9 +222,11 @@ class GPTModel(LanguageModule):
             post_process=self.post_process,
             pg_collection=self.pg_collection,
             vp_stage=vp_stage,
+            dualpipev_stage=dualpipev_stage,
         )
 
         if self.mtp_process:
+            assert dualpipev_stage is None
             self.mtp = MultiTokenPredictionBlock(
                 config=self.config,
                 spec=self.mtp_block_spec,

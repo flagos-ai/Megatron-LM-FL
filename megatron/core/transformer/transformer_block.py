@@ -72,7 +72,7 @@ def get_num_layers_to_build(
     config: TransformerConfig,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    is_dualpipev_first_chunk: Optional[bool] = False,
+    dualpipev_stage: Optional[int] = None
 ) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
@@ -87,6 +87,7 @@ def get_num_layers_to_build(
     # If we have a custom PP layout, straightforwardly
     # return the number of decoders in the layout array.
     if config.pipeline_model_parallel_layout is not None:
+        assert dualpipev_stage is None
         return config.pipeline_model_parallel_layout.get_num_layers_to_build(
             layer_type=LayerType.decoder, vp_stage=vp_stage
         )
@@ -178,6 +179,25 @@ def get_num_layers_to_build(
 
         num_layers_to_build = num_layers_per_virtual_stage
 
+    elif config.use_dualpipev and config.pipeline_model_parallel_size > 1:
+        # dualpipev pipeline parallelism:
+        # With 8 layers, 2 stages, and use_dualpipev, we want an assignment of
+        # layers to stages like (each list is a model chunk):
+        # stage 0: [0, 1], [6, 7]
+        # stage 1: [2, 3], [4, 5]
+        # With 8 layers, 4 stages, and 2 use_dualpipev, we want an assignment of
+        # layers to stages like (each list is a model chunk):
+        # stage 0: [0], [7]
+        # stage 1: [1], [6]
+        # stage 2: [2], [5]
+        # stage 3: [3], [4]
+        assert (
+            num_layers_per_pipeline_rank % 2 == 0
+        ), f"num_layers_per_pipeline_rank {num_layers_per_pipeline_rank} \
+            should be divisible by dualpipev 2"
+        num_layers_per_dualpipev_stage = num_layers_per_pipeline_rank // 2
+
+        num_layers_to_build = num_layers_per_dualpipev_stage
     else:
         # Non-interleaved pipeline parallelism:
         # Each stage gets a contiguous set of layers.
@@ -192,11 +212,19 @@ def get_num_layers_to_build(
             assert (
                 num_layers_to_build >= 0
             ), f"Not enough layers in the first virtual pipeline stage"
+        elif dualpipev_stage == 0 and is_first_pp_stage:
+            num_layers_to_build -= 1
+            assert (
+                num_layers_to_build >= 0
+            ), f"Not enough layers in the first dualpipev pipeline stage"
 
     if config.account_for_loss_in_pipeline_split:
         if is_vp_last_stage(vp_stage, vp_size) and is_last_pp_stage:
             num_layers_to_build -= 1
             assert num_layers_to_build >= 0, f"Not enough layers in the last virtual pipeline stage"
+        elif dualpipev_stage == 1 and is_first_pp_stage:
+            num_layers_to_build -= 1
+            assert num_layers_to_build >= 0, f"Not enough layers in the last dualpipev pipeline stage"
 
     return num_layers_to_build
 
@@ -226,6 +254,7 @@ def _get_block_submodules(
     spec: Union[TransformerBlockSubmodules, ModuleSpec],
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,
 ) -> TransformerBlockSubmodules:
     """
     Retrieve or construct TransformerBlockSubmodules based on the provided specification.
@@ -252,7 +281,7 @@ def _get_block_submodules(
         if issubclass(spec.module, TransformerBlock):
             return spec.submodules
         elif issubclass(spec.module, BaseTransformerLayer):
-            num_layers = get_num_layers_to_build(config, vp_stage, pp_rank)
+            num_layers = get_num_layers_to_build(config, vp_stage, pp_rank, dualpipev_stage)
             return TransformerBlockSubmodules(
                 layer_specs=[spec] * num_layers, layer_norm=LayerNormImpl
             )
@@ -274,6 +303,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         post_process: bool = True,
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
+        dualpipev_stage: Optional[int] = None,
     ):
         super().__init__(config=config)
 
@@ -290,6 +320,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         self.pre_process = pre_process
         self.post_process = post_process
         self.vp_stage = vp_stage
+        self.dualpipev_stage = dualpipev_stage
 
         # required for pipeline parallel schedules
         self.input_tensor = None
@@ -334,7 +365,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         #     self.norm_factor *= coeff
         def build_layer(layer_spec, layer_number):
             global_layer_number = layer_number + get_transformer_layer_offset(
-                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp)
+                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp), self.dualpipev_stage,
             )  # 1-based index
             if self.config.heterogeneous_block_specs:
                 layer_config = self.config.get_config_for_layer(global_layer_number)
@@ -360,6 +391,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     layer_number=layer_number,
                     pg_collection=self.pg_collection,
                     vp_stage=self.vp_stage,
+                    dualpipev_stage=self.dualpipev_stage
                 )
             return module
 
@@ -735,7 +767,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # This is needed to convert local layer indices to global indices for feature extraction
         pp_group = self.pg_collection.pp if hasattr(self.pg_collection, 'pp') else None
         layer_offset = get_transformer_layer_offset(
-            self.config, self.vp_stage, get_pg_rank(pp_group)
+            self.config, self.vp_stage, get_pg_rank(pp_group), self.dualpipev_stage
         )
 
         # Delete the obsolete reference to the initial input tensor if necessary
@@ -937,7 +969,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         num_layers = self.config.num_layers
         for layer in self.layers:
             offset = get_transformer_layer_offset(
-                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp)
+                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp), self.dualpipev_stage
             )
 
             global_layer_offset = layer.layer_number - 1  # self.layer_number starts at 1
