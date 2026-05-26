@@ -3,7 +3,8 @@
 
 import contextlib
 
-from functools import wraps
+from collections import deque
+from functools import partial
 from typing import Callable, Iterator, List, Optional, Union
 
 import torch
@@ -12,7 +13,13 @@ from megatron.core import ModelParallelConfig, parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.pipeline_parallel.p2p_communication import _communicate
+from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
+from megatron.core.pipeline_parallel.utils import (
+    is_pp_first_stage,
+    is_pp_last_stage,
+    is_dualpipev_first_stage,
+    is_dualpipev_last_stage,
+)
 from megatron.core.pipeline_parallel.schedules import (
     backward_step,
     clear_embedding_activation_buffer,
@@ -21,9 +28,23 @@ from megatron.core.pipeline_parallel.schedules import (
     finish_embedding_wgrad_compute,
     set_current_microbatch,
 )
+from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 from megatron.core.transformer.transformer_layer import TransformerLayer
-from megatron.core.utils import get_attr_wrapped_model, get_model_config, get_model_type
+from megatron.core.utils import (
+    drain_embedding_wgrad_compute,
+    get_attr_wrapped_model,
+    get_model_config,
+    get_model_type,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
+from megatron.core.pipeline_parallel.utils import (
+    AbstractSchedulePlan,
+    ScheduleNode,
+    get_comp_stream,
+    set_streams,
+)
 
 from megatron.plugin.dualpipev.fb_overlap.gpt_model import (
     gpt_model_backward,
@@ -77,6 +98,7 @@ def send_forward(
     config: ModelParallelConfig,
     model_chunk_id,
     async_op=False,
+    p2p_communicator=None,
 ) -> None:
     """Send tensor to next rank in pipeline (forward send).
 
@@ -95,13 +117,12 @@ def send_forward(
     if config.timers is not None:
         config.timers('forward-send', log_level=2).start()
 
-    _, _, fwd_wait_handles = _communicate(
+    _, _, fwd_wait_handles = p2p_communicator._communicate(
         tensor_send_next=tensor_send_next,
         tensor_send_prev=tensor_send_prev,
         recv_prev=False,
         recv_next=False,
         tensor_shape=tensor_shape,
-        config=config,
         wait_on_reqs=(not async_op),
     )
     if config.timers is not None:
@@ -116,6 +137,7 @@ def send_backward(
     config: ModelParallelConfig,
     model_chunk_id,
     async_op=False,
+    p2p_communicator=None,
 ) -> None:
     """Send tensor to next rank in pipeline (forward send).
 
@@ -134,13 +156,12 @@ def send_backward(
 
     if config.timers is not None:
         config.timers('backward-send', log_level=2).start()
-    _, _, reqs = _communicate(
+    _, _, reqs = p2p_communicator._communicate(
         tensor_send_next=tensor_send_next,
         tensor_send_prev=tensor_send_prev,
         recv_prev=False,
         recv_next=False,
         tensor_shape=tensor_shape,
-        config=config,
         wait_on_reqs=(not async_op),
     )
     if config.timers is not None:
@@ -149,7 +170,11 @@ def send_backward(
 
 
 def recv_forward(
-    tensor_shape: Shape, config: ModelParallelConfig, model_chunk_id, async_op=False
+    tensor_shape: Shape,
+    config: ModelParallelConfig,
+    model_chunk_id,
+    async_op=False,
+    p2p_communicator=None,
 ) -> torch.Tensor:
     """Receive tensor from previous rank in pipeline (forward receive).
 
@@ -171,13 +196,12 @@ def recv_forward(
         if config.timers is not None:
             config.timers('forward-recv', log_level=2).start()
 
-        tensor_recv_prev, tensor_recv_next, fwd_wait_handles = _communicate(
+        tensor_recv_prev, tensor_recv_next, fwd_wait_handles = p2p_communicator._communicate(
             tensor_send_next=None,
             tensor_send_prev=None,
             recv_prev=recv_prev,
             recv_next=recv_next,
             tensor_shape=tensor_shape,
-            config=config,
             wait_on_reqs=(not async_op),
         )
         if config.timers is not None:
@@ -190,7 +214,11 @@ def recv_forward(
 
 
 def recv_backward(
-    tensor_shape: Shape, config: ModelParallelConfig, model_chunk_id, async_op=False
+    tensor_shape: Shape,
+    config: ModelParallelConfig,
+    model_chunk_id,
+    async_op=False,
+    p2p_communicator=None,
 ) -> torch.Tensor:
     """Receive tensor from next rank in pipeline (backward receive).
 
@@ -212,13 +240,12 @@ def recv_backward(
 
         if config.timers is not None:
             config.timers('backward-recv', log_level=2).start()
-        tensor_recv_prev, tensor_recv_next, bwd_wait_handles = _communicate(
+        tensor_recv_prev, tensor_recv_next, bwd_wait_handles = p2p_communicator._communicate(
             tensor_send_next=None,
             tensor_send_prev=None,
             recv_prev=recv_prev,
             recv_next=recv_next,
             tensor_shape=tensor_shape,
-            config=config,
             wait_on_reqs=(not async_op),
         )
         if config.timers is not None:
@@ -236,6 +263,7 @@ def send_forward_recv_forward(
     config: ModelParallelConfig,
     model_chunk_id,
     async_op=False,
+    p2p_communicator=None,
 ) -> torch.Tensor:
     """Batched recv from previous rank and send to next rank in pipeline.
 
@@ -258,14 +286,13 @@ def send_forward_recv_forward(
 
     if config.timers is not None:
         config.timers('forward-send-forward-recv', log_level=2).start()
-    tensor_recv_prev, tensor_recv_next, fwd_wait_handles = _communicate(
+    tensor_recv_prev, tensor_recv_next, fwd_wait_handles = p2p_communicator._communicate(
         tensor_send_next=tensor_send_next,
         tensor_send_prev=tensor_send_prev,
         recv_prev=recv_prev,
         recv_next=recv_next,
         tensor_shape=tensor_shape,
         wait_on_reqs=(not async_op),
-        config=config,
     )
     if config.timers is not None:
         config.timers('forward-send-forward-recv').stop()
@@ -288,6 +315,7 @@ def send_forward_recv_slave_forward(
     config: ModelParallelConfig,
     model_chunk_id,
     async_op=False,
+    p2p_communicator=None,
 ) -> torch.Tensor:
     """Batched recv from previous rank and send to next rank in pipeline.
     See _communicate for argument details.
@@ -306,14 +334,13 @@ def send_forward_recv_slave_forward(
         recv_prev = True
     if config.timers is not None:
         config.timers('forward-send-slave-forward-recv', log_level=2).start()
-    tensor_recv_prev, tensor_recv_next, fwd_wait_handles = _communicate(
+    tensor_recv_prev, tensor_recv_next, fwd_wait_handles = p2p_communicator._communicate(
         tensor_send_next=tensor_send_next,
         tensor_send_prev=tensor_send_prev,
         recv_prev=recv_prev,
         recv_next=recv_next,
         tensor_shape=tensor_shape,
         wait_on_reqs=(not async_op),
-        config=config,
     )
     if config.timers is not None:
         config.timers('forward-send-slave-forward-recv').stop()
@@ -496,12 +523,6 @@ def forward_step_no_model_graph(
     # If T5 model (or other model with encoder and decoder)
     # and in decoder stack, then send encoder_hidden_state
     # downstream as well.
-    model_type = get_model_type(model)
-    if (
-        parallel_state.is_pipeline_stage_after_split()
-        and model_type == ModelType.encoder_and_decoder
-    ):
-        return [output_tensor, input_tensor[-1]], num_tokens
 
     if unwrap_output_tensor:
         return output_tensor, num_tokens
@@ -567,13 +588,7 @@ def backward_step_with_model_graph(
 
     # Handle single skip connection if it exists (encoder_hidden_state in
     # model with encoder and decoder).
-    if (
-        parallel_state.get_pipeline_model_parallel_world_size() > 1
-        and parallel_state.is_pipeline_stage_after_split()
-        and model_type == ModelType.encoder_and_decoder
-    ):
-        if output_tensor_grad[1] is not None:
-            input_tensor_grad[-1].add_(output_tensor_grad[1])
+
     if unwrap_input_tensor_grad:
         input_tensor_grad = input_tensor_grad[0]
 
@@ -686,16 +701,6 @@ def forward_step_with_model_graph(
         # Set the loss scale
         MoEAuxLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
 
-    # If T5 model (or other model with encoder and decoder)
-    # and in decoder stack, then send encoder_hidden_state
-    # downstream as well.
-    model_type = get_model_type(model)
-    if (
-        parallel_state.is_pipeline_stage_after_split()
-        and model_type == ModelType.encoder_and_decoder
-    ):
-        return [output_tensor, input_tensor[-1]], num_tokens
-
     if unwrap_output_tensor:
         return output_tensor, num_tokens
     return [output_tensor], num_tokens
@@ -714,11 +719,54 @@ def forward_backward_pipelining_with_dualpipev(
     collect_non_loss_data: bool = False,
     first_val_step: bool = None,
     adjust_tensor_shapes_fn: Optional[Callable] = None,
+    p2p_communicator: Optional[P2PCommunicator] = None,
+    pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: Optional[bool] = False,
 ):
     """DualPipeV Schedules"""
+
+    config = get_model_config(model[0])
+    if p2p_communicator is None and pg_collection is None:
+        p2p_communicator = P2PCommunicator(
+            pp_group=parallel_state.get_pipeline_model_parallel_group(), config=config
+        )
+        tp_group = parallel_state.get_tensor_model_parallel_group()
+        cp_group = parallel_state.get_context_parallel_group()
+        cp_size = cp_group.size()
+        embd_group = parallel_state.get_embedding_group(check_initialized=False)
+        pp_group = parallel_state.get_pipeline_model_parallel_group()
+        pos_emb_group = parallel_state.get_position_embedding_group(check_initialized=False)
+
+        pg_collection = ProcessGroupCollection()
+        pg_collection.tp = tp_group
+        pg_collection.cp = cp_group
+        pg_collection.embd = embd_group
+        pg_collection.pos_embd = pos_emb_group
+        pg_collection.pp = pp_group
+        pg_collection.dp_cp = parallel_state.get_data_parallel_group(
+            with_context_parallel=True, partial_data_parallel=False
+        )
+
+    elif p2p_communicator is not None and pg_collection is not None:
+        model_type = get_model_type(model[0])
+        assert hasattr(p2p_communicator, 'config'), "p2p_communicator must have a config"
+        assert hasattr(pg_collection, 'tp'), "pg_collection must have tp"
+        assert hasattr(pg_collection, 'cp'), "pg_collection must have cp"
+        tp_group = pg_collection.tp
+        cp_group = pg_collection.cp
+        cp_size = cp_group.size()
+    else:
+        raise ValueError(
+            "Invalid combination of p2p_communicator, pg_collection"
+            " provide none or provide all the process groups"
+        )
+
+    print(f"{model=}")
+    print(f"{data_iterator=}")
     assert (
         isinstance(model, list) and len(model) == 2
     ), 'Dualpipe Schedule only support chunk model for two consecutive chunks'
+    assert all(isinstance(chunk, torch.nn.Module) for chunk in model), "invalid model chunking"
     assert (
         isinstance(data_iterator, list) and len(data_iterator) == 2
     ), 'Dualpipe Schedule only support two data_iterators'
@@ -748,7 +796,10 @@ def forward_backward_pipelining_with_dualpipev(
 
     # Needed only when gradients are finalized in M-Core
     if config.finalize_model_grads_func is not None and not forward_only:
-        embedding_module = clear_embedding_activation_buffer(config, model)
+        # NOTE(zhaoyinglia): last embedding in first pp stage in dualpipev
+        embedding_module = clear_embedding_activation_buffer(
+            config, model, is_pp_first_stage(p2p_communicator.pp_group)
+        )
 
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
@@ -767,6 +818,16 @@ def forward_backward_pipelining_with_dualpipev(
     if no_sync_func is None:
         no_sync_func = contextlib.nullcontext
     no_sync_context = None
+
+    if config.grad_sync_func is not None and not isinstance(config.grad_sync_func, list):
+        config.grad_sync_func = [config.grad_sync_func for _ in model]
+
+    if config.param_sync_func is not None and not isinstance(config.param_sync_func, list):
+        config.param_sync_func = [config.param_sync_func for _ in model]
+
+    # Disable config.grad_sync_func and config.param_sync_func if only running forward passes.
+    # They will be re-enabled at the end of this function.
+    grad_sync_func, param_sync_func = None, None
 
     def disable_grad_sync():
         """Disable asynchronous grad reductions"""
@@ -788,6 +849,7 @@ def forward_backward_pipelining_with_dualpipev(
     pp_size = parallel_state.get_pipeline_model_parallel_world_size()
     rank = parallel_state.get_pipeline_model_parallel_rank()
     schedule = generate_dualpipev_schedule(pp_size, num_microbatches)
+    print(f"{schedule=}")
 
     model_type = get_model_type(model[0])
 
@@ -882,7 +944,12 @@ def forward_backward_pipelining_with_dualpipev(
                 send_prev=send_prev, recv_prev=not fwd_send_only and recv_prev
             ), P2PCommParams(send_prev=send_prev, recv_prev=recv_prev)
 
-    input_tensor = recv_forward(tensor_shape, config, master_chunk_id)[0]
+    input_tensor = recv_forward(
+        tensor_shape,
+        config,
+        master_chunk_id,
+        p2p_communicator=p2p_communicator
+    )[0]
 
     ### Run warmup forward passes
     fwd_wait_handles_warmup = None
@@ -919,13 +986,17 @@ def forward_backward_pipelining_with_dualpipev(
 
         if i != schedule['warmup'][rank] - 1:
             input_tensor, _ = send_forward_recv_forward(
-                output_tensor_warmup, tensor_shape, config, master_chunk_id
+                output_tensor_warmup,
+                tensor_shape,
+                config,
+                master_chunk_id,
+                p2p_communicator=p2p_communicator
             )
             deallocate_output_tensor(output_tensor_warmup, config.deallocate_pipeline_outputs)
         else:
-            input_tensor, _ = recv_forward(tensor_shape, config, master_chunk_id)
+            input_tensor, _ = recv_forward(tensor_shape, config, master_chunk_id, p2p_communicator=p2p_communicator)
             fwd_wait_handles_warmup = send_forward(
-                output_tensor_warmup, tensor_shape, config, master_chunk_id, async_op=True
+                output_tensor_warmup, tensor_shape, config, master_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
             )
 
     ### Run interleaved forward passes for two model chunk
@@ -987,13 +1058,13 @@ def forward_backward_pipelining_with_dualpipev(
             input_tensor_slave_chunk = output_tensor.detach().requires_grad_(True)
 
             input_tensor, fwd_wait_handles = recv_forward(
-                tensor_shape, config, master_chunk_id, async_op=True
+                tensor_shape, config, master_chunk_id, async_op=True, p2p_communicator=p2p_communicator
             )
         else:
-            input_tensor_slave_chunk, _ = recv_forward(tensor_shape, config, slave_chunk_id)
+            input_tensor_slave_chunk, _ = recv_forward(tensor_shape, config, slave_chunk_id, p2p_communicator=p2p_communicator)
 
             input_tensor, fwd_wait_handles = recv_forward(
-                tensor_shape, config, master_chunk_id, async_op=True
+                tensor_shape, config, master_chunk_id, async_op=True, p2p_communicator=p2p_communicator
             )
 
         if fwd_wait_handles_warmup is not None:
@@ -1049,19 +1120,19 @@ def forward_backward_pipelining_with_dualpipev(
             if parallel_state.is_pipeline_last_stage():
                 firstFB_no_overlap = True
                 output_tensor_grad_bwd, firstFB_no_overlap_handle = recv_backward(
-                    tensor_shape, config, slave_chunk_id, async_op=True
+                    tensor_shape, config, slave_chunk_id, async_op=True, p2p_communicator=p2p_communicator
                 )
             else:
-                output_tensor_grad_bwd, _ = recv_backward(tensor_shape, config, slave_chunk_id)
+                output_tensor_grad_bwd, _ = recv_backward(tensor_shape, config, slave_chunk_id, p2p_communicator=p2p_communicator)
 
         fwd_wait_handles_slave_chunk = send_forward(
-            output_tensor_slave_chunk, tensor_shape, config, slave_chunk_id, async_op=True
+            output_tensor_slave_chunk, tensor_shape, config, slave_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
         )
 
         if not parallel_state.is_pipeline_last_stage():
             output_tensor_send = output_tensor
             fwd_wait_handles_send = send_forward(
-                output_tensor_send, tensor_shape, config, master_chunk_id, async_op=True
+                output_tensor_send, tensor_shape, config, master_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
             )
         else:
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
@@ -1108,11 +1179,11 @@ def forward_backward_pipelining_with_dualpipev(
             output_tensor_bwd = output_tensors[slave_chunk_id].pop(0)
 
             input_tensor_grad = backward_step(
-                input_tensor_bwd, output_tensor_bwd, output_tensor_grad_bwd, model_type, config
+                input_tensor_bwd, output_tensor_bwd, output_tensor_grad_bwd, config
             )
 
         # If asynchronous, the memory will rise.
-        bwd_wait_handles = send_backward(input_tensor_grad, tensor_shape, config, slave_chunk_id)
+        bwd_wait_handles = send_backward(input_tensor_grad, tensor_shape, config, slave_chunk_id, p2p_communicator=p2p_communicator)
 
         if fwd_wait_handles_slave_chunk is not None:
             for req in fwd_wait_handles_slave_chunk:
@@ -1134,7 +1205,7 @@ def forward_backward_pipelining_with_dualpipev(
 
         # If asynchronous, the memory will rise.
         input_tensor_slave_chunk, recv_forward_handle = recv_forward(
-            tensor_shape, config, slave_chunk_id
+            tensor_shape, config, slave_chunk_id, p2p_communicator=p2p_communicator
         )
 
         if recv_forward_handle is not None:
@@ -1174,10 +1245,10 @@ def forward_backward_pipelining_with_dualpipev(
 
         slave_cur_microbatch += 1
 
-        output_tensor_grad_bwd, _ = recv_backward(tensor_shape, config, slave_chunk_id)
+        output_tensor_grad_bwd, _ = recv_backward(tensor_shape, config, slave_chunk_id, p2p_communicator=p2p_communicator)
 
         fwd_wait_handles_slave_chunk = send_forward(
-            output_tensor_slave_chunk, tensor_shape, config, slave_chunk_id, async_op=True
+            output_tensor_slave_chunk, tensor_shape, config, slave_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
         )
 
     ### Run overlapping f&bw stages
@@ -1335,7 +1406,7 @@ def forward_backward_pipelining_with_dualpipev(
                     and slave_cur_microbatch < slave_microbatch_max
                 ):
                     input_tensor, fwd_wait_handles_recv = recv_forward(
-                        tensor_shape, config, slave_chunk_id, async_op=True
+                        tensor_shape, config, slave_chunk_id, async_op=True, p2p_communicator=p2p_communicator
                     )
 
                 if is_dualpipev_last_stgae(bwd_model_chunk_id):
@@ -1372,7 +1443,7 @@ def forward_backward_pipelining_with_dualpipev(
                     output_tensor_grad_bwd = input_tensor_grad
                 else:
                     output_tensor_grad_bwd, bwd_wait_handles = send_forward_recv_slave_forward(
-                        input_tensor_grad, tensor_shape, config, fwd_model_chunk_id
+                        input_tensor_grad, tensor_shape, config, fwd_model_chunk_id, p2p_communicator=p2p_communicator
                     )
         else:
             firstFB_no_overlap = False
@@ -1416,7 +1487,7 @@ def forward_backward_pipelining_with_dualpipev(
 
                 if fwd_send_only:
                     fwd_wait_handles = send_forward(
-                        output_tensor, tensor_shape, config, fwd_model_chunk_id, async_op=True
+                        output_tensor, tensor_shape, config, fwd_model_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
                     )
                 else:
                     if (
@@ -1426,7 +1497,7 @@ def forward_backward_pipelining_with_dualpipev(
                         input_tensor = output_tensor.detach().requires_grad_(True)
                     else:
                         input_tensor, fwd_wait_handles = send_forward_recv_slave_forward(
-                            output_tensor, tensor_shape, config, fwd_model_chunk_id, async_op=True
+                            output_tensor, tensor_shape, config, fwd_model_chunk_id, async_op=True, p2p_communicator=p2p_communicator
                         )
 
                 if firstFB_no_overlap_handle is not None:
@@ -1479,7 +1550,6 @@ def forward_backward_pipelining_with_dualpipev(
                         input_tensor_bwd,
                         output_tensor_bwd,
                         output_tensor_grad_bwd,
-                        model_type,
                         config,
                     )
 
@@ -1502,7 +1572,12 @@ def forward_backward_pipelining_with_dualpipev(
                     output_tensor_grad_bwd = input_tensor_grad
                 else:
                     output_tensor_grad_bwd, bwd_wait_handles = send_forward_recv_slave_forward(
-                        input_tensor_grad, tensor_shape, config, fwd_model_chunk_id, async_op=True
+                        input_tensor_grad,
+                        tensor_shape,
+                        config,
+                        fwd_model_chunk_id,
+                        async_op=True,
+                        p2p_communicator=p2p_communicator
                     )
 
                 if fwd_wait_handles_slave_chunk is not None:
@@ -1522,7 +1597,7 @@ def forward_backward_pipelining_with_dualpipev(
                     bwd_model_chunk_id == slave_chunk_id
                     and slave_cur_microbatch < slave_microbatch_max
                 ):
-                    input_tensor, _ = recv_forward(tensor_shape, config, slave_chunk_id)
+                    input_tensor, _ = recv_forward(tensor_shape, config, slave_chunk_id, p2p_communicator=p2p_communicator)
 
                 if bwd_wait_handles is not None:
                     for req in bwd_wait_handles:
@@ -1566,7 +1641,6 @@ def forward_backward_pipelining_with_dualpipev(
                         input_tensor_bwd,
                         output_tensor_bwd,
                         output_tensor_grad_bwd,
-                        model_type,
                         config,
                     )
 
@@ -1577,7 +1651,7 @@ def forward_backward_pipelining_with_dualpipev(
                     output_tensor_grad_bwd = input_tensor_grad
                 else:
                     output_tensor_grad_bwd, bwd_wait_handles = send_forward_recv_slave_forward(
-                        input_tensor_grad, tensor_shape, config, fwd_model_chunk_id
+                        input_tensor_grad, tensor_shape, config, fwd_model_chunk_id, p2p_communicator=p2p_communicator
                     )
 
         fwd_model_chunk_id, bwd_model_chunk_id = bwd_model_chunk_id, fwd_model_chunk_id
@@ -1631,19 +1705,19 @@ def forward_backward_pipelining_with_dualpipev(
             )
         else:
             input_tensor_grad = backward_step(
-                input_tensor_bwd, output_tensor_bwd, output_tensor_grad_bwd, model_type, config
+                input_tensor_bwd, output_tensor_bwd, output_tensor_grad_bwd, config
             )
 
         if i == pp_size - 1:
             bwd_wait_handles = send_backward(
-                input_tensor_grad, tensor_shape, config, bwd_model_chunk_id, async_op=True
+                input_tensor_grad, tensor_shape, config, bwd_model_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
             )
         elif i >= schedule['cooldown'][rank][0] - 1:
             bwd_wait_handles = send_backward(
-                input_tensor_grad, tensor_shape, config, bwd_model_chunk_id, async_op=True
+                input_tensor_grad, tensor_shape, config, bwd_model_chunk_id, async_op=True, p2p_communicator=p2p_communicator,
             )
             output_tensor_grad_bwd, bwd_wait_handles_recv = recv_backward(
-                tensor_shape, config, bwd_model_chunk_id, async_op=True
+                tensor_shape, config, bwd_model_chunk_id, async_op=True, p2p_communicator=p2p_communicator
             )
         else:
             if (
@@ -1653,7 +1727,7 @@ def forward_backward_pipelining_with_dualpipev(
                 output_tensor_grad_bwd = input_tensor_grad
             else:
                 output_tensor_grad_bwd, bwd_wait_handles = send_forward_recv_slave_forward(
-                    input_tensor_grad, tensor_shape, config, 1 - bwd_model_chunk_id
+                    input_tensor_grad, tensor_shape, config, 1 - bwd_model_chunk_id, p2p_communicator=p2p_communicator
                 )
 
     if bwd_wait_handles is not None:
@@ -1673,7 +1747,7 @@ def forward_backward_pipelining_with_dualpipev(
 
         # If defer_embedding_wgrad_compute is enabled we need to do the
         # weight gradient GEMM's here.
-        finish_embedding_wgrad_compute(config, embedding_module)
+        finish_embedding_wgrad_compute(config, embedding_module, parallel_state.is_pipeline_last_stage(), tp_group)
 
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
         # data parallelism, layernorm all-reduce for sequence parallelism, and
