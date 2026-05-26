@@ -150,7 +150,7 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to enable local window attention in flash-sparse-attention.
     Only used when attention_backend is flash_sparse."""
 
-    is_autotune: bool = True
+    is_autotune: bool = False
     """Whether to enable kernel autotuning in flash-sparse-attention.
     Only used when attention_backend is flash_sparse."""
 
