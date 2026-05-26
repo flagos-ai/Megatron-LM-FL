@@ -111,6 +111,8 @@ class MultiLatentAttention(Attention):
         attention_type: str,
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        pp_layer_offset: Optional[int] = None,
+        is_mtp_layer: bool = False,
     ) -> None:
 
         super().__init__(
@@ -120,6 +122,8 @@ class MultiLatentAttention(Attention):
             attention_type=attention_type,
             attn_mask_type=attn_mask_type,
             pg_collection=pg_collection,
+            pp_layer_offset=pp_layer_offset,
+            is_mtp_layer=is_mtp_layer,
         )
         self.config: MLATransformerConfig
 
@@ -389,6 +393,8 @@ class MLASelfAttention(MultiLatentAttention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        pp_layer_offset: Optional[int] = None,
+        is_mtp_layer: bool = False,
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -401,6 +407,8 @@ class MLASelfAttention(MultiLatentAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            pp_layer_offset=pp_layer_offset,
+            is_mtp_layer=is_mtp_layer,
         )
 
         if self.config.q_lora_rank is None:
@@ -825,6 +833,7 @@ class MLASelfAttention(MultiLatentAttention):
                     cu_seqlens=cu_seqlens_q,
                     mscale=mscale,
                     cp_group=self.pg_collection.cp,
+                    mla_rotary_interleaved=True,
                 )
                 # k_pos_emb:[num_tokens, 1, qk_pos_emb_head_dim]
                 k_pos_emb = apply_rotary_pos_emb(
@@ -834,6 +843,7 @@ class MLASelfAttention(MultiLatentAttention):
                     cu_seqlens=cu_seqlens_kv,
                     mscale=mscale,
                     cp_group=self.pg_collection.cp,
+                    mla_rotary_interleaved=True,
                 )
 
                 # query: [num_tokens, n, (qk_head_dim + v_head_dim)]
@@ -1122,6 +1132,7 @@ class FusedMLASelfAttention(MLASelfAttention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+        is_mtp_layer: bool = False,
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -1135,6 +1146,7 @@ class FusedMLASelfAttention(MLASelfAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
         )
 
         assert self.config.q_lora_rank is not None, (

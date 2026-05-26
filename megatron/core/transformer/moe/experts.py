@@ -267,62 +267,14 @@ class TEGroupedMLP(MegatronModule):
             .to(intermediate_parallel.dtype)
         )
 
-    def bias_act_func(self, intermediate_parallel, bias_parallel, permuted_probs):
-        """
-        Applies bias and activation function to the output of linear_fc1.
-        """
-        if self.config.use_te_activation_func:
-            if bias_parallel is not None:
-                intermediate_parallel = intermediate_parallel + bias_parallel
-            intermediate_parallel = self.activation_func(intermediate_parallel)
-            if permuted_probs is not None:
-                original_dtype = intermediate_parallel.dtype
-                intermediate_parallel = intermediate_parallel * permuted_probs
-                intermediate_parallel = intermediate_parallel.to(original_dtype)
-        elif self.config.bias_activation_fusion:
-            if self.activation_func == F.silu and self.config.gated_linear_unit:
-                # dtype is handled inside the fused kernel
-                intermediate_parallel = weighted_bias_swiglu_impl(
-                    intermediate_parallel,
-                    bias_parallel,
-                    permuted_probs,
-                    self.config.activation_func_fp8_input_store,
-                )
-            elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
-                intermediate_parallel = weighted_bias_quick_geglu_impl(
-                    intermediate_parallel,
-                    bias_parallel,
-                    permuted_probs,
-                    self.config.activation_func_fp8_input_store,
-                    self.config.glu_linear_offset,
-                    self.config.activation_func_clamp_value,
-                )
-            else:
-                raise ValueError("Only support fusion of swiglu and quick_gelu in TEGroupedMLP.")
-        elif self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu:
-            assert bias_parallel is None, "Bias is not supported with fused weighted squared relu."
-            intermediate_parallel = weighted_squared_relu_impl(
-                intermediate_parallel, permuted_probs
-            )
-        else:
-            if self.config.gated_linear_unit:
-
-                def glu(x):
-                    x_glu, x_linear = torch.chunk(x, 2, dim=-1)
-                    if (val := self.config.activation_func_clamp_value) is not None:
-                        x_glu = x_glu.clamp(min=None, max=val)
-                        x_linear = x_linear.clamp(min=-val, max=val)
-                    return self.config.activation_func(x_glu) * (
-                        x_linear + self.config.glu_linear_offset
-                    )
-
-                intermediate_parallel = glu(intermediate_parallel)
-            else:
-                intermediate_parallel = self.activation_func(intermediate_parallel)
-            original_dtype = intermediate_parallel.dtype
-            intermediate_parallel = intermediate_parallel * permuted_probs
-            intermediate_parallel = intermediate_parallel.to(original_dtype)
-        return intermediate_parallel
+    @staticmethod
+    def _remove_glu_interleaving(x: torch.Tensor, interleave_size: int) -> torch.Tensor:
+        """Reorder interleaved GLU blocks so gate and linear halves are contiguous."""
+        shape = x.size()
+        x = x.reshape(-1, shape[-1] // (2 * interleave_size), 2, interleave_size)
+        x = x.transpose(1, 2).contiguous()
+        x = x.view(shape)
+        return x
 
     def forward(
         self,
@@ -376,15 +328,91 @@ class TEGroupedMLP(MegatronModule):
                 forced_released_tensors=[permuted_local_hidden_states],
             )
 
+        def bias_act_func(intermediate_parallel, bias_parallel, permuted_probs):
+
+            # Whether activation function is interleaved GLU
+            with_glu_interleaving = (
+                self.config.gated_linear_unit
+                and self.config.moe_mlp_glu_interleave_size is not None
+            )
+
+            if self.config.use_te_activation_func:
+                if bias_parallel is not None:
+                    intermediate_parallel = intermediate_parallel + bias_parallel
+                if with_glu_interleaving:
+                    intermediate_parallel = self._remove_glu_interleaving(
+                        intermediate_parallel, self.config.moe_mlp_glu_interleave_size
+                    )
+                intermediate_parallel = self.activation_func(intermediate_parallel)
+                if permuted_probs is not None:
+                    original_dtype = intermediate_parallel.dtype
+                    intermediate_parallel = intermediate_parallel * permuted_probs
+                    intermediate_parallel = intermediate_parallel.to(original_dtype)
+            elif self.config.bias_activation_fusion and not with_glu_interleaving:
+                if self.activation_func == F.silu and self.config.gated_linear_unit:
+                    # dtype is handled inside the fused kernel
+                    intermediate_parallel = weighted_bias_swiglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        permuted_probs,
+                        self.config.activation_func_fp8_input_store,
+                        self.config.activation_func_clamp_value,
+                    )
+                elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
+                    intermediate_parallel = weighted_bias_quick_geglu_impl(
+                        intermediate_parallel,
+                        bias_parallel,
+                        permuted_probs,
+                        self.config.activation_func_fp8_input_store,
+                        self.config.glu_linear_offset,
+                        self.config.activation_func_clamp_value,
+                    )
+                else:
+                    raise ValueError(
+                        "Only support fusion of swiglu and quick_gelu in TEGroupedMLP."
+                    )
+            elif (
+                self.activation_func == squared_relu and self.config.use_fused_weighted_squared_relu
+            ):
+                assert (
+                    bias_parallel is None
+                ), "Bias is not supported with fused weighted squared relu."
+                intermediate_parallel = weighted_squared_relu_impl(
+                    intermediate_parallel, permuted_probs
+                )
+            else:
+                if self.config.gated_linear_unit:
+
+                    def glu(x):
+                        if with_glu_interleaving:
+                            x = self._remove_glu_interleaving(
+                                x, self.config.moe_mlp_glu_interleave_size
+                            )
+                        x_glu, x_linear = torch.chunk(x, 2, dim=-1)
+                        if (val := self.config.activation_func_clamp_value) is not None:
+                            x_glu = x_glu.clamp(min=None, max=val)
+                            x_linear = x_linear.clamp(min=-val, max=val)
+                        return self.config.activation_func(x_glu) * (
+                            x_linear + self.config.glu_linear_offset
+                        )
+
+                    intermediate_parallel = glu(intermediate_parallel)
+                else:
+                    intermediate_parallel = self.activation_func(intermediate_parallel)
+                original_dtype = intermediate_parallel.dtype
+                intermediate_parallel = intermediate_parallel * permuted_probs
+                intermediate_parallel = intermediate_parallel.to(original_dtype)
+            return intermediate_parallel
+
         if self.activation_recompute:
             self.activation_checkpoint = tensor_parallel.CheckpointWithoutOutput()
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = self.activation_checkpoint.checkpoint(
-                    self.bias_act_func, fc1_output, bias_parallel, permuted_probs
+                    bias_act_func, fc1_output, bias_parallel, permuted_probs
                 )
         else:
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
-                bias_act_output = self.bias_act_func(fc1_output, bias_parallel, permuted_probs)
+                bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
         output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)

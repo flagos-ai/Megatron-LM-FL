@@ -698,8 +698,8 @@ def topk_routing_with_score_function(
         group_topk (int, optional): Number of selected groups for each token. Defaults to None.
         scaling_factor (float, optional): Scaling factor of routing score in top-k selection.
                                          Defaults to None.
-        score_function (str, optional): The score function to use. Can be either "softmax" or
-                                        "sigmoid". Defaults to "softmax".
+        score_function (str, optional): The score function to use. Can be either "softmax", "sigmoid"
+                                        or "sqrtsoftplus". Defaults to "softmax".
         expert_bias (torch.Tensor, optional): The bias added to logits for expert routing.
                                               Defaults to None.
         fused (bool, optional): Whether to use the fused version. Defaults to False.
@@ -732,6 +732,11 @@ def topk_routing_with_score_function(
         if not HAVE_TE or fused_topk_with_score_function is None:
             raise ValueError(
                 "fused_topk_with_score_function is not available. Please install TE >= 2.6.0."
+            )
+        if score_function == "sqrtsoftplus" and not is_te_min_version("2.13.0"):
+            raise ValueError(
+                "Fused sqrtsoftplus score function requires TE >= 2.13.0. "
+                "Please upgrade Transformer Engine or disable moe_router_fusion."
             )
         return fused_topk_with_score_function(
             logits=logits,
@@ -792,8 +797,11 @@ def topk_routing_with_score_function(
         else:
             scores, top_indices = compute_topk(logits, topk, num_groups, group_topk)
             probs = torch.softmax(scores, dim=-1, dtype=torch.float32).type_as(logits)
-    elif score_function == "sigmoid":
-        scores = torch.sigmoid(logits.float()).type_as(logits)
+    elif score_function in ("sigmoid", "sqrtsoftplus"):
+        if score_function == "sigmoid":
+            scores = torch.sigmoid(logits.float()).type_as(logits)
+        elif score_function == "sqrtsoftplus":
+            scores = torch.nn.functional.softplus(logits.float()).sqrt().type_as(logits)
         if expert_bias is not None:
             scores_for_routing = scores + expert_bias
             _, top_indices = compute_topk(scores_for_routing, topk, num_groups, group_topk)
@@ -841,7 +849,7 @@ def compute_routing_scores_for_aux_loss(
     Args:
         logits (torch.Tensor): The logits tensor after gating, shape: [num_tokens, num_experts].
         topk (int): The number of top-k indices to compute.
-        score_function (str): The score function to use. Can be either "softmax" or "sigmoid".
+        score_function (str): The score function to use. Can be either "softmax", "sigmoid", or "sqrtsoftplus".
         fused (bool, optional): Whether to use the fused version. Defaults to False.
         padding_mask (torch.Tensor, optional): Boolean mask indicating non-padding tokens.
                                                Shape in [num_tokens]. True for valid tokens,
@@ -855,6 +863,11 @@ def compute_routing_scores_for_aux_loss(
             raise ValueError(
                 "fused_compute_score_for_moe_aux_loss is not available. Please install TE >= 2.6.0."
             )
+        if score_function == "sqrtsoftplus" and not is_te_min_version("2.13.0"):
+            raise ValueError(
+                "Fused sqrtsoftplus score function requires TE >= 2.13.0. "
+                "Please upgrade Transformer Engine or disable moe_router_fusion."
+            )
         routing_map, scores = fused_compute_score_for_moe_aux_loss(
             logits=logits, topk=topk, score_function=score_function
         )
@@ -864,6 +877,9 @@ def compute_routing_scores_for_aux_loss(
         elif score_function == "sigmoid":
             # Cast logits to float32 before sigmoid for stability
             scores = torch.sigmoid(logits.to(torch.float32))
+            scores = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20)
+        elif score_function == "sqrtsoftplus":
+            scores = torch.nn.functional.softplus(logits.float()).sqrt()
             scores = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20)
         else:
             raise ValueError(f"Invalid score_function: {score_function}")
@@ -1185,7 +1201,7 @@ def maybe_move_tensor_to_cpu(
         if as_numpy:
             cpu_tensor = cpu_tensor.numpy()
         if record_stream:
-            tensor.record_stream(cur_platform.current_stream())
+            tensor.record_stream(cur_platform.current_stream())  # FlagScale Add
         tensor = cpu_tensor
     return tensor
 
