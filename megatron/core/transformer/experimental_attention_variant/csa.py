@@ -79,6 +79,95 @@ def get_compress_topk_idxs(
 
 
 # ---------------------------------------------------------------------------
+# Helper functions for Context Parallel (sliding window halo exchange)
+# ---------------------------------------------------------------------------
+
+
+def _exchange_kv_halo(
+    kv: torch.Tensor,
+    halo_size: int,
+    cp_group: torch.distributed.ProcessGroup,
+) -> torch.Tensor:
+    """P2P halo exchange for sliding window attention with context parallelism.
+
+    Each rank sends its last `halo_size` KV tokens to the next rank, and receives
+    `halo_size` tokens from the previous rank to prepend to its local KV.
+
+    Args:
+        kv: [local_seq, b, hn] local KV tensor.
+        halo_size: number of tokens to exchange (typically window_size - 1).
+        cp_group: context parallel process group.
+
+    Returns:
+        kv_with_halo: [halo_size + local_seq, b, hn] for rank > 0,
+                      [local_seq, b, hn] for rank 0 (no halo needed).
+    """
+    cp_rank = cp_group.rank()
+    cp_size = cp_group.size()
+
+    if cp_size == 1:
+        return kv
+
+    global_ranks = torch.distributed.get_process_group_ranks(cp_group)
+    prev_rank = global_ranks[(cp_rank - 1) % cp_size]
+    next_rank = global_ranks[(cp_rank + 1) % cp_size]
+
+    send_buf = kv[-halo_size:].contiguous()
+    recv_buf = torch.empty_like(send_buf)
+
+    ops = []
+    if cp_rank < cp_size - 1:
+        ops.append(torch.distributed.isend(send_buf, dst=next_rank, group=cp_group))
+    if cp_rank > 0:
+        ops.append(torch.distributed.irecv(recv_buf, src=prev_rank, group=cp_group))
+
+    for op in ops:
+        op.wait()
+
+    print(f"[CSA CP] _exchange_kv_halo done: rank={cp_rank}, "
+          f"send_to={next_rank if cp_rank < cp_size - 1 else 'None'}, "
+          f"recv_from={prev_rank if cp_rank > 0 else 'None'}, "
+          f"halo_size={halo_size}")
+
+    if cp_rank == 0:
+        return kv
+    else:
+        return torch.cat([recv_buf, kv], dim=0)
+
+
+@lru_cache(maxsize=8)
+def _get_window_topk_idxs_cp_cached(
+    window_size: int, local_seq_len: int, halo_size: int, device_str: str
+) -> torch.Tensor:
+    """Compute sliding-window indices with halo offset for CP (cached).
+
+    KV layout after halo exchange: [halo(halo_size) | local(local_seq_len)]
+    For local query position i, its position in kv_with_halo is i + halo_size.
+    Its window covers [i + halo_size - window_size + 1, i + halo_size].
+
+    Returns:
+        indices: [local_seq_len, window_size] int tensor, -1 for invalid positions.
+    """
+    base = torch.arange(local_seq_len, device=device_str).unsqueeze(1) + halo_size
+    offsets = torch.arange(window_size, device=device_str)
+    matrix = (base - window_size + 1).clamp(min=0) + offsets
+    matrix = torch.where(matrix > base, -1, matrix)
+    return matrix
+
+
+def get_window_topk_idxs_cp(
+    window_size: int,
+    batch_size: int,
+    local_seq_len: int,
+    halo_size: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Sliding-window indices with CP halo offset [batch, local_seq_len, window_size]."""
+    matrix = _get_window_topk_idxs_cp_cached(window_size, local_seq_len, halo_size, str(device))
+    return matrix.unsqueeze(0).expand(batch_size, -1, -1)
+
+
+# ---------------------------------------------------------------------------
 # Helper functions for RoPE
 # ---------------------------------------------------------------------------
 
@@ -660,10 +749,26 @@ class CompressedSparseAttention(MegatronModule):
 
         sq, b, np, hn = query.size()
 
+        cp_size = self.pg_collection.cp.size()
+        cp_rank = self.pg_collection.cp.rank()
+
         # --- Step 1: Prepare single-head KV (squeeze singleton head dim) ---
         kv = key.squeeze(-2)  # [sq, b, 1, v_head_dim] -> [sq, b, v_head_dim]
 
-        # --- Step 2: Compression ---
+        # --- Step 2: Halo exchange for sliding window (CP only) ---
+        if cp_size > 1:
+            halo_size = self.window_size - 1 if cp_rank > 0 else 0
+            if torch.distributed.get_rank() == 0:
+                print(f"[CSA CP] Layer {self.layer_number}: cp_size={cp_size}, cp_rank={cp_rank}, "
+                      f"halo_size={halo_size}, window_size={self.window_size}, "
+                      f"compress_ratio={self.compress_ratio}, kv.shape={kv.shape}")
+            kv = _exchange_kv_halo(kv, self.window_size - 1, self.pg_collection.cp)
+            if torch.distributed.get_rank() == 0:
+                print(f"[CSA CP] Layer {self.layer_number}: after halo exchange, kv.shape={kv.shape}")
+        else:
+            halo_size = 0
+
+        # --- Step 3: Compression ---
         if self.compressor is not None and self.compress_ratio > 1:
             compressed_kv = self.compressor(x)  # [n_compressed, b, v_head_dim]
             if compressed_kv is not None:
@@ -676,12 +781,20 @@ class CompressedSparseAttention(MegatronModule):
             kv_full = kv
             n_compressed = 0
 
-        offset = sq  # compressed indices start after original positions
+        offset = sq + halo_size  # compressed indices start after halo + original positions
 
-        # --- Step 3: Window indices ---
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
+        # --- Step 4: Window indices ---
+        if halo_size > 0:
+            window_idxs = get_window_topk_idxs_cp(
+                self.window_size, b, sq, halo_size, query.device
+            )
+            if torch.distributed.get_rank() == 0:
+                print(f"[CSA CP] Layer {self.layer_number}: using CP window indices, "
+                      f"window_idxs.shape={window_idxs.shape}, offset={offset}")
+        else:
+            window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
 
-        # --- Step 4: Compressed indices ---
+        # --- Step 5: Compressed indices ---
         indexer_loss = None
 
         if self.force_unfused_dsa:
@@ -756,7 +869,7 @@ class CompressedSparseAttention(MegatronModule):
 
             topk_idxs = topk_idxs.int()
 
-            # --- Step 5: Sparse attention ---
+            # --- Step 6: Sparse attention ---
             nvtx_range_push("sparse_attn_kernel")
             output = unfused_compressed_sparse_attn(
                 query, kv_full, self.attn_sink.float(), topk_idxs, self.softmax_scale
@@ -766,7 +879,7 @@ class CompressedSparseAttention(MegatronModule):
         else:
             raise ValueError("Fused path is not supported for CompressedSparseAttention")
 
-        # --- Step 6: Attach indexer loss ---
+        # --- Step 7: Attach indexer loss ---
         if indexer_loss is not None and self.training and torch.is_grad_enabled():
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 
