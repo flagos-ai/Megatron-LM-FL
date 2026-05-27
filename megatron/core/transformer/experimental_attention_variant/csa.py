@@ -357,26 +357,56 @@ class Compressor(MegatronModule):
     def forward(self, x: torch.Tensor) -> Optional[torch.Tensor]:
         """Compress hidden states into shorter KV sequence.
 
+        When CP is active (cp_size > 1), this method internally handles:
+        1. Halo exchange (prepend boundary tokens from previous rank)
+        2. Local compression (discard halo group to avoid duplicates)
+        3. All-gather across CP ranks to produce the global compressed sequence
+
         Args:
-            x: [sq, b, hidden_size]
+            x: [sq, b, hidden_size] — local hidden states (without halo).
 
         Returns:
-            compressed_kv [sq // ratio, b, head_dim] or None if too short.
+            cp_size == 1: [sq // ratio, b, head_dim] or None if too short.
+            cp_size > 1:  [n_compressed_global, b, head_dim] or None if too short.
         """
         nvtx_range_push("compressor")
 
         sq, b, _ = x.size()
         ratio = self.compress_ratio
+        cp_group = self.pg_collection.cp
+        cp_size = cp_group.size()
+        cp_rank = cp_group.rank()
 
-        if sq < ratio:
+        # --- CP Step 1: Halo exchange for compression boundary ---
+        _rank = torch.distributed.get_rank()
+        has_halo = False
+        if cp_size > 1:
+            need_halo = self.overlap or (sq % ratio != 0)
+            if need_halo:
+                logger.debug(
+                    f"[rank {_rank}] Compressor(ratio={ratio}): "
+                    f"before halo exchange, x.shape={x.shape}"
+                )
+                x = _exchange_halo(x, ratio, cp_group)
+                logger.debug(
+                    f"[rank {_rank}] Compressor(ratio={ratio}): "
+                    f"after halo exchange, x.shape={x.shape}"
+                )
+                if cp_rank > 0:
+                    has_halo = True
+
+        sq_with_halo = x.size(0)
+
+        if sq_with_halo < ratio:
             nvtx_range_pop("compressor")
             return None
 
-        kv, _ = self.linear_wkv(x)  # [sq, b, coff * head_dim]
-        score, _ = self.linear_wgate(x)  # [sq, b, coff * head_dim]
+        # --- Core compression ---
+        kv, _ = self.linear_wkv(x)  # [sq_with_halo, b, coff * head_dim]
+        score, _ = self.linear_wgate(x)  # [sq_with_halo, b, coff * head_dim]
 
-        cutoff = (sq // ratio) * ratio
-        if cutoff < sq:
+        cutoff = (sq_with_halo // ratio) * ratio
+        if cutoff < sq_with_halo:
             kv = kv[:cutoff]
             score = score[:cutoff]
 
@@ -395,6 +425,12 @@ class Compressor(MegatronModule):
 
         kv = (kv * torch.softmax(score, dim=1)).sum(dim=1)  # [n_compressed, b, head_dim]
 
+        # Discard halo group: it only served as overlap context for group 1.
+        # The same tokens are already compressed by the previous rank.
+        if has_halo:
+            kv = kv[1:]
+            n_compressed = n_compressed - 1
+
         kv = self.norm(kv.to(x.dtype))
 
         kv = _apply_rope(
@@ -405,14 +441,26 @@ class Compressor(MegatronModule):
             self.config,
             n_compressed,
             ratio=ratio,
-            cp_group=self.pg_collection.cp,
+            cp_group=cp_group,
         )
 
         if self.rotate:
             kv = rotate_activation(kv)
 
+        # --- CP Step 2: All-gather to produce global compressed sequence ---
+        if cp_size > 1:
+            logger.debug(
+                f"[rank {_rank}] Compressor(ratio={ratio}): "
+                f"before all-gather, kv.shape={kv.shape}, expected_local={sq // ratio}"
+            )
+            kv = differentiable_all_gather(kv, cp_group)
+            logger.debug(
+                f"[rank {_rank}] Compressor(ratio={ratio}): "
+                f"after all-gather, kv.shape={kv.shape}"
+            )
+
         nvtx_range_pop("compressor")
-        return kv  # [n_compressed, b, head_dim]
+        return kv
 
 
 # ---------------------------------------------------------------------------
@@ -681,115 +729,44 @@ class CompressedSparseAttention(MegatronModule):
 
         cp_size = self.pg_collection.cp.size()
         cp_rank = self.pg_collection.cp.rank()
+        _rank = torch.distributed.get_rank()
 
-        if torch.distributed.get_rank() == 0:
-            logger.debug(
-                f"\n[CSA CP DEBUG] Layer {self.layer_number} START: "
-                f"query.shape={query.shape}, key.shape={key.shape}, "
-                f"x.shape={x.shape if x is not None else None}"
-            )
+        logger.debug(
+            f"[rank {_rank}] CSA Layer {self.layer_number} START: "
+            f"query.shape={query.shape}, key.shape={key.shape}, "
+            f"x.shape={x.shape if x is not None else None}, "
+            f"cp_size={cp_size}, cp_rank={cp_rank}"
+        )
 
         # --- Step 1: Prepare single-head KV (squeeze singleton head dim) ---
         kv = key.squeeze(-2)  # [sq, b, 1, v_head_dim] -> [sq, b, v_head_dim]
-        if torch.distributed.get_rank() == 0:
-            logger.debug(f"[CSA CP DEBUG] Layer {self.layer_number} Step 1: kv.shape={kv.shape}")
+        logger.debug(
+            f"[rank {_rank}] CSA Layer {self.layer_number} Step 1 done: kv.shape={kv.shape}"
+        )
 
         # --- Step 2: Halo exchange for sliding window (CP only) ---
         if cp_size > 1:
             halo_size = self.window_size - 1 if cp_rank > 0 else 0
-            if torch.distributed.get_rank() == 0:
-                logger.debug(
-                    f"[CSA CP] Layer {self.layer_number}: cp_size={cp_size}, cp_rank={cp_rank}, "
-                    f"halo_size={halo_size}, window_size={self.window_size}, "
-                    f"compress_ratio={self.compress_ratio}, kv.shape={kv.shape}"
-                )
+            logger.debug(
+                f"[rank {_rank}] CSA Layer {self.layer_number} Step 2: "
+                f"before halo exchange, halo_size={halo_size}"
+            )
             kv = _exchange_halo(kv, self.window_size - 1, self.pg_collection.cp, name="kv")
-            if torch.distributed.get_rank() == 0:
-                logger.debug(
-                    f"[CSA CP] Layer {self.layer_number}: after halo exchange, kv.shape={kv.shape}"
-                )
+            logger.debug(
+                f"[rank {_rank}] CSA Layer {self.layer_number} Step 2 done: "
+                f"after halo exchange, kv.shape={kv.shape}"
+            )
         else:
             halo_size = 0
 
         # --- Step 3: Compression ---
+        logger.debug(
+            f"[rank {_rank}] CSA Layer {self.layer_number} Step 3: "
+            f"starting compression, compress_ratio={self.compress_ratio}"
+        )
         if self.compressor is not None and self.compress_ratio > 1:
-            # CP: exchange hidden_states halo for compression boundary handling.
-            # For non-overlap (ratio=128, HCA): halo needed only if sq % ratio != 0.
-            # For overlap (ratio=4, CSA): halo needed for _overlap_transform cross-boundary.
-            x_for_compression = x
-            if cp_size > 1 and cp_rank > 0:
-                need_compression_halo = self.compressor.overlap or (sq % self.compress_ratio != 0)
-                if need_compression_halo:
-                    compression_halo_size = self.compress_ratio
-                    if torch.distributed.get_rank() == 0:
-                        logger.debug(
-                            f"[CSA CP] Layer {self.layer_number}: compression halo exchange, "
-                            f"halo_size={compression_halo_size}, overlap={self.compressor.overlap}"
-                        )
-                    x_for_compression = _exchange_halo(
-                        x, compression_halo_size, self.pg_collection.cp, name="hidden_states"
-                    )
-
-            compressed_kv = self.compressor(
-                x_for_compression
-            )  # [n_compressed_local, b, v_head_dim]
-            if compressed_kv is not None and cp_size > 1:
-                # Pad to uniform length (sq // ratio + 1) for all-gather
-                uniform_len = sq // self.compress_ratio + 1
-                n_local = compressed_kv.size(0)
-                if torch.distributed.get_rank() == 0:
-                    logger.debug(
-                        f"[CSA CP] Layer {self.layer_number}: compressed n_local={n_local}, "
-                        f"uniform_len={uniform_len}"
-                    )
-                if n_local < uniform_len:
-                    pad = torch.zeros(
-                        uniform_len - n_local,
-                        *compressed_kv.shape[1:],
-                        device=compressed_kv.device,
-                        dtype=compressed_kv.dtype,
-                    )
-                    compressed_kv_padded = torch.cat([compressed_kv, pad], dim=0)
-                else:
-                    compressed_kv_padded = compressed_kv[:uniform_len]
-
-                # All-gather padded compressed KV from all ranks (differentiable)
-                gathered_full = differentiable_all_gather(
-                    compressed_kv_padded, self.pg_collection.cp
-                )
-                # Split back into list for select-and-pad logic
-                gathered_list = list(torch.split(gathered_full, uniform_len, dim=0))
-
-                # Select-and-Pad: reorder valid tokens, move padding to tail
-                # Each rank has n_valid tokens followed by padding.
-                # Rank 0: n_valid = n_local (no halo, may be sq//ratio)
-                # Rank i>0 with halo: n_valid = n_local (may be sq//ratio + 1)
-                # Collect valid tokens in global order, pad at the end.
-                valid_tokens = []
-                for i in range(cp_size):
-                    chunk = gathered_list[i]
-                    # Determine how many valid tokens this rank produced
-                    if i == 0:
-                        n_valid_i = sq // self.compress_ratio
-                    else:
-                        # With halo: (compression_halo + sq) // ratio
-                        if self.compressor.overlap or (sq % self.compress_ratio != 0):
-                            n_valid_i = (self.compress_ratio + sq) // self.compress_ratio
-                        else:
-                            n_valid_i = sq // self.compress_ratio
-                    valid_tokens.append(chunk[:n_valid_i])
-                compressed_kv = torch.cat(
-                    valid_tokens, dim=0
-                )  # [n_compressed_global, b, v_head_dim]
-                if torch.distributed.get_rank() == 0:
-                    logger.debug(
-                        f"[CSA CP] Layer {self.layer_number}: after select-and-pad, "
-                        f"compressed_kv.shape={compressed_kv.shape}"
-                    )
-
-                kv_full = torch.cat([kv, compressed_kv], dim=0)
-                n_compressed = compressed_kv.size(0)
-            elif compressed_kv is not None:
+            compressed_kv = self.compressor(x)
+            if compressed_kv is not None:
                 kv_full = torch.cat([kv, compressed_kv], dim=0)
                 n_compressed = compressed_kv.size(0)
             else:
@@ -800,22 +777,20 @@ class CompressedSparseAttention(MegatronModule):
             n_compressed = 0
 
         offset = sq + halo_size  # compressed indices start after halo + original positions
-        if torch.distributed.get_rank() == 0:
-            logger.debug(
-                f"[CSA CP DEBUG] Layer {self.layer_number} Step 3 done: "
-                f"kv_full.shape={kv_full.shape}, n_compressed={n_compressed}, offset={offset}"
-            )
+        logger.debug(
+            f"[rank {_rank}] CSA Layer {self.layer_number} Step 3 done: "
+            f"kv_full.shape={kv_full.shape}, n_compressed={n_compressed}, offset={offset}"
+        )
 
         # --- Step 4: Window indices ---
         if halo_size > 0:
             window_idxs = get_window_topk_idxs_cp(self.window_size, b, sq, halo_size, query.device)
         else:
             window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
-        if torch.distributed.get_rank() == 0:
-            logger.debug(
-                f"[CSA CP DEBUG] Layer {self.layer_number} Step 4: "
-                f"window_idxs.shape={window_idxs.shape}"
-            )
+        logger.debug(
+            f"[rank {_rank}] CSA Layer {self.layer_number} Step 4 done: "
+            f"window_idxs.shape={window_idxs.shape}"
+        )
 
         # --- Step 5: Compressed indices ---
         indexer_loss = None
@@ -827,21 +802,43 @@ class CompressedSparseAttention(MegatronModule):
                     x_det = x.detach()
                     qr_det = qr.detach()
 
-                    causal_mask = (
-                        torch.arange(n_compressed, device=x.device).unsqueeze(0).expand(sq, -1)
-                    )
-                    positions = torch.arange(1, sq + 1, device=x.device).unsqueeze(1)
-                    causal_mask = (
-                        torch.where(
-                            causal_mask >= positions // self.compress_ratio, float("-inf"), 0.0
-                        )
-                        .unsqueeze(0)
-                        .expand(b, -1, -1)
+                    # Causal mask with global positions for CP
+                    # Compressed token j covers [j*ratio, (j+1)*ratio).
+                    # Query at global pos g attends to j iff (j+1)*ratio-1 <= g.
+                    compressed_indices = torch.arange(n_compressed, device=x.device).unsqueeze(
+                        0
+                    )  # [1, n_compressed]
+                    compressed_max_pos = (
+                        compressed_indices + 1
+                    ) * self.compress_ratio - 1  # [1, n_compressed]
+
+                    # Global query positions for current rank
+                    local_positions = torch.arange(1, sq + 1, device=x.device).unsqueeze(
+                        1
+                    )  # [sq, 1]
+                    global_positions = cp_rank * sq + local_positions  # [sq, 1]
+
+                    # Causal constraint: compressed_max_pos <= global_positions
+                    causal_mask = torch.where(
+                        compressed_max_pos > global_positions, float("-inf"), 0.0
+                    )  # [sq, n_compressed]
+                    causal_mask = causal_mask.unsqueeze(0).expand(
+                        b, -1, -1
                     )  # [b, sq, n_compressed]
+
+                    logger.debug(
+                        f"[rank {_rank}] CSA Layer {self.layer_number} Step 5: "
+                        f"causal_mask built, calling indexer.forward_before_topk"
+                    )
 
                     if self.training and torch.is_grad_enabled():
                         q_indexer, k_indexer, weights_indexer = self.indexer.forward_before_topk(
                             x_det, qr_det, packed_seq_params
+                        )
+                        logger.debug(
+                            f"[rank {_rank}] CSA Layer {self.layer_number} Step 5: "
+                            f"forward_before_topk done, q_indexer.shape={q_indexer.shape}, "
+                            f"k_indexer.shape={k_indexer.shape}"
                         )
                         indexer_loss_coeff = getattr(self.config, 'dsa_indexer_loss_coeff', 0.0)
                         # compressed_kv is [n, b, hn]; expand to [n, b, np, hn] for loss
@@ -851,6 +848,10 @@ class CompressedSparseAttention(MegatronModule):
                         # weights-scaling trick so the effective weights match
                         # the pre-scale-split behaviour.
                         weights_for_unfused = weights_indexer * self.indexer.softmax_scale
+                        logger.debug(
+                            f"[rank {_rank}] CSA Layer {self.layer_number} Step 5: "
+                            f"calling FusedDSAIndexerLoss"
+                        )
                         topk_indices_compressed, indexer_loss = FusedDSAIndexerLoss.apply(
                             q_indexer,
                             weights_for_unfused,
@@ -864,6 +865,11 @@ class CompressedSparseAttention(MegatronModule):
                             getattr(self.config, "dsa_indexer_use_sparse_loss", True),
                             self.indexer.pg_collection,
                         )
+                        logger.debug(
+                            f"[rank {_rank}] CSA Layer {self.layer_number} Step 5: "
+                            f"FusedDSAIndexerLoss done, "
+                            f"topk_indices_compressed.shape={topk_indices_compressed.shape}"
+                        )
                         if indexer_loss_coeff > 0:
                             DSAIndexerLossLoggingHelper.save_loss_to_tracker(
                                 loss=indexer_loss,
@@ -875,7 +881,7 @@ class CompressedSparseAttention(MegatronModule):
                             x_det, qr_det, mask=causal_mask, packed_seq_params=packed_seq_params
                         )
 
-                    n_valid_per_pos = positions // self.compress_ratio  # [sq, 1]
+                    n_valid_per_pos = global_positions // self.compress_ratio  # [sq, 1]
                     valid = topk_indices_compressed < n_valid_per_pos
                     compress_topk_idxs = torch.where(
                         valid, topk_indices_compressed + offset, torch.tensor(-1, device=x.device)
@@ -900,13 +906,12 @@ class CompressedSparseAttention(MegatronModule):
                 topk_idxs = window_idxs
 
             topk_idxs = topk_idxs.int()
-            if torch.distributed.get_rank() == 0:
-                logger.debug(
-                    f"[CSA CP DEBUG] Layer {self.layer_number} Step 5: "
-                    f"topk_idxs.shape={topk_idxs.shape}, "
-                    f"topk_idxs.min()={topk_idxs.min().item()}, "
-                    f" topk_idxs.max()={topk_idxs.max().item()}"
-                )
+            logger.debug(
+                f"[rank {_rank}] CSA Layer {self.layer_number} Step 5 done: "
+                f"topk_idxs.shape={topk_idxs.shape}, "
+                f"topk_idxs.min()={topk_idxs.min().item()}, "
+                f"topk_idxs.max()={topk_idxs.max().item()}"
+            )
 
             # --- Step 6: Sparse attention ---
             nvtx_range_push("sparse_attn_kernel")
@@ -914,11 +919,10 @@ class CompressedSparseAttention(MegatronModule):
                 query, kv_full, self.attn_sink.float(), topk_idxs, self.softmax_scale
             )
             nvtx_range_pop("sparse_attn_kernel")
-            if torch.distributed.get_rank() == 0:
-                logger.debug(
-                    f"[CSA CP DEBUG] Layer {self.layer_number} Step 6: "
-                    f"output.shape={output.shape}\n"
-                )
+            logger.debug(
+                f"[rank {_rank}] CSA Layer {self.layer_number} Step 6 done: "
+                f"output.shape={output.shape}"
+            )
 
         else:
             raise ValueError("Fused path is not supported for CompressedSparseAttention")
