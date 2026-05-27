@@ -312,6 +312,12 @@ class OptimizerConfig:
 
     overlap_param_gather_with_optimizer_step: bool = False
     """If true, overlap param all-gather of first bucket with optimizer step."""
+    ##### FlagScale Begin #####
+    use_padded_layerwise_optimizer: bool = False
+    """If true, issue reduce-scatter and all-gather collectives to aggregate gradients and gather
+       model parameters, otherwise issue all-reduce and all-gather collectives.
+    """
+    ##### FlagScale End #####
 
     #######################
     # Optimizer Offload

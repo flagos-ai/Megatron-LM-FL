@@ -12,7 +12,7 @@ from ..fp8_utils import is_float8tensor, post_all_gather_processing
 from ..process_groups_config import ProcessGroupCollection
 from ..transformer.cuda_graphs import is_graph_capturing
 from ..transformer.transformer_config import TransformerConfig
-from ..utils import log_single_rank
+from ..utils import log_single_rank, get_pg_rank, get_pg_size
 from .data_parallel_base import _BaseDataParallel
 from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
@@ -144,7 +144,7 @@ class DistributedDataParallel(_BaseDataParallel):
                 ########## FlagScale End ##########
 
         def _allocate_buffers_for_parameters(
-            input_params, data_parallel_group, gradient_scaling_factor
+            input_params, data_parallel_group, gradient_scaling_factor, params_per_rank_for_padded_layerwise_opt=None    ##### FlagScale Begin #####
         ):
             param_and_grad_dtype_to_params = {}
             param_and_grad_dtype_to_offsets = {}
@@ -228,6 +228,7 @@ class DistributedDataParallel(_BaseDataParallel):
                         param_and_grad_dtype_to_indices[(param_dtype, grad_dtype)],
                         self.ddp_config.nccl_ub,
                         pg_collection,
+                        params_per_rank_for_padded_layerwise_opt=params_per_rank_for_padded_layerwise_opt    ##### FlagScale Begin #####
                     )
                 )
 
@@ -321,9 +322,15 @@ class DistributedDataParallel(_BaseDataParallel):
                 engram_embedding_gradient_scaling_factor = 1.0 / data_parallel_world_size
                 ########## FlagScale End ##########
 
+        ##### FlagScale Begin #####
+        if self.ddp_config.use_padded_layerwise_optimizer:
+            dense_params_per_rank, expert_params_per_rank = self.set_padded_layerwise_param_order(dense_params + expert_parallel_params)
+        else:
+            dense_params_per_rank, expert_params_per_rank = None, None
+        ##### FlagScale End #####
         # Allocate the param+grad buffers for dense params' grads.
         self.buffers, self.bucket_groups = _allocate_buffers_for_parameters(
-            dense_params, self.intra_dp_cp_group, gradient_scaling_factor=gradient_scaling_factor
+            dense_params, self.intra_dp_cp_group, gradient_scaling_factor=gradient_scaling_factor, params_per_rank_for_padded_layerwise_opt=dense_params_per_rank ### FlagScale #####
         )
 
         # Allocate separate param+grad buffers for expert parallel params' grads.
@@ -332,6 +339,7 @@ class DistributedDataParallel(_BaseDataParallel):
                 expert_parallel_params,
                 self.intra_expt_dp_group,
                 gradient_scaling_factor=expert_gradient_scaling_factor,
+                params_per_rank_for_padded_layerwise_opt=expert_params_per_rank   ### FlagScale #####
             )
         )
 
@@ -719,4 +727,29 @@ class DistributedDataParallel(_BaseDataParallel):
             buffer.reload_from_cpu(move_params=False, move_grads=True)
 
         if synchronize:
-            cur_platform.synchronize()  # FlagScale Add
+            cur_platform.synchronize()
+
+    ##### FlagScale Begin #####
+    def set_padded_layerwise_param_order(self, params_with_name):
+        # assign params to rank in ping-pong style loop
+        intra_dp_cp_size = get_pg_size(self.intra_dp_cp_group)
+        intra_expt_dp_size = get_pg_size(self.intra_expt_dp_group)
+        intra_dp_cp_loop = list(range(intra_dp_cp_size)) + list(range(intra_dp_cp_size))[::-1]
+        intra_expt_dp_loop = list(range(intra_expt_dp_size)) + list(range(intra_expt_dp_size))[::-1]
+        dense_params_per_rank = [[] for _ in range(intra_dp_cp_size)]
+        moe_params_per_rank = [[] for _ in range(intra_expt_dp_size)]
+        sorted_params = sorted(params_with_name, key=lambda p:-p[0].numel())
+        dense_idx, moe_idx = 0, 0
+        for _, (p, name) in enumerate(sorted_params):
+            if getattr(p, "allreduce", True):
+                rank = intra_dp_cp_loop[dense_idx]
+                dense_params_per_rank[rank].append(p)
+                dense_idx = (dense_idx + 1)  % len(intra_dp_cp_loop)
+            else:
+                rank = intra_expt_dp_loop[moe_idx]
+                moe_params_per_rank[rank].append(p)
+                moe_idx = (moe_idx + 1)  % len(intra_expt_dp_loop)
+        self.dense_params_per_rank_for_padded_layerwise_opt = dense_params_per_rank
+        self.moe_params_per_rank_for_padded_layerwise_opt = moe_params_per_rank
+        return dense_params_per_rank, moe_params_per_rank
+    ##### FlagScale End #####

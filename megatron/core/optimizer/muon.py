@@ -398,5 +398,6 @@ def get_megatron_muon_optimizer(
             init_state_fn_list=init_fns,
             model_chunks=model_chunks,
             async_allgather=config.overlap_param_gather,
+            use_padded_layerwise_optimizer=config.use_padded_layerwise_optimizer,    ##### FlagScale Begin #####
         )
     return ChainedOptimizer(optimizers)
