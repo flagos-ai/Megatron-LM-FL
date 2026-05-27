@@ -1,6 +1,7 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
 import copy
+import logging
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Tuple, Union
@@ -13,6 +14,11 @@ from megatron.core.models.common.embeddings import RotaryEmbedding, apply_rotary
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.experimental_attention_variant.csa_utils import (
+    _exchange_halo,
+    differentiable_all_gather,
+    get_window_topk_idxs_cp,
+)
 from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -24,6 +30,8 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Helper functions for index computation
@@ -79,95 +87,6 @@ def get_compress_topk_idxs(
 
 
 # ---------------------------------------------------------------------------
-# Helper functions for Context Parallel (sliding window halo exchange)
-# ---------------------------------------------------------------------------
-
-
-def _exchange_kv_halo(
-    kv: torch.Tensor,
-    halo_size: int,
-    cp_group: torch.distributed.ProcessGroup,
-) -> torch.Tensor:
-    """P2P halo exchange for sliding window attention with context parallelism.
-
-    Each rank sends its last `halo_size` KV tokens to the next rank, and receives
-    `halo_size` tokens from the previous rank to prepend to its local KV.
-
-    Args:
-        kv: [local_seq, b, hn] local KV tensor.
-        halo_size: number of tokens to exchange (typically window_size - 1).
-        cp_group: context parallel process group.
-
-    Returns:
-        kv_with_halo: [halo_size + local_seq, b, hn] for rank > 0,
-                      [local_seq, b, hn] for rank 0 (no halo needed).
-    """
-    cp_rank = cp_group.rank()
-    cp_size = cp_group.size()
-
-    if cp_size == 1:
-        return kv
-
-    global_ranks = torch.distributed.get_process_group_ranks(cp_group)
-    prev_rank = global_ranks[(cp_rank - 1) % cp_size]
-    next_rank = global_ranks[(cp_rank + 1) % cp_size]
-
-    send_buf = kv[-halo_size:].contiguous()
-    recv_buf = torch.empty_like(send_buf)
-
-    ops = []
-    if cp_rank < cp_size - 1:
-        ops.append(torch.distributed.isend(send_buf, dst=next_rank, group=cp_group))
-    if cp_rank > 0:
-        ops.append(torch.distributed.irecv(recv_buf, src=prev_rank, group=cp_group))
-
-    for op in ops:
-        op.wait()
-
-    print(f"[CSA CP] _exchange_kv_halo done: rank={cp_rank}, "
-          f"send_to={next_rank if cp_rank < cp_size - 1 else 'None'}, "
-          f"recv_from={prev_rank if cp_rank > 0 else 'None'}, "
-          f"halo_size={halo_size}")
-
-    if cp_rank == 0:
-        return kv
-    else:
-        return torch.cat([recv_buf, kv], dim=0)
-
-
-@lru_cache(maxsize=8)
-def _get_window_topk_idxs_cp_cached(
-    window_size: int, local_seq_len: int, halo_size: int, device_str: str
-) -> torch.Tensor:
-    """Compute sliding-window indices with halo offset for CP (cached).
-
-    KV layout after halo exchange: [halo(halo_size) | local(local_seq_len)]
-    For local query position i, its position in kv_with_halo is i + halo_size.
-    Its window covers [i + halo_size - window_size + 1, i + halo_size].
-
-    Returns:
-        indices: [local_seq_len, window_size] int tensor, -1 for invalid positions.
-    """
-    base = torch.arange(local_seq_len, device=device_str).unsqueeze(1) + halo_size
-    offsets = torch.arange(window_size, device=device_str)
-    matrix = (base - window_size + 1).clamp(min=0) + offsets
-    matrix = torch.where(matrix > base, -1, matrix)
-    return matrix
-
-
-def get_window_topk_idxs_cp(
-    window_size: int,
-    batch_size: int,
-    local_seq_len: int,
-    halo_size: int,
-    device: torch.device,
-) -> torch.Tensor:
-    """Sliding-window indices with CP halo offset [batch, local_seq_len, window_size]."""
-    matrix = _get_window_topk_idxs_cp_cached(window_size, local_seq_len, halo_size, str(device))
-    return matrix.unsqueeze(0).expand(batch_size, -1, -1)
-
-
-# ---------------------------------------------------------------------------
 # Helper functions for RoPE
 # ---------------------------------------------------------------------------
 
@@ -192,11 +111,20 @@ def _apply_rope(
         total_seq_len = rotary_seq_len
     else:
         total_seq_len = rotary_seq_len * ratio
+
+    contiguous_split = getattr(config, 'cp_seq_split_mode', '2chunk') == 'contiguous'
+    # When CP is enabled, rotary_pos_emb_module.forward() will slice the emb internally,
+    # so we need to pass the full sequence length (local * cp_size).
+    if cp_group is not None and cp_group.size() > 1:
+        total_seq_len = total_seq_len * cp_group.size()
+
     mscale = 1.0
     rotary_pos_cos = None
     rotary_pos_sin = None
     if config.rope_type == "rope":
-        rotary_pos_emb = rotary_pos_emb_module(total_seq_len, packed_seq=False)
+        rotary_pos_emb = rotary_pos_emb_module(
+            total_seq_len, packed_seq=False, contiguous_split=contiguous_split
+        )
         mscale = 1.0
     else:
         if config.apply_rope_fusion:
@@ -208,17 +136,19 @@ def _apply_rope(
                 fused_mla_rope_inplace is not None
             ), "Fused MLA RoPE apply is not imported successfully"
         else:
-            rotary_pos_emb, mscale = rotary_pos_emb_module(total_seq_len, packed_seq=False)
+            rotary_pos_emb, mscale = rotary_pos_emb_module(
+                total_seq_len, packed_seq=False, contiguous_split=contiguous_split
+            )
             # DSv4 reference (DS-Inf) RoPE is pure rotation (norm-preserving). Yarn's
             # concentration factor (mscale) is NOT part of the DSv4 model contract --
             # the model relies on Q/KV RMS-norm + unit-magnitude rotation. Force 1.0.
             mscale = 1.0
     if rotary_pos_emb is not None and ratio > 1:
-        rotary_pos_emb = rotary_pos_emb[:total_seq_len:ratio][:rotary_seq_len]
+        rotary_pos_emb = rotary_pos_emb[::ratio][:rotary_seq_len]
     if rotary_pos_cos is not None and ratio > 1:
-        rotary_pos_cos = rotary_pos_cos[:total_seq_len:ratio][:rotary_seq_len]
+        rotary_pos_cos = rotary_pos_cos[::ratio][:rotary_seq_len]
     if rotary_pos_sin is not None and ratio > 1:
-        rotary_pos_sin = rotary_pos_sin[:total_seq_len:ratio][:rotary_seq_len]
+        rotary_pos_sin = rotary_pos_sin[::ratio][:rotary_seq_len]
 
     squeeze_head = x.dim() == 3
     if squeeze_head:
@@ -752,26 +682,114 @@ class CompressedSparseAttention(MegatronModule):
         cp_size = self.pg_collection.cp.size()
         cp_rank = self.pg_collection.cp.rank()
 
+        if torch.distributed.get_rank() == 0:
+            logger.debug(
+                f"\n[CSA CP DEBUG] Layer {self.layer_number} START: "
+                f"query.shape={query.shape}, key.shape={key.shape}, "
+                f"x.shape={x.shape if x is not None else None}"
+            )
+
         # --- Step 1: Prepare single-head KV (squeeze singleton head dim) ---
         kv = key.squeeze(-2)  # [sq, b, 1, v_head_dim] -> [sq, b, v_head_dim]
+        if torch.distributed.get_rank() == 0:
+            logger.debug(f"[CSA CP DEBUG] Layer {self.layer_number} Step 1: kv.shape={kv.shape}")
 
         # --- Step 2: Halo exchange for sliding window (CP only) ---
         if cp_size > 1:
             halo_size = self.window_size - 1 if cp_rank > 0 else 0
             if torch.distributed.get_rank() == 0:
-                print(f"[CSA CP] Layer {self.layer_number}: cp_size={cp_size}, cp_rank={cp_rank}, "
-                      f"halo_size={halo_size}, window_size={self.window_size}, "
-                      f"compress_ratio={self.compress_ratio}, kv.shape={kv.shape}")
-            kv = _exchange_kv_halo(kv, self.window_size - 1, self.pg_collection.cp)
+                logger.debug(
+                    f"[CSA CP] Layer {self.layer_number}: cp_size={cp_size}, cp_rank={cp_rank}, "
+                    f"halo_size={halo_size}, window_size={self.window_size}, "
+                    f"compress_ratio={self.compress_ratio}, kv.shape={kv.shape}"
+                )
+            kv = _exchange_halo(kv, self.window_size - 1, self.pg_collection.cp, name="kv")
             if torch.distributed.get_rank() == 0:
-                print(f"[CSA CP] Layer {self.layer_number}: after halo exchange, kv.shape={kv.shape}")
+                logger.debug(
+                    f"[CSA CP] Layer {self.layer_number}: after halo exchange, kv.shape={kv.shape}"
+                )
         else:
             halo_size = 0
 
         # --- Step 3: Compression ---
         if self.compressor is not None and self.compress_ratio > 1:
-            compressed_kv = self.compressor(x)  # [n_compressed, b, v_head_dim]
-            if compressed_kv is not None:
+            # CP: exchange hidden_states halo for compression boundary handling.
+            # For non-overlap (ratio=128, HCA): halo needed only if sq % ratio != 0.
+            # For overlap (ratio=4, CSA): halo needed for _overlap_transform cross-boundary.
+            x_for_compression = x
+            if cp_size > 1 and cp_rank > 0:
+                need_compression_halo = self.compressor.overlap or (sq % self.compress_ratio != 0)
+                if need_compression_halo:
+                    compression_halo_size = self.compress_ratio
+                    if torch.distributed.get_rank() == 0:
+                        logger.debug(
+                            f"[CSA CP] Layer {self.layer_number}: compression halo exchange, "
+                            f"halo_size={compression_halo_size}, overlap={self.compressor.overlap}"
+                        )
+                    x_for_compression = _exchange_halo(
+                        x, compression_halo_size, self.pg_collection.cp, name="hidden_states"
+                    )
+
+            compressed_kv = self.compressor(
+                x_for_compression
+            )  # [n_compressed_local, b, v_head_dim]
+            if compressed_kv is not None and cp_size > 1:
+                # Pad to uniform length (sq // ratio + 1) for all-gather
+                uniform_len = sq // self.compress_ratio + 1
+                n_local = compressed_kv.size(0)
+                if torch.distributed.get_rank() == 0:
+                    logger.debug(
+                        f"[CSA CP] Layer {self.layer_number}: compressed n_local={n_local}, "
+                        f"uniform_len={uniform_len}"
+                    )
+                if n_local < uniform_len:
+                    pad = torch.zeros(
+                        uniform_len - n_local,
+                        *compressed_kv.shape[1:],
+                        device=compressed_kv.device,
+                        dtype=compressed_kv.dtype,
+                    )
+                    compressed_kv_padded = torch.cat([compressed_kv, pad], dim=0)
+                else:
+                    compressed_kv_padded = compressed_kv[:uniform_len]
+
+                # All-gather padded compressed KV from all ranks (differentiable)
+                gathered_full = differentiable_all_gather(
+                    compressed_kv_padded, self.pg_collection.cp
+                )
+                # Split back into list for select-and-pad logic
+                gathered_list = list(torch.split(gathered_full, uniform_len, dim=0))
+
+                # Select-and-Pad: reorder valid tokens, move padding to tail
+                # Each rank has n_valid tokens followed by padding.
+                # Rank 0: n_valid = n_local (no halo, may be sq//ratio)
+                # Rank i>0 with halo: n_valid = n_local (may be sq//ratio + 1)
+                # Collect valid tokens in global order, pad at the end.
+                valid_tokens = []
+                for i in range(cp_size):
+                    chunk = gathered_list[i]
+                    # Determine how many valid tokens this rank produced
+                    if i == 0:
+                        n_valid_i = sq // self.compress_ratio
+                    else:
+                        # With halo: (compression_halo + sq) // ratio
+                        if self.compressor.overlap or (sq % self.compress_ratio != 0):
+                            n_valid_i = (self.compress_ratio + sq) // self.compress_ratio
+                        else:
+                            n_valid_i = sq // self.compress_ratio
+                    valid_tokens.append(chunk[:n_valid_i])
+                compressed_kv = torch.cat(
+                    valid_tokens, dim=0
+                )  # [n_compressed_global, b, v_head_dim]
+                if torch.distributed.get_rank() == 0:
+                    logger.debug(
+                        f"[CSA CP] Layer {self.layer_number}: after select-and-pad, "
+                        f"compressed_kv.shape={compressed_kv.shape}"
+                    )
+
+                kv_full = torch.cat([kv, compressed_kv], dim=0)
+                n_compressed = compressed_kv.size(0)
+            elif compressed_kv is not None:
                 kv_full = torch.cat([kv, compressed_kv], dim=0)
                 n_compressed = compressed_kv.size(0)
             else:
@@ -782,17 +800,22 @@ class CompressedSparseAttention(MegatronModule):
             n_compressed = 0
 
         offset = sq + halo_size  # compressed indices start after halo + original positions
+        if torch.distributed.get_rank() == 0:
+            logger.debug(
+                f"[CSA CP DEBUG] Layer {self.layer_number} Step 3 done: "
+                f"kv_full.shape={kv_full.shape}, n_compressed={n_compressed}, offset={offset}"
+            )
 
         # --- Step 4: Window indices ---
         if halo_size > 0:
-            window_idxs = get_window_topk_idxs_cp(
-                self.window_size, b, sq, halo_size, query.device
-            )
-            if torch.distributed.get_rank() == 0:
-                print(f"[CSA CP] Layer {self.layer_number}: using CP window indices, "
-                      f"window_idxs.shape={window_idxs.shape}, offset={offset}")
+            window_idxs = get_window_topk_idxs_cp(self.window_size, b, sq, halo_size, query.device)
         else:
             window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
+        if torch.distributed.get_rank() == 0:
+            logger.debug(
+                f"[CSA CP DEBUG] Layer {self.layer_number} Step 4: "
+                f"window_idxs.shape={window_idxs.shape}"
+            )
 
         # --- Step 5: Compressed indices ---
         indexer_loss = None
@@ -858,9 +881,18 @@ class CompressedSparseAttention(MegatronModule):
                         valid, topk_indices_compressed + offset, torch.tensor(-1, device=x.device)
                     )
                 else:
-                    compress_topk_idxs = get_compress_topk_idxs(
-                        self.compress_ratio, b, sq, offset, query.device
-                    )
+                    if cp_size > 1:
+                        # Use global seq len and slice current rank's rows
+                        global_seq_len = sq * cp_size
+                        all_idxs = get_compress_topk_idxs(
+                            self.compress_ratio, b, global_seq_len, offset, query.device
+                        )
+                        start = cp_rank * sq
+                        compress_topk_idxs = all_idxs[:, start : start + sq, :]
+                    else:
+                        compress_topk_idxs = get_compress_topk_idxs(
+                            self.compress_ratio, b, sq, offset, query.device
+                        )
 
                 topk_idxs = torch.cat([window_idxs, compress_topk_idxs], dim=-1)
                 nvtx_range_pop("compressed_indices")
@@ -868,6 +900,13 @@ class CompressedSparseAttention(MegatronModule):
                 topk_idxs = window_idxs
 
             topk_idxs = topk_idxs.int()
+            if torch.distributed.get_rank() == 0:
+                logger.debug(
+                    f"[CSA CP DEBUG] Layer {self.layer_number} Step 5: "
+                    f"topk_idxs.shape={topk_idxs.shape}, "
+                    f"topk_idxs.min()={topk_idxs.min().item()}, "
+                    f" topk_idxs.max()={topk_idxs.max().item()}"
+                )
 
             # --- Step 6: Sparse attention ---
             nvtx_range_push("sparse_attn_kernel")
@@ -875,6 +914,11 @@ class CompressedSparseAttention(MegatronModule):
                 query, kv_full, self.attn_sink.float(), topk_idxs, self.softmax_scale
             )
             nvtx_range_pop("sparse_attn_kernel")
+            if torch.distributed.get_rank() == 0:
+                logger.debug(
+                    f"[CSA CP DEBUG] Layer {self.layer_number} Step 6: "
+                    f"output.shape={output.shape}\n"
+                )
 
         else:
             raise ValueError("Fused path is not supported for CompressedSparseAttention")

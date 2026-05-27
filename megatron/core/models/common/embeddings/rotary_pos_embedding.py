@@ -26,6 +26,7 @@ from megatron.core.models.common.embeddings.rope_utils import (  # for backward 
     get_pos_emb_on_this_cp_rank,
 )
 from megatron.core.utils import deprecate_inference_params, internal_api
+
 # FlagScale Begin
 from megatron.plugin.platform import get_platform
 
@@ -271,7 +272,9 @@ class RotaryEmbedding(nn.Module):
                 rotary_seq_len = transformer_input.size(0)
 
             if transformer_config.sequence_parallel:
-                rotary_seq_len *= parallel_state.get_tensor_model_parallel_world_size()  # FlagScale Add
+                rotary_seq_len *= (
+                    parallel_state.get_tensor_model_parallel_world_size()
+                )  # FlagScale Add
 
         rotary_seq_len *= transformer_config.context_parallel_size
 
@@ -317,7 +320,9 @@ class MultimodalRotaryEmbedding(nn.Module):
         self.inv_freq = 1.0 / (
             rotary_base
             ** (
-                torch.arange(0, dim, 2, dtype=torch.float32, device=cur_platform.current_device())  # FlagScale Add
+                torch.arange(
+                    0, dim, 2, dtype=torch.float32, device=cur_platform.current_device()
+                )  # FlagScale Add
                 / dim
             )
         )

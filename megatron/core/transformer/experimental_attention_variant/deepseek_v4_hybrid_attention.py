@@ -1,6 +1,6 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-
+import logging
 from dataclasses import dataclass
 from typing import NoReturn, Optional, Union
 
@@ -30,6 +30,7 @@ try:
 except Exception:
     fused_mla_rope_inplace = None
 
+logger = logging.getLogger(__name__)
 
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine import TELinear, set_save_original_input
@@ -530,8 +531,13 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == 'thd'
         contiguous_split = getattr(self.config, 'cp_seq_split_mode', '2chunk') == 'contiguous'
         if torch.distributed.get_rank() == 0 and self.layer_number == 1:
-            print(f"[DSv4 Hybrid Attn] Layer {self.layer_number}: contiguous_split={contiguous_split}, "
-                  f"cp_seq_split_mode={getattr(self.config, 'cp_seq_split_mode', '2chunk')}")
+            cp_mode = getattr(self.config, 'cp_seq_split_mode', '2chunk')
+            logger.debug(
+                "[DSv4 Hybrid Attn] Layer %d: contiguous_split=%s, " "cp_seq_split_mode=%s",
+                self.layer_number,
+                contiguous_split,
+                cp_mode,
+            )
         if self.config.rope_type == "rope":
             rotary_pos_emb = self.rotary_pos_emb(
                 rotary_seq_len, packed_seq=packed_seq, contiguous_split=contiguous_split
