@@ -720,6 +720,8 @@ class Attention(MegatronModule, ABC):
                 is_local=is_local,
                 is_quant=is_quant,
                 is_autotune=is_autotune,
+                is_split_kv=True,
+                is_split_qo=True,
             )
         elif query.size(0) == 1 and not self.training:
             # Static decode path: query is [1, b, np, hn], key/value are [sk, b, np, hn]
@@ -752,10 +754,19 @@ class Attention(MegatronModule, ABC):
                 value,
                 is_causal=is_causal,
                 softmax_scale=softmax_scale,
-                softmax_threshold=softmax_threshold,
-                is_local=is_local,
-                is_quant=is_quant,
-                is_autotune=is_autotune,
+                query_scale=None,
+                key_scale=None,
+                value_scale=None,
+                softmax_threshold=-100.0,
+                is_local=True,
+                is_quant=False,
+                is_split_kv=True,
+                is_split_qo=True,
+                pack_gqa=True,
+                is_autotune=False,
+                skip_checks=True,
+                num_heads_kv_global=self.config.num_query_groups,
+                tp_rank=get_tensor_model_parallel_rank(),
             )
 
             # [B, S, H, D] -> [S, B, H, D] -> [S, B, H*D]
@@ -812,6 +823,8 @@ class Attention(MegatronModule, ABC):
                 is_local=is_local,
                 is_quant=is_quant,
                 is_autotune=is_autotune,
+                is_split_kv=True,
+                is_split_qo=True,
             )
             output_total = output_total.unsqueeze(1)
         else:
