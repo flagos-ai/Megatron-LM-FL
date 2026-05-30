@@ -658,6 +658,7 @@ class ShortConv(nn.Module):
         norm_eps: float = 1e-5,
         hc_mult: int = 4,
         activation: bool = True,
+        sequence_parallel: bool = False,
     ):
         super().__init__()
         self.hc_mult = hc_mult
@@ -680,6 +681,9 @@ class ShortConv(nn.Module):
 
         if self.activation:
             self.act_fn = nn.SiLU()
+        # Set sequence_parallel to enable grad is correctly reduce across tensor_parallel_group.
+        for param in self.parameters():
+            param.sequence_parallel = sequence_parallel
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -747,6 +751,7 @@ class EngramModule(nn.Module):
             kernel_size=config.engram_kernel_size,
             dilation=config.max_ngram_size,
             hc_mult=self.hc_mult,
+            sequence_parallel=self.config.sequence_parallel,
         )
         engram_hidden_size = (
             config.max_ngram_size - 1
@@ -772,6 +777,9 @@ class EngramModule(nn.Module):
                 for _ in range(self.hc_mult)
             ]
         )
+        for module in [self.value_proj] + list(self.key_projs) + list(self.norm1) + list(self.norm2):
+            for param in module.parameters():
+                param.sequence_parallel = self.config.sequence_parallel
 
     def forward(self, hidden_states, hash_input_ids):
         """
@@ -805,6 +813,8 @@ class EngramModule(nn.Module):
         # Pre-compute scaling factor for efficiency
         scale = 1.0 / math.sqrt(self.config.hidden_size)
         gates = []
+        tp_rank = parallel_state.get_tensor_model_parallel_rank()
+        print(f"[TP rank {tp_rank}]: engram.norm1 = {self.norm1}, engram.norm2 = {self.norm2}")
         for hc_idx in range(self.hc_mult):
             key = self.key_projs[hc_idx](embeddings)
             # [L/tp_size, B, HIDDEN_SIZE]
