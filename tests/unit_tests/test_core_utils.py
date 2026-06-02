@@ -22,8 +22,12 @@ def test_null_decorator_direct_and_factory_modes():
     def fn():
         return "ok"
 
-    assert utils.null_decorator(fn) is fn
-    assert utils.null_decorator("unused")(fn) is fn
+    with utils.null_decorator(fn) as decorated:
+        assert decorated is fn
+        assert decorated() == "ok"
+
+    with utils.null_decorator("unused") as decorator:
+        assert decorator(fn) is fn
 
 
 def test_experimental_fn_respects_global_flag(monkeypatch):

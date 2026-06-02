@@ -131,6 +131,8 @@ test_matrix:
       # Metax C500 8-GPU layer-wise optimizer checkpointing times out in
       # determine_main_replica_uniform_distribution/all_gather_object during fully-parallel save.
       - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_optimizer_common_state_dict
+      # Metax CI image does not install nvidia-resiliency-ext; keep mcore async strategy covered.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
 
       # 6.distributed
       - tests/unit_tests/distributed/test_distributed_data_parallel.py
@@ -213,6 +215,10 @@ test_matrix:
       # multimodule schedule path aborts inside TE attention backend selection.
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+      # Metax C500 bridge communicator combined send/recv paths hit Maca invalid device pointer.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator::test_send_forward_recv_backward_send_backward_recv_forward
+      # Metax C500 transformer-block bridge path hits NCCL/Maca invalid device pointer during all_reduce.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator::test_bridge_communicator_with_transformer_blocks
       # Metax C500 pipeline CI hits flaky fine-grained activation offload paths.
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
