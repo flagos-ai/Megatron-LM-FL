@@ -55,7 +55,7 @@ test_matrix:
       ## 1.core
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_optimizer.py ## RuntimeError: No CUDA GPUs are available
-      - tests/unit_tests/test_utils.py
+      - tests/unit_tests/test_utils.py::test_straggler_detector
       # Metax C500 CPU optimizer offload overlap has larger numeric drift than CUDA tolerance.
       - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
 
@@ -168,31 +168,45 @@ test_matrix:
       #11.unit_tests/utils
 
       # === Need >2 GPU（model_size > 2） ===
+      # Metax runner has recovered to 8 GPUs. In ignored_tests, uncommented "- ..." entries
+      # are skipped by pytest, so keep these historical records commented to let CI run them.
       # core: tp=2,pp=4 or tp=world_size
-      - tests/unit_tests/test_parallel_state.py
-      - tests/unit_tests/test_hyper_comm_grid.py
-
-      # models: tp≥4
-      - tests/unit_tests/models/test_t5_model.py
-      - tests/unit_tests/models/test_llava_model.py
+      # - tests/unit_tests/test_parallel_state.py
+      # - tests/unit_tests/test_hyper_comm_grid.py
+      # models: tp>=4
+      # - tests/unit_tests/models/test_t5_model.py
+      # - tests/unit_tests/models/test_llava_model.py
       # transformer: tp*pp>2 or ep>2
-      - tests/unit_tests/transformer/test_transformer_layer.py
-      - tests/unit_tests/transformer/test_submodule_callables.py
-      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
-      - tests/unit_tests/transformer/moe/test_sequential_mlp.py
-      - tests/unit_tests/transformer/moe/test_token_dispatcher.py
-      # tensor_parallel: tp≥4 or tp*pp=8
-      - tests/unit_tests/tensor_parallel/test_cross_entropy.py
-      - tests/unit_tests/tensor_parallel/test_mappings.py
-      - tests/unit_tests/tensor_parallel/test_data.py
-      - tests/unit_tests/tensor_parallel/test_random.py
-      - tests/unit_tests/tensor_parallel/test_initialization.py
-      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py
-      - tests/unit_tests/tensor_parallel/test_layers.py
-      # pipeline_parallel: pp≥4
-      - tests/unit_tests/pipeline_parallel/test_schedules.py
-      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py
-      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      # - tests/unit_tests/transformer/test_transformer_layer.py
+      # - tests/unit_tests/transformer/test_submodule_callables.py
+      # - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      # - tests/unit_tests/transformer/moe/test_sequential_mlp.py
+      # - tests/unit_tests/transformer/moe/test_token_dispatcher.py
+      # tensor_parallel: tp>=4 or tp*pp=8
+      # - tests/unit_tests/tensor_parallel/test_cross_entropy.py
+      # - tests/unit_tests/tensor_parallel/test_mappings.py
+      # - tests/unit_tests/tensor_parallel/test_data.py
+      # - tests/unit_tests/tensor_parallel/test_random.py
+      # - tests/unit_tests/tensor_parallel/test_initialization.py
+      # - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py
+      # - tests/unit_tests/tensor_parallel/test_layers.py
+      # pipeline_parallel: pp>=4
+      # - tests/unit_tests/pipeline_parallel/test_schedules.py
+      # - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py
+      # - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      # distributed: pp=4
+      # - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      # dist_checkpointing: tp*pp=8
+      # - tests/unit_tests/dist_checkpointing/test_serialization.py
+      # - tests/unit_tests/dist_checkpointing/test_strict.py
+      # - tests/unit_tests/dist_checkpointing/test_async_save.py
+      # - tests/unit_tests/dist_checkpointing/test_msc.py
+      # - tests/unit_tests/dist_checkpointing/test_torch_dist.py
+      # - tests/unit_tests/dist_checkpointing/test_replication.py
+      # ssm: cp>=4 or tp=4
+      # - tests/unit_tests/ssm/test_mamba_mixer.py
+      # - tests/unit_tests/ssm/test_mamba_context_parallel.py
+
       # Metax runtime aborts in multimodule bridge communicator teardown.
       - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py
       # Metax C500 TE package misses transformer_engine_torch.get_fused_attn_backend, so the 8-GPU
@@ -202,19 +216,6 @@ test_matrix:
       # Metax C500 pipeline CI hits flaky fine-grained activation offload paths.
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
-      # distributed: pp=4
-      - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
-      # dist_checkpointing: tp*pp=8
-      - tests/unit_tests/dist_checkpointing/test_serialization.py
-      - tests/unit_tests/dist_checkpointing/test_strict.py
-      - tests/unit_tests/dist_checkpointing/test_async_save.py
-      - tests/unit_tests/dist_checkpointing/test_msc.py
-      - tests/unit_tests/dist_checkpointing/test_torch_dist.py
-      - tests/unit_tests/dist_checkpointing/test_replication.py
-      # ssm: cp≥4 or tp=4
-      - tests/unit_tests/ssm/test_mamba_mixer.py
-      - tests/unit_tests/ssm/test_mamba_context_parallel.py
-
       # specific case that are unstable on Metax
       # models
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
