@@ -1,11 +1,13 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
 from contextlib import nullcontext
+import logging
 from types import SimpleNamespace
 
 import pytest
 import torch
 
+from megatron.core.enums import Fp4Recipe, Fp8Recipe
 from megatron.core.models.common import model_chunk_schedule_plan as schedule_plan
 from megatron.core.models.gpt import fine_grained_callables as fine_callables
 from megatron.core import rerun_state_machine as rerun
@@ -18,7 +20,16 @@ from megatron.core.inference.inference_request import (
     Status,
 )
 from megatron.core.inference.sampling_params import SamplingParams
+from megatron.core.inference.text_generation_controllers.text_generation_controller import (
+    TextGenerationController,
+)
 from megatron.core.dist_checkpointing import tensor_aware_state_dict as tensor_aware
+from megatron.core.dist_checkpointing import exchange_utils
+from megatron.core.dist_checkpointing import dict_utils as checkpoint_dict_utils
+from megatron.core.dist_checkpointing import state_dict_utils as checkpoint_state_utils
+from megatron.core.dist_checkpointing import utils as checkpoint_utils
+from megatron.core.pipeline_parallel import utils as pipeline_utils
+from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer import utils as transformer_utils
 from megatron.core.resharding import utils as reshard_utils
 
@@ -175,6 +186,138 @@ def test_transformer_layer_schedule_run_covers_overlap_orders():
         )
     )
     assert attn_backward_index < len(early_calls)
+
+
+def test_transformer_layer_schedule_plan_builds_dense_moe_mtp_and_releases(monkeypatch):
+    calls = []
+
+    class _FakeMoE:
+        def __init__(self):
+            self.num_local_experts = 2
+
+    class _FakeMTP:
+        pass
+
+    class _FakeTransformerLayerNode:
+        def __init__(
+            self,
+            stream,
+            event,
+            layer_state,
+            chunk_state,
+            module,
+            name,
+            bwd_dw_callables=None,
+            extra_args=None,
+        ):
+            self.stream = stream
+            self.event = event
+            self.layer_state = layer_state
+            self.chunk_state = chunk_state
+            self.module = module
+            self.name = name
+            self.bwd_dw_callables = bwd_dw_callables
+            self.extra_args = extra_args
+            calls.append(("node", name, module, bwd_dw_callables, dict(extra_args or {})))
+
+    def fake_build_layer_callables(layer):
+        return (
+            ["attn-fn", "dispatch-fn", "mlp-fn", "combine-fn", "mtp-fn"],
+            {"attn": "attn-dw", "mlp": "mlp-dw", "mtp_post_process": "mtp-dw"},
+        )
+
+    from megatron.core.transformer.moe import moe_layer as moe_layer_module
+    from megatron.core.transformer import multi_token_prediction as mtp_module
+
+    monkeypatch.setattr(fine_callables, "TransformerLayerNode", _FakeTransformerLayerNode)
+    monkeypatch.setattr(fine_callables, "build_layer_callables", fake_build_layer_callables)
+    monkeypatch.setattr(moe_layer_module, "MoELayer", _FakeMoE)
+    monkeypatch.setattr(mtp_module, "MultiTokenPredictionLayer", _FakeMTP)
+
+    dense_layer = SimpleNamespace(
+        config=SimpleNamespace(delay_wgrad_compute=False, fp8=None, fp8_recipe=Fp8Recipe.delayed),
+        mlp=object(),
+        layer_number=1,
+    )
+    dense_plan = schedule_plan.TransformerLayerSchedulePlan(
+        dense_layer,
+        event="event",
+        chunk_state="chunk",
+        comp_stream="comp",
+        comm_stream="comm",
+        extra_args={"is_first_layer": True},
+    )
+    assert isinstance(dense_plan.moe_dispatch, schedule_plan.NoopScheduleNode)
+    assert isinstance(dense_plan.moe_combine, schedule_plan.NoopScheduleNode)
+    assert isinstance(dense_plan.mtp_post_process, schedule_plan.NoopScheduleNode)
+    assert dense_plan.attn.name == "attn"
+    assert dense_plan.mlp.bwd_dw_callables == "mlp-dw"
+
+    moe_layer = SimpleNamespace(
+        config=SimpleNamespace(delay_wgrad_compute=True, fp8=None, fp8_recipe=Fp8Recipe.delayed),
+        mlp=_FakeMoE(),
+        layer_number=2,
+    )
+    moe_plan = schedule_plan.TransformerLayerSchedulePlan(
+        moe_layer,
+        event="event",
+        chunk_state="chunk",
+        comp_stream="comp",
+        comm_stream="comm",
+        extra_args={},
+    )
+    assert moe_plan.moe_dispatch.name == "moe_dispatch"
+    assert moe_plan.moe_combine.name == "moe_combine"
+    assert moe_plan.moe_dispatch.extra_args["is_moe"] is True
+    assert moe_plan.moe_dispatch.extra_args["num_local_experts"] == 2
+
+    mtp_model_layer = SimpleNamespace(mlp=_FakeMoE())
+    mtp_layer = _FakeMTP()
+    mtp_layer.config = SimpleNamespace(delay_wgrad_compute=True, fp8=None, fp8_recipe=Fp8Recipe.delayed)
+    mtp_layer.mtp_model_layer = mtp_model_layer
+    mtp_layer.layer_number = 3
+    mtp_layer.engram = "engram"
+    mtp_layer.engram_hash_layer_id = 4
+    mtp_plan = schedule_plan.TransformerLayerSchedulePlan(
+        mtp_layer,
+        event="event",
+        chunk_state="chunk",
+        comp_stream="comp",
+        comm_stream="comm",
+        extra_args={"is_engram": True},
+    )
+    assert mtp_plan.mtp_post_process.name == "mtp_post_process"
+    assert mtp_plan.layer_state.engram == "engram"
+    assert mtp_plan.layer_state.is_engram is True
+
+    context_calls = []
+
+    class _Context:
+        def __enter__(self):
+            context_calls.append("enter")
+
+        def __exit__(self, exc_type, exc, tb):
+            context_calls.append("exit")
+
+    monkeypatch.setattr(schedule_plan, "get_fp8_context", lambda config, layer_number: _Context())
+    fp8_layer = SimpleNamespace(
+        config=SimpleNamespace(fp8="e4m3", fp8_recipe=Fp8Recipe.tensorwise),
+        layer_number=5,
+    )
+    fp8_plan = object.__new__(schedule_plan.TransformerLayerSchedulePlan)
+    fp8_plan.layer = fp8_layer
+    with fp8_plan.get_fp8_context():
+        context_calls.append("body")
+    assert context_calls == ["enter", "body", "exit"]
+
+    mtp_plan.release_state()
+    assert mtp_plan.attn is None
+    assert mtp_plan.moe_dispatch is None
+    assert mtp_plan.mlp is None
+    assert mtp_plan.moe_combine is None
+    assert mtp_plan.mtp_post_process is None
+    assert mtp_plan.layer_state is None
+    assert not hasattr(mtp_plan, "layer")
 
 
 def test_transformer_model_chunk_schedule_run_and_manual_plan_methods(monkeypatch):
@@ -599,6 +742,77 @@ def test_transformer_utils_cpu_helpers_and_attribute_caches(monkeypatch):
     with pytest.raises(AssertionError, match="contiguous"):
         transformer_utils._get_extra_state_offsets(((2, 4, 8),))
 
+    sharded_calls = []
+    monkeypatch.setattr(transformer_utils, "get_pg_rank", lambda group: {"tp": 1, "dp": 2}[group])
+
+    class _FakeShardedObject:
+        def __init__(self, key, obj, shape, offset, replica_id, **kwargs):
+            self.key = key
+            self.obj = obj
+            self.shape = shape
+            self.offset = offset
+            self.replica_id = replica_id
+            self.kwargs = kwargs
+
+    monkeypatch.setattr(transformer_utils, "ShardedObject", _FakeShardedObject)
+    monkeypatch.setattr(
+        transformer_utils,
+        "make_tp_sharded_tensor_for_checkpoint",
+        lambda tensor, key, axis, prepend_offsets=(), tp_group=None, dp_cp_group=None: sharded_calls.append(
+            ("tp", key, axis, tuple(prepend_offsets), tp_group, dp_cp_group)
+        )
+        or ("tp", key),
+    )
+    monkeypatch.setattr(
+        transformer_utils,
+        "make_sharded_tensor_for_checkpoint",
+        lambda tensor, key, prepend_offsets=(), tp_group=None, dp_cp_group=None: sharded_calls.append(
+            ("dp", key, tuple(prepend_offsets), tp_group, dp_cp_group)
+        )
+        or ("dp", key),
+    )
+    sharded = transformer_utils.make_sharded_tensors_for_checkpoint(
+        {
+            "weight": torch.ones(2, 2),
+            "bias": torch.zeros(2),
+            "layer_extra_state": {"rng": 1},
+        },
+        prefix="module.",
+        tensor_parallel_layers_axis_map={"weight": 0},
+        sharded_offsets=((0, 3, 5),),
+        tp_group="tp",
+        dp_cp_group="dp",
+    )
+    assert sharded["module.weight"] == ("tp", "module.weight")
+    assert sharded["module.bias"] == ("dp", "module.bias")
+    assert isinstance(sharded["module.layer_extra_state"], _FakeShardedObject)
+    assert sharded["module.layer_extra_state"].replica_id == (0, 1, 2)
+    assert ("tp", "module.weight", 0, ((0, 3, 5),), "tp", "dp") in sharded_calls
+
+    class _ModuleWithCustomShard:
+        def sharded_state_dict(self, prefix, sharded_offsets, metadata):
+            return {"custom": (prefix, sharded_offsets, metadata["dp_cp_group"])}
+
+    assert transformer_utils.sharded_state_dict_default(
+        _ModuleWithCustomShard(),
+        prefix="x.",
+        sharded_offsets=((0, 1, 2),),
+        metadata={"dp_cp_group": "dp"},
+    ) == {"custom": ("x.", ((0, 1, 2),), "dp")}
+
+    class _PlainModule:
+        def state_dict(self, prefix="", keep_vars=True):
+            assert prefix == ""
+            assert keep_vars is True
+            return {"plain": torch.ones(1)}
+
+    assert transformer_utils.sharded_state_dict_default(
+        _PlainModule(),
+        prefix="plain.",
+        metadata={"dp_cp_group": "dp"},
+        tp_group="tp",
+    ) == {"plain.plain": ("dp", "plain.plain")}
+
     monkeypatch.setattr(
         transformer_utils.parallel_state,
         "get_data_parallel_group",
@@ -776,6 +990,91 @@ def test_dynamic_inference_request_record_checkpoint_merge_and_serialization(mon
     assert len(restored_record.requests) == 2
 
 
+def test_text_generation_controller_lightweight_tokenization_detokenization_and_sampling():
+    class _TokenizerWithSkip:
+        bos = 101
+        eod = 102
+
+        def tokenize(self, prompt):
+            return [self.bos, 1, 2] if prompt == "with-bos" else [1, 2]
+
+        def detokenize(self, tokens, skip_special_tokens=True):
+            suffix = ":skip" if skip_special_tokens else ":keep"
+            return "-".join(map(str, tokens)) + suffix
+
+        def offsets(self, tokens, text):
+            offsets = []
+            current = 0
+            for token in tokens:
+                offsets.append(current)
+                current += len(str(token)) + 1
+            return offsets
+
+    class _TokenizerNoSkip(_TokenizerWithSkip):
+        def detokenize(self, tokens):
+            return "|".join(map(str, tokens))
+
+    tokenizer = _TokenizerWithSkip()
+    assert TextGenerationController.tokenize_prompt(tokenizer, "with-bos") == [1, 2]
+    assert TextGenerationController.tokenize_prompt(tokenizer, "with-bos", add_BOS=True) == [
+        101,
+        1,
+        2,
+    ]
+    no_bos = _TokenizerWithSkip()
+    no_bos.bos = None
+    with pytest.raises(AssertionError):
+        TextGenerationController.tokenize_prompt(no_bos, "prompt", add_BOS=True)
+
+    assert TextGenerationController.detokenize(tokenizer, [1, 2, 102, 102]) == "1-2:skip"
+    assert (
+        TextGenerationController.detokenize(
+            tokenizer, [1, 2, 102], remove_EOD=False, skip_special_tokens=False
+        )
+        == "1-2-102:keep"
+    )
+    assert TextGenerationController.detokenize(_TokenizerNoSkip(), [1, 2, 102]) == "1|2"
+
+    controller = object.__new__(TextGenerationController)
+    controller.tokenizer = tokenizer
+    text, segments = controller.detokenize_generations(
+        torch.tensor([1, 2, 102]), torch.tensor([3]), detokenize_segments=False
+    )
+    assert text == "1-2:skip"
+    assert segments is None
+
+    text, segments = controller.detokenize_generations(
+        torch.tensor([1, 2, 3]), torch.tensor([3]), detokenize_segments=True
+    )
+    assert text == "1-2-3:skip"
+    assert segments == [["1-", "2-", "3:skip"]]
+
+    controller.sampling_rng = torch.Generator()
+    controller.sampling_rng.manual_seed(123)
+    logits = torch.tensor([[0.1, 2.0, 0.3], [3.0, 0.2, 0.1]])
+    assert torch.equal(
+        controller._torch_sampling_func(logits, temperature=1.0, top_k=1, top_p=0.0),
+        torch.tensor([1, 0]),
+    )
+    top_k_sample = controller._torch_sampling_func(
+        logits, temperature=0.5, top_k=2, top_p=0.0, vocab_size=3
+    )
+    assert top_k_sample.shape == torch.Size([2])
+    top_p_sample = controller._torch_sampling_func(
+        logits, temperature=1.0, top_k=0, top_p=0.8, vocab_size=3
+    )
+    assert top_p_sample.shape == torch.Size([2])
+
+    with pytest.raises(AssertionError, match="top-p"):
+        controller._torch_sampling_func(logits, temperature=1.0, top_k=2, top_p=0.5)
+    with pytest.raises(AssertionError, match="top-p should"):
+        controller._torch_sampling_func(logits, temperature=1.0, top_k=0, top_p=1.5)
+    with pytest.raises(AssertionError, match="top-k is larger"):
+        controller._torch_sampling_func(logits, temperature=1.0, top_k=4, top_p=0.0)
+    with pytest.raises(AssertionError, match="top-k is larger than vocab size"):
+        controller._torch_sampling_func(logits, temperature=1.0, top_k=2, top_p=0.0, vocab_size=2)
+
+
 def test_tensor_aware_state_dict_tensor_lifecycle(monkeypatch):
     class _FakeShardedTensor:
         def __init__(self, key, data):
@@ -854,6 +1153,456 @@ def test_tensor_aware_state_dict_tensor_lifecycle(monkeypatch):
         )
         is cached_distribution
     )
+
+
+def test_pipeline_utils_rank_helpers_streams_and_schedule_node(monkeypatch):
+    calls = []
+    monkeypatch.setattr(pipeline_utils, "get_pg_rank", lambda group: group["rank"])
+    monkeypatch.setattr(pipeline_utils, "get_pg_size", lambda group: group["size"])
+    monkeypatch.setattr(
+        pipeline_utils.torch.distributed,
+        "get_process_group_ranks",
+        lambda group: group["ranks"],
+    )
+
+    first_group = {"rank": 0, "size": 4, "ranks": [10, 11, 12, 13]}
+    middle_group = {"rank": 2, "size": 4, "ranks": [10, 11, 12, 13]}
+    last_group = {"rank": 3, "size": 4, "ranks": [10, 11, 12, 13]}
+    assert pipeline_utils.is_pp_first_stage(first_group) is True
+    assert pipeline_utils.is_pp_last_stage(first_group) is False
+    assert pipeline_utils.is_pp_last_stage(last_group) is True
+    assert pipeline_utils.get_pp_first_rank(middle_group) == 10
+    assert pipeline_utils.get_pp_last_rank(middle_group) == 13
+    assert pipeline_utils.get_pp_next_rank(middle_group) == 13
+    assert pipeline_utils.get_pp_prev_rank(middle_group) == 11
+    assert pipeline_utils.get_pp_next_rank(last_group) is None
+    assert pipeline_utils.get_pp_prev_rank(first_group) is None
+
+    assert pipeline_utils.is_vp_first_stage(None, None) is True
+    assert pipeline_utils.is_vp_first_stage(0, 1) is True
+    assert pipeline_utils.is_vp_first_stage(0, 4) is True
+    assert pipeline_utils.is_vp_first_stage(2, 4) is False
+    assert pipeline_utils.is_vp_last_stage(3, 4) is True
+    assert pipeline_utils.is_vp_last_stage(1, 4) is False
+    with pytest.raises(AssertionError, match="Expected vp_stage"):
+        pipeline_utils.is_vp_first_stage(1, None)
+    with pytest.raises(AssertionError, match="Expected vp_stage"):
+        pipeline_utils.is_vp_last_stage(2, 1)
+
+    noop = pipeline_utils.NoopScheduleNode()
+    assert noop.forward("x") == "x"
+    assert noop.backward("grad") == "grad"
+
+    monkeypatch.setattr(pipeline_utils, "cur_platform", _FakePlatform(calls))
+    pipeline_utils._COMM_STREAM = None
+    pipeline_utils.set_streams(comm_stream="comm-a")
+    assert pipeline_utils.get_comm_stream() == "comm-a"
+    pipeline_utils.set_streams(comm_stream="comm-b")
+    assert pipeline_utils.get_comm_stream() == "comm-a"
+    assert pipeline_utils.get_comp_stream() == "current-stream"
+
+    monkeypatch.setattr(pipeline_utils, "make_viewless", lambda value: value)
+    tensor = torch.tensor([1.0], requires_grad=True)
+    grad = torch.tensor([2.0])
+    event = _FakeEvent(calls)
+    node = pipeline_utils.ScheduleNode(
+        forward_func=lambda value: value * 3,
+        stream=lambda: "node-stream",
+        event=event,
+        backward_func=lambda outputs, output_grad: output_grad,
+        name="unit-node",
+    )
+    output = node.forward(tensor)
+    assert torch.allclose(output, torch.tensor([3.0]))
+    assert node.get_output() is output
+    node.inputs[0].grad = grad
+    assert node.backward(torch.tensor([1.0])) is grad
+    assert node.inputs is None
+    assert not hasattr(node, "forward_func")
+
+
+def test_exchange_utils_pure_distribution_and_object_gather(monkeypatch):
+    class _Shard:
+        def __init__(self, key, shape=(2, 3), dtype=torch.float32, data=None):
+            self.key = key
+            self.local_shape = shape
+            self.dtype = dtype
+            self.data = data
+            self.init_calls = []
+
+        def init_data(self, device):
+            self.init_calls.append(device)
+            self.data = torch.empty(self.local_shape, dtype=self.dtype, device="cpu")
+
+    assert exchange_utils._shard_size(_Shard("a", shape=(2, 3), dtype=torch.float32)) == 24
+    assert exchange_utils.is_float8tensor(torch.tensor([1.0])) is False
+
+    assignment = exchange_utils.distribute_shards_to_ranks(
+        shard_to_ranks={"a": [0, 1], "b": [1], "c": [0, 1], "d": [0]},
+        shard_to_size={"a": 4, "b": 8, "c": 2, "d": 1},
+        num_ranks=2,
+        cross_parallelization_group_loads={"c"},
+    )
+    assert assignment["b"] == 1
+    assert assignment["d"] == 0
+    assert assignment["c"] in {0, 1}
+
+    needed = {"need": _Shard("need")}
+    unneeded = {"drop": _Shard("drop"), "drop-loaded": _Shard("drop-loaded", data=torch.ones(2))}
+    loaded = {}
+    monkeypatch.setattr(
+        exchange_utils,
+        "cur_platform",
+        SimpleNamespace(device_name=lambda: "cpu", device=lambda: torch.device("cpu"), synchronize=lambda: None),
+    )
+    tensor, orig_device = exchange_utils._get_empty_tensor_for_exchange(
+        "need", needed, unneeded, loaded
+    )
+    assert tensor.shape == torch.Size([2, 3])
+    assert orig_device == torch.device("cpu")
+    assert loaded["need"] is tensor
+    tensor, orig_device = exchange_utils._get_empty_tensor_for_exchange(
+        "drop", needed, unneeded, loaded
+    )
+    assert unneeded["drop"].data is None
+    assert orig_device is None
+    tensor, orig_device = exchange_utils._get_empty_tensor_for_exchange(
+        "drop-loaded", needed, unneeded, loaded
+    )
+    assert tensor.shape == torch.Size([2])
+    assert orig_device is None
+
+    def fake_all_gather_object(target, payload, group=None):
+        target[:] = [{"a": 1}, {"b": 2}]
+
+    monkeypatch.setattr(exchange_utils.torch.distributed, "get_world_size", lambda group=None: 2)
+    monkeypatch.setattr(exchange_utils.torch.distributed, "all_gather_object", fake_all_gather_object)
+    assert exchange_utils.exchange_loaded_objects_gather_object({"local": 0}) == {"a": 1, "b": 2}
+
+    def duplicate_all_gather_object(target, payload, group=None):
+        target[:] = [{"dup": 1}, {"dup": 2}]
+
+    monkeypatch.setattr(exchange_utils.torch.distributed, "all_gather_object", duplicate_all_gather_object)
+    with pytest.raises(exchange_utils.CheckpointingException, match="Duplicate shard ids"):
+        exchange_utils.exchange_loaded_objects_gather_object({"dup": 1})
+
+    distribution = exchange_utils.ShardDistribution(
+        main_rank_for_shard={("a",): 0},
+        shards_in_this_group={("a",)},
+        shard_to_metadata={("a",): _Shard("a")},
+        all_ranks_for_shard={("a",): [0]},
+    )
+    monkeypatch.setattr(
+        exchange_utils,
+        "exchange_loaded_tensors_gather_object",
+        lambda loaded_tensors, unloaded_shards, shard_distribution, parallelization_group=None: {
+            **loaded_tensors,
+            "algo": "gather_object",
+        },
+    )
+    monkeypatch.setattr(
+        exchange_utils,
+        "exchange_loaded_tensors_gather_rounds",
+        lambda loaded_tensors, unloaded_shards, shard_distribution, parallelization_group=None: {
+            **loaded_tensors,
+            "algo": "gather_rounds",
+        },
+    )
+    monkeypatch.setattr(
+        exchange_utils,
+        "exchange_loaded_tensors_broadcast",
+        lambda loaded_tensors, unloaded_shards, shard_distribution, parallelization_group=None: {
+            **loaded_tensors,
+            "algo": "broadcast",
+        },
+    )
+    assert exchange_utils.exchange_by_distribution({}, {}, distribution, exchange_algo="gather_object") == {
+        "algo": "gather_object"
+    }
+    assert exchange_utils.exchange_by_distribution({}, {}, distribution, exchange_algo="gather_rounds") == {
+        "algo": "gather_rounds"
+    }
+    assert exchange_utils.exchange_by_distribution({}, {}, distribution, exchange_algo="broadcast") == {
+        "algo": "broadcast"
+    }
+    with pytest.raises(AssertionError, match="Expecting distribution"):
+        exchange_utils.exchange_by_distribution({}, {}, None)
+    with pytest.raises(NotImplementedError, match="Unrecognized"):
+        exchange_utils.exchange_by_distribution({}, {}, distribution, exchange_algo="unknown")
+
+
+def test_dist_checkpointing_dict_utils_nested_operations():
+    nested = {
+        "keep": 2,
+        "drop": 1,
+        "nested": [3, {"keep2": 4, "drop2": 5}, []],
+    }
+    matching, nonmatching = checkpoint_dict_utils.extract_matching_values(
+        nested, lambda value: isinstance(value, int) and value % 2 == 0
+    )
+    assert matching == {"keep": 2, "nested": [{"keep2": 4}]}
+    assert nonmatching == {"drop": 1, "nested": [3, {"drop2": 5}, []]}
+
+    matching, nonmatching = checkpoint_dict_utils.extract_matching_values(
+        [1, 2, {"x": 4, "y": 5}], lambda value: isinstance(value, int) and value > 1, True
+    )
+    assert matching == {1: 2, 2: {"x": 4}}
+    assert nonmatching == {0: 1, 2: {"y": 5}}
+    with pytest.raises(ValueError, match="Unexpected top-level"):
+        checkpoint_dict_utils.extract_matching_values("bad", lambda value: True)
+
+    left = {"a": torch.tensor([1, 2]), "b": [1, 2], "c": {"same": "x"}}
+    right = {"a": torch.tensor([1, 3]), "b": [1, 2, 3], "d": 4, "c": {"same": "x"}}
+    only_left, only_right, mismatch = checkpoint_dict_utils.diff(left, right)
+    assert ("d",) in only_right
+    assert ("a",) == mismatch[0][0]
+    assert only_left == []
+    assert 2 in only_right
+
+    class _Replica:
+        def __init__(self, data):
+            self.replica_id = 0
+            self.data = data
+
+    _, _, replica_mismatch = checkpoint_dict_utils.diff(_Replica(1), _Replica(2))
+    assert replica_mismatch[0][0] == (_Replica,)
+
+    mapped = {"a": [1, {"b": 2}]}
+    checkpoint_dict_utils.dict_map(lambda value: value * 10, mapped)
+    assert mapped == {"a": [10, {"b": 20}]}
+    checkpoint_dict_utils.dict_map_with_key(lambda key, value: f"{key}:{value}", mapped)
+    assert mapped == {"a": ["0:10", {"b": "b:20"}]}
+
+    inplace = {"a": [1, 2]}
+    assert checkpoint_dict_utils.dict_list_map_inplace(lambda value: value + 1, inplace) == {
+        "a": [2, 3]
+    }
+    outplace = checkpoint_dict_utils.dict_list_map_outplace(lambda value: value * 2, inplace)
+    assert outplace == {"a": [4, 6]}
+    assert inplace == {"a": [2, 3]}
+
+    merged = {"a": {"x": 1}, "b": [1, {"z": 2}]}
+    checkpoint_dict_utils.merge(merged, {"a": {"y": 2}, "b": [3, {"w": 4}]})
+    assert merged == {"a": {"x": 1, "y": 2}, "b": [3, {"z": 2, "w": 4}]}
+    with pytest.raises(ValueError, match="different lengths"):
+        checkpoint_dict_utils.merge([1], [1, 2])
+    with pytest.raises(ValueError, match="Duplicate"):
+        checkpoint_dict_utils.merge({"a": 1}, {"a": 2})
+
+    reduced = checkpoint_dict_utils.map_reduce(
+        ["apple", "ape", "bear"],
+        key_fn=lambda value: value[0],
+        value_fn=len,
+        reduce_fn=sum,
+    )
+    assert reduced == {"a": 8, "b": 4}
+    assert list(checkpoint_dict_utils.nested_values({"a": [1, {"b": 2}]})) == [1, 2]
+    assert [item[1:] for item in checkpoint_dict_utils.nested_items_iter({"a": [1]})] == [(0, 1)]
+
+
+def test_dist_checkpointing_utils_prefixes_filters_and_logging(monkeypatch, caplog):
+    class _Base:
+        def __init__(self, key, data=None, flattened_range=None):
+            self.key = key
+            self.data = data
+            self.global_offset = (0,)
+            self.global_shape = (1,)
+            self.flattened_range = flattened_range
+
+    class _Tensor(_Base):
+        pass
+
+    class _Factory(_Base):
+        pass
+
+    class _Object(_Base):
+        pass
+
+    class _Nonpersistent:
+        def __init__(self, data):
+            self.data = data
+
+    monkeypatch.setattr(checkpoint_utils, "ShardedBase", _Base)
+    monkeypatch.setattr(checkpoint_utils, "ShardedTensor", _Tensor)
+    monkeypatch.setattr(checkpoint_utils, "ShardedTensorFactory", _Factory)
+    monkeypatch.setattr(checkpoint_utils, "ShardedObject", _Object)
+    monkeypatch.setattr(checkpoint_utils, "LocalNonpersistentObject", _Nonpersistent)
+    monkeypatch.setattr(checkpoint_state_utils, "ShardedTensor", _Tensor)
+
+    tensor = _Tensor("old.weight", torch.tensor([1.0]))
+    factory = _Factory("old.factory")
+    obj = _Object("old.object", {"x": 1})
+    nonpersistent = _Nonpersistent("local")
+    state = {"layer": [tensor, {"factory": factory, "object": obj, "local": nonpersistent}], "plain": 3}
+
+    sharded, rest = checkpoint_utils.extract_sharded_tensors(state)
+    assert sharded == {"layer": [tensor]}
+    assert rest["plain"] == 3
+    sharded_factories, rest = checkpoint_utils.extract_sharded_tensors_and_factories(state)
+    assert sharded_factories["layer"][1]["factory"] is factory
+    sharded_or_local, _ = checkpoint_utils.extract_sharded_tensors_or_nonpersistent(state)
+    assert sharded_or_local["layer"][1]["local"] is nonpersistent
+    base_only, common = checkpoint_utils.extract_sharded_base(state)
+    assert base_only["layer"][1]["object"] is obj
+    assert common["plain"] == 3
+    local_only, _ = checkpoint_utils.extract_nonpersistent(state)
+    assert local_only["layer"][1]["local"] is nonpersistent
+
+    checkpoint_utils.add_prefix_for_sharding(state, "prefix.")
+    assert tensor.key == "prefix.old.weight"
+    checkpoint_utils.replace_prefix_for_sharding(state, "prefix.old.", "new.")
+    assert tensor.key == "new.weight"
+    with pytest.raises(ValueError, match="Expected"):
+        checkpoint_utils.replace_prefix_for_sharding({"bad": _Tensor("wrong.weight")}, "new.", "other.")
+
+    checkpoint_utils.apply_prefix_mapping(state, {"new.": "mapped.", "missing.": "unused."})
+    assert tensor.key == "mapped.weight"
+    assert checkpoint_utils._sharded_tensor_shard_id(tensor) == ("mapped.weight", (0,), None)
+    assert checkpoint_utils._sharded_object_id(obj) == (obj.key, (0,), (1,))
+
+    assert list(checkpoint_utils.zip_strict([1, 2], ["a", "b"])) == [(1, "a"), (2, "b")]
+    with pytest.raises(AssertionError, match="unequal lengths"):
+        list(checkpoint_utils.zip_strict([1], [1, 2]))
+
+    empty = _Tensor("empty", flattened_range=range(2, 2))
+    nonempty = _Tensor("nonempty", flattened_range=range(2, 3))
+    filtered = checkpoint_state_utils.filter_out_empty_flatten_tensor({"a": empty, "b": nonempty})
+    assert filtered == {"b": nonempty}
+
+    assert checkpoint_utils._clean_metadata_for_serialization(None) is None
+    metadata = {"dp_cp_group": object(), "keep": 1}
+    assert checkpoint_utils._clean_metadata_for_serialization(metadata) == {"keep": 1}
+
+    logger = logging.getLogger("test_dist_checkpointing_utils")
+    caplog.set_level(logging.DEBUG, logger="test_dist_checkpointing_utils")
+    with checkpoint_utils.logger_stack("outer", logger):
+        with checkpoint_utils.logger_stack("inner"):
+            checkpoint_utils.debug_msg("hello")
+    assert "outer.inner hello" in caplog.text
+
+
+def test_transformer_config_safe_post_init_branches(monkeypatch):
+    monkeypatch.setattr(
+        "megatron.core.transformer.transformer_config.log_single_rank",
+        lambda *args, **kwargs: None,
+    )
+
+    config = TransformerConfig(num_layers=2, hidden_size=16, num_attention_heads=4)
+    assert config.ffn_hidden_size == 64
+    assert config.kv_channels == 4
+    assert config.num_query_groups == 4
+
+    config = TransformerConfig(
+        num_layers=2,
+        hidden_size=16,
+        num_attention_heads=4,
+        fp32_residual_connection=True,
+        pipeline_dtype=torch.float16,
+    )
+    assert config.pipeline_dtype == torch.float
+
+    config = TransformerConfig(
+        num_layers=2,
+        hidden_size=16,
+        num_attention_heads=4,
+        apply_query_key_layer_scaling=True,
+        attention_softmax_in_fp32=False,
+    )
+    assert config.attention_softmax_in_fp32 is True
+
+    with pytest.raises(ValueError, match="Only one"):
+        TransformerConfig(num_layers=2, hidden_size=16, num_attention_heads=4, fp16=True, bf16=True)
+
+    with pytest.raises(ValueError, match="num_attention_heads"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=3,
+            tensor_model_parallel_size=2,
+        )
+
+    with pytest.raises(ValueError, match="num_query_groups"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            num_query_groups=3,
+            tensor_model_parallel_size=2,
+        )
+
+    with pytest.raises(AssertionError, match="linear_attention_freq"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            experimental_attention_variant="gated_delta_net",
+            linear_attention_freq=None,
+        )
+
+    with pytest.raises(AssertionError, match="linear_num_value_heads"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            experimental_attention_variant="gated_delta_net",
+            linear_attention_freq=2,
+            linear_num_key_heads=3,
+            linear_num_value_heads=4,
+        )
+
+    with pytest.raises(ValueError, match="Delayed scaling"):
+        TransformerConfig(
+            num_layers=4,
+            hidden_size=16,
+            num_attention_heads=4,
+            fp8="e4m3",
+            fp8_recipe=Fp8Recipe.delayed,
+            first_last_layers_bf16=True,
+        )
+
+    with pytest.raises(ValueError, match="fp8_quantizer_factory"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            fp8="e4m3",
+            fp8_recipe=Fp8Recipe.custom,
+        )
+
+    with pytest.raises(ValueError, match="fp8_param"):
+        TransformerConfig(num_layers=2, hidden_size=16, num_attention_heads=4, fp8_param=True)
+
+    with pytest.raises(ValueError, match="fp4_param"):
+        TransformerConfig(num_layers=2, hidden_size=16, num_attention_heads=4, fp4_param=True)
+
+    with pytest.raises(ValueError, match="fp4 and fp8"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            fp8="e4m3",
+            fp4="e2m1",
+        )
+
+    with pytest.raises(ValueError, match="fp4_quantizer_factory"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            fp4="e2m1",
+            fp4_recipe=Fp4Recipe.custom,
+        )
+
+    with pytest.raises(ValueError, match="num_moe_experts"):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=16,
+            num_attention_heads=4,
+            expert_model_parallel_size=2,
+        )
+
+    with pytest.raises(ValueError, match="non-negative"):
+        TransformerConfig(num_layers=2, hidden_size=16, num_attention_heads=4, num_moe_experts=0)
 
 
 def test_rerun_quick_stats_data_iterator_and_error_injector(monkeypatch):
