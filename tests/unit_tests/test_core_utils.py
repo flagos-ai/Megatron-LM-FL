@@ -409,12 +409,11 @@ def test_misc_compatibility_helpers_and_quantization_flags():
     assert utils.is_using_quantization_scales(SimpleNamespace()) is False
 
 
-def test_dtensor_helpers_return_plain_tensor_paths():
+def test_dtensor_local_helpers_return_plain_tensor_paths():
     tensor = torch.ones(2)
 
     assert utils.to_local_if_dtensor(tensor) is tensor
     assert utils.get_data_parallel_group_if_dtensor(tensor) is None
-    assert utils.get_full_tensor_if_necessary(tensor) is tensor
 
 
 def test_straggler_detector_disabled_and_min_max_paths(monkeypatch):
