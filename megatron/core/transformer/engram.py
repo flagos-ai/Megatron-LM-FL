@@ -775,11 +775,35 @@ class EngramModule(nn.Module):
 
     def forward(self, hidden_states, hash_input_ids):
         """
-        # hidden_states: [L, B, HC_MULT * D]
-        input_ids: [B, L]
+        # hidden_states: [L, B, HC_MULT * D] or [L/tp_size, B, HC_MULT * D] if SP is on
+        input_ids: [B, L] or [B, L/tp_size] if SP is on
 
-        # return: [L, B, HC_MULT * D]
+        # return: [L, B, HC_MULT * D] or [L/tp_size, B, HC_MULT * D] if SP is on
         """
+        # When sequence parallel is enabled, we need to gather the full sequence
+        # before entering engram, because:
+        # 1. Short conv operates on sequence dimension and needs full sequence
+        # 2. Hash input_ids are split and need to be gathered
+        # 3. Engram parameters will need all-reduce in backward on tp_group
+        sp_enabled = self.config.sequence_parallel
+        if sp_enabled:
+            # Gather hidden_states from [L/tp_size, B, D] to [L, B, D]
+            # Backward: split (scatter without reduce), since engram computes identically
+            # on all ranks and d_input is the same everywhere.
+            hidden_states = tensor_parallel.gather_from_sequence_parallel_region(
+                hidden_states,
+                tensor_parallel_output_grad=False,
+            )
+            # Gather hash_input_ids from [B, L/tp_size] to [B, L]
+            if hash_input_ids is not None:
+                # hash_input_ids: [B, L/tp_size] -> [L/tp_size, B] -> [L, B] -> [B, L]
+                hash_input_ids = hash_input_ids.transpose(0, 1)  # [L/tp_size, B]
+                hash_input_ids = tensor_parallel.gather_from_sequence_parallel_region(
+                    hash_input_ids,
+                    tensor_parallel_output_grad=False,
+                )
+                hash_input_ids = hash_input_ids.transpose(0, 1).contiguous()  # [B, L]
+
         # [B, L, N_GRAM * N_HEADS_PER_GRAM]
         # fake hyper-connection
         seq_len, batch_size, expanded_hidden_size = hidden_states.shape
@@ -832,6 +856,12 @@ class EngramModule(nn.Module):
         # [L, B, HC_MULT * HIDDEN_SIZE]
         output = output.view(seq_len, batch_size, expanded_hidden_size)
 
+        # When sequence parallel is enabled, scatter back to [L/tp_size, B, D]
+        # Forward: scatter (split output, since all ranks computed identical results)
+        # Backward: all-gather (gradients from all chunks flow back to engram params)
+        if sp_enabled:
+            output = tensor_parallel.scatter_to_sequence_parallel_region(output)
+
         return output
 
     def pre_compute_embedding(self, input_ids: torch.Tensor):
@@ -840,6 +870,16 @@ class EngramModule(nn.Module):
         This can be called before the forward pass to warm up the embedding cache.
         """
         assert input_ids is not None, "Input ids can not be None for EngramModel"
+        # When sequence parallel is enabled, input_ids is [B, L/tp_size].
+        # We need to gather to full [B, L] before computing embeddings.
+        if self.config.sequence_parallel:
+            # input_ids: [B, L/tp_size] -> [L/tp_size, B] -> gather -> [L, B] -> [B, L]
+            input_ids_t = input_ids.transpose(0, 1).contiguous()  # [L/tp_size, B]
+            input_ids_t = tensor_parallel.gather_from_sequence_parallel_region(
+                input_ids_t,
+                tensor_parallel_output_grad=False,
+            )
+            input_ids = input_ids_t.transpose(0, 1).contiguous()  # [B, L]
         self.embedding_stream.synchronize()  # Ensure previous computations on the stream are finished
         with torch.cuda.stream(self.embedding_stream):
             embedding_result = self.memory(input_ids).flatten(start_dim=-2)
