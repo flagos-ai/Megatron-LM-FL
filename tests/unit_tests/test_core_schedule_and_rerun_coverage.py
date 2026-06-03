@@ -2804,7 +2804,10 @@ def test_dynamic_inference_requests_hashes_events_records_and_identity_ops(monke
         cu_seqlens_q_padded=torch.tensor([0, 3, 10], dtype=torch.int32),
         total_tokens=5,
     )
-    assert torch.equal(padded.seq_idx, torch.tensor([[0, 0, 0, 1, 1]], dtype=torch.int32))
+    assert torch.equal(
+        padded.seq_idx,
+        torch.tensor([[0, 0, 0, 1, 1, 1, 1, 1, 1, 1]], dtype=torch.int32),
+    )
     no_tokens = PackedSeqParams(cu_seqlens_q=torch.tensor([0, 1], dtype=torch.int32))
     assert no_tokens.seq_idx is None
 
