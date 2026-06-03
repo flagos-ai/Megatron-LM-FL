@@ -484,7 +484,7 @@ def test_get_train_valid_test_num_samples_iteration_sample_and_phase_paths(monke
     assert get_train_valid_test_num_samples()[0] == 12
 
     args.phase_transition_iterations = None
-    args.train_samples = None
+    args.train_samples = 1
     args.train_iters = None
     args.full_validation = False
     args.skip_train = False
