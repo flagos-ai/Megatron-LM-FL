@@ -1512,7 +1512,7 @@ def test_dist_checkpointing_utils_prefixes_filters_and_logging(monkeypatch, capl
     assert base_only["layer"][1]["object"] is obj
     assert common["plain"] == 3
     local_only, _ = checkpoint_utils.extract_nonpersistent(state)
-    assert local_only["layer"][1]["local"] is nonpersistent
+    assert local_only["layer"][0]["local"] is nonpersistent
 
     checkpoint_utils.add_prefix_for_sharding(state, "prefix.")
     assert tensor.key == "prefix.old.weight"
