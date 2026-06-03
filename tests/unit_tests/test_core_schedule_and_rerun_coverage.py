@@ -1409,8 +1409,8 @@ def test_dist_checkpointing_dict_utils_nested_operations():
     matching, nonmatching = checkpoint_dict_utils.extract_matching_values(
         [1, 2, {"x": 4, "y": 5}], lambda value: isinstance(value, int) and value > 1, True
     )
-    assert matching == {1: 2, 2: {"x": 4}}
-    assert nonmatching == {0: 1, 2: {"y": 5}}
+    assert matching == {1: 2, 2: {"x": 4, "y": 5}}
+    assert nonmatching == {0: 1}
     with pytest.raises(ValueError, match="Unexpected top-level"):
         checkpoint_dict_utils.extract_matching_values("bad", lambda value: True)
 
