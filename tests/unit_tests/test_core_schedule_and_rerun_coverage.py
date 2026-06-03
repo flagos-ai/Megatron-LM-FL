@@ -2013,7 +2013,7 @@ def test_dist_checkpointing_mapping_tensor_object_factory_and_errors():
     shard = checkpoint_mapping.ShardedTensor.from_rank_offsets(
         "weight",
         data,
-        (0, 1, 2),
+        (1, 1, 2),
         replica_id=(0, 0),
         prepend_axis_num=1,
     )
