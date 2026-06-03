@@ -1444,9 +1444,12 @@ def test_dist_checkpointing_dict_utils_nested_operations():
     assert outplace == {"a": [4, 6]}
     assert inplace == {"a": [2, 3]}
 
-    merged = {"a": {"x": 1}, "b": [1, {"z": 2}]}
-    checkpoint_dict_utils.merge(merged, {"a": {"y": 2}, "b": [3, {"w": 4}]})
-    assert merged == {"a": {"x": 1, "y": 2}, "b": [3, {"z": 2, "w": 4}]}
+    merged = {"a": {"x": 1}, "b": [{"left": 1}, {"z": 2}]}
+    checkpoint_dict_utils.merge(merged, {"a": {"y": 2}, "b": [{"right": 3}, {"w": 4}]})
+    assert merged == {
+        "a": {"x": 1, "y": 2},
+        "b": [{"left": 1, "right": 3}, {"z": 2, "w": 4}],
+    }
     with pytest.raises(ValueError, match="different lengths"):
         checkpoint_dict_utils.merge([1], [1, 2])
     with pytest.raises(ValueError, match="Duplicate"):
