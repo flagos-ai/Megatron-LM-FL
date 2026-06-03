@@ -2317,8 +2317,12 @@ def test_spec_rank_and_tensor_parallel_utils_cpu_paths(monkeypatch):
         5,
     )
     assert (module.value, module.scale, module.submodules) == (5, 2, {"inner": True})
-    module_override = spec_utils.build_module(spec_utils.ModuleSpec(module=ToyModule, params={"scale": 2}), 5, scale=7)
-    assert module_override.scale == 7
+    module_with_kwargs = spec_utils.build_module(
+        spec_utils.ModuleSpec(module=ToyModule, params={"submodules": {"base": True}}),
+        5,
+        scale=7,
+    )
+    assert (module_with_kwargs.scale, module_with_kwargs.submodules) == (7, {"base": True})
     spec = spec_utils.ModuleSpec(module=ToyModule, params={"scale": 3})
     assert spec(4).scale == 3
     assert spec_utils.get_submodules(spec_utils.ModuleSpec(module=ToyModule, submodules="sub")) == "sub"
