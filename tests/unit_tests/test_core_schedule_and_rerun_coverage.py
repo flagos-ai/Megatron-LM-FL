@@ -1957,7 +1957,7 @@ def test_fine_grained_offload_pool_group_handler_and_manager_paths(monkeypatch):
     chunk.offload_groups[0]._tensors = {pushed_tag: recordable}
     monkeypatch.setattr(chunk, "offload", lambda tensor, pin_memory=True, use_cpu_pool=True: ("cpu", tensor.payload.clone(), use_cpu_pool))
     monkeypatch.setattr(chunk, "reload", lambda state, non_blocking=None: state[1].clone())
-    chunk.bulk_offload_group()
+    chunk.bulk_offload([])
     assert chunk._groups_to_offload == []
     assert len(chunk._groups_to_reload) == 1
     chunk.bulk_reload_group()
