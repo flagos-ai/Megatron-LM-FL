@@ -92,6 +92,61 @@ def differentiable_all_gather(tensor, cp_group):
 
 
 # ---------------------------------------------------------------------------
+# Async differentiable all-gather (for compute/communication overlap)
+# ---------------------------------------------------------------------------
+
+_ASYNC_AG_HANDLE = None
+
+
+class _AsyncAllGatherAlongFirstDim(torch.autograd.Function):
+    """Async differentiable all-gather: launches non-blocking all-gather in forward.
+
+    The caller must invoke async_differentiable_all_gather_wait() before
+    reading the returned output buffer.
+    """
+
+    @staticmethod
+    def forward(ctx, input_, cp_group):
+        global _ASYNC_AG_HANDLE
+        ctx.cp_group = cp_group
+        ctx.cp_rank = cp_group.rank()
+        ctx.cp_size = cp_group.size()
+        ctx.input_size_0 = input_.size(0)
+
+        output = torch.empty(
+            ctx.cp_size * input_.size(0), *input_.shape[1:],
+            dtype=input_.dtype, device=input_.device,
+        )
+        _ASYNC_AG_HANDLE = torch.distributed.all_gather_into_tensor(
+            output, input_.contiguous(), group=cp_group, async_op=True
+        )
+        return output
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        chunk_size = ctx.input_size_0
+        start = ctx.cp_rank * chunk_size
+        grad_input = grad_output[start : start + chunk_size].contiguous()
+        return grad_input, None
+
+
+def async_differentiable_all_gather_start(tensor, cp_group):
+    """Launch async all-gather. Returns output buffer (not yet valid).
+
+    Call async_differentiable_all_gather_wait() before reading the buffer.
+    """
+    return _AsyncAllGatherAlongFirstDim.apply(tensor, cp_group)
+
+
+def async_differentiable_all_gather_wait():
+    """Wait for the most recent async all-gather to complete."""
+    global _ASYNC_AG_HANDLE
+    if _ASYNC_AG_HANDLE is not None:
+        _ASYNC_AG_HANDLE.wait()
+        _ASYNC_AG_HANDLE = None
+
+
+# ---------------------------------------------------------------------------
 # CP-aware sliding window indices
 # ---------------------------------------------------------------------------
 
