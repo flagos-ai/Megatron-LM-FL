@@ -21,9 +21,12 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.utils import divide
-
+# FlagScale Begin
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+# FlagScale End
+
 
 class DotProductAttention(MegatronModule):
     """
@@ -47,10 +50,10 @@ class DotProductAttention(MegatronModule):
         layer_number: int,
         attn_mask_type: AttnMaskType,
         attention_type: str,
-        attention_dropout: float = None,
-        softmax_scale: float = None,
-        cp_comm_type: str = None,
-        pg_collection: ProcessGroupCollection = None,
+        attention_dropout: Optional[float] = None,
+        softmax_scale: Optional[float] = None,
+        cp_comm_type: Optional[str] = None,
+        pg_collection: Optional[ProcessGroupCollection] = None,
     ):
         super().__init__(config=config)
 
@@ -73,6 +76,8 @@ class DotProductAttention(MegatronModule):
             assert hasattr(
                 pg_collection, 'tp'
             ), "DotProductAttention pg_collection must have tp process group"
+        self.pg_collection = pg_collection
+        self.tp_group = self.pg_collection.tp
 
         world_size = pg_collection.tp.size()
         self.hidden_size_per_partition = divide(projection_size, world_size)
@@ -120,7 +125,7 @@ class DotProductAttention(MegatronModule):
         elif self.config.softmax_type == "off-by-one":
             self.softmax_offset = torch.zeros(
                 self.num_attention_heads_per_partition,
-                device=cur_platform.current_device(),
+                device=cur_platform.current_device(),  # FlagScale Add
                 dtype=self.config.params_dtype,
             )
         elif self.config.softmax_type == "learnable":
@@ -129,7 +134,7 @@ class DotProductAttention(MegatronModule):
                 torch.nn.Parameter(
                     torch.empty(
                         self.num_attention_heads_per_partition,
-                        device=cur_platform.current_device(),
+                        device=cur_platform.current_device(),  # FlagScale Add
                         dtype=self.config.params_dtype,
                     )
                 ),
@@ -144,9 +149,9 @@ class DotProductAttention(MegatronModule):
         query: Tensor,
         key: Tensor,
         value: Tensor,
-        attention_mask: Tensor,
-        attn_mask_type: AttnMaskType = None,
-        attention_bias: Tensor = None,
+        attention_mask: Optional[Tensor],
+        attn_mask_type: Optional[AttnMaskType] = None,
+        attention_bias: Optional[Tensor] = None,
         packed_seq_params: Optional[PackedSeqParams] = None,
     ):
         """Forward."""
@@ -253,7 +258,7 @@ class DotProductAttention(MegatronModule):
     def sharded_state_dict(
         self,
         prefix: str = '',
-        sharded_offsets: Tuple[Tuple[int, int, int]] = (),
+        sharded_offsets: Tuple[Tuple[int, int, int], ...] = (),
         metadata: Optional[dict] = None,
     ) -> ShardedStateDict:
         """Sharded state dict for the learnable softmax offset parameter"""
@@ -262,5 +267,10 @@ class DotProductAttention(MegatronModule):
         else:
             state_dict = {}
         return make_sharded_tensors_for_checkpoint(
-            state_dict, prefix, {'softmax_offset': 0}, sharded_offsets
+            state_dict,
+            prefix,
+            {'softmax_offset': 0},
+            sharded_offsets,
+            tp_group=self.tp_group,
+            dp_cp_group=metadata['dp_cp_group'],
         )

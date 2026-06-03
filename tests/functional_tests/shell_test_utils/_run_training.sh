@@ -57,6 +57,25 @@ while IFS= read -r ARGUMENT; do
     echo "$KEY=$VALUE"
 done <<<"$ENV_VARS"
 
+if ! command -v python3-config &>/dev/null; then
+    PYTHON_BIN=$(command -v python || command -v python3)
+    PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
+    mkdir -p "$PYTHON_BIN_DIR"
+    cat >"$PYTHON_BIN_DIR/python3-config" <<PYCONFIGEOF
+#!$PYTHON_BIN
+import sys
+import sysconfig
+
+if "--extension-suffix" in sys.argv:
+    print(sysconfig.get_config_var("EXT_SUFFIX") or "")
+else:
+    raise SystemExit("python3-config shim only supports --extension-suffix")
+PYCONFIGEOF
+    chmod +x "$PYTHON_BIN_DIR/python3-config"
+    export PATH="$PYTHON_BIN_DIR:$PATH"
+fi
+python3-config --extension-suffix
+
 # Run before script
 BEFORE_SCRIPT=$(cat "$TRAINING_PARAMS_PATH" | /usr/local/bin/yq '.BEFORE_SCRIPT')
 if [[ "$BEFORE_SCRIPT" != null ]]; then
@@ -124,8 +143,8 @@ else
                 value=$(echo "$value" | sed 's/^\[//;s/\]$//')
                 TRAINING_PARAMS_FROM_CONFIG+="$key $value "
 
-            # Case: contains spaces
-            elif [[ "$value" == *" "* ]]; then
+            # Case: contains spaces or shell metacharacters
+            elif [[ "$value" == *" "* || "$value" == *"|"* || "$value" == *"("* || "$value" == *")"* ]]; then
                 TRAINING_PARAMS_FROM_CONFIG+="$key \"$value\" "
             # Case: default
             else
@@ -159,7 +178,7 @@ MASTER_PORT=${MASTER_PORT:-6000}
 NUM_NODES=${NUM_NODES:-${SLURM_NNODES:-1}}
 GPUS_PER_NODE=${GPUS_PER_NODE:-8}
 NODE_RANK=${SLURM_NODEID:-${SLURM_NODEID:-0}}
-LAST_RANK=7
+LAST_RANK=$((GPUS_PER_NODE - 1)) 
 export LOG_DIR=$OUTPUT_PATH/logs/$REPEAT
 mkdir -p $LOG_DIR
 
@@ -170,7 +189,7 @@ DISTRIBUTED_ARGS=(
     --master_port $MASTER_PORT
     --node_rank $NODE_RANK
     --log-dir $LOG_DIR
-    --tee "0:3,7:3"
+    --tee "0:3,$LAST_RANK:3"
     --redirects "3"
 )
 
