@@ -2615,6 +2615,269 @@ def test_dynamic_engine_reset_and_cuda_graph_creation_cpu_paths(monkeypatch):
     }
 
 
+def test_dynamic_engine_postprocess_schedule_and_shutdown_paths(monkeypatch):
+    loop = asyncio.new_event_loop()
+    calls = []
+
+    class _Tokenizer:
+        def detokenize(self, tokens):
+            return "|".join(str(token) for token in tokens)
+
+    class _Socket:
+        def __init__(self, messages=None):
+            self.messages = list(messages or [])
+            self.sent = []
+            self.closed = False
+
+        def recv(self, flags=None):
+            if not self.messages:
+                raise dynamic_engine.zmq.Again()
+            return self.messages.pop(0)
+
+        def recv_multipart(self):
+            return self.messages.pop(0)
+
+        def send(self, payload):
+            self.sent.append(payload)
+
+        def send_multipart(self, payload):
+            self.sent.append(("multipart", payload))
+
+        def close(self, linger=0):
+            self.closed = True
+            self.linger = linger
+
+    class _Context:
+        chunked_prefill_request_id = -1
+        enable_prefix_caching = True
+        prefix_cache_hits = 2
+        prefix_cache_blocks_matched = 3
+        step_count = 1
+        batch_dimensions = "real"
+        padded_batch_dimensions = "padded"
+        padded_active_token_count = 4
+
+        def using_cuda_graph_this_step(self):
+            return True
+
+    fake_zmq = SimpleNamespace(NOBLOCK=1, Again=type("Again", (Exception,), {}))
+    fake_msgpack = SimpleNamespace(
+        packb=lambda obj, use_bin_type=True: obj,
+        unpackb=lambda obj, raw=False: obj,
+    )
+    monkeypatch.setattr(dynamic_engine, "zmq", fake_zmq, raising=False)
+    monkeypatch.setattr(dynamic_engine, "msgpack", fake_msgpack, raising=False)
+    monkeypatch.setattr(dynamic_engine, "range_push", lambda name: calls.append(("push", name)))
+    monkeypatch.setattr(dynamic_engine, "range_pop", lambda: calls.append("pop"))
+    monkeypatch.setattr(dynamic_engine.torch.cuda, "memory_stats", lambda: {
+        "allocation.all.current": 2,
+        "allocated_bytes.all.current": 1024,
+        "reserved_bytes.all.current": 2048,
+    })
+
+    engine = object.__new__(dynamic_engine.DynamicInferenceEngine)
+    engine.controller = SimpleNamespace(
+        tokenizer=_Tokenizer(),
+        detokenize=lambda tokenizer, tokens, remove_EOD=True: tokenizer.detokenize(tokens),
+    )
+    engine.context = _Context()
+    engine.context.kv_block_allocator = SimpleNamespace(
+        total_count=10,
+        total_avail=7,
+        enable_prefix_caching=True,
+        block_ref_counts=torch.tensor([1, 0, 2], dtype=torch.int32),
+    )
+    engine.requests = {}
+    engine.waiting_request_ids = dynamic_engine.deque()
+    engine.finished_request_count = 0
+    engine.evicted_request_count = 0
+    engine.track_generated_token_events = True
+    engine.num_speculative_tokens = 1
+    engine._spec_tokens_proposed = 0
+    engine._spec_tokens_accepted = 0
+    engine._spec_steps = 0
+    engine.stop_word_finished_request_ids = set()
+    engine.stop_word_being_finished_ids = set()
+    engine.use_coordinator = False
+    engine.is_mp_coordinator = False
+    engine.rank = 0
+
+    def _entry(request):
+        request.add_event_add_engine()
+        future = loop.create_future()
+        return dynamic_engine.RequestEntry(
+            record=DynamicInferenceRequestRecord.from_request(request),
+            future=future,
+        )
+
+    req1 = DynamicInferenceRequest(
+        request_id=1,
+        prompt_tokens=torch.tensor([1, 2], dtype=torch.long),
+        sampling_params=SamplingParams(
+            num_tokens_to_generate=3,
+            skip_prompt_log_probs=True,
+            termination_id=99,
+        ),
+    )
+    req2 = DynamicInferenceRequest(
+        request_id=2,
+        prompt_tokens=torch.tensor([3, 4], dtype=torch.long),
+        sampling_params=SamplingParams(
+            num_tokens_to_generate=2,
+            skip_prompt_log_probs=False,
+            termination_id=99,
+        ),
+    )
+    engine.requests[1] = _entry(req1)
+    engine.requests[2] = _entry(req2)
+    req2_future = engine.requests[2].future
+
+    active_ids, finished_records = dynamic_engine.DynamicInferenceEngine.post_process_requests(
+        engine,
+        request_ids=torch.tensor([1, 2], dtype=torch.int64),
+        finished_request_ids=torch.tensor([2], dtype=torch.int64),
+        evict_request_ids=torch.tensor([1], dtype=torch.int64),
+        step_time=0.4,
+        sample=torch.tensor([7, 9], dtype=torch.long),
+        accepted_tokens=torch.tensor([[11, -1], [12, -1]], dtype=torch.long),
+        log_probs=[torch.tensor([0.1, 0.2]), torch.tensor([0.3, 0.4])],
+        top_n_logprobs={
+            0: [(torch.tensor([0.5]), torch.tensor([7]))],
+            1: [(torch.tensor([0.6]), torch.tensor([9]))],
+        },
+        routing_indices_per_request={1: torch.ones(2, 1, 1, dtype=torch.long)},
+        pre_fwd_active_token_count=4,
+        pre_fwd_step_count=8,
+    )
+
+    assert active_ids == [1]
+    assert len(finished_records) == 1
+    assert finished_records[0].request_id == 2
+    assert engine.finished_request_count == 1
+    assert engine.evicted_request_count == 1
+    assert list(engine.waiting_request_ids) == [1]
+    assert req1.generated_tokens == [11, 7]
+    assert len(req1.generated_log_probs) == 1
+    assert req1.routing_indices.shape == (2, 1, 1)
+    assert req2.status == Status.COMPLETED
+    assert req2_future.done() is True
+
+    engine.failed_request_ids = [3]
+    failed = DynamicInferenceRequest(
+        request_id=3,
+        prompt_tokens=torch.tensor([5], dtype=torch.long),
+        sampling_params=SamplingParams(num_tokens_to_generate=1, termination_id=99),
+        status=Status.FAILED,
+    )
+    failed_entry = _entry(failed)
+    failed_entry.future.set_result(failed_entry.record)
+    engine.requests[3] = failed_entry
+    engine.logging_step_interval = 1
+    engine.metrics_writer = None
+    engine._prefix_cache_hits = 0
+    engine._prefix_cache_blocks_matched = 0
+    bookkeep = loop.run_until_complete(
+        dynamic_engine.DynamicInferenceEngine.async_bookkeep(
+            engine,
+            None,
+            {
+                "kv_stats": None,
+                "is_decode_only": True,
+                "total_request_count": 1,
+                "paused_request_count": 0,
+                "max_requests": 4,
+                "waiting_request_count": 1,
+                "finished_request_count": 0,
+                "evicted_request_count": 0,
+                "total_active_used_blocks": 1,
+                "total_active_block_count": 4,
+                "total_paused_used_blocks": 0,
+                "total_paused_block_count": 0,
+            },
+            0.2,
+        )
+    )
+    assert bookkeep["finished_request_records"][0].request_id == 3
+    assert engine.failed_request_ids == []
+    assert engine._prefix_cache_hits == 0
+
+    submit = [
+        dynamic_engine.Headers.SUBMIT_REQUEST.value,
+        10,
+        [1, 2],
+        SamplingParams(num_tokens_to_generate=1, termination_id=99).serialize(),
+    ]
+    epoch = [dynamic_engine.Headers.SET_GENERATION_EPOCH.value, 5]
+    pause = [dynamic_engine.Headers.PAUSE.value]
+    schedule_engine = object.__new__(dynamic_engine.DynamicInferenceEngine)
+    schedule_engine.is_mp_coordinator = True
+    schedule_engine.socket_for_receiving_requests = _Socket([submit, epoch, pause])
+    schedule_engine.model_parallel_num_msgs_publisher_socket = _Socket()
+    schedule_engine.model_parallel_publisher_socket = _Socket()
+    schedule_engine._pending_signals = dynamic_engine.deque()
+    schedule_engine.state = dynamic_engine.EngineState.RUNNING
+    schedule_engine._state_events = {
+        state: asyncio.Event() for state in dynamic_engine.DynamicInferenceEngine._STATE_EVENTS
+    }
+    schedule_engine._state_events[dynamic_engine.EngineState.RUNNING].set()
+    schedule_engine.requests = {
+        9: dynamic_engine.RequestEntry(
+            record=DynamicInferenceRequestRecord.from_request(
+                DynamicInferenceRequest(
+                    request_id=9,
+                    prompt_tokens=torch.tensor([1, 2], dtype=torch.long),
+                    generated_tokens=[3],
+                    sampling_params=SamplingParams(num_tokens_to_generate=1, termination_id=99),
+                    policy_epoch=[(0, 1)],
+                    kv_cache_epoch=[(0, 1)],
+                )
+            ),
+            future=loop.create_future(),
+        )
+    }
+    schedule_engine.add_request = lambda request_id, prompt, sampling_params: calls.append(
+        ("scheduled-add", request_id, prompt, sampling_params.num_tokens_to_generate)
+    )
+
+    assert dynamic_engine.DynamicInferenceEngine.schedule_requests(schedule_engine) == 3
+    assert ("scheduled-add", 10, [1, 2], 1) in calls
+    assert schedule_engine.state == dynamic_engine.EngineState.PAUSING
+    assert schedule_engine._generation_epoch == 5
+    stamped = schedule_engine.requests[9].record[-1]
+    assert stamped.policy_epoch[-1] == (2, 5)
+    assert stamped.kv_cache_epoch[-1] == (2, 5)
+
+    shutdown_engine = object.__new__(dynamic_engine.DynamicInferenceEngine)
+    pending_future = loop.create_future()
+    shutdown_engine.requests = {
+        1: dynamic_engine.RequestEntry(record=engine.requests[1].record, future=pending_future)
+    }
+    shutdown_engine.socket_for_receiving_requests = _Socket()
+    shutdown_sockets = [_Socket(), _Socket()]
+    shutdown_engine.zmq_sockets = shutdown_sockets
+    shutdown_engine.expert_parallel_zmq_communicator = SimpleNamespace(
+        close=lambda: calls.append("close-ep")
+    )
+    shutdown_engine.world_zmq_communicator = SimpleNamespace(
+        close=lambda: calls.append("close-world")
+    )
+    shutdown_engine.zmq_context = SimpleNamespace(
+        closed=False,
+        term=lambda: calls.append("term-zmq"),
+    )
+    shutdown_engine._state_events = {
+        state: asyncio.Event() for state in dynamic_engine.DynamicInferenceEngine._STATE_EVENTS
+    }
+    loop.run_until_complete(dynamic_engine.DynamicInferenceEngine.shutdown(shutdown_engine))
+    assert shutdown_engine.state == dynamic_engine.EngineState.STOPPED
+    assert pending_future.cancelled() is True
+    assert all(socket.closed for socket in shutdown_sockets)
+    assert "close-ep" in calls and "close-world" in calls and "term-zmq" in calls
+    assert shutdown_engine._state_events[dynamic_engine.EngineState.STOPPED].is_set()
+
+    loop.close()
+
+
 def test_text_generation_server_generate_endpoint_validation_and_success(monkeypatch):
     from megatron.core.inference.text_generation_server import (
         text_generation_server as generation_server,
