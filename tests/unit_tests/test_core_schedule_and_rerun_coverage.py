@@ -43,6 +43,9 @@ from megatron.core.dist_checkpointing import mapping as checkpoint_mapping
 from megatron.core.dist_checkpointing import dict_utils as checkpoint_dict_utils
 from megatron.core.dist_checkpointing import state_dict_utils as checkpoint_state_utils
 from megatron.core.dist_checkpointing import utils as checkpoint_utils
+from megatron.core.distributed.fsdp.src.megatron_fsdp import (
+    param_and_grad_buffer as fsdp_param_buffer,
+)
 from megatron.core.pipeline_parallel import fine_grained_activation_offload as offload
 from megatron.core.datasets import utils as dataset_utils
 from megatron.core.quantization import utils as quantization_utils
@@ -1140,6 +1143,214 @@ def test_cuda_graphs_record_and_replay_nodes_validate_status_and_surfaces(monkey
     )
     with pytest.raises(AssertionError, match="before calling"):
         cuda_graphs._CudagraphReplayNode.forward(SimpleNamespace(), replay_runner, True, inputs)
+
+
+def test_cuda_graph_runner_record_metadata_and_mismatch_cpu_paths(monkeypatch):
+    @dataclass
+    class _RunnerPayload:
+        tensor: object
+        label: str
+
+    record = cuda_graphs._CudagraphGlobalRecord
+    monkeypatch.setattr(record, "cudagraph_record", [])
+    monkeypatch.setattr(record, "cudagraph_created", False)
+    monkeypatch.setattr(cuda_graphs, "HAVE_TE_GRAPHS", False)
+
+    runner = object.__new__(cuda_graphs._CudaGraphRunner)
+    runner.func = lambda hidden_states, payload=None, scale=1: hidden_states * scale + payload.tensor
+    runner.fwd_graph_recorded = False
+    runner.status = cuda_graphs._GraphStatus.FWD_READY
+    runner.fp8_runtime_enabled = False
+    runner.fp4_runtime_enabled = False
+
+    hidden_states = torch.ones(2, requires_grad=True)
+    payload = _RunnerPayload(torch.tensor([3.0, 4.0]), "same")
+    output = runner.record_graph_capture(
+        (hidden_states,),
+        {"payload": payload, "scale": 2},
+    )
+
+    assert torch.equal(output, torch.tensor([5.0, 6.0]))
+    assert runner.fwd_graph_recorded is True
+    assert hidden_states.cg_buffer_metadata.is_cudagraph_input is True
+    assert hidden_states.cg_buffer_metadata.input_use_count == 1
+    assert output.cg_buffer_metadata.is_cudagraph_output is True
+    assert record.cudagraph_record[-1][1] == "fwd"
+
+    arg_metas = runner.get_arg_metas(record.cudagraph_record[-1][2], record.cudagraph_record[-1][3])
+    assert any(meta.type is torch.Tensor for meta in arg_metas)
+    flattened_tensors = runner.get_tensors(
+        (hidden_states, payload), {"extra": torch.tensor([7.0])}
+    )
+    assert flattened_tensors[0] is hidden_states
+    assert torch.equal(flattened_tensors[1], payload.tensor)
+    assert torch.equal(flattened_tensors[2], torch.tensor([7.0]))
+
+    runner.fwd_graph_input_arg_metas = [cuda_graphs.ArgMetadata(hidden_states)]
+    runner.fwd_graph_input_kwarg_metas = {
+        "payload": cuda_graphs.ArgMetadata(payload),
+        "scale": cuda_graphs.ArgMetadata(2),
+    }
+    assert runner.get_mismatch_errors((hidden_states,), {"payload": payload, "scale": 2}) == []
+    assert "Argument count mismatch" in "\n".join(
+        runner.get_mismatch_errors((), {"payload": payload, "scale": 2})
+    )
+    assert "Tensor mismatch" in "\n".join(
+        runner.get_mismatch_errors(
+            (torch.ones(3),),
+            {"payload": payload, "scale": 2},
+        )
+    )
+    assert "Missing kwargs" in "\n".join(
+        runner.get_mismatch_errors((hidden_states,), {"payload": payload})
+    )
+    assert "Unexpected kwargs" in "\n".join(
+        runner.get_mismatch_errors(
+            (hidden_states,),
+            {"payload": payload, "scale": 2, "extra": 1},
+        )
+    )
+    assert "Value mismatch" in "\n".join(
+        runner.get_mismatch_errors(
+            (hidden_states,),
+            {"payload": _RunnerPayload(payload.tensor, "different"), "scale": 2},
+        )
+    )
+
+    runner.grad_enabled = False
+    with pytest.raises(AssertionError, match="argument mismatch"):
+        runner.replay_graph_capture(False, (torch.ones(3),), {"payload": payload, "scale": 2})
+
+    assert runner.to_list(torch.tensor([1])).pop().item() == 1
+    assert runner.to_list((1, 2)) == [1, 2]
+
+
+def test_fsdp_param_and_grad_buffer_index_and_allocator_cpu_paths(monkeypatch):
+    assert fsdp_param_buffer._pad(5, 4) == 8
+    policy = fsdp_param_buffer.BucketingPolicy(
+        suggested_bucket_size=8,
+        fsdp_unit_modules=[torch.nn.Linear],
+        data_parallel_sharding_strategy="optim_grads_params",
+    )
+    assert policy.suggested_bucket_size == 8
+    assert policy.fsdp_unit_modules == [torch.nn.Linear]
+
+    no_shard = fsdp_param_buffer.DistributedDataParallelConfig(
+        data_parallel_sharding_strategy="no_shard"
+    )
+    elements = [
+        torch.Size([5]),
+        torch.Size([3]),
+        torch.Size([1]),
+        torch.Size([2]),
+        torch.Size([4]),
+    ]
+    item_map, bucket_index, shard_index = fsdp_param_buffer.build_data_parallel_buffer_index(
+        elements,
+        data_parallel_rank=1,
+        data_parallel_world_size=3,
+        is_data_distributed=False,
+        ddp_config=no_shard,
+        bucket_id=2,
+        chunk_size_factor=4,
+    )
+    assert bucket_index.bucket_id == 2
+    assert bucket_index.size == 15
+    assert item_map[0].global_data_index == 0
+    assert item_map[1].global_data_index == 5
+    assert item_map[4].global_data_index == 8
+    assert item_map[2].global_data_index == 12
+    assert item_map[3].global_data_index == 13
+    assert shard_index == fsdp_param_buffer.ShardBucketIndex(
+        bucket_id=2,
+        global_data_index=5,
+        local_data_index=5,
+        bucket_data_index=5,
+        size=5,
+    )
+
+    sharded = fsdp_param_buffer.DistributedDataParallelConfig(
+        data_parallel_sharding_strategy="optim_grads_params"
+    )
+    _, padded_bucket, distributed_shard = fsdp_param_buffer.build_data_parallel_buffer_index(
+        elements,
+        data_parallel_rank=2,
+        data_parallel_world_size=4,
+        is_data_distributed=True,
+        ddp_config=sharded,
+        bucket_id=4,
+        chunk_size_factor=4,
+    )
+    assert padded_bucket.size == 16
+    assert distributed_shard == fsdp_param_buffer.ShardBucketIndex(
+        bucket_id=4,
+        global_data_index=8,
+        local_data_index=0,
+        bucket_data_index=8,
+        size=4,
+    )
+
+    direct_shard = fsdp_param_buffer._get_dp_buffer_shard_bucket_index(
+        fsdp_param_buffer.BucketIndex(7, 12, 24, []),
+        is_data_distributed=False,
+        data_parallel_world_size=4,
+        data_parallel_rank=3,
+    )
+    assert direct_shard.global_data_index == 30
+    assert direct_shard.local_data_index == 30
+    assert direct_shard.size == 6
+
+    temp_allocator = fsdp_param_buffer.TemporaryBucketAllocator()
+    bucket = temp_allocator.allocate(0, 3, torch.float32, torch.device("cpu"))
+    assert bucket.data.shape == torch.Size([3])
+    assert 0 in temp_allocator.buckets
+    temp_allocator.free(0)
+    assert 0 not in temp_allocator.buckets
+
+    resize_allocator = fsdp_param_buffer.StorageResizeBasedBucketAllocator()
+    resize_bucket = resize_allocator.allocate(1, 4, torch.float32, torch.device("cpu"))
+    assert resize_bucket.data.numel() == 4
+    resize_allocator.free(1)
+    assert 1 in resize_allocator.buckets
+    assert resize_allocator.buckets[1].data._typed_storage()._size() == 0
+    resized_again = resize_allocator.allocate(1, 6, torch.float32, torch.device("cpu"))
+    assert resized_again.data._typed_storage()._size() == 6
+
+    buffer_calls = []
+
+    class _FakeGlobalBuffer:
+        def get_tensor(self, shape, dtype, name, mem_alloc_context=None):
+            buffer_calls.append((tuple(shape), dtype, name, mem_alloc_context))
+            return torch.zeros(*shape, dtype=dtype)
+
+    monkeypatch.setattr(fsdp_param_buffer, "get_global_memory_buffer", lambda: _FakeGlobalBuffer())
+    rotary = fsdp_param_buffer.RotaryBucketAllocator("rotary")
+    first = rotary.allocate(3, 5, torch.float32, torch.device("cpu"))
+    second = rotary.allocate(3, 5, torch.float32, torch.device("cpu"))
+    assert torch.equal(first.data, second.data)
+    assert buffer_calls[-1][2] == "rotary_0"
+    rotary.free(3)
+    rotary.allocate(4, 5, torch.float32, torch.device("cpu"))
+    assert rotary.using_buffer[4] == 0
+
+    monkeypatch.setattr(fsdp_param_buffer.torch.distributed, "get_rank", lambda *args, **kwargs: 0)
+    monkeypatch.setattr(fsdp_param_buffer.cur_platform, "synchronize", lambda: buffer_calls.append("sync"))
+    fsdp_groups = [
+        SimpleNamespace(fsdp_unit_id=1, params=[torch.nn.Parameter(torch.ones(2))], dtype=torch.float32),
+        SimpleNamespace(fsdp_unit_id=1, params=[torch.nn.Parameter(torch.ones(3))], dtype=torch.float32),
+        SimpleNamespace(fsdp_unit_id=2, params=[torch.nn.Parameter(torch.ones(2))], dtype=torch.float32),
+        SimpleNamespace(fsdp_unit_id=2, params=[torch.nn.Parameter(torch.ones(3))], dtype=torch.float32),
+        SimpleNamespace(fsdp_unit_id=None, params=[torch.nn.Parameter(torch.ones(1))], dtype=torch.float32),
+    ]
+    fixed = fsdp_param_buffer.FixedPoolAllocator("fixed", fsdp_groups, size=2)
+    assert fixed._is_two_bucket_group_equal([0, 1], [2, 3]) is True
+    fixed_bucket = fixed.allocate(0, 2, torch.float32, torch.device("cpu"), mem_alloc_context=object())
+    assert fixed_bucket.data.shape == torch.Size([2])
+    assert fixed.using_buffer[0] == (0, 0)
+    fixed.free(0)
+    assert (0, 0) in fixed.idle_buffer
+    fallback_bucket = fixed.allocate(4, 1, torch.float32, torch.device("cpu"))
+    assert fallback_bucket.data.shape == torch.Size([1])
 
 
 def test_dynamic_inference_request_record_checkpoint_merge_and_serialization(monkeypatch):
