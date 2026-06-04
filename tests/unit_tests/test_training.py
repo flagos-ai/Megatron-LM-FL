@@ -2552,7 +2552,7 @@ def test_get_model_wraps_virtual_chunks_with_ddp_config_and_side_stream(monkeypa
         use_megatron_fsdp=False,
         fp16=False,
         bf16=False,
-        accumulate_allreduce_grads_in_fp32=True,
+        accumulate_allreduce_grads_in_fp32=False,
         check_for_nan_in_loss_and_grad=True,
         check_for_large_grads=False,
         ddp_num_buckets=2,
@@ -2597,6 +2597,9 @@ def test_get_model_wraps_virtual_chunks_with_ddp_config_and_side_stream(monkeypa
     assert [chunk.kwargs["module"].metadata["post_process"] for chunk in model] == [False, True]
     assert ("ddp", 0, False, 4) in calls
     assert ("ddp", 1, True, 4) in calls
+    assert model[0].kwargs["ddp_config"].param_name_patterns_for_fp32_local_accumulation == (
+        ".*weight",
+    )
     assert ("defaults", 4) in calls
     assert ("amax", 2) in calls
     assert "stream-enter" in calls and "stream-exit" in calls
