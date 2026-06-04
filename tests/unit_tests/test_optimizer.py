@@ -12,6 +12,7 @@ from torch.optim import SGD, Adam
 
 import megatron.core.optimizer.clip_grads as clip_grads_module
 import megatron.core.optimizer.grad_scaler as grad_scaler_module
+import megatron.core.optimizer.layer_wise_optimizer as layer_wise_optimizer_module
 import megatron.core.optimizer.optimizer as optimizer_module
 # FP8 recipe will be used to test precision-aware-optimizer.
 from transformer_engine.pytorch.fp8 import fp8_autocast
@@ -1014,6 +1015,206 @@ def test_optimizer_package_optimizer_factory_selection_paths(monkeypatch):
             model_chunks=["model"],
             param_groups=param_groups,
         )
+
+
+def test_layer_wise_optimizer_shards_buckets_gathers_broadcasts_and_steps(monkeypatch):
+    monkeypatch.setattr(layer_wise_optimizer_module, "get_pg_size", lambda group: {"dp": 2, "expt": 2}[group])
+    monkeypatch.setattr(layer_wise_optimizer_module, "get_pg_rank", lambda group: 0)
+
+    config = OptimizerConfig(clip_grad=0.5, log_num_zeros_in_grad=True)
+    dense_a = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    dense_b = torch.nn.Parameter(torch.tensor([3.0]))
+    expert_a = torch.nn.Parameter(torch.tensor([4.0, 5.0, 6.0]))
+    expert_b = torch.nn.Parameter(torch.tensor([7.0]))
+
+    base1 = SimpleNamespace(
+        param_groups=[
+            {"params": [dense_a, dense_b], "is_expert_parallel": False},
+            {"params": [expert_a, expert_b], "is_expert_parallel": True},
+        ],
+        state={},
+    )
+    opt1 = _ToyMegatronOptimizer(base1, config)
+    pg_collection = SimpleNamespace(dp_cp="dp", expt_dp="expt")
+
+    layerwise = layer_wise_optimizer_module.LayerWiseDistributedOptimizer(
+        [opt1], config, pg_collection=pg_collection
+    )
+
+    assert layerwise.dp_cp_params_list is not None
+    assert layerwise.expt_dp_params_list is not None
+    assert any(param is dense_a for param in layerwise.dp_cp_params_list[0])
+    assert any(param is dense_b for param in layerwise.dp_cp_params_list[1])
+    assert any(param is expert_a for param in layerwise.expt_dp_params_list[0])
+    assert any(param is expert_b for param in layerwise.expt_dp_params_list[1])
+    assert len(opt1.optimizer.param_groups[0]["params"]) == 1
+    assert opt1.optimizer.param_groups[0]["params"][0] is dense_a
+    assert len(opt1.optimizer.param_groups[1]["params"]) == 1
+    assert opt1.optimizer.param_groups[1]["params"][0] is expert_a
+
+    bucket_calls = []
+
+    class _Bucket:
+        def __init__(self, params):
+            self.params = params
+
+        def set_layerwise_params_list(self, params_list):
+            bucket_calls.append(params_list)
+
+    model_chunk = SimpleNamespace(
+        bucket_groups=[SimpleNamespace(buckets=[_Bucket([dense_a])])],
+        expert_parallel_bucket_groups=[SimpleNamespace(buckets=[_Bucket([expert_a])])],
+    )
+    layerwise.set_bucket_layerwise_params_list([model_chunk])
+    assert len(bucket_calls) == 2
+    assert any(param is dense_a for param in bucket_calls[0][0])
+    assert any(param is expert_a for param in bucket_calls[1][0])
+
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.torch.distributed,
+        "all_gather",
+        lambda gather_list, src, group=None: [
+            tensor.copy_(torch.full_like(tensor, 10.0 + idx))
+            for idx, tensor in enumerate(gather_list)
+            if tensor is not src and tensor.numel() > 0
+        ],
+    )
+    layerwise.allgather_params()
+    assert torch.equal(dense_b.data, torch.full_like(dense_b.data, 11.0))
+    assert torch.equal(expert_b.data, torch.full_like(expert_b.data, 11.0))
+
+    broadcast_calls = []
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.torch.distributed,
+        "get_global_rank",
+        lambda group, rank: {"dp": 100, "expt": 200}[group] + rank,
+    )
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.torch.distributed,
+        "broadcast",
+        lambda param, src, group: broadcast_calls.append((param, src, group)),
+    )
+    layerwise.broadcast_params()
+    assert any(src == 100 and group == "dp" for _, src, group in broadcast_calls)
+    assert any(src == 200 and group == "expt" for _, src, group in broadcast_calls)
+
+    norm_calls = []
+    clip_calls = []
+    monkeypatch.setattr(
+        layer_wise_optimizer_module,
+        "get_grad_norm_fp32",
+        lambda grads, grad_stats_parallel_group=None: norm_calls.append(len(grads)) or 5.0,
+    )
+    monkeypatch.setattr(
+        layer_wise_optimizer_module,
+        "count_zeros_fp32",
+        lambda params, grad_stats_parallel_group=None, use_decoupled_grad=False: 2,
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "clip_grad_by_total_norm_fp32",
+        lambda params, max_norm, total_norm, use_decoupled_grad: clip_calls.append(
+            (list(params), max_norm, total_norm, use_decoupled_grad)
+        ),
+    )
+    for param in [dense_a, expert_a]:
+        param.grad = torch.ones_like(param.data)
+    success, grad_norm, zeros = layerwise.step()
+    assert success is True
+    assert grad_norm == 5.0
+    assert zeros == 2
+    assert norm_calls[-1] == 2
+    assert clip_calls
+
+    single_pg = SimpleNamespace(dp_cp="single", expt_dp="single")
+    monkeypatch.setattr(layer_wise_optimizer_module, "get_pg_size", lambda group: 1)
+    no_shard = layer_wise_optimizer_module.LayerWiseDistributedOptimizer(
+        [_ToyMegatronOptimizer(SimpleNamespace(param_groups=[{"params": [torch.nn.Parameter(torch.ones(1))]}], state={}), config)],
+        config,
+        pg_collection=single_pg,
+    )
+    assert no_shard.dp_cp_params_list is None
+    no_shard.allgather_params()
+    no_shard.broadcast_params()
+
+
+def test_layer_wise_optimizer_state_dict_files_and_sharded_metadata(monkeypatch, tmp_path):
+    monkeypatch.setattr(layer_wise_optimizer_module, "get_pg_size", lambda group: 1)
+    monkeypatch.setattr(layer_wise_optimizer_module, "get_pg_rank", lambda group: 0)
+    config = OptimizerConfig()
+    base = SimpleNamespace(param_groups=[{"params": [torch.nn.Parameter(torch.ones(1))]}], state={})
+    toy = _ToyMegatronOptimizer(base, config)
+    layerwise = layer_wise_optimizer_module.LayerWiseDistributedOptimizer(
+        [toy], config, pg_collection=SimpleNamespace(dp_cp="dp", expt_dp="expt")
+    )
+
+    loaded = []
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.ChainedOptimizer,
+        "load_state_dict",
+        lambda self, state_dict: loaded.append(state_dict),
+    )
+    state = {"fp32_from_fp16_params": {1: ["b"], 0: ["a"]}}
+    layerwise.load_state_dict(state)
+    assert state["fp32_from_fp16_params"] == [["a"], ["b"]]
+    assert loaded[-1] is state
+
+    class _Shard:
+        def __init__(self, replica_id):
+            self.replica_id = replica_id
+
+    local_params = SimpleNamespace(unwrap=lambda: [torch.tensor([1.0])])
+    empty_params = SimpleNamespace(unwrap=lambda: [])
+    sharded_state = {
+        "tensor": _Shard((3, 4, 5)),
+        "fp32_from_fp16_params": [[], [torch.tensor([2.0])]],
+        "optimizer": {
+            "state": {},
+            "param_groups": [{"params": local_params}, {"params": empty_params}],
+        },
+    }
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.ChainedOptimizer,
+        "sharded_state_dict",
+        lambda self, model_sharded_state_dict, is_loading=False, **kwargs: sharded_state,
+    )
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.torch.distributed,
+        "get_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.torch.distributed,
+        "all_gather_object",
+        lambda out, obj: (out.__setitem__(0, dict(obj)), out.__setitem__(1, {**dict(obj), "params": True})),
+    )
+
+    result = layerwise.sharded_state_dict({}, is_loading=False)
+    assert result["tensor"].replica_id == (3, 4, 0)
+    assert isinstance(
+        result["fp32_from_fp16_params"][0],
+        layer_wise_optimizer_module.LocalNonpersistentObject,
+    )
+    assert len(result["fp32_from_fp16_params"][1]) == 1
+    assert torch.equal(result["fp32_from_fp16_params"][1][0], torch.tensor([2.0]))
+    assert isinstance(result["fp32_from_fp16_params"], dict)
+    assert isinstance(
+        result["optimizer"]["state"],
+        layer_wise_optimizer_module.LocalNonpersistentObject,
+    )
+    assert result["optimizer"]["param_groups"][0]["params"] is local_params
+    assert result["optimizer"]["param_groups"][1]["params"] is empty_params
+
+    save_path = tmp_path / "layerwise.pt"
+    monkeypatch.setattr(
+        layer_wise_optimizer_module.ChainedOptimizer,
+        "state_dict",
+        lambda self: {"saved": True},
+    )
+    layerwise.save_state_dict_to_file(str(save_path))
+    assert torch.load(save_path) == {"saved": True}
+    layerwise.load_state_dict_from_file(str(save_path))
+    assert loaded[-1] == {"saved": True}
 
 
 def test_precision_aware_fused_adam():
