@@ -529,6 +529,7 @@ def test_validate_args_dtype_and_precision_guard_paths(monkeypatch):
                 setattr(args, "use_rotary_position_embeddings", False),
                 setattr(args, "rotary_interleaved", True),
                 setattr(args, "use_legacy_models", True),
+                setattr(args, "ckpt_format", "torch"),
             ),
             "rotary-interleaved",
         ),
