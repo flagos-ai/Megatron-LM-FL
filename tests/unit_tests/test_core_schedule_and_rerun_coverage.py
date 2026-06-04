@@ -51,6 +51,14 @@ from megatron.core import _rank_utils as rank_utils
 from megatron.core.resharding import utils as reshard_utils
 
 
+class _ReusableNullContext:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return False
+
+
 class _FakeEvent:
     def __init__(self, calls):
         self.calls = calls
@@ -1253,6 +1261,364 @@ def test_dynamic_context_errors_factory_and_memory_size_strings():
     assert dynamic_context.get_mem_size_str(1024**2) == "1 MB"
     assert dynamic_context.get_mem_size_str(1024**3) == "1 GB"
     assert dynamic_context.get_mem_size_str(1024**4) == "1 TB"
+
+
+def test_text_generation_server_generate_endpoint_validation_and_success(monkeypatch):
+    from megatron.core.inference.text_generation_server import (
+        text_generation_server as generation_server,
+    )
+
+    calls = []
+
+    class _Request:
+        remote_addr = "127.0.0.1"
+
+        def __init__(self, payload):
+            self.payload = payload
+
+        def get_json(self):
+            return self.payload
+
+    def call(payload):
+        monkeypatch.setattr(generation_server, "request", _Request(payload), raising=False)
+        endpoint = generation_server.MegatronGenerate(
+            "engine", SimpleNamespace(inference_flask_server_logging=True)
+        )
+        return endpoint.put()
+
+    monkeypatch.setattr(generation_server, "LOCK", _ReusableNullContext())
+    monkeypatch.setattr(generation_server, "jsonify", lambda obj: ("json", obj), raising=False)
+    monkeypatch.setattr(generation_server, "send_do_generate", lambda: calls.append("send"))
+    monkeypatch.setattr(
+        generation_server,
+        "run_mcore_engine",
+        lambda *args, **kwargs: calls.append(("run", args[1:])) or {"text": ["ok"]},
+    )
+    monkeypatch.setattr(generation_server.logging, "info", lambda message: calls.append(("log", message)))
+
+    invalid_payloads = [
+        ({}, "prompts argument required"),
+        ({"prompts": ["x"], "max_len": 4}, "max_len is no longer used"),
+        ({"prompts": ["x"], "sentences": ["x"]}, "sentences is no longer used"),
+        ({"prompts": ["x"], "beam_width": 1}, "Beam search is no longer supported."),
+        ({"prompts": "x"}, "prompts is not a list of strings"),
+        ({"prompts": []}, "prompts is empty"),
+        ({"prompts": ["x"] * 129}, "Maximum number of prompts is 128"),
+        ({"prompts": ["x"], "tokens_to_generate": "bad"}, "tokens_to_generate must be"),
+        ({"prompts": ["x"], "tokens_to_generate": -1}, "tokens_to_generate must be"),
+        ({"prompts": ["x"], "tokens_to_generate": 0}, "tokens_to_generate=0 implies"),
+        ({"prompts": ["x"], "logprobs": "bad"}, "logprobs must be"),
+        ({"prompts": ["x"], "temperature": "hot"}, "temperature must be"),
+        ({"prompts": ["x"], "temperature": 0.0}, "temperature must be"),
+        ({"prompts": ["x"], "top_k": 1.5}, "top_k must be"),
+        ({"prompts": ["x"], "top_k": 1001}, "top_k must be"),
+        ({"prompts": ["x"], "top_p": 1}, "top_p must be"),
+        ({"prompts": ["x"], "top_k": 1, "top_p": 0.5}, "cannot set both"),
+        ({"prompts": ["x"], "top_p": 1.5}, "top_p must be less"),
+        ({"prompts": ["x"], "top_p_decay": "bad"}, "top_p_decay must be"),
+        ({"prompts": ["x"], "top_p_decay": 0.5}, "top_p_decay cannot"),
+        ({"prompts": ["x"], "top_p": 0.8, "top_p_decay": 1.5}, "top_p_decay must be"),
+        ({"prompts": ["x"], "top_p_bound": "bad"}, "top_p_bound must be"),
+        ({"prompts": ["x"], "top_p_bound": 0.5}, "top_p_bound cannot"),
+        ({"prompts": ["x"], "top_p": 0.4, "top_p_bound": 0.5}, "top_p_bound must be"),
+        ({"prompts": ["x"], "add_BOS": "bad"}, "add_BOS must be"),
+        ({"prompts": [""]}, "Empty prompts require"),
+        ({"prompts": ["x"], "stop_on_double_eol": 1}, "stop_on_double_eol must be"),
+        ({"prompts": ["x"], "stop_on_eol": 1}, "stop_on_eol must be"),
+        ({"prompts": ["x"], "prevent_newline_after_colon": 1}, "prevent_newline_after_colon"),
+        ({"prompts": ["x"], "random_seed": "seed"}, "random_seed must be"),
+        ({"prompts": ["x"], "random_seed": -1}, "random_seed must be"),
+        ({"prompts": ["x"], "stop_token": "eod"}, "stop_token must be"),
+        ({"prompts": ["x"], "length_penalty": 1}, "length_penalty must be"),
+    ]
+    for payload, expected in invalid_payloads:
+        response = call(payload)
+        message = response[0] if isinstance(response, tuple) else response
+        assert expected in message
+
+    response = call(
+        {
+            "prompts": ["x"],
+            "tokens_to_generate": 2,
+            "logprobs": True,
+            "temperature": 0.5,
+            "top_p": 0.8,
+            "top_p_decay": 0.1,
+            "top_p_bound": 0.2,
+            "add_BOS": True,
+            "stop_on_double_eol": False,
+            "stop_on_eol": False,
+            "prevent_newline_after_colon": False,
+            "random_seed": 4,
+            "stop_token": 5,
+            "length_penalty": 1.0,
+        }
+    )
+    assert response == ("json", {"text": ["ok"]})
+    assert "send" in calls
+    assert any(item[0] == "run" for item in calls if isinstance(item, tuple))
+
+    monkeypatch.setattr(
+        generation_server,
+        "run_mcore_engine",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("engine failed")),
+    )
+    assert call({"prompts": ["x"]}) == "engine failed"
+
+    monkeypatch.setattr(generation_server, "HAVE_FLASK", False)
+    with pytest.raises(RuntimeError, match="flask"):
+        generation_server.MegatronServer("model")
+
+
+def test_text_generation_completions_endpoint_detokenize_and_post(monkeypatch):
+    from megatron.core.inference.text_generation_server.endpoints import (
+        completions as completions_endpoint,
+    )
+
+    class _Tokenizer:
+        eod = 9
+
+        def detokenize(self, tokens):
+            if isinstance(tokens, int):
+                return f"tok{tokens}"
+            if isinstance(tokens, list):
+                return "".join(f"tok{token}" for token in tokens)
+            return str(tokens)
+
+        def offsets(self, tokens, text):
+            offsets = []
+            cursor = 0
+            for token in tokens:
+                offsets.append(cursor)
+                cursor += len(self.detokenize([token]))
+            return offsets
+
+    tokenizer = _Tokenizer()
+    assert completions_endpoint.detokenize("prompt", tokenizer) == ["prompt"]
+    assert completions_endpoint.detokenize(["a", "b"], tokenizer) == ["a", "b"]
+    assert completions_endpoint.detokenize([1, 2], tokenizer) == ["tok1"]
+    assert completions_endpoint.detokenize([[1, 2], [3]], tokenizer) == ["tok1tok2", "tok3"]
+    for bad_prompt in ([], [1, "bad"], object()):
+        with pytest.raises(ValueError):
+            completions_endpoint.detokenize(bad_prompt, tokenizer)
+
+    calls = []
+
+    class _Request:
+        def __init__(self, payload):
+            self.payload = payload
+
+        def get_json(self):
+            return self.payload
+
+    def call(payload):
+        monkeypatch.setattr(completions_endpoint, "request", _Request(payload), raising=False)
+        endpoint = completions_endpoint.MegatronCompletions(
+            SimpleNamespace(controller=SimpleNamespace(tokenizer=tokenizer)), SimpleNamespace()
+        )
+        return endpoint.post()
+
+    monkeypatch.setattr(completions_endpoint, "HAVE_FLASK", True)
+    monkeypatch.setattr(completions_endpoint, "LOCK", _ReusableNullContext())
+    monkeypatch.setattr(completions_endpoint, "send_do_generate", lambda: calls.append("send"))
+    monkeypatch.setattr(completions_endpoint, "jsonify", lambda obj: ("json", obj), raising=False)
+
+    monkeypatch.setattr(
+        completions_endpoint,
+        "run_mcore_engine",
+        lambda *args, **kwargs: calls.append(("run", args[1:], kwargs))
+        or {
+            "text": ["prompttok1tok2STOP"],
+            "segments": [[["prompt", "tok1", "tok2", "STOP"]]],
+            "logprobs": [[-0.1, -0.2, -0.3]],
+            "tokens": [[1, 2, 3]],
+            "top_n_logprobs": [[{"tok1": -0.1}, {"tok2": -0.2}, {"STOP": -0.3}]],
+        },
+    )
+
+    assert call({"prompt": "x", "max_tokens": 0, "echo": False}) == (
+        "echo=False not supported when tokens_to_generate == 0",
+        400,
+    )
+    assert call({"prompt": "x", "max_tokens": 1, "best_of": 2}) == (
+        "best_of > 1 not supported",
+        400,
+    )
+    assert call({"prompt": "x", "max_tokens": 1, "n": 2}) == (
+        "num_completions > 1 not supported",
+        400,
+    )
+    assert call({"prompt": "x", "max_tokens": 1, "logprobs": 1}) == (
+        "cannot return top-k unless tokens_to_generate=0 at this time",
+        400,
+    )
+    assert call({"prompt": "x", "max_tokens": 0, "echo": True, "logprobs": 11}) == (
+        "return_topk_logprobs > 10 not supported",
+        400,
+    )
+
+    response = call(
+        {
+            "prompt": "prompt",
+            "max_tokens": 0,
+            "temperature": 0,
+            "top_k": 4,
+            "top_p": 0.7,
+            "logprobs": 1,
+            "echo": True,
+            "seed": 123,
+            "stop": "STOP",
+        }
+    )
+    assert response[0] == "json"
+    assert response[1]["choices"][0]["index"] == 0
+    assert response[1]["choices"][0]["logprobs"]["top_logprobs"][0] is None
+    assert "send" in calls
+    run_call = next(item for item in calls if isinstance(item, tuple) and item[0] == "run")
+    assert run_call[2]["random_seed"] == 123
+    assert run_call[1][1] == ["prompt"]
+
+
+def test_masked_wordpiece_dataset_config_cache_and_masking_paths(monkeypatch, tmp_path):
+    from megatron.core.datasets import masked_dataset
+
+    class _Tokenizer:
+        cls = 101
+        sep = 102
+        mask = 103
+        pad = 0
+        eos = 104
+        eod = 105
+        special_tokens_dict = {"pad_token": pad, "eos_token": eos}
+        inv_vocab = {
+            101: "[CLS]",
+            102: "[SEP]",
+            11: "hello",
+            12: "##ly",
+            13: "world",
+            14: "again",
+            15: "##s",
+            16: "tail",
+        }
+
+    config = masked_dataset.MaskedWordPieceDatasetConfig(
+        random_seed=123,
+        sequence_length=8,
+        tokenizer=_Tokenizer(),
+        path_to_cache=str(tmp_path),
+        masking_probability=0.5,
+        short_sequence_probability=0.25,
+        masking_max_ngram=3,
+        masking_do_full_word=True,
+        masking_do_permutation=False,
+        masking_use_longer_ngrams=True,
+        masking_use_geometric_distribution=False,
+    )
+    assert config.mock is True
+
+    with pytest.raises(AssertionError):
+        masked_dataset.MaskedWordPieceDatasetConfig(
+            random_seed=1,
+            sequence_length=8,
+            tokenizer=_Tokenizer(),
+            masking_probability=0.5,
+            short_sequence_probability=0.1,
+            masking_max_ngram=2,
+            masking_do_full_word=True,
+            masking_do_permutation=True,
+            masking_use_longer_ngrams=False,
+            masking_use_geometric_distribution=True,
+        )
+
+    log_calls = []
+    monkeypatch.setattr(
+        masked_dataset,
+        "log_single_rank",
+        lambda logger, level, message: log_calls.append((level, message)),
+    )
+    masked_dataset.MaskedWordPieceDatasetConfig(
+        random_seed=1,
+        sequence_length=8,
+        tokenizer=_Tokenizer(),
+        masking_probability=0.5,
+        short_sequence_probability=0.1,
+        masking_max_ngram=2,
+        masking_do_full_word=True,
+        masking_do_permutation=False,
+        masking_use_longer_ngrams=True,
+        masking_use_geometric_distribution=True,
+    )
+    assert any("geometric distribution overrides" in message for _, message in log_calls)
+
+    class _LowLevelDataset:
+        document_indices = torch.tensor([0, 2, 5])
+
+    assert masked_dataset.MaskedWordPieceDataset.numel_low_level_dataset(_LowLevelDataset()) == 2
+    monkeypatch.setattr(masked_dataset, "IndexedDataset", lambda path: ("indexed", path))
+    assert masked_dataset.MaskedWordPieceDataset.build_low_level_dataset("prefix", config) == (
+        "indexed",
+        "prefix",
+    )
+    assert "masking_probability" in masked_dataset.MaskedWordPieceDataset._key_config_attributes()
+
+    class _ToyMaskedDataset(masked_dataset.MaskedWordPieceDataset):
+        def __getitem__(self, idx):
+            return idx
+
+        def _get_token_mask(self, numpy_random_state):
+            return self.config.tokenizer.mask
+
+    dataset = object.__new__(_ToyMaskedDataset)
+    dataset.config = config
+    dataset.sample_index = torch.arange(3)
+    assert len(dataset) == 3
+
+    masked_tokens, positions, labels, boundaries, spans = dataset._create_masked_lm_predictions(
+        [101, 11, 12, 13, 102, 14, 15, 16, 102],
+        target_sequence_length=8,
+        numpy_random_state=masked_dataset.numpy.random.RandomState(7),
+    )
+    assert masked_tokens[0] == 101 and masked_tokens[-1] == 102
+    assert positions == sorted(positions)
+    assert all(label in {11, 12, 13, 14, 15, 16} for label in labels)
+    assert boundaries == [1, 1, 0, 1, 1, 1, 0, 1, 1]
+    assert spans == sorted(spans, key=lambda item: item[0][0])
+
+    permutation_config = masked_dataset.MaskedWordPieceDatasetConfig(
+        random_seed=123,
+        sequence_length=8,
+        tokenizer=_Tokenizer(),
+        path_to_cache=str(tmp_path),
+        masking_probability=0.5,
+        short_sequence_probability=0.25,
+        masking_max_ngram=2,
+        masking_do_full_word=False,
+        masking_do_permutation=True,
+        masking_use_longer_ngrams=False,
+        masking_use_geometric_distribution=False,
+    )
+    permutation_dataset = object.__new__(_ToyMaskedDataset)
+    permutation_dataset.config = permutation_config
+    permutation_dataset._create_masked_lm_predictions(
+        [101, 11, 12, 13, 102, 14, 15, 16, 102],
+        target_sequence_length=8,
+        numpy_random_state=masked_dataset.numpy.random.RandomState(11),
+    )
+
+    cached_dataset = object.__new__(_ToyMaskedDataset)
+    cached_dataset.config = config
+    cached_dataset.dataset = SimpleNamespace(path_prefix="prefix", document_indices=torch.arange(5), sequence_lengths=torch.arange(5))
+    cached_dataset.indices = masked_dataset.numpy.array([0, 1, 2])
+    cached_dataset.num_samples = None
+    cached_dataset.index_split = dataset_utils.Split.train
+    cached_dataset.unique_description_hash = "hash"
+    cached_dataset.unique_description = "description"
+    cache_dir = tmp_path
+    (cache_dir / "hash-_ToyMaskedDataset-description.txt").write_text("description", encoding="utf-8")
+    saved_index = masked_dataset.numpy.array([[0, 1], [1, 2]])
+    masked_dataset.numpy.save(cache_dir / "hash-_ToyMaskedDataset-sample_index.npy", saved_index)
+    loaded = cached_dataset._build_sample_index(sequence_length=8, min_sentences_per_sample=1)
+    assert loaded.shape == saved_index.shape
 
 
 @pytest.mark.parametrize(
