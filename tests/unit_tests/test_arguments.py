@@ -3,6 +3,9 @@
 import argparse
 import dataclasses
 import json
+import sys
+from importlib.machinery import ModuleSpec
+from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
@@ -161,6 +164,38 @@ def test_parse_args_allows_extra_provider_and_unknown_args(monkeypatch):
     parsed = arguments.parse_args(extra_args_provider=extra_provider, ignore_unknown_args=True)
 
     assert parsed.custom_flag == 7
+
+
+def test_parse_args_yaml_and_disable_msc_paths(monkeypatch):
+    loaded_args = SimpleNamespace(yaml_loaded=True, enable_msc=True)
+    yaml_module = ModuleType("megatron.training.yaml_arguments")
+    yaml_module.__spec__ = ModuleSpec("megatron.training.yaml_arguments", loader=None)
+    yaml_module.load_yaml = lambda path: loaded_args
+    monkeypatch.setitem(sys.modules, "megatron.training.yaml_arguments", yaml_module)
+    monkeypatch.setattr(
+        "sys.argv",
+        _minimal_training_argv(["--yaml-cfg", "config.yaml"]),
+    )
+    monkeypatch.setenv("RANK", "2")
+    monkeypatch.setenv("WORLD_SIZE", "4")
+
+    parsed = arguments.parse_args()
+
+    assert parsed is loaded_args
+    assert parsed.rank == 2
+    assert parsed.world_size == 4
+
+    calls = []
+    monkeypatch.setattr("sys.argv", _minimal_training_argv(["--disable-msc"]))
+    monkeypatch.setattr(arguments.MultiStorageClientFeature, "disable", lambda: calls.append("disable"))
+    monkeypatch.setattr(arguments.MultiStorageClientFeature, "is_enabled", lambda: False)
+    monkeypatch.setattr(arguments, "warn_rank_0", lambda message, *args: calls.append(message))
+
+    parsed = arguments.parse_args()
+
+    assert parsed.enable_msc is False
+    assert "disable" in calls
+    assert any("MSC feature is disabled" in item for item in calls if isinstance(item, str))
 
 
 @pytest.mark.parametrize(
@@ -360,6 +395,377 @@ def test_validate_args_dtype_and_precision_guard_paths(monkeypatch):
     assert args.mamba_inference_conv_states_dtype is None
     assert args.accumulate_allreduce_grads_in_fp32 is False
     assert args.bias_gelu_fusion is False
+
+
+@pytest.mark.parametrize(
+    ("mutator", "match"),
+    [
+        (
+            lambda args: setattr(args, "non_persistent_ckpt_type", "local"),
+            "nvidia_resiliency_ext is required",
+        ),
+        (
+            lambda args: (
+                setattr(args, "use_legacy_models", True),
+                setattr(args, "ckpt_format", "torch_dist"),
+            ),
+            "legacy model format",
+        ),
+        (
+            lambda args: (
+                setattr(args, "attention_backend", arguments.AttnBackend.local),
+                setattr(args, "spec", ["transformer_engine"]),
+            ),
+            "attention-backend local",
+        ),
+        (
+            lambda args: (
+                setattr(args, "perform_rl_step", True),
+                setattr(args, "rl_persist_cuda_graphs", True),
+                setattr(args, "cuda_graph_impl", "none"),
+            ),
+            "rl-persist-cuda-graphs",
+        ),
+        (
+            lambda args: (
+                setattr(args, "perform_rl_step", True),
+                setattr(args, "rl_training_cuda_graphs", True),
+                setattr(args, "cuda_graph_impl", "none"),
+            ),
+            "rl-training-cuda-graphs",
+        ),
+        (
+            lambda args: (
+                setattr(args, "perform_rl_step", True),
+                setattr(args, "rl_num_parallel_generations", 2),
+                setattr(args, "rl_parallel_generation_tasks", 1),
+            ),
+            "Cannot specify both",
+        ),
+        (
+            lambda args: (
+                setattr(args, "perform_rl_step", True),
+                setattr(args, "rl_num_parallel_generation_batches", 2),
+                setattr(args, "rl_partial_rollouts", False),
+            ),
+            "rl-num-parallel-generation-batches requires",
+        ),
+        (
+            lambda args: (
+                setattr(args, "perform_rl_step", True),
+                setattr(args, "rl_use_sequence_packing", True),
+                setattr(args, "micro_batch_size", 2),
+            ),
+            "micro_batch_size must be 1",
+        ),
+        (
+            lambda args: setattr(args, "num_dataset_builder_threads", 0),
+            "",
+        ),
+        (
+            lambda args: (
+                setattr(args, "train_samples", 10),
+                setattr(args, "train_iters", 4),
+            ),
+            "expected iteration-based training",
+        ),
+        (
+            lambda args: (
+                setattr(args, "fp16_lm_cross_entropy", True),
+                setattr(args, "fp16", False),
+            ),
+            "lm cross entropy",
+        ),
+        (
+            lambda args: (
+                setattr(args, "fp32_residual_connection", True),
+                setattr(args, "bf16", False),
+            ),
+            "residual connection",
+        ),
+        (
+            lambda args: setattr(args, "no_weight_decay_cond_type", "bad"),
+            "Invalid no_weight_decay_cond_type",
+        ),
+        (
+            lambda args: (
+                setattr(args, "distribute_saved_activations", True),
+                setattr(args, "tensor_model_parallel_size", 1),
+            ),
+            "distribute",
+        ),
+        (
+            lambda args: (
+                setattr(args, "recompute_granularity", "selective"),
+                setattr(args, "recompute_method", "block"),
+            ),
+            "selective",
+        ),
+        (
+            lambda args: (
+                setattr(args, "overlap_param_gather", True),
+                setattr(args, "use_distributed_optimizer", False),
+                setattr(args, "use_megatron_fsdp", False),
+                setattr(args, "optimizer", "adam"),
+            ),
+            "overlap-param-gather",
+        ),
+        (
+            lambda args: (
+                setattr(args, "fp4", True),
+                setattr(args, "fp8", True),
+            ),
+            "cannot be used simultaneously",
+        ),
+        (
+            lambda args: (
+                setattr(args, "fp4", False),
+                setattr(args, "fp4_param_gather", True),
+            ),
+            "fp4-param-gather",
+        ),
+        (
+            lambda args: (
+                setattr(args, "use_rotary_position_embeddings", False),
+                setattr(args, "rotary_interleaved", True),
+                setattr(args, "use_legacy_models", True),
+            ),
+            "rotary-interleaved",
+        ),
+        (
+            lambda args: (
+                setattr(args, "add_position_embedding", False),
+                setattr(args, "position_embedding_type", "learned_absolute"),
+            ),
+            "no-position-embedding",
+        ),
+        (
+            lambda args: (
+                setattr(args, "position_embedding_type", "mrope"),
+                setattr(args, "mrope_section", None),
+            ),
+            "mrope-section",
+        ),
+        (
+            lambda args: (
+                setattr(args, "expert_model_parallel_size", 2),
+                setattr(args, "num_experts", None),
+            ),
+            "num_experts",
+        ),
+        (
+            lambda args: (
+                setattr(args, "ckpt_format", "torch_dcp"),
+                setattr(args, "use_torch_fsdp2", False),
+            ),
+            "torch_dcp",
+        ),
+        (
+            lambda args: (
+                setattr(args, "ckpt_format", "fsdp_dtensor"),
+                setattr(args, "use_megatron_fsdp", False),
+            ),
+            "fsdp_dtensor",
+        ),
+        (
+            lambda args: (
+                setattr(args, "mock_data", True),
+                setattr(args, "data_path", ["train"]),
+            ),
+            "single data source",
+        ),
+        (
+            lambda args: (
+                setattr(args, "fim_data", True),
+                setattr(args, "mock_data", False),
+                setattr(args, "fim_rate", None),
+            ),
+            "fim-rate",
+        ),
+        (
+            lambda args: (
+                setattr(args, "deterministic_mode", True),
+                setattr(args, "use_flash_attn", True),
+            ),
+            "Flash attention",
+        ),
+        (
+            lambda args: (
+                setattr(args, "load_main_params_from_ckpt", True),
+                setattr(args, "no_load_optim", False),
+            ),
+            "load-main-params",
+        ),
+        (
+            lambda args: (
+                setattr(args, "inference_batch_times_seqlen_threshold", 1),
+                setattr(args, "pipeline_model_parallel_size", 1),
+            ),
+            "inference-batch-times-seqlen-threshold",
+        ),
+        (
+            lambda args: (
+                setattr(args, "inference_dynamic_batching", True),
+                setattr(args, "inference_dynamic_batching_buffer_size_gb", None),
+            ),
+            "",
+        ),
+        (
+            lambda args: (
+                setattr(args, "moe_use_upcycling", True),
+                setattr(args, "save", None),
+            ),
+            "upcycling",
+        ),
+        (
+            lambda args: (
+                setattr(args, "skip_train", True),
+                setattr(args, "perform_rl_step", True),
+                setattr(args, "no_load_optim", True),
+                setattr(args, "rl_offload_optimizer_during_inference", True),
+            ),
+            "rl-offload-optimizer",
+        ),
+        (
+            lambda args: (
+                setattr(args, "optimizer", "muon"),
+                setattr(args, "overlap_grad_reduce", True),
+            ),
+            "Muon optimizer",
+        ),
+        (
+            lambda args: (
+                setattr(args, "optimizer_cpu_offload", True),
+                setattr(args, "use_precision_aware_optimizer", False),
+            ),
+            "optimizer cpu offload",
+        ),
+        (
+            lambda args: (
+                setattr(args, "replication", True),
+                setattr(args, "replication_jump", None),
+            ),
+            "replication-jump",
+        ),
+        (
+            lambda args: (
+                setattr(args, "delay_wgrad_compute", True),
+                setattr(args, "transformer_impl", "local"),
+            ),
+            "Delaying wgrad",
+        ),
+        (
+            lambda args: (
+                setattr(args, "fine_grained_activation_offloading", True),
+                setattr(args, "transformer_impl", "local"),
+            ),
+            "Fine-grained activation",
+        ),
+        (
+            lambda args: (
+                setattr(args, "mtp_num_layers", 1),
+                setattr(args, "position_embedding_type", "relative"),
+            ),
+            "Multi-Token Prediction",
+        ),
+        (
+            lambda args: (
+                setattr(args, "multi_latent_attention", True),
+                setattr(args, "group_query_attention", True),
+            ),
+            "mutually exclusive",
+        ),
+        (
+            lambda args: (
+                setattr(args, "mla_down_proj_fusion", True),
+                setattr(args, "multi_latent_attention", False),
+            ),
+            "mla-down-proj-fusion",
+        ),
+        (
+            lambda args: (
+                setattr(args, "moe_latent_size", 0),
+                setattr(args, "num_experts", 2),
+            ),
+            "greater than zero",
+        ),
+    ],
+)
+def test_validate_args_rejects_training_configuration_guard_paths(monkeypatch, mutator, match):
+    _patch_validate_environment(monkeypatch)
+    args = _parse_minimal_training_args(monkeypatch)
+    mutator(args)
+
+    with pytest.raises((AssertionError, RuntimeError, ValueError), match=match):
+        arguments.validate_args(args)
+
+
+def test_validate_args_accepts_pipeline_layout_and_warning_mutation_paths(monkeypatch):
+    _patch_validate_environment(monkeypatch)
+    messages = []
+    monkeypatch.setattr(arguments, "warn_rank_0", lambda message, *args: messages.append(message))
+    monkeypatch.setattr(arguments, "print_rank_0", lambda message, *args: messages.append(message))
+    monkeypatch.setenv("NCCL_ALGO", "Tree")
+    monkeypatch.setattr(torch, "use_deterministic_algorithms", lambda enabled: messages.append(("det", enabled)))
+    args = _parse_minimal_training_args(
+        monkeypatch,
+        [
+            "--pipeline-model-parallel-size",
+            "2",
+            "--num-layers-per-virtual-pipeline-stage",
+            "1",
+            "--overlap-p2p-comm",
+            "--ckpt-format",
+            "torch_dist",
+        ],
+    )
+    args.world_size = 2
+    args.rank = 0
+    args.overlap_param_gather = True
+    args.overlap_grad_reduce = True
+    args.use_distributed_optimizer = True
+    args.use_gloo_process_groups = True
+    args.ckpt_fully_parallel_save = False
+    args.use_dist_ckpt = True
+    args.use_dist_ckpt_deprecated = True
+    args.dist_ckpt_format_deprecated = True
+    args.ckpt_fully_parallel_save_deprecated = True
+    args.ckpt_fully_parallel_load = True
+    args.ckpt_fully_parallel_load_exchange_algo = "ring"
+    args.async_save = True
+    args.use_persistent_ckpt_worker = False
+    args.fake_process_group = True
+    args.moe_token_dispatcher_type = "allgather"
+    args.replication = False
+    args.replication_jump = 2
+    args.apply_query_key_layer_scaling = True
+    args.result_rejected_tracker_filename = "tracker.txt"
+    args.iterations_to_skip = [1]
+    args.fim_data = False
+    args.deterministic_mode = True
+    args.use_flash_attn = False
+    args.cross_entropy_loss_fusion = False
+    args.cuda_graph_scope = ["full"]
+    args.cuda_graph_impl = "none"
+
+    class _FakeRerun:
+        @staticmethod
+        def get_skipped_iterations_from_tracker_file(path):
+            assert path == "tracker.txt"
+            return [3, 5]
+
+    monkeypatch.setattr(arguments, "RerunStateMachine", _FakeRerun)
+
+    arguments.validate_args(args)
+
+    assert args.virtual_pipeline_model_parallel_size is None
+    assert args.no_load_optim is False
+    assert args.async_save is False
+    assert args.replication_jump is None
+    assert args.attention_softmax_in_fp32 is True
+    assert args.iterations_to_skip == [1, 3, 5]
+    assert args.cuda_graph_scope == []
+    assert ("det", True) in messages
 
 
 def test_validate_model_config_args_from_heterogeneous_config_accepts_matching_args():

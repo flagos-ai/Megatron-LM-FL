@@ -2,7 +2,8 @@
 
 import logging
 import random
-from types import SimpleNamespace
+import sys
+from types import ModuleType, SimpleNamespace
 
 import numpy as np
 import pytest
@@ -148,6 +149,58 @@ def test_initialize_megatron_validates_yaml_and_checkpoint_arg_requirements(monk
         assert "--use-checkpoint-args requires" in str(exc)
     else:
         raise AssertionError("expected missing checkpoint args to raise")
+
+
+def test_initialize_megatron_checkpoint_conversion_checkpoint_args_and_async_worker(monkeypatch):
+    calls = []
+    args = _make_initialize_args(
+        ckpt_convert_format="torch_dist",
+        ckpt_convert_save="converted",
+        load="source",
+        use_checkpoint_args=True,
+        async_save=True,
+        use_persistent_ckpt_worker=True,
+    )
+    monkeypatch.setattr(
+        initialize,
+        "load_args_from_checkpoint",
+        lambda args, load_arg=None: calls.append(("load-args", load_arg)),
+    )
+    monkeypatch.setattr(initialize, "validate_args", lambda args, defaults: calls.append(("validate", defaults)))
+    monkeypatch.setattr(initialize, "set_global_variables", lambda args: calls.append("globals"))
+    monkeypatch.setattr(initialize, "setup_logging", lambda: calls.append("logging"))
+    monkeypatch.setattr(initialize, "init_persistent_async_worker", lambda rank, mode: calls.append(("async", rank, mode)))
+    monkeypatch.setattr(initialize, "initialize_rerun_state_machine", lambda **kwargs: calls.append("rerun"))
+    monkeypatch.setattr(initialize, "get_args", lambda: args)
+
+    result = initialize.initialize_megatron(
+        allow_no_cuda=True,
+        skip_mpu_initialization=True,
+        parsed_args=args,
+        args_defaults={"use_checkpoint_args": True},
+    )
+
+    assert result is None
+    assert args.exit_on_missing_checkpoint is True
+    assert ("load-args", "pretrained_checkpoint") in calls
+    assert ("load-args", None) in calls
+    assert ("async", 0, "forkserver") in calls
+
+    bad_local_args = _make_initialize_args(use_checkpoint_args=True, load="source", non_persistent_ckpt_type="local")
+    with pytest.raises(AssertionError, match="not supported"):
+        initialize.initialize_megatron(
+            allow_no_cuda=True,
+            skip_mpu_initialization=True,
+            parsed_args=bad_local_args,
+        )
+
+    bad_convert_args = _make_initialize_args(ckpt_convert_format="torch_dist", load="source")
+    with pytest.raises(AssertionError):
+        initialize.initialize_megatron(
+            allow_no_cuda=True,
+            skip_mpu_initialization=True,
+            parsed_args=bad_convert_args,
+        )
 
 
 def test_set_random_seed_offsets_pipeline_and_data_parallel_ranks(monkeypatch):
@@ -370,6 +423,103 @@ def test_initialize_distributed_sets_flight_recorder_env_and_init_group(monkeypa
     finally:
         for env_name in flight_recorder_env_names:
             initialize.os.environ.pop(env_name, None)
+
+
+def test_initialize_distributed_keeps_preexisting_flight_recorder_env(monkeypatch, tmp_path):
+    calls = []
+    args = SimpleNamespace(
+        local_rank=0,
+        cuda_graph_impl=None,
+        flight_recorder_dump_path=str(tmp_path / "rank_dump"),
+        flight_recorder_trace_buffer_size=128,
+        flight_recorder_dump_on_timeout=False,
+        flight_recorder_include_stack_trace=False,
+        flight_recorder_include_only_active=True,
+        flight_recorder_extra_dump_on_exec=False,
+        distributed_backend="nccl",
+        world_size=1,
+        rank=0,
+        distributed_timeout_minutes=1,
+        fake_process_group=False,
+    )
+    monkeypatch.setattr(initialize, "get_args", lambda: args)
+    monkeypatch.setattr(initialize.torch.cuda, "device_count", lambda: 0)
+    monkeypatch.setattr(initialize.torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(initialize.torch.distributed, "init_process_group", lambda **kwargs: calls.append(("init", kwargs)))
+    monkeypatch.setattr(initialize.inprocess_restart, "maybe_force_nccl_backend_init", lambda device_id: calls.append(("nccl", device_id)))
+    monkeypatch.setattr(initialize, "print_rank_0", lambda message: calls.append(("print", message)))
+    monkeypatch.setattr(initialize, "warn_rank_0", lambda message: calls.append(("warn", message)))
+    monkeypatch.setenv("TORCH_NCCL_TRACE_BUFFER_SIZE", "already-set")
+
+    initialize._initialize_distributed(None, None, store=None)
+
+    assert initialize.os.environ["TORCH_NCCL_TRACE_BUFFER_SIZE"] == "already-set"
+    assert any("already set" in message for kind, message in calls if kind == "warn")
+
+
+def test_initialize_tp_communicators_te_version_branches(monkeypatch, tmp_path):
+    calls = []
+    te_module = ModuleType("transformer_engine.pytorch.module")
+
+    class UserBufferQuantizationMode:
+        FP8 = "fp8"
+        NONE = "none"
+
+    te_module.base = SimpleNamespace(
+        UserBufferQuantizationMode=UserBufferQuantizationMode,
+        initialize_ub=lambda **kwargs: calls.append(("ub", kwargs)),
+    )
+    te_pkg = ModuleType("transformer_engine")
+    te_pytorch_pkg = ModuleType("transformer_engine.pytorch")
+    te_pytorch_pkg.module = te_module
+    yaml_module = ModuleType("yaml")
+    yaml_module.safe_load = lambda stream: {"from": stream.read()}
+    monkeypatch.setitem(sys.modules, "transformer_engine", te_pkg)
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch", te_pytorch_pkg)
+    monkeypatch.setitem(sys.modules, "transformer_engine.pytorch.module", te_module)
+    monkeypatch.setitem(sys.modules, "yaml", yaml_module)
+
+    cfg_path = tmp_path / "tp.yaml"
+    cfg_path.write_text("enabled: true")
+    args = SimpleNamespace(
+        tp_comm_overlap_cfg=str(cfg_path),
+        decoder_tp_comm_overlap=True,
+        decoder_seq_length=16,
+        seq_length=8,
+        micro_batch_size=2,
+        context_parallel_size=2,
+        hidden_size=32,
+        tensor_model_parallel_size=4,
+        fp8="e4m3",
+        first_last_layers_bf16=True,
+        num_layers_at_start_in_bf16=1,
+        num_layers_at_end_in_bf16=0,
+        tp_comm_bootstrap_backend="nccl",
+    )
+    monkeypatch.setattr(initialize, "get_args", lambda: args)
+    monkeypatch.setattr(initialize, "is_te_min_version", lambda version: version == "2.7.0")
+    initialize._initialize_tp_communicators()
+    assert calls[-1][1]["shape"] == [16, 32]
+    assert calls[-1][1]["quantization_modes"] == ["fp8", "none"]
+    assert calls[-1][1]["ub_cfgs"] == {"from": "enabled: true"}
+
+    args.tp_comm_overlap_cfg = None
+    args.decoder_tp_comm_overlap = False
+    monkeypatch.setattr(initialize, "is_te_min_version", lambda version: version == "1.9.0")
+    initialize._initialize_tp_communicators()
+    assert calls[-1][1]["shape"] == [8, 32]
+    assert calls[-1][1]["use_fp8"] is True
+
+    args.tp_comm_bootstrap_backend = "ucx"
+    warning_messages = []
+    monkeypatch.setattr(initialize, "is_te_min_version", lambda version: False)
+    monkeypatch.setattr(initialize, "get_te_version", lambda: "1.8.0")
+    monkeypatch.setattr(initialize.warnings, "warn", lambda message: warning_messages.append(message))
+    monkeypatch.setattr(initialize, "create_group", lambda **kwargs: calls.append(("group", kwargs)))
+    initialize._initialize_tp_communicators()
+    assert any("supports only MPI" in message for message in warning_messages)
+    assert calls[-2] == ("group", {"backend": "mpi", "group_desc": "TP_BOOTSTRAP_GROUP_MPI"})
+    assert calls[-1][1]["use_fp8"] is True
 
 
 def test_setup_logging_uses_env_and_argument_precedence(monkeypatch):

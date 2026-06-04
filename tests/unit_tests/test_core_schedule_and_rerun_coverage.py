@@ -1,8 +1,13 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+import asyncio
+import importlib
+from importlib.machinery import ModuleSpec
+import json
 from contextlib import nullcontext
 import logging
 import sys
+from types import ModuleType
 from types import SimpleNamespace
 
 import pytest
@@ -116,6 +121,52 @@ class _FakeStream:
 
     def record_event(self, event):
         self.calls.append((self.name, "record-event", event))
+
+
+class _FakeBlueprint:
+    def __init__(self, *args, **kwargs):
+        self.args = args
+        self.kwargs = kwargs
+
+    def route(self, *args, **kwargs):
+        def decorator(func):
+            return func
+
+        return decorator
+
+
+class _FakeQuartResponse:
+    def __init__(self, body="", status=200, mimetype=None):
+        self.body = body
+        self.status = status
+        self.status_code = status
+        self.mimetype = mimetype
+
+    def get_data(self, as_text=False):
+        if as_text and isinstance(self.body, bytes):
+            return self.body.decode("utf-8")
+        return self.body
+
+
+class _AsyncJsonRequest:
+    def __init__(self, payload):
+        self.payload = payload
+
+    async def get_json(self, *args, **kwargs):
+        return self.payload
+
+
+def _load_dynamic_endpoint(monkeypatch, module_name):
+    quart = ModuleType("quart")
+    quart.__spec__ = ModuleSpec("quart", loader=None)
+    quart.Blueprint = _FakeBlueprint
+    quart.Response = _FakeQuartResponse
+    quart.current_app = SimpleNamespace(config={})
+    quart.jsonify = lambda obj: ("json", obj)
+    quart.request = _AsyncJsonRequest({})
+    monkeypatch.setitem(sys.modules, "quart", quart)
+    sys.modules.pop(module_name, None)
+    return importlib.import_module(module_name)
 
 
 class _ScheduleNode:
@@ -1482,6 +1533,458 @@ def test_text_generation_completions_endpoint_detokenize_and_post(monkeypatch):
     assert run_call[1][4] == 0
 
 
+def test_dynamic_chat_completions_helpers_normalize_and_sanitize(monkeypatch):
+    chat_endpoint = _load_dynamic_endpoint(
+        monkeypatch,
+        "megatron.core.inference.text_generation_server.dynamic_text_gen_server.endpoints.chat_completions",
+    )
+
+    redacted = chat_endpoint._redact_token_id_lists_for_logging(
+        {
+            "prompt_tokens": [1, 2, 3],
+            "nested": [{"moe_topk_indices": [[1, 2], [3, 4]], "tpot": [1.0, 2.0]}],
+            "keep": ["not", "numeric"],
+        }
+    )
+    assert redacted["prompt_tokens"] == "...truncated..."
+    assert redacted["nested"][0]["moe_topk_indices"] == "...truncated..."
+    assert redacted["nested"][0]["tpot"] == "...truncated..."
+    assert redacted["keep"] == ["not", "numeric"]
+
+    tools = [
+        {
+            "function": {
+                "name": "update_reservation_flights",
+                "parameters": {
+                    "properties": {
+                        "legs": {"type": "array"},
+                        "meta": {"anyOf": [{"type": "object"}, {"type": "null"}]},
+                    }
+                },
+            }
+        }
+    ]
+    normalized = chat_endpoint._normalize_tool_calls(
+        [
+            {
+                "id": 7,
+                "function": {
+                    "name": "update_reservation_flights",
+                    "arguments": '{"legs": "[1, 2]", "meta": "{\\"a\\": 3}"}',
+                },
+            },
+            {"function": {"name": "cancel_reservation", "arguments": {"id": 1}}},
+            {"function": {"arguments": 5}},
+        ],
+        tools=tools,
+    )
+    assert len(normalized) == 1
+    assert normalized[0]["id"] == "7"
+    parsed_args = json.loads(normalized[0]["function"]["arguments"])
+    assert parsed_args == {"legs": [1, 2], "meta": {"a": 3}}
+
+    assert chat_endpoint._normalize_assistant_content(
+        "before transfer",
+        [{"function": {"name": "transfer_to_human_agents", "arguments": "{}"}}],
+    ) == "YOU ARE BEING TRANSFERRED TO A HUMAN AGENT. PLEASE HOLD ON."
+
+    messages = chat_endpoint._sanitize_messages_for_template(
+        [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "hello"}, {"text": " world"}],
+            },
+            {
+                "role": "assistant",
+                "content": {"text": "answer"},
+                "tool_calls": [
+                    {"function": {"name": "lookup", "arguments": '{"city": "Paris"}'}},
+                    {"function": {"name": "bad", "arguments": "[1, 2]"}},
+                ],
+            },
+            "passthrough",
+        ]
+    )
+    assert messages[0]["content"] == "hello world"
+    assert messages[1]["content"] == "answer"
+    assert messages[1]["tool_calls"][0]["function"]["arguments"] == {"city": "Paris"}
+    assert messages[1]["tool_calls"][1]["function"]["arguments"] == {}
+    assert messages[2] == "passthrough"
+
+    tools_for_template = chat_endpoint._sanitize_tools_for_template(
+        [{"function": {"name": "lookup", "parameters": "bad"}}, "drop-me"]
+    )
+    assert tools_for_template == [
+        {"function": {"name": "lookup", "parameters": {"type": "object", "properties": {}}}}
+    ]
+
+    reconstructed = chat_endpoint._reconstruct_reasoning_content(
+        [{"role": "assistant", "content": "final", "reasoning_content": "think"}]
+    )
+    assert reconstructed[0]["content"] == "<think>think</think>final"
+
+    replaced = chat_endpoint._replace_prefix_tokens(
+        99,
+        [1, 2, 99],
+        [8, 99],
+        [7, 99, 10, 11],
+    )
+    assert replaced == [1, 2, 99, 10, 11]
+
+
+def test_dynamic_chat_completions_endpoint_success_errors_and_fallback(monkeypatch):
+    chat_endpoint = _load_dynamic_endpoint(
+        monkeypatch,
+        "megatron.core.inference.text_generation_server.dynamic_text_gen_server.endpoints.chat_completions",
+    )
+    monkeypatch.setattr(chat_endpoint, "HAVE_ORJSON", False, raising=False)
+    monkeypatch.setattr(chat_endpoint, "jsonify", lambda obj: ("json", obj), raising=False)
+
+    calls = []
+
+    class _Tokenizer:
+        chat_template = "template"
+        bos = 101
+        eos_id = 99
+
+        def apply_chat_template(self, messages, tokenize, add_generation_prompt, tools=None, **kwargs):
+            calls.append(("template", messages, add_generation_prompt, tools, kwargs))
+            return [101, 1, 2, 3]
+
+        def tokenize(self, text):
+            calls.append(("tokenize", text))
+            return [5, 6]
+
+        def detokenize(self, tokens):
+            return "".join(f"T{token}" for token in tokens)
+
+    class _Client:
+        async def add_request(self, prompt_tokens, sampling_params):
+            calls.append(("request", list(prompt_tokens), sampling_params))
+            return {
+                "status": "COMPLETED",
+                "prompt_tokens": list(prompt_tokens),
+                "generated_text": "answer",
+                "generated_tokens": [20, 21],
+                "log_probs": [-0.1, -0.2],
+                "generated_top_n_logprobs": [{"A": -0.1}, {"B": -0.2}],
+                "generated_log_probs": [-0.1, -0.2],
+                "sampling_params": {"num_tokens_to_generate": 2},
+                "prompt": "prompt",
+                "policy_epoch": 1,
+                "kv_cache_epoch": 2,
+                "events": [{"type": "EVICT"}, {"type": "OTHER"}],
+                "routing_indices": [[0], [1], [2], [3]],
+            }
+
+    class _Parser:
+        @staticmethod
+        def parse(message_text, tools=None):
+            return (
+                "parsed",
+                {
+                    "reasoning": "chain",
+                    "tool_calls": [
+                        {
+                            "function": {
+                                "name": "lookup",
+                                "arguments": {"items": "[1, 2]"},
+                            }
+                        }
+                    ],
+                },
+            )
+
+    monkeypatch.setattr(chat_endpoint, "PARSER_MAPPING", {"parser": _Parser})
+    monkeypatch.setattr(
+        chat_endpoint,
+        "current_app",
+        SimpleNamespace(
+            config={
+                "client": _Client(),
+                "tokenizer": _Tokenizer(),
+                "parsers": ["parser"],
+                "verbose": True,
+            }
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_endpoint,
+        "request",
+        _AsyncJsonRequest(
+            {
+                "messages": [
+                    {"role": "system", "content": "system"},
+                    {"role": "user", "content": [{"type": "text", "text": "hi"}]},
+                ],
+                "tools": [
+                    {
+                        "function": {
+                            "name": "lookup",
+                            "parameters": {"properties": {"items": {"type": "array"}}},
+                        }
+                    }
+                ],
+                "chat_template_kwargs": {"enable_thinking": False},
+                "temperature": 0.0,
+                "top_p": 0.7,
+                "top_k": 3,
+                "n": 2,
+                "logprobs": True,
+                "top_logprobs": 1,
+                "skip_prompt_log_probs": False,
+                "add_BOS": True,
+                "max_completion_tokens": 2,
+            }
+        ),
+        raising=False,
+    )
+
+    response = asyncio.run(chat_endpoint.chat_completions())
+    assert response[0] == "json"
+    payload = response[1]
+    assert payload["object"] == "chat.completion"
+    assert len(payload["choices"]) == 2
+    assert payload["choices"][0]["message"]["content"] == "parsed"
+    assert payload["choices"][0]["message"]["reasoning_content"] == "chain"
+    assert payload["choices"][0]["finish_reason"] == "length"
+    assert payload["choices"][0]["num_evictions"] == 1
+    assert payload["choices"][0]["logprobs"]["content"][0]["top_logprobs"][0]["token"] == "A"
+    assert payload["usage"]["completion_tokens"] == 4
+    first_request = next(item for item in calls if item[0] == "request")
+    assert first_request[1] == [101, 1, 2, 3]
+    assert first_request[2].top_k == 1
+    assert first_request[2].top_p == 0.0
+
+    monkeypatch.setattr(chat_endpoint, "request", _AsyncJsonRequest({}), raising=False)
+    missing = asyncio.run(chat_endpoint.chat_completions())
+    assert isinstance(missing, _FakeQuartResponse)
+    assert missing.status == 400
+    assert "messages" in missing.body
+
+    monkeypatch.setattr(
+        chat_endpoint,
+        "request",
+        _AsyncJsonRequest({"messages": "bad"}),
+        raising=False,
+    )
+    bad_messages = asyncio.run(chat_endpoint.chat_completions())
+    assert bad_messages.status == 400
+    assert "must be a list" in bad_messages.body
+
+    class _BadTokenizer(_Tokenizer):
+        def apply_chat_template(self, *args, **kwargs):
+            raise RuntimeError("template failed")
+
+    monkeypatch.setattr(
+        chat_endpoint,
+        "current_app",
+        SimpleNamespace(
+            config={
+                "client": _Client(),
+                "tokenizer": _BadTokenizer(),
+                "parsers": [],
+                "verbose": False,
+            }
+        ),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        chat_endpoint,
+        "request",
+        _AsyncJsonRequest({"messages": [{"role": "user", "content": "hi"}]}),
+        raising=False,
+    )
+    template_error = asyncio.run(chat_endpoint.chat_completions())
+    assert template_error.status == 500
+    assert "template failed" in template_error.body
+
+    class _FallbackTokenizer:
+        chat_template = None
+        bos = None
+
+        def tokenize(self, text):
+            return [9, 8]
+
+        def detokenize(self, tokens):
+            return "fallback"
+
+    class _FailingClient:
+        async def add_request(self, prompt_tokens, sampling_params):
+            raise RuntimeError("engine failed")
+
+    monkeypatch.setattr(
+        chat_endpoint,
+        "current_app",
+        SimpleNamespace(
+            config={
+                "client": _FailingClient(),
+                "tokenizer": _FallbackTokenizer(),
+                "parsers": [],
+                "verbose": False,
+            }
+        ),
+        raising=False,
+    )
+    engine_error = asyncio.run(chat_endpoint.chat_completions())
+    assert engine_error.status == 500
+    assert "engine failed" in engine_error.body
+
+    class _FailedClient:
+        async def add_request(self, prompt_tokens, sampling_params):
+            return {
+                "status": "FAILED",
+                "events": [{"type": "ERROR_NONTRANSIENT", "payload": "bad request"}],
+            }
+
+    monkeypatch.setattr(
+        chat_endpoint,
+        "current_app",
+        SimpleNamespace(
+            config={
+                "client": _FailedClient(),
+                "tokenizer": _FallbackTokenizer(),
+                "parsers": [],
+                "verbose": False,
+            }
+        ),
+        raising=False,
+    )
+    failed_record = asyncio.run(chat_endpoint.chat_completions())
+    assert failed_record.status == 400
+    assert "bad request" in failed_record.body
+
+
+def test_dynamic_completions_endpoint_prompt_sampling_logprobs_and_errors(monkeypatch):
+    completions_endpoint = _load_dynamic_endpoint(
+        monkeypatch,
+        "megatron.core.inference.text_generation_server.dynamic_text_gen_server.endpoints.completions",
+    )
+    monkeypatch.setattr(completions_endpoint, "jsonify", lambda obj: ("json", obj), raising=False)
+
+    calls = []
+
+    class _Tokenizer:
+        def tokenize(self, text):
+            if text == "explode":
+                raise RuntimeError("tokenizer failed")
+            return [ord(ch) % 10 for ch in text]
+
+        def detokenize(self, tokens):
+            return "".join(f"T{token}" for token in tokens)
+
+    class _Client:
+        async def add_request(self, prompt_tokens, sampling_params):
+            calls.append(("request", list(prompt_tokens), sampling_params))
+            return {
+                "status": "COMPLETED",
+                "prompt_tokens": list(prompt_tokens),
+                "generated_text": "gen",
+                "generated_tokens": [7, 8],
+                "prompt_log_probs": [-0.5],
+                "prompt_top_n_logprobs": [{"T1": -0.5}],
+                "generated_log_probs": [-0.1, -0.2],
+                "generated_top_n_logprobs": [{"T7": -0.1}, {"T8": -0.2}],
+                "routing_indices": ["p0", "g0", "g1"],
+            }
+
+    def set_request(payload, client=None, verbose=False):
+        monkeypatch.setattr(
+            completions_endpoint,
+            "current_app",
+            SimpleNamespace(
+                config={
+                    "client": client or _Client(),
+                    "tokenizer": _Tokenizer(),
+                    "verbose": verbose,
+                }
+            ),
+            raising=False,
+        )
+        monkeypatch.setattr(completions_endpoint, "request", _AsyncJsonRequest(payload), raising=False)
+
+    set_request(None)
+    assert asyncio.run(completions_endpoint.completions()) == ("Invalid or missing JSON body", 400)
+
+    for payload, expected in (
+        ({}, "prompt"),
+        ({"prompt": []}, "prompt"),
+        ({"prompt": {"bad": True}}, "type"),
+        ({"prompt": [1, "bad"]}, "format"),
+    ):
+        set_request(payload)
+        response = asyncio.run(completions_endpoint.completions())
+        assert response[1] == 400
+        assert expected in response[0]
+
+    set_request({"prompt": "explode"})
+    token_error = asyncio.run(completions_endpoint.completions())
+    assert token_error[1] == 500
+    assert "tokenizer failed" in token_error[0]
+
+    set_request({"prompt": "abc", "temperature": "hot"})
+    sampling_error = asyncio.run(completions_endpoint.completions())
+    assert sampling_error[1] == 400
+    assert "Invalid sampling parameter" in sampling_error[0]
+
+    set_request(
+        {
+            "prompt": [[1, 2], [3]],
+            "temperature": 0.0,
+            "top_p": 0.8,
+            "top_k": 3,
+            "echo": True,
+            "logprobs": 1,
+            "max_tokens": 2,
+            "stop": "END",
+        },
+        verbose=True,
+    )
+    response = asyncio.run(completions_endpoint.completions())
+    assert response[0] == "json"
+    payload = response[1]
+    assert len(payload["choices"]) == 2
+    assert payload["choices"][0]["text"].startswith("T1T2")
+    assert payload["choices"][0]["logprobs"]["tokens"][0] == "T1"
+    assert payload["choices"][0]["prompt_moe_topk_indices"] == ["p0", "g0"]
+    assert payload["choices"][0]["moe_topk_indices"] == ["p0", "g0", "g1"]
+    assert calls[0][2].top_k == 1
+    assert calls[0][2].top_p == 0.0
+    assert calls[0][2].skip_prompt_log_probs is False
+    assert calls[0][2].stop_words == ["END"]
+
+    class _TransientFailedClient:
+        async def add_request(self, prompt_tokens, sampling_params):
+            return {"status": "FAILED", "events": [{"type": "ERROR_TRANSIENT", "payload": "retry"}]}
+
+    set_request({"prompt": "abc"}, client=_TransientFailedClient())
+    transient = asyncio.run(completions_endpoint.completions())
+    assert transient[1] == 500
+    assert "retry" in transient[0]
+
+    class _NonTransientFailedClient:
+        async def add_request(self, prompt_tokens, sampling_params):
+            return {
+                "status": "FAILED",
+                "events": [{"type": "ERROR_NONTRANSIENT", "payload": "invalid"}],
+            }
+
+    set_request({"prompt": "abc"}, client=_NonTransientFailedClient())
+    nontransient = asyncio.run(completions_endpoint.completions())
+    assert nontransient[1] == 400
+    assert "invalid" in nontransient[0]
+
+    class _EngineErrorClient:
+        async def add_request(self, prompt_tokens, sampling_params):
+            raise RuntimeError("engine boom")
+
+    set_request({"prompt": "abc"}, client=_EngineErrorClient())
+    engine_error = asyncio.run(completions_endpoint.completions())
+    assert engine_error[1] == 500
+    assert "engine boom" in engine_error[0]
+
+
 def test_masked_wordpiece_dataset_config_cache_and_masking_paths(monkeypatch, tmp_path):
     from megatron.core.datasets import masked_dataset
 
@@ -1622,6 +2125,288 @@ def test_masked_wordpiece_dataset_config_cache_and_masking_paths(monkeypatch, tm
     masked_dataset.numpy.save(cache_dir / "hash-_ToyMaskedDataset-sample_index.npy", saved_index)
     loaded = cached_dataset._build_sample_index(sequence_length=8, min_sentences_per_sample=1)
     assert loaded.shape == saved_index.shape
+
+
+def test_blended_dataset_indices_cache_defer_and_getitem(monkeypatch, tmp_path):
+    import numpy
+
+    from megatron.core.datasets import blended_dataset
+
+    class _ToyDataset:
+        index_split = dataset_utils.Split.train
+
+        def __init__(self, name, length=6):
+            self.name = name
+            self.length = length
+            self.unique_identifiers = {"name": name}
+
+        def __len__(self):
+            return self.length
+
+        def __getitem__(self, idx):
+            return {"sample": f"{self.name}-{idx}"}
+
+    def build_blending_indices(dataset_index, dataset_sample_index, weights, num_datasets, size, verbose):
+        assert num_datasets == 2
+        dataset_index[:] = numpy.array([0, 1, 0, 1], dtype=numpy.int16)
+        dataset_sample_index[:] = numpy.array([0, 0, 1, 1], dtype=numpy.int64)
+
+    def build_exhaustive_indices(dataset_index, dataset_sample_index, weights, num_datasets):
+        dataset_index[:] = numpy.array([0, 0, 1], dtype=numpy.int16)
+        dataset_sample_index[:] = numpy.array([0, 1, 0], dtype=numpy.int64)
+
+    fake_helpers = ModuleType("megatron.core.datasets.helpers")
+    fake_helpers.build_blending_indices = build_blending_indices
+    fake_helpers.build_exhaustive_blending_indices = build_exhaustive_indices
+    monkeypatch.setitem(sys.modules, "megatron.core.datasets.helpers", fake_helpers)
+    monkeypatch.setattr(
+        sys.modules["megatron.core.datasets"], "helpers", fake_helpers, raising=False
+    )
+    monkeypatch.setattr(blended_dataset, "is_built_on_zero_rank", lambda: True)
+    monkeypatch.setattr(blended_dataset.time, "time", lambda: 1.0)
+
+    config = SimpleNamespace(
+        defer_npy_index_mmap=False,
+        path_to_cache=None,
+        fast_cache_load=False,
+        mid_level_dataset_surplus=0.5,
+    )
+    dataset = blended_dataset.BlendedDataset(
+        [_ToyDataset("a"), _ToyDataset("b")], [0.25, 0.75], 4, config
+    )
+    assert len(dataset) == 4
+    assert dataset[1] == {"dataset_id": 1, "sample": "b-0"}
+    assert dataset.dataset_index.tolist() == [0, 1, 0, 1]
+
+    exhaustive = blended_dataset.BlendedDataset(
+        [_ToyDataset("a"), _ToyDataset("b")], [2, 1], None, config
+    )
+    assert len(exhaustive) == 3
+    assert exhaustive[2] == {"dataset_id": 1, "sample": "b-0"}
+
+    cache_config = SimpleNamespace(
+        defer_npy_index_mmap=False,
+        path_to_cache=str(tmp_path),
+        fast_cache_load=False,
+        mid_level_dataset_surplus=0.5,
+    )
+    cached = blended_dataset.BlendedDataset(
+        [_ToyDataset("a"), _ToyDataset("b")], [0.5, 0.5], 4, cache_config
+    )
+    hash_prefix = f"{cached.unique_description_hash}-BlendedDataset-train"
+    assert (tmp_path / f"{hash_prefix}-description.txt").is_file()
+
+    cache_hit = blended_dataset.BlendedDataset(
+        [_ToyDataset("a"), _ToyDataset("b")], [0.5, 0.5], 4, cache_config
+    )
+    assert cache_hit.dataset_index.shape[0] == 4
+
+    defer_config = SimpleNamespace(
+        defer_npy_index_mmap=True,
+        path_to_cache=str(tmp_path),
+        fast_cache_load=False,
+        mid_level_dataset_surplus=0.5,
+    )
+    deferred = blended_dataset.BlendedDataset(
+        [_ToyDataset("a"), _ToyDataset("b")], [2, 1], None, defer_config
+    )
+    assert len(deferred) == 3
+    numpy.save(deferred.path_to_dataset_index, numpy.array([1], dtype=numpy.int16))
+    numpy.save(deferred.path_to_dataset_sample_index, numpy.array([2], dtype=numpy.int64))
+    assert deferred[0] == {"dataset_id": 1, "sample": "b-2"}
+
+    def oversample_indices(dataset_index, dataset_sample_index, weights, num_datasets, size, verbose):
+        dataset_index[:] = numpy.array([0, 0, 0, 0], dtype=numpy.int16)
+        dataset_sample_index[:] = numpy.arange(size, dtype=numpy.int64)
+
+    fake_helpers.build_blending_indices = oversample_indices
+    with pytest.raises(IndexError, match="oversamples"):
+        blended_dataset.BlendedDataset([_ToyDataset("small", length=1)], [1.0], 4, config)
+
+
+def test_blended_megatron_dataset_builder_mock_blend_and_per_split_paths(monkeypatch):
+    from megatron.core.datasets import blended_megatron_dataset_builder as builder_module
+    from megatron.core.datasets.blended_megatron_dataset_builder import (
+        BlendedMegatronDatasetBuilder,
+        _get_size_per_split_per_dataset,
+    )
+
+    class _ToyMidDataset:
+        def __init__(self, low_level_dataset, dataset_path, indexed_indices, num_samples, split, config):
+            self.low_level_dataset = low_level_dataset
+            self.dataset_path = dataset_path
+            self.indexed_indices = indexed_indices
+            self.num_samples = num_samples
+            self.index_split = split
+            self.config = config
+            self.unique_identifiers = {"path": dataset_path, "split": split.name}
+
+        def __len__(self):
+            return 10 if self.num_samples is None else max(self.num_samples, 1)
+
+        @staticmethod
+        def build_low_level_dataset(dataset_path, config):
+            return list(range(12)) if dataset_path is not None else list(range(9))
+
+        @staticmethod
+        def numel_low_level_dataset(low_level_dataset):
+            return len(low_level_dataset)
+
+    monkeypatch.setattr(builder_module.torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(builder_module, "is_built_on_zero_rank", lambda: True)
+    monkeypatch.setattr(builder_module.cur_platform, "device_count", lambda: 4)
+    monkeypatch.setattr(builder_module, "BlendedDataset", lambda *args: ("blended", args))
+
+    config = SimpleNamespace(
+        mock=True,
+        split_matrix=[(0.0, 0.5), (0.5, 0.75), None],
+        blend=None,
+        blend_per_split=None,
+        multiple_validation_sets=False,
+        full_validation=False,
+        num_dataset_builder_threads=1,
+        mid_level_dataset_surplus=0.25,
+        fast_cache_load=False,
+    )
+    builder = BlendedMegatronDatasetBuilder(_ToyMidDataset, [4, 2, None], lambda: True, config)
+    built = builder.build()
+    assert [dataset.index_split.name if dataset else None for dataset in built] == [
+        "train",
+        "valid",
+        None,
+    ]
+    assert built[0].indexed_indices.tolist() == [0, 1, 2, 3]
+    assert built[1].indexed_indices.tolist() == [4, 5, 6]
+
+    single_config = SimpleNamespace(
+        mock=False,
+        split_matrix=[(0.0, 0.5), None, None],
+        blend=(["prefix"], None),
+        blend_per_split=None,
+        multiple_validation_sets=False,
+        full_validation=False,
+        num_dataset_builder_threads=1,
+        mid_level_dataset_surplus=0.25,
+        fast_cache_load=False,
+    )
+    single = BlendedMegatronDatasetBuilder(_ToyMidDataset, [3, None, None], lambda: True, single_config)
+    single_built = single._build_blended_dataset_splits()
+    assert single_built[0].dataset_path == "prefix"
+    assert single_built[1] is None
+
+    class _FakeDataset:
+        def __init__(self, name, length):
+            self.name = name
+            self.length = length
+            self.num_samples = None
+            self.unique_identifiers = {"name": name}
+            self.index_split = dataset_utils.Split.train
+
+        def __len__(self):
+            return self.length
+
+    generic_calls = []
+
+    def fake_generic(cls, is_built_on_rank, synchronize_ranks, *args):
+        generic_calls.append((cls, synchronize_ranks, args))
+        if cls is builder_module.BlendedDataset:
+            return SimpleNamespace(size=args[2], args=args)
+        return cls(*args)
+
+    weighted_config = SimpleNamespace(
+        mock=False,
+        split_matrix=[(0.0, 0.5), (0.5, 1.0), None],
+        blend=(["a", "b"], [1.0, 3.0]),
+        blend_per_split=None,
+        multiple_validation_sets=False,
+        full_validation=False,
+        num_dataset_builder_threads=1,
+        mid_level_dataset_surplus=0.5,
+        fast_cache_load=False,
+    )
+    weighted = BlendedMegatronDatasetBuilder(
+        _ToyMidDataset, [8, 4, 0], lambda: True, weighted_config
+    )
+    monkeypatch.setattr(
+        weighted,
+        "_build_megatron_datasets_parallel",
+        lambda prefixes, split, sizes: [
+            [_FakeDataset("a-train", 10), _FakeDataset("b-train", 10)],
+            [_FakeDataset("a-valid", 10), _FakeDataset("b-valid", 10)],
+            [],
+        ],
+    )
+    monkeypatch.setattr(weighted, "build_generic_dataset", fake_generic)
+    weighted_built = weighted._build_blended_dataset_splits()
+    assert weighted_built[0].size == 8
+    assert weighted_built[1].size == 4
+    assert generic_calls[0][2][1] == [0.25, 0.75]
+
+    unweighted_config = SimpleNamespace(
+        mock=False,
+        split_matrix=[(0.0, 1.0), None, None],
+        blend=(["a", "b"], None),
+        blend_per_split=None,
+        multiple_validation_sets=False,
+        full_validation=False,
+        num_dataset_builder_threads=1,
+        mid_level_dataset_surplus=0.0,
+        fast_cache_load=False,
+    )
+    unweighted = BlendedMegatronDatasetBuilder(
+        _ToyMidDataset, [7, None, None], lambda: True, unweighted_config
+    )
+    monkeypatch.setattr(
+        unweighted,
+        "_build_megatron_datasets_parallel",
+        lambda prefixes, split, sizes: [
+            [_FakeDataset("a-train", 3), _FakeDataset("b-train", 5)],
+            [],
+            [],
+        ],
+    )
+    monkeypatch.setattr(unweighted, "build_generic_dataset", fake_generic)
+    unweighted_built = unweighted._build_blended_dataset_splits()
+    assert unweighted_built[0].size == 7
+    assert unweighted_built[0].args[1] == [3, 5]
+
+    per_split_config = SimpleNamespace(
+        mock=False,
+        split_matrix=[None, None, None],
+        blend=None,
+        blend_per_split=[
+            (["train-a", "train-b"], [0.5, 0.5]),
+            (["valid-a", "valid-b"], None),
+            (["test-only"], None),
+        ],
+        multiple_validation_sets=True,
+        full_validation=True,
+        num_dataset_builder_threads=1,
+        mid_level_dataset_surplus=0.0,
+        fast_cache_load=False,
+    )
+    per_split = BlendedMegatronDatasetBuilder(
+        _ToyMidDataset, [6, None, 2], lambda: True, per_split_config
+    )
+    monkeypatch.setattr(
+        per_split,
+        "_build_megatron_datasets_parallel",
+        lambda prefixes, split, sizes: [
+            [_FakeDataset(f"{prefixes[0]}-train", 3), _FakeDataset(f"{prefixes[-1]}-train", 3)],
+            [],
+            [],
+        ],
+    )
+    monkeypatch.setattr(per_split, "build_generic_dataset", fake_generic)
+    per_split_built = per_split._build_blended_dataset_splits()
+    assert per_split_built[0].size == 6
+    assert [dataset.dataset_path for dataset in per_split_built[1]] == ["valid-a", "valid-b"]
+    assert per_split_built[2].dataset_path == "test-only"
+
+    assert _get_size_per_split_per_dataset([0.25, 0.75], [8, 4, 0], surplus=0.5) == [
+        [3, 2, 0],
+        [9, 5, 0],
+    ]
 
 
 @pytest.mark.parametrize(

@@ -28,11 +28,30 @@ def test_dist_signal_handler_helpers_without_initialized_distributed(monkeypatch
     assert dist_signal_handler.all_gather_item(7, dtype=torch.int32) == [7]
 
 
+def test_dist_signal_handler_all_gather_initialized_path(monkeypatch):
+    monkeypatch.setattr(dist_signal_handler.torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(dist_signal_handler.torch.distributed, "is_initialized", lambda: True)
+    monkeypatch.setattr(dist_signal_handler.torch.distributed, "get_world_size", lambda: 3)
+    monkeypatch.setattr(dist_signal_handler.torch.distributed, "get_backend", lambda: "gloo")
+
+    def fake_all_gather(output_tensors, tensor, group, async_op):
+        for idx, output in enumerate(output_tensors):
+            output.copy_(tensor + idx)
+
+    monkeypatch.setattr(dist_signal_handler.torch.distributed, "all_gather", fake_all_gather)
+
+    assert dist_signal_handler.get_world_size() == 3
+    assert dist_signal_handler.all_gather_item(5, dtype=torch.int32) == [5, 6, 7]
+    group = SimpleNamespace(size=lambda: 2)
+    assert dist_signal_handler.all_gather_item(9, dtype=torch.int32, group=group) == [9, 10]
+
+
 def test_dist_signal_handler_device_selection(monkeypatch):
     monkeypatch.setattr(dist_signal_handler.torch.distributed, "get_backend", lambda: "gloo")
     assert dist_signal_handler.get_device() == torch.device("cpu")
 
     monkeypatch.setattr(dist_signal_handler.torch.distributed, "get_backend", lambda: "nccl")
+    assert dist_signal_handler.get_device() == torch.device("cuda")
     assert dist_signal_handler.get_device(local_rank=3) == torch.device("cuda:3")
 
     monkeypatch.setattr(dist_signal_handler.torch.distributed, "get_backend", lambda: "unknown")

@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import os
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -9,6 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.optim import SGD, Adam
 
+import megatron.core.optimizer.clip_grads as clip_grads_module
+import megatron.core.optimizer.grad_scaler as grad_scaler_module
+import megatron.core.optimizer.optimizer as optimizer_module
 # FP8 recipe will be used to test precision-aware-optimizer.
 from transformer_engine.pytorch.fp8 import fp8_autocast
 
@@ -365,6 +369,651 @@ def test_chained_optimizer_get_parameters():
 
     assert len(result) == len(all_params)
     assert result == opt1.params + opt2.params + opt3.params
+
+
+class _ToyMegatronOptimizer(optimizer_module.MegatronOptimizer):
+    def __init__(self, optimizer, config):
+        super().__init__(optimizer, config)
+        self.is_stub_optimizer = False
+        self.zero_grad_calls = []
+        self.reloaded_state_dicts = []
+        self.loaded_state_dicts = []
+        self.stepped = False
+
+    def prepare_grads(self):
+        return False
+
+    def step_with_ready_grads(self):
+        return True
+
+    def zero_grad(self, set_to_none=True):
+        self.zero_grad_calls.append(set_to_none)
+
+    def get_loss_scale(self):
+        return torch.tensor([2.0])
+
+    def reload_model_params(self, state_dict=None):
+        self.reloaded_state_dicts.append(state_dict)
+
+    def state_dict(self):
+        return {"state": self.optimizer.state, "param_groups": self.optimizer.param_groups}
+
+    def load_state_dict(self, state_dict):
+        self.loaded_state_dicts.append(state_dict)
+
+    def step(self):
+        self.stepped = True
+        return True
+
+    def sharded_state_dict(self, model_sharded_state_dict, is_loading=False, metadata=None):
+        return {
+            "model": model_sharded_state_dict,
+            "is_loading": is_loading,
+            "metadata": metadata,
+        }
+
+
+def _make_base_optimizer_with_params(params):
+    return SimpleNamespace(param_groups=[{"params": list(params)}], state={})
+
+
+def test_megatron_optimizer_base_grad_filters_stats_and_properties(monkeypatch):
+    p1 = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    p1.grad = torch.tensor([3.0, 4.0])
+    p2 = torch.nn.Parameter(torch.tensor([5.0]))
+    p2.grad = torch.tensor([6.0])
+    p2.shared = True
+    p3 = torch.nn.Parameter(torch.tensor([7.0]))
+    p3.grad = torch.tensor([8.0])
+    p3.tp_duplicate = True
+    fsdp_grad = torch.tensor([9.0])
+    fsdp_param = SimpleNamespace(grad=SimpleNamespace(_local_tensor=fsdp_grad), __fsdp_param__=True)
+
+    monkeypatch.setattr(optimizer_module, "param_is_not_shared", lambda p: not getattr(p, "shared", False))
+    monkeypatch.setattr(
+        optimizer_module.tensor_parallel,
+        "param_is_not_tensor_parallel_duplicate",
+        lambda p, tp_group=None: not getattr(p, "tp_duplicate", False),
+    )
+
+    base = _make_base_optimizer_with_params([p1, p2, p3, fsdp_param])
+    opt = _ToyMegatronOptimizer(base, OptimizerConfig())
+
+    assert all(
+        actual is expected
+        for actual, expected in zip(opt.get_parameters(), [p1, p2, p3, fsdp_param])
+    )
+    grads_for_norm = opt.get_main_grads_for_grad_norm()
+    assert grads_for_norm[0] is p1.grad
+    assert grads_for_norm[1] is fsdp_grad
+
+    opt.model_parallel_group = "legacy-group"
+    with pytest.warns(UserWarning, match="model_parallel_group"):
+        assert opt.get_grad_stats_parallel_group() == "legacy-group"
+    assert not hasattr(opt, "model_parallel_group")
+    assert opt.get_grad_stats_parallel_group() == "legacy-group"
+    delattr(opt, "grad_stats_parallel_group")
+    monkeypatch.setattr(optimizer_module.parallel_state, "get_model_parallel_group", lambda: "mp")
+    assert opt.get_grad_stats_parallel_group() == "mp"
+
+    assert opt.scale_loss(torch.tensor([3.0])).item() == 6.0
+    assert opt.param_groups is base.param_groups
+    opt.param_groups = [{"params": [p2]}]
+    assert len(base.param_groups) == 1
+    assert base.param_groups[0]["params"][0] is p2
+    opt.is_stub_optimizer = True
+    assert opt.param_groups == []
+
+
+def test_megatron_optimizer_base_decoupled_clip_count_offload_and_steps(monkeypatch):
+    p1 = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    p1.decoupled_grad = torch.tensor([0.0, 1.0])
+    p2 = torch.nn.Parameter(torch.tensor([3.0]))
+    p2.decoupled_grad = torch.tensor([2.0])
+    base = _make_base_optimizer_with_params([p1, p2])
+    base.state[p1] = {"momentum": torch.tensor([4.0])}
+
+    config = OptimizerConfig()
+    config.use_precision_aware_optimizer_no_fp8_or_ds_fp8 = True
+    opt = _ToyMegatronOptimizer(base, config)
+
+    monkeypatch.setattr(optimizer_module, "param_is_not_shared", lambda p: True)
+    monkeypatch.setattr(
+        optimizer_module.tensor_parallel,
+        "param_is_not_tensor_parallel_duplicate",
+        lambda p, tp_group=None: True,
+    )
+    monkeypatch.setattr(optimizer_module.parallel_state, "get_model_parallel_group", lambda: "mp")
+
+    norm_calls = []
+    clip_calls = []
+    zero_calls = []
+    monkeypatch.setattr(
+        optimizer_module,
+        "get_grad_norm_fp32",
+        lambda grads, grad_stats_parallel_group=None: norm_calls.append(
+            (list(grads), grad_stats_parallel_group)
+        )
+        or 7.0,
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "clip_grad_by_total_norm_fp32",
+        lambda params, clip_grad, grad_norm, use_decoupled_grad: clip_calls.append(
+            (list(params), clip_grad, grad_norm, use_decoupled_grad)
+        ),
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "count_zeros_fp32",
+        lambda params, grad_stats_parallel_group=None, use_decoupled_grad=False, tp_group=None: (
+            zero_calls.append((list(params), grad_stats_parallel_group, use_decoupled_grad, tp_group))
+            or 3
+        ),
+    )
+
+    decoupled_grads = opt.get_main_grads_for_grad_norm()
+    assert decoupled_grads[0] is p1.decoupled_grad
+    assert decoupled_grads[1] is p2.decoupled_grad
+    assert opt.get_grad_norm() == 7.0
+    assert opt.clip_grad_norm(0.5) == 7.0
+    assert clip_calls[0][0][0] is p1
+    assert clip_calls[0][0][1] is p2
+    assert clip_calls[0][1:] == (0.5, 7.0, True)
+    assert opt.count_zeros() == 3
+    assert zero_calls[0][0][0] is p1
+    assert zero_calls[0][0][1] is p2
+    assert zero_calls[0][1:] == ("mp", True, None)
+    assert norm_calls[-1][0][0] is p1.decoupled_grad
+    assert norm_calls[-1][0][1] is p2.decoupled_grad
+    assert norm_calls[-1][1] == "mp"
+
+    empty_cache_calls = []
+    monkeypatch.setattr(
+        optimizer_module,
+        "cur_platform",
+        SimpleNamespace(
+            empty_cache=lambda: empty_cache_calls.append("empty"),
+            device=lambda: torch.device("cpu"),
+        ),
+    )
+    opt.offload_to_cpu()
+    assert empty_cache_calls == ["empty"]
+    opt.restore_from_cpu()
+    assert base.state[p1]["momentum"].device.type == "cpu"
+
+    assert optimizer_module.MegatronOptimizer._extract_common_per_param_step(
+        {"state": {0: {"step": 11}, 1: {"step": 11}, 2: {}}}
+    ) == 11
+    with pytest.raises(ValueError, match="differs per parameter"):
+        optimizer_module.MegatronOptimizer._extract_common_per_param_step(
+            {"state": {0: {"step": 1}, 1: {"step": 2}}}
+        )
+    state = {"state": {0: {}, 1: {"step": 0}}}
+    optimizer_module.MegatronOptimizer._restore_common_per_param_step(state, 5)
+    assert state == {"state": {0: {"step": 5}, 1: {"step": 5}}}
+
+
+def test_clip_grads_decoupled_cpu_paths_and_dynamic_grad_scaler(monkeypatch):
+    original_zeros = torch.zeros
+
+    def cpu_zeros(*args, **kwargs):
+        if kwargs.get("device") == "cuda":
+            kwargs = dict(kwargs)
+            kwargs["device"] = "cpu"
+        return original_zeros(*args, **kwargs)
+
+    def fake_multi_tensor_applier(_impl, _overflow_buf, tensor_lists, scale):
+        scale_value = scale.item() if isinstance(scale, torch.Tensor) else scale
+        for grad in tensor_lists[0]:
+            grad.mul_(scale_value)
+        return torch.tensor([0.0]), None
+
+    monkeypatch.setattr(clip_grads_module.torch, "zeros", cpu_zeros)
+    monkeypatch.setattr(clip_grads_module.torch.distributed, "all_reduce", lambda *a, **k: None)
+    monkeypatch.setattr(clip_grads_module, "param_is_not_shared", lambda p: True)
+    monkeypatch.setattr(
+        clip_grads_module,
+        "param_is_not_tensor_parallel_duplicate",
+        lambda p, tp_group=None: True,
+    )
+    monkeypatch.setattr(clip_grads_module, "multi_tensor_applier", fake_multi_tensor_applier)
+    monkeypatch.setattr(clip_grads_module, "multi_tensor_scale_tensor_impl", object())
+
+    p1 = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    p1.decoupled_grad = torch.tensor([0.0, 4.0])
+    p2 = torch.nn.Parameter(torch.tensor([3.0]))
+    p2.decoupled_grad = torch.tensor([0.0])
+
+    assert clip_grads_module.count_zeros_fp32(
+        [p1, p2], grad_stats_parallel_group="mp", use_decoupled_grad=True
+    ) == 2
+
+    clip_grads_module.clip_grad_by_total_norm_fp32(
+        [p1, p2], max_norm=2.0, total_norm=8.0, use_decoupled_grad=True
+    )
+    assert torch.allclose(p1.decoupled_grad, torch.tensor([0.0, 1.0]), atol=1e-5)
+
+    clip_grads_module.clip_grad_by_total_norm_fp32(
+        [p1], max_norm=torch.tensor(1.0), total_norm=torch.tensor(4.0), use_decoupled_grad=True
+    )
+    assert p1.decoupled_grad[1].item() < 1.0
+
+    monkeypatch.setattr(
+        grad_scaler_module,
+        "cur_platform",
+        SimpleNamespace(device_name=lambda: "cpu", current_device=lambda: torch.device("cpu")),
+    )
+    constant = grad_scaler_module.ConstantGradScaler(2.0)
+    assert constant.inv_scale.item() == 0.5
+    constant.update(True)
+    assert constant.state_dict() == {}
+
+    scaler = grad_scaler_module.DynamicGradScaler(
+        initial_scale=8.0,
+        min_scale=2.0,
+        growth_factor=2.0,
+        backoff_factor=0.5,
+        growth_interval=2,
+        hysteresis=2,
+    )
+    scaler.update(False)
+    assert scaler.scale.item() == 8.0
+    scaler.update(False)
+    assert scaler.scale.item() == 16.0
+    scaler.update(True)
+    assert scaler.scale.item() == 16.0
+    scaler.update(True)
+    assert scaler.scale.item() == 8.0
+    state_dict = scaler.state_dict()
+    restored = grad_scaler_module.DynamicGradScaler(4.0, 1.0, 2.0, 0.5, 3, 1)
+    restored.load_state_dict(state_dict)
+    assert restored.scale.item() == scaler.scale.item()
+    assert restored._growth_tracker == scaler._growth_tracker
+    assert restored._hysteresis_tracker == scaler._hysteresis_tracker
+
+
+def test_chained_optimizer_state_split_load_step_and_parameter_state(monkeypatch, tmp_path):
+    p1 = torch.nn.Parameter(torch.tensor([1.0]))
+    p1.grad = torch.tensor([1.0])
+    p2 = torch.nn.Parameter(torch.tensor([2.0]))
+    p2.grad = torch.tensor([2.0])
+    base1 = _make_base_optimizer_with_params([p1])
+    base1.param_groups[0]["step"] = 3
+    base1.state["state-a"] = 1
+    base2 = _make_base_optimizer_with_params([p2])
+    base2.param_groups[0]["step"] = 3
+    base2.state["state-b"] = 2
+
+    config = OptimizerConfig(clip_grad=0.7, log_num_zeros_in_grad=True)
+    config.overlap_param_gather_with_optimizer_step = True
+    opt1 = _ToyMegatronOptimizer(base1, config)
+    opt2 = _ToyMegatronOptimizer(base2, config)
+    sync_calls = []
+    opt1.model_chunks = [SimpleNamespace(start_param_sync=lambda **kwargs: sync_calls.append(kwargs))]
+    opt2.model_chunks = [object(), object()]
+    opt1.grad_stats_parallel_group = "shared"
+    opt2.grad_stats_parallel_group = "shared"
+
+    chained = ChainedOptimizer([opt1, opt2])
+    assert chained.model_chunks == opt1.model_chunks + opt2.model_chunks
+    assert ChainedOptimizer([opt1]).optimizer is opt1.optimizer
+    with pytest.raises(AssertionError, match="more than one optimizer"):
+        _ = chained.optimizer
+    assert chained.get_loss_scale().item() == 2.0
+    chained.zero_grad(set_to_none=False)
+    assert opt1.zero_grad_calls == [False]
+    assert opt2.zero_grad_calls == [False]
+
+    proxy_state = chained.state
+    assert len(proxy_state) == 2
+    assert proxy_state[(0, "state-a")] == 1
+    proxy_state[(1, "extra")] = 9
+    assert base2.state["extra"] == 9
+    assert sorted(list(proxy_state)) == [(0, "state-a"), (1, "extra"), (1, "state-b")]
+    assert ((1, "extra"), 9) in list(proxy_state.items())
+
+    split = chained._split_state_dict({"model0": "a", "model1": "b", "model2": "c"})
+    assert split == [{"model0": "a"}, {"model0": "b", "model1": "c"}]
+    chained.reload_model_params({"model0": "a", "model1": "b", "model2": "c"})
+    assert opt1.reloaded_state_dicts[-1] == {"model0": "a"}
+    assert opt2.reloaded_state_dicts[-1] == {"model0": "b", "model1": "c"}
+    with pytest.raises(AssertionError, match="Wrong state_dict format"):
+        chained._split_state_dict({"model0": "only-one"})
+
+    assert isinstance(chained.state_dict(), list)
+    chained.load_state_dict({1: {"opt": "two"}, 0: {"opt": "one"}})
+    assert opt1.loaded_state_dicts[-1] == {"opt": "one"}
+    assert opt2.loaded_state_dicts[-1] == {"opt": "two"}
+    with pytest.raises(RuntimeError, match="Expected 2 entries"):
+        chained.load_state_dict([{"only": "one"}])
+
+    norm_calls = []
+    clip_calls = []
+    monkeypatch.setattr(
+        optimizer_module,
+        "get_grad_norm_fp32",
+        lambda grads, grad_stats_parallel_group=None: norm_calls.append(
+            (len(grads), grad_stats_parallel_group)
+        )
+        or 13.0,
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "clip_grad_by_total_norm_fp32",
+        lambda parameters, max_norm, total_norm, use_decoupled_grad: clip_calls.append(
+            (list(parameters), max_norm, total_norm, use_decoupled_grad)
+        ),
+    )
+    monkeypatch.setattr(
+        optimizer_module,
+        "count_zeros_fp32",
+        lambda parameters, grad_stats_parallel_group=None, use_decoupled_grad=False: 6,
+    )
+    success, grad_norm, zeros = chained.step()
+    assert success is True
+    assert grad_norm == 13.0
+    assert zeros == 6
+    assert norm_calls == [(2, "shared")]
+    assert sync_calls == [{"force_dispatch": True}]
+    assert clip_calls[0][0][0] is p1
+    assert clip_calls[1][0][0] is p2
+
+    opt2.grad_stats_parallel_group = "different"
+    opt1.get_grad_norm = lambda: 3.0
+    opt2.get_grad_norm = lambda: 4.0
+    opt1.count_zeros = lambda: 2
+    opt2.count_zeros = lambda: 5
+    assert chained.grads_states_parallel_group_is_shared() is False
+    with pytest.raises(AssertionError, match="not shared"):
+        chained.get_grad_stats_parallel_group()
+    assert chained.get_grad_norm() == 5.0
+    assert chained.count_zeros() == 7
+
+    opt1.data_parallel_group = SimpleNamespace(rank=lambda: 0)
+    opt2.data_parallel_group = SimpleNamespace(rank=lambda: 1)
+    opt1.get_parameter_state_dp_zero = lambda: {"rank0": True}
+    opt2.get_parameter_state_dp_zero = lambda: None
+    parameter_state_path = tmp_path / "parameter_state.pt"
+    chained.save_parameter_state(str(parameter_state_path))
+    assert torch.load(parameter_state_path) == [{"rank0": True}, None]
+
+    loaded_parameter_states = []
+    opt1.load_parameter_state_from_dp_zero = lambda state, update_legacy_format=False: (
+        loaded_parameter_states.append((state, update_legacy_format))
+    )
+    opt2.load_parameter_state_from_dp_zero = lambda state, update_legacy_format=False: (
+        loaded_parameter_states.append((state, update_legacy_format))
+    )
+    chained.load_parameter_state(str(parameter_state_path), update_legacy_format=True)
+    assert loaded_parameter_states == [({"rank0": True}, True), (None, True)]
+
+
+def test_chained_optimizer_sharded_state_dict_convert_and_prefix_paths(monkeypatch):
+    config = OptimizerConfig()
+    opt1 = _ToyMegatronOptimizer(_make_base_optimizer_with_params([]), config)
+    opt2 = _ToyMegatronOptimizer(_make_base_optimizer_with_params([]), config)
+    opt1.optimizer.param_groups = [{"params": [1], "step": 4}]
+    opt2.optimizer.param_groups = [{"params": [2], "step": 4}]
+
+    opt1.sharded_state_dict = lambda *args, **kwargs: {
+        "optimizer": {"main": "one"},
+        "param_state": {0: {"a": 1}},
+        "param_state_sharding_type": {0: "type-a"},
+    }
+    opt2.sharded_state_dict = lambda *args, **kwargs: {
+        "optimizer": {"main": "two"},
+        "param_state": {3: {"b": 2}},
+        "param_state_sharding_type": {3: "type-b"},
+    }
+    chained = ChainedOptimizer([opt1, opt2])
+
+    converted = chained.sharded_state_dict({}, is_loading=True, convert_to_ep=True)
+    assert converted["param_state"] == {0: {"a": 1}, 1: {"b": 2}}
+    assert chained.mapping_idx == {0: {0: 0}, 1: {3: 1}}
+    assert chained.original_sharded_state_dict[0]["len_param_state"] == 1
+
+    prefixes = []
+    monkeypatch.setattr(
+        optimizer_module,
+        "add_prefix_for_sharding",
+        lambda state_dict, prefix: prefixes.append(prefix) or state_dict.setdefault(
+            "prefix", prefix
+        ),
+    )
+    sharded = chained.sharded_state_dict(
+        {},
+        is_loading=False,
+        metadata={"distrib_optim_sharding_type": "legacy"},
+    )
+    assert prefixes == ["chained_0.", "chained_1."]
+    assert sharded[0]["prefix"] == "chained_0."
+    assert sharded[1]["prefix"] == "chained_1."
+
+    no_prefix = chained.sharded_state_dict(
+        {},
+        is_loading=False,
+        metadata={"chained_optim_avoid_prefix": True},
+    )
+    assert "prefix" not in no_prefix[0]
+
+
+def test_optimizer_package_mup_overrides_and_param_group_buffer_helpers(monkeypatch):
+    import megatron.core.optimizer as optimizer_pkg
+
+    warnings_seen = []
+    monkeypatch.setattr(
+        optimizer_pkg,
+        "log_single_rank",
+        lambda _logger, _level, message: warnings_seen.append(message),
+    )
+
+    adam_config = OptimizerConfig(
+        optimizer="adam",
+        lr=0.1,
+        min_lr=0.01,
+        decoupled_lr=0.2,
+        decoupled_min_lr=0.02,
+        adam_eps=1.0e-6,
+    )
+    adam_overrides = optimizer_pkg.get_mup_config_overrides(adam_config, 2.0, "adam")
+    assert any("decoupled_lr" in message for message in warnings_seen)
+    assert {"max_lr": 0.05, "min_lr": 0.005} in adam_overrides.values()
+    assert {"eps": 5.0e-7} in adam_overrides.values()
+
+    hidden = torch.nn.Parameter(torch.ones(2, 2))
+    vector = torch.nn.Parameter(torch.ones(2))
+    output = torch.nn.Parameter(torch.ones(2, 2))
+    output.is_embedding_or_output_parameter = True
+    hidden_matches = [
+        override
+        for key, override in adam_overrides.items()
+        if key.matches(hidden, "decoder.layers.0.mlp.weight")
+    ]
+    output_matches = [
+        override
+        for key, override in adam_overrides.items()
+        if key.matches(output, "output_layer.weight")
+    ]
+    assert {"max_lr": 0.05, "min_lr": 0.005} in hidden_matches
+    assert {"eps": 5.0e-7} in hidden_matches
+    assert {"max_lr": 0.05, "min_lr": 0.005} not in output_matches
+
+    sgd_overrides = optimizer_pkg.get_mup_config_overrides(
+        OptimizerConfig(optimizer="sgd", lr=0.1, min_lr=0.01), 3.0, "sgd"
+    )
+    assert list(sgd_overrides.values()) == [{"max_lr": 0.30000000000000004, "min_lr": 0.03}]
+    assert next(iter(sgd_overrides)).matches(vector, "norm.weight")
+    assert optimizer_pkg.get_mup_config_overrides(OptimizerConfig(lr=0.1), 1.0, "adam") == {}
+
+    monkeypatch.setattr(optimizer_pkg.torch.distributed, "get_world_size", lambda: 1)
+    monkeypatch.setattr(
+        optimizer_pkg.torch.distributed,
+        "all_gather_object",
+        lambda gathered, value: gathered.__setitem__(0, value),
+    )
+
+    class Chunk(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.dense = torch.nn.Parameter(torch.ones(2, 2))
+            self.frozen = torch.nn.Parameter(torch.ones(1), requires_grad=False)
+            self.expert = torch.nn.Parameter(torch.ones(2))
+            self.expert.allreduce = False
+            self.engram = torch.nn.Parameter(torch.ones(3))
+            self.engram.is_engram_embedding = True
+            self.buffers = ["dense-buffer"]
+            self.expert_parallel_buffers = ["expert-buffer"]
+            self.engram_embedding_buffers = ["engram-buffer"]
+
+    chunk = Chunk()
+    dense_groups, dense_buffers = optimizer_pkg._get_param_groups_and_buffers(
+        [chunk],
+        model_chunk_offset=4,
+        config=OptimizerConfig(lr=0.01),
+        config_overrides={},
+        filter_fn=lambda group: not group["is_expert_parallel"] and not group["is_engram_parallel"],
+        buffer_name="buffers",
+    )
+    assert dense_buffers == {4: ["dense-buffer"]}
+    assert any(param is chunk.dense for param in dense_groups[0]["params"])
+    assert not any(param is chunk.expert for param in dense_groups[0]["params"])
+    assert not any(param is chunk.frozen for param in dense_groups[0]["params"])
+
+    expert_groups, expert_buffers = optimizer_pkg._get_param_groups_and_buffers(
+        [chunk],
+        model_chunk_offset=0,
+        config=OptimizerConfig(lr=0.01),
+        config_overrides={},
+        filter_fn=lambda group: group["is_expert_parallel"],
+        buffer_name="expert_parallel_buffers",
+    )
+    assert expert_buffers == {0: ["expert-buffer"]}
+    assert expert_groups[0]["is_expert_parallel"] is True
+    assert any(param is chunk.expert for param in expert_groups[0]["params"])
+
+    engram_groups, engram_buffers = optimizer_pkg._get_param_groups_and_buffers(
+        [chunk],
+        model_chunk_offset=0,
+        config=OptimizerConfig(lr=0.01),
+        config_overrides={},
+        filter_fn=lambda group: group["is_engram_parallel"],
+        buffer_name="engram_embedding_buffers",
+    )
+    assert engram_buffers == {0: ["engram-buffer"]}
+    assert engram_groups[0]["is_engram_parallel"] is True
+    assert any(param is chunk.engram for param in engram_groups[0]["params"])
+
+
+def test_optimizer_package_optimizer_factory_selection_paths(monkeypatch):
+    import megatron.core.optimizer as optimizer_pkg
+
+    class FakeTorchOptimizer:
+        def __init__(self, params, **kwargs):
+            self.param_groups = params
+            self.kwargs = kwargs
+            self.state = {}
+            for group in params:
+                for param in group["params"]:
+                    self.state[param] = {}
+
+    wrappers = []
+
+    def fake_fp32_optimizer(base_optimizer, config, init_state_fn):
+        wrapper = SimpleNamespace(
+            kind="fp32",
+            optimizer=base_optimizer,
+            config=config,
+            init_state_fn=init_state_fn,
+        )
+        wrappers.append(wrapper)
+        return wrapper
+
+    def fake_float16_optimizer(base_optimizer, config, grad_scaler, init_state_fn):
+        wrapper = SimpleNamespace(
+            kind="float16",
+            optimizer=base_optimizer,
+            config=config,
+            grad_scaler=grad_scaler,
+            init_state_fn=init_state_fn,
+        )
+        wrappers.append(wrapper)
+        return wrapper
+
+    def fake_distributed_optimizer(*args, **kwargs):
+        wrapper = SimpleNamespace(kind="distributed", args=args, kwargs=kwargs)
+        wrappers.append(wrapper)
+        return wrapper
+
+    monkeypatch.setattr(optimizer_pkg, "SGD", FakeTorchOptimizer)
+    monkeypatch.setattr(optimizer_pkg, "Adam", FakeTorchOptimizer)
+    monkeypatch.setattr(optimizer_pkg, "FP32Optimizer", fake_fp32_optimizer)
+    monkeypatch.setattr(optimizer_pkg, "Float16OptimizerWithFloat16Params", fake_float16_optimizer)
+    monkeypatch.setattr(optimizer_pkg, "DistributedOptimizer", fake_distributed_optimizer)
+    monkeypatch.setattr(optimizer_pkg.parallel_state, "get_tensor_model_parallel_group", lambda: "tp")
+    monkeypatch.setattr(optimizer_pkg, "HAVE_EO_V02", False)
+
+    param = torch.nn.Parameter(torch.ones(1))
+    param_groups = [{"params": [param]}]
+    fp32 = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
+        OptimizerConfig(optimizer="sgd", lr=0.1),
+        model_chunks=["model"],
+        param_groups=param_groups,
+        model_parallel_group="mp",
+    )
+    assert fp32.kind == "fp32"
+    assert fp32.optimizer.kwargs["momentum"] == OptimizerConfig().sgd_momentum
+    assert fp32.grad_stats_parallel_group == "mp"
+    assert fp32.tp_group == "tp"
+
+    empty = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
+        OptimizerConfig(optimizer="sgd", lr=0.1),
+        model_chunks=[],
+        param_groups=[],
+        pg_collection=SimpleNamespace(tp="custom-tp"),
+    )
+    assert empty.kind == "fp32"
+    assert empty.optimizer is None
+    assert empty.tp_group == "custom-tp"
+
+    float16 = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
+        OptimizerConfig(optimizer="sgd", lr=0.1, bf16=True),
+        model_chunks=["model"],
+        param_groups=param_groups,
+        model_parallel_group="mp16",
+    )
+    assert float16.kind == "float16"
+    assert float16.grad_scaler is None
+    assert float16.grad_stats_parallel_group == "mp16"
+
+    distributed = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
+        OptimizerConfig(optimizer="sgd", lr=0.1, use_distributed_optimizer=True),
+        model_chunks=["model"],
+        param_groups=param_groups,
+        per_model_buffers={0: ["buffer"]},
+        data_parallel_group="dp",
+        data_parallel_group_gloo="gloo",
+        data_parallel_group_idx=7,
+        intra_dist_opt_group="intra",
+        distributed_optimizer_instance_id=3,
+    )
+    assert distributed.kind == "distributed"
+    assert distributed.kwargs["per_model_buffers"] == {0: ["buffer"]}
+    assert distributed.kwargs["data_parallel_group_idx"] == 7
+    assert distributed.grad_stats_parallel_group == "intra"
+
+    with pytest.raises(ImportError, match="Lion optimizer requires"):
+        optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
+            OptimizerConfig(optimizer="lion", lr=0.1),
+            model_chunks=["model"],
+            param_groups=param_groups,
+        )
+    with pytest.raises(Exception, match="not supported"):
+        optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
+            OptimizerConfig(optimizer="unknown", lr=0.1),
+            model_chunks=["model"],
+            param_groups=param_groups,
+        )
 
 
 def test_precision_aware_fused_adam():

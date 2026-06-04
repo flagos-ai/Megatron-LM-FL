@@ -10,6 +10,7 @@ import torch
 from megatron.core.tokenizers.utils.build_tokenizer import vocab_size_with_padding
 from megatron.training.checkpointing import save_grads
 from megatron.training.global_vars import set_args
+from megatron.training import checkpointing
 from megatron.training import training
 from megatron.training.training import (
     build_train_valid_test_data_loaders,
@@ -490,6 +491,308 @@ def test_get_train_valid_test_num_samples_iteration_sample_and_phase_paths(monke
     args.skip_train = False
     with pytest.raises(AssertionError):
         get_train_valid_test_num_samples()
+
+
+def test_checkpointing_versions_paths_metadata_and_storage_branches(monkeypatch, tmp_path):
+    monkeypatch.setattr(checkpointing, "_CHECKPOINT_VERSION", None)
+    checkpointing.set_checkpoint_version(3.0)
+    assert checkpointing.get_checkpoint_version() == 3.0
+    checkpointing.set_checkpoint_version(3.0)
+    with pytest.raises(AssertionError, match="checkpoint versions"):
+        checkpointing.set_checkpoint_version(2.0)
+
+    checkpointing.set_loaded_iteration(17)
+    assert checkpointing.get_loaded_iteration() == 17
+
+    monkeypatch.setattr(checkpointing.mpu, "get_pipeline_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_tensor_model_parallel_rank", lambda: 2)
+    monkeypatch.setattr(checkpointing.mpu, "get_pipeline_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(checkpointing.mpu, "get_expert_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_expert_model_parallel_rank", lambda: 0)
+
+    base = str(tmp_path / "ckpts")
+    assert checkpointing.get_checkpoint_name(base, 5).endswith(
+        "iter_0000005/mp_rank_02/model_optim_rng.pt"
+    )
+    assert checkpointing.get_checkpoint_name(base, 0, release=True, return_base_dir=True).endswith(
+        "release"
+    )
+    assert checkpointing.get_checkpoint_name(
+        base,
+        7,
+        pipeline_parallel=True,
+        tensor_rank=3,
+        pipeline_rank=4,
+        expert_parallel=True,
+        expert_rank=5,
+        basename="custom.pt",
+    ).endswith("iter_0000007/mp_rank_03_004_005/custom.pt")
+    assert checkpointing.get_distributed_optimizer_checkpoint_name("/a/b/model.pt") == (
+        "/a/b/distrib_optim.pt"
+    )
+
+    checkpointing.ensure_directory_exists(str(tmp_path / "parent" / "file.pt"))
+    assert (tmp_path / "parent").is_dir()
+    checkpointing.ensure_directory_exists(str(tmp_path / "whole_dir"), check_parent=False)
+    assert (tmp_path / "whole_dir").is_dir()
+
+    tracker = tmp_path / "latest_checkpointed_iteration.txt"
+    assert checkpointing.checkpoint_exists(str(tmp_path)) is False
+    tracker.write_text("9", encoding="utf-8")
+    assert checkpointing.checkpoint_exists(str(tmp_path)) is True
+    monkeypatch.setattr(checkpointing.torch.distributed, "is_initialized", lambda: False)
+    assert checkpointing.read_metadata(str(tracker)) == (9, False)
+    tracker.write_text("release", encoding="utf-8")
+    assert checkpointing.read_metadata(str(tracker)) == (0, True)
+    tracker.write_text("not-valid", encoding="utf-8")
+    with pytest.raises(SystemExit):
+        checkpointing.read_metadata(str(tracker))
+
+    rank0_path = Path(
+        checkpointing.get_checkpoint_name(
+            base,
+            11,
+            pipeline_parallel=True,
+            tensor_rank=0,
+            pipeline_rank=0,
+            expert_parallel=True,
+            expert_rank=0,
+        )
+    )
+    rank0_path.parent.mkdir(parents=True, exist_ok=True)
+    rank0_path.write_text("checkpoint", encoding="utf-8")
+    assert checkpointing.find_checkpoint_rank_0(base, 11) == str(rank0_path)
+
+    monkeypatch.setattr(checkpointing, "isfile", lambda filename: False)
+    monkeypatch.setattr(
+        checkpointing.dist_checkpointing,
+        "check_is_distributed_checkpoint",
+        lambda filename: filename.endswith("iter_0000012"),
+    )
+    assert checkpointing.find_checkpoint_rank_0(base, 12).endswith("iter_0000012")
+
+    monkeypatch.setattr(
+        checkpointing,
+        "isfile",
+        lambda filename: filename.endswith("latest_checkpointed_iteration.txt"),
+    )
+    monkeypatch.setattr(checkpointing, "read_metadata", lambda filename: (4, False))
+    load_args = SimpleNamespace(load=base, ckpt_step=None)
+    assert checkpointing.get_load_checkpoint_path_by_args(load_args).endswith("iter_0000004")
+    load_args.ckpt_step = 6
+    assert checkpointing.get_load_checkpoint_path_by_args(load_args).endswith("iter_0000006")
+
+    msc_calls = []
+    fake_msc = SimpleNamespace(
+        os=SimpleNamespace(
+            path=SimpleNamespace(isfile=lambda filename: filename == "remote"),
+            makedirs=lambda dirname, exist_ok=True: msc_calls.append((dirname, exist_ok)),
+        )
+    )
+    monkeypatch.setattr(checkpointing.MultiStorageClientFeature, "is_enabled", lambda: True)
+    monkeypatch.setattr(checkpointing.MultiStorageClientFeature, "import_package", lambda: fake_msc)
+    assert checkpointing.isfile("remote") is True
+    checkpointing.ensure_directory_exists("remote_dir/file.pt")
+    assert msc_calls == [("remote_dir", True)]
+
+
+def test_checkpointing_check_args_metadata_and_state_dict_generation(monkeypatch):
+    runtime_args = SimpleNamespace(
+        num_layers=2,
+        hidden_size=8,
+        num_attention_heads=2,
+        add_position_embedding=True,
+        vocab_file="vocab.json",
+        max_position_embeddings=16,
+        make_vocab_size_divisible_by=8,
+        padded_vocab_size=32,
+        tokenizer_type="GPT2BPETokenizer",
+        data_parallel_random_init=True,
+        phase_transition_iterations=[3],
+        global_batch_size=4,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+        use_dist_ckpt=False,
+    )
+    checkpoint_args = SimpleNamespace(
+        num_layers=2,
+        hidden_size=8,
+        num_attention_heads=2,
+        max_position_embeddings=16,
+        make_vocab_size_divisible_by=8,
+        padded_vocab_size=32,
+        tokenizer_type="GPT2BPETokenizer",
+        data_parallel_random_init=True,
+        global_batch_size=4,
+        model_parallel_size=1,
+        tensor_model_parallel_size=1,
+        pipeline_model_parallel_size=1,
+    )
+    monkeypatch.setattr(checkpointing, "get_args", lambda: runtime_args)
+    monkeypatch.setattr(checkpointing, "_CHECKPOINT_VERSION", 2.0)
+    checkpointing.check_checkpoint_args(checkpoint_args)
+    monkeypatch.setattr(checkpointing, "_CHECKPOINT_VERSION", 3.0)
+    checkpointing.check_checkpoint_args(checkpoint_args)
+
+    checkpoint_args.hidden_size = 16
+    with pytest.raises(AssertionError, match="hidden_size"):
+        checkpointing.check_checkpoint_args(checkpoint_args)
+    checkpoint_args.hidden_size = 8
+
+    monkeypatch.setattr(checkpointing.mpu, "get_data_parallel_group", lambda **kwargs: "dp-cp")
+    metadata_args = SimpleNamespace(
+        use_distributed_optimizer=True,
+        ckpt_format="torch_dist",
+        dist_ckpt_optim_fully_reshardable=True,
+        distrib_optim_fully_reshardable_mem_efficient=False,
+    )
+    metadata = checkpointing._build_sharded_state_dict_metadata(metadata_args)
+    assert metadata["distrib_optim_sharding_type"] == "fully_reshardable"
+    assert metadata["dp_cp_group"] == "dp-cp"
+    metadata_args.dist_ckpt_optim_fully_reshardable = False
+    assert checkpointing._build_sharded_state_dict_metadata(metadata_args)[
+        "distrib_optim_sharding_type"
+    ] == "dp_reshardable"
+    metadata_args.ckpt_format = "fsdp_dtensor"
+    assert checkpointing._build_sharded_state_dict_metadata(metadata_args)[
+        "distrib_optim_sharding_type"
+    ] == "fsdp_dtensor"
+
+    class _Model:
+        def __init__(self, name):
+            self.name = name
+
+        def state_dict_for_save_checkpoint(self):
+            return {"plain": self.name}
+
+        def sharded_state_dict(self, **kwargs):
+            return {"sharded": self.name, "metadata": kwargs["metadata"]}
+
+    class _Optimizer:
+        is_stub_optimizer = False
+
+        def state_dict(self):
+            return {"optim": "plain"}
+
+        def sharded_state_dict(self, state_dict, **kwargs):
+            return {"optim": sorted(state_dict), "metadata": kwargs["metadata"]}
+
+    class _Scheduler:
+        def state_dict(self):
+            return {"lr": 0.1}
+
+    args = SimpleNamespace(
+        ckpt_format="torch",
+        no_save_optim=False,
+        no_save_rng=False,
+        use_distributed_optimizer=False,
+        dist_ckpt_optim_fully_reshardable=False,
+        distrib_optim_fully_reshardable_mem_efficient=False,
+    )
+    state = checkpointing.generate_state_dict(
+        args,
+        [_Model("a"), _Model("b")],
+        _Optimizer(),
+        _Scheduler(),
+        rng_state={"rng": True},
+        iteration=5,
+        rerun_state={"rerun": True},
+    )
+    assert state["model0"] == {"plain": "a"}
+    assert state["model1"] == {"plain": "b"}
+    assert state["optimizer"] == {"optim": "plain"}
+    assert state["opt_param_scheduler"] == {"lr": 0.1}
+    assert state["rng_state"] == {"rng": True}
+    assert state["rerun_state_machine"] == {"rerun": True}
+
+    args.ckpt_format = "torch_dist"
+    sharded = checkpointing.generate_state_dict(
+        args,
+        [_Model("a")],
+        _Optimizer(),
+        None,
+        rng_state=None,
+        optim_sd_kwargs={"metadata": {"passed": True}},
+        model_sd_kwargs={"metadata": {"model": True}},
+    )
+    assert sharded["model"]["metadata"] == {"model": True}
+    assert sharded["optimizer"]["metadata"] == {"passed": True}
+    assert "rng_state" not in sharded
+
+    args.ckpt_format = "fsdp_dtensor"
+    args.use_distributed_optimizer = True
+    args.no_save_optim = False
+    fsdp_state = checkpointing.generate_state_dict(
+        args,
+        [_Model("a")],
+        _Optimizer(),
+        None,
+        rng_state=None,
+        optim_sd_kwargs={"metadata": {}},
+    )
+    assert fsdp_state["optimizer"]["metadata"]["distrib_optim_sharding_type"] == "fsdp_dtensor"
+
+    args.no_save_optim = True
+    no_optim = checkpointing.generate_state_dict(
+        args,
+        [_Model("a")],
+        _Optimizer(),
+        _Scheduler(),
+        rng_state={"rng": True},
+    )
+    assert "optimizer" not in no_optim
+    assert "opt_param_scheduler" not in no_optim
+
+
+def test_checkpointing_dataloader_state_cleanup_and_delete_paths(monkeypatch, tmp_path):
+    calls = []
+    monkeypatch.setattr(checkpointing.torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr(checkpointing.torch.distributed, "barrier", lambda group=None: calls.append(("barrier", group)))
+    monkeypatch.setattr(checkpointing.mpu, "is_pipeline_first_stage", lambda ignore_virtual=True: True)
+    monkeypatch.setattr(checkpointing.mpu, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(checkpointing.mpu, "get_data_parallel_rank", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_data_parallel_group", lambda: "dp-group")
+    monkeypatch.setattr(checkpointing.mpu, "get_pipeline_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_pipeline_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(checkpointing.mpu, "get_expert_model_parallel_world_size", lambda: 1)
+    monkeypatch.setattr(checkpointing.mpu, "get_expert_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(checkpointing.torch, "save", lambda obj, path: calls.append(("save", obj, path)))
+
+    checkpointing.maybe_save_dataloader_state(None, 1, str(tmp_path))
+    checkpointing.maybe_save_dataloader_state(object(), 1, None)
+    with pytest.raises(RuntimeError, match="save_state"):
+        checkpointing.maybe_save_dataloader_state(SimpleNamespace(iterable=object()), 1, str(tmp_path))
+
+    monkeypatch.setattr(checkpointing.mpu, "get_tensor_model_parallel_rank", lambda: 1)
+    iterator = SimpleNamespace(iterable=SimpleNamespace(save_state=lambda: {"state": 1}))
+    checkpointing.maybe_save_dataloader_state(iterator, 3, str(tmp_path))
+    assert calls == []
+
+    monkeypatch.setattr(checkpointing.mpu, "get_tensor_model_parallel_rank", lambda: 0)
+    checkpointing.maybe_save_dataloader_state(iterator, 3, str(tmp_path))
+    save_call = next(item for item in calls if item[0] == "save")
+    assert save_call[1] == {"dataloader_state_dict": {"state": 1}}
+    assert save_call[2].endswith("train_dataloader_dprank001.pt")
+    assert calls.count(("barrier", "dp-group")) == 2
+
+    for iteration in [1, 2, 3, 4]:
+        (tmp_path / f"iter_{iteration:07d}").mkdir()
+    monkeypatch.setattr(checkpointing, "print_rank_0", lambda message: calls.append(("print", message)))
+    checkpointing.cleanup_old_non_persistent_checkpoint(str(tmp_path), leave_ckpt_num=2, do_async=False)
+    assert not (tmp_path / "iter_0000001").exists()
+    assert not (tmp_path / "iter_0000002").exists()
+    assert (tmp_path / "iter_0000003").exists()
+    assert (tmp_path / "iter_0000004").exists()
+
+    delete_root = tmp_path / "delete-root"
+    checkpoint_to_delete = Path(
+        checkpointing.get_checkpoint_name(str(delete_root), 5, return_base_dir=True)
+    )
+    checkpoint_to_delete.mkdir(parents=True)
+    monkeypatch.setattr(checkpointing, "append_to_progress_log", lambda message, barrier=False: calls.append(("progress", message, barrier)))
+    checkpointing._async_delete_checkpoint_impl(str(delete_root), 5, log_progress=True)
+    assert not checkpoint_to_delete.exists()
+    assert ("progress", "Deleted checkpoint\tIteration: 5", False) in calls
 
 
 def test_build_train_valid_test_datasets_prints_targets_and_delegates(monkeypatch):
