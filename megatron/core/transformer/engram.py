@@ -780,11 +780,11 @@ class EngramModule(nn.Module):
 
         # return: [L, B, HC_MULT * D] or [L/tp_size, B, HC_MULT * D] if SP is on
         """
-        # When sequence parallel is enabled, we need to gather the full sequence
-        # before entering engram, because:
+        # When sequence parallel is enabled, hidden_states is [L/tp_size, B, D].
+        # We need to gather the full sequence before entering engram because:
         # 1. Short conv operates on sequence dimension and needs full sequence
-        # 2. Hash input_ids are split and need to be gathered
-        # 3. Engram parameters will need all-reduce in backward on tp_group
+        # 2. Engram parameters need correct gradients from the full sequence
+        # Note: hash_input_ids is already full [B, L] (derived from unsplit input_ids)
         sp_enabled = self.config.sequence_parallel
         if sp_enabled:
             # Gather hidden_states from [L/tp_size, B, D] to [L, B, D]
@@ -794,15 +794,6 @@ class EngramModule(nn.Module):
                 hidden_states,
                 tensor_parallel_output_grad=False,
             )
-            # Gather hash_input_ids from [B, L/tp_size] to [B, L]
-            if hash_input_ids is not None:
-                # hash_input_ids: [B, L/tp_size] -> [L/tp_size, B] -> [L, B] -> [B, L]
-                hash_input_ids = hash_input_ids.transpose(0, 1)  # [L/tp_size, B]
-                hash_input_ids = tensor_parallel.gather_from_sequence_parallel_region(
-                    hash_input_ids,
-                    tensor_parallel_output_grad=False,
-                )
-                hash_input_ids = hash_input_ids.transpose(0, 1).contiguous()  # [B, L]
 
         # [B, L, N_GRAM * N_HEADS_PER_GRAM]
         # fake hyper-connection
@@ -870,16 +861,6 @@ class EngramModule(nn.Module):
         This can be called before the forward pass to warm up the embedding cache.
         """
         assert input_ids is not None, "Input ids can not be None for EngramModel"
-        # When sequence parallel is enabled, input_ids is [B, L/tp_size].
-        # We need to gather to full [B, L] before computing embeddings.
-        if self.config.sequence_parallel:
-            # input_ids: [B, L/tp_size] -> [L/tp_size, B] -> gather -> [L, B] -> [B, L]
-            input_ids_t = input_ids.transpose(0, 1).contiguous()  # [L/tp_size, B]
-            input_ids_t = tensor_parallel.gather_from_sequence_parallel_region(
-                input_ids_t,
-                tensor_parallel_output_grad=False,
-            )
-            input_ids = input_ids_t.transpose(0, 1).contiguous()  # [B, L]
         self.embedding_stream.synchronize()  # Ensure previous computations on the stream are finished
         with torch.cuda.stream(self.embedding_stream):
             embedding_result = self.memory(input_ids).flatten(start_dim=-2)
