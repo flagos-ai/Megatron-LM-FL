@@ -312,9 +312,12 @@ class MultiHeadEmbedding(nn.Module):
         total_N = sum(list_of_N)
 
         # embeddings (parallel).
+        # Note: reduce_scatter_embeddings is always False here because SP is handled
+        # at the EngramModule level (gather hidden_states before entering, scatter after).
+        # Embedding always operates on full sequence and outputs [L, B, ...].
+        self.reduce_scatter_embeddings = False
         if self.config.engram_embedding_parallel_method == "allreduce":
             self.tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
-            self.reduce_scatter_embeddings = self.config.sequence_parallel
 
             padded_total_N = _vocab_size_with_padding(
                 total_N, get_pg_size(self.tp_group)
@@ -335,7 +338,6 @@ class MultiHeadEmbedding(nn.Module):
             self.embedding_parallel_group = (
                 parallel_state.get_engram_embedding_parallel_group()
             )
-            self.reduce_scatter_embeddings = self.config.sequence_parallel
             padded_total_N = _vocab_size_with_padding(
                 total_N, get_pg_size(self.embedding_parallel_group)
             )
@@ -785,6 +787,11 @@ class EngramModule(nn.Module):
         # 1. Short conv operates on sequence dimension and needs full sequence
         # 2. Engram parameters need correct gradients from the full sequence
         # Note: hash_input_ids is already full [B, L] (derived from unsplit input_ids)
+
+        # Because we perform all-gather at entry and scatter at exit of the entire
+        # EngramModule, parameters inside engram do NOT need the "sequence_parallel"
+        # attribute set (i.e., no need for `setattr(param, "sequence_parallel", True)`).
+        # The gradient all-reduce is implicitly handled by the scatter backward (all-gather).
         sp_enabled = self.config.sequence_parallel
         if sp_enabled:
             # Gather hidden_states from [L/tp_size, B, D] to [L, B, D]
