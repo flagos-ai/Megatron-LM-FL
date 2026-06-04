@@ -1111,6 +1111,95 @@ def test_cuda_graphs_cpu_metadata_tree_pool_and_global_record_paths(monkeypatch)
         record.create_cudagraphs()
 
 
+def test_cuda_graphs_global_create_and_delete_cpu_paths(monkeypatch):
+    calls = []
+
+    class _FakePlatform:
+        def memory_stats(self):
+            calls.append("memory-stats")
+            return {
+                "allocated_bytes.all.current": 4096,
+                "reserved_bytes.all.current": 8192,
+            }
+
+        def empty_cache(self):
+            calls.append("empty-cache")
+
+    class _FakeRunner:
+        def __init__(self, name):
+            self.name = name
+            self.base_module = SimpleNamespace(modules=lambda: [])
+            self.cudagraph_created = False
+
+        def create_fwd_graph(self, args, kwargs, out, clone_inputs=True):
+            calls.append(("fwd", self.name, args, kwargs, out, clone_inputs))
+
+        def create_bwd_graph(self):
+            calls.append(("bwd", self.name))
+
+    monkeypatch.setattr(cuda_graphs, "HAVE_TE_GRAPHS", False)
+    monkeypatch.setattr(cuda_graphs, "HAVE_TQDM", False)
+    monkeypatch.setattr(cuda_graphs, "fwd_buffer_reuse_ref_count", 0)
+    monkeypatch.setattr(cuda_graphs, "bwd_buffer_reuse_ref_count", 0)
+    monkeypatch.setattr(cuda_graphs, "cur_platform", _FakePlatform())
+    monkeypatch.setattr(cuda_graphs.torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(cuda_graphs.torch.cuda, "default_stream", lambda: "default-stream")
+    monkeypatch.setattr(
+        cuda_graphs.torch.cuda,
+        "set_stream",
+        lambda stream: calls.append(("set-stream", stream)),
+    )
+    monkeypatch.setattr(cuda_graphs, "log_single_rank", lambda *args, **kwargs: calls.append("log"))
+    monkeypatch.setattr(cuda_graphs.gc, "collect", lambda: calls.append("gc"))
+
+    record = cuda_graphs._CudagraphGlobalRecord
+    monkeypatch.setattr(record, "cudagraph_created", False)
+    monkeypatch.setattr(record, "cudagraph_record", [])
+    monkeypatch.setattr(record, "cudagraph_inference_record", [])
+    runner_a = _FakeRunner("a")
+    runner_b = _FakeRunner("b")
+    record.cudagraph_record = [
+        (runner_a, "fwd", ("arg",), {"hidden_states": "h"}, "out"),
+        (runner_b, "bwd"),
+    ]
+
+    stats = cuda_graphs.create_cudagraphs()
+    assert stats["allocated_bytes"] == 0
+    assert runner_a.cudagraph_created is True
+    assert runner_b.cudagraph_created is True
+    assert record.cudagraph_created is True
+    assert record.cudagraph_record == []
+    assert ("fwd", "a", ("arg",), {"hidden_states": "h"}, "out", True) in calls
+    assert ("bwd", "b") in calls
+    assert ("set-stream", "default-stream") in calls
+    assert cuda_graphs.is_graph_capturing() is False
+
+    reusable_runner = object.__new__(cuda_graphs._CudaGraphRunner)
+    torch.nn.Module.__init__(reusable_runner)
+    reusable_runner.cudagraph_created = True
+    reusable_runner.fwd_graph_recorded = True
+    reusable_runner.bwd_graph_recorded = True
+    reusable_runner.fwd_graph = object()
+    reusable_runner.bwd_graph = object()
+    reusable_runner.mempool = object()
+    record.cudagraph_created = True
+    record.cudagraph_record = [(reusable_runner, "fwd")]
+    record.cudagraph_inference_record = [(reusable_runner, "inference")]
+    cuda_graphs.CudaGraphManager.global_mempool = object()
+
+    cuda_graphs.delete_cuda_graphs()
+    assert reusable_runner.cudagraph_created is False
+    assert reusable_runner.fwd_graph_recorded is False
+    assert reusable_runner.bwd_graph_recorded is False
+    assert reusable_runner.fwd_graph is None
+    assert reusable_runner.bwd_graph is None
+    assert reusable_runner.mempool is None
+    assert record.cudagraph_created is False
+    assert record.cudagraph_record == []
+    assert record.cudagraph_inference_record == []
+    assert cuda_graphs.CudaGraphManager.global_mempool is None
+
+
 def test_cuda_graphs_record_and_replay_nodes_validate_status_and_surfaces(monkeypatch):
     record = cuda_graphs._CudagraphGlobalRecord
     monkeypatch.setattr(record, "cudagraph_record", [])
