@@ -825,8 +825,6 @@ def forward_backward_pipelining_with_dualpipev(
             " provide none or provide all the process groups"
         )
 
-    print(f"{model=}")
-    print(f"{data_iterator=}")
     assert (
         isinstance(model, list) and len(model) == 2
     ), 'Dualpipe Schedule only support chunk model for two consecutive chunks'
@@ -916,7 +914,6 @@ def forward_backward_pipelining_with_dualpipev(
     pp_size = parallel_state.get_pipeline_model_parallel_world_size()
     rank = parallel_state.get_pipeline_model_parallel_rank()
     schedule = generate_dualpipev_schedule(pp_size, num_microbatches)
-    print(f"{schedule=}")
 
     model_type = get_model_type(model[0])
 
@@ -1814,8 +1811,9 @@ def forward_backward_pipelining_with_dualpipev(
 
         # If defer_embedding_wgrad_compute is enabled we need to do the
         # weight gradient GEMM's here.
+        # NOTE(zhaoyinglia): last embedding in first pp stage in dualpipev
         finish_embedding_wgrad_compute(
-            config, embedding_module, p2p_communicator.is_pp_last_stage, tp_group
+            config, embedding_module, p2p_communicator.is_pp_first_stage, tp_group
         )
 
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for

@@ -379,7 +379,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             self.layer_number = layer_number + get_transformer_layer_offset(
                 self.config, vp_stage, get_pg_rank(pg_collection.pp), dualpipev_stage
             )
-        print(f"{self.layer_number=}")
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
         self.is_mtp_layer = is_mtp_layer
 
