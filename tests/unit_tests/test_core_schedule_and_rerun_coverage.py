@@ -35,6 +35,7 @@ from megatron.core.inference.text_generation_controllers.text_generation_control
     TextGenerationController,
 )
 from megatron.core.inference import batch_dimensions_utils
+from megatron.core.inference.engines import dynamic_engine
 from megatron.core.dist_checkpointing import tensor_aware_state_dict as tensor_aware
 from megatron.core.dist_checkpointing import exchange_utils
 from megatron.core.dist_checkpointing import mapping as checkpoint_mapping
@@ -1679,6 +1680,253 @@ def test_dynamic_context_cpu_state_management_prefix_and_cache_paths(monkeypatch
     mamba_ctx._allocate_mamba_cache(0.000001)
     assert mamba_allocations
     assert mamba_ctx.kv_block_allocator.on_blocks_deregistered is not None
+
+
+def test_dynamic_engine_request_failure_suspend_resume_and_context_manager_paths(monkeypatch):
+    assert dynamic_engine.format_mem_bytes(1) == "1 bytes"
+    assert dynamic_engine.format_mem_bytes(2048) == "2.0 kb"
+    assert dynamic_engine.format_mem_bytes(3 * 1024**2) == "3.0 mb"
+    assert dynamic_engine.format_mem_bytes(4 * 1024**3) == "4.0 gb"
+
+    loop = asyncio.new_event_loop()
+    calls = []
+
+    class _Tokenizer:
+        eod = 99
+
+        def detokenize(self, tokens):
+            return "|".join(str(token) for token in tokens)
+
+    class _Controller:
+        tokenizer = _Tokenizer()
+
+        def tokenize_prompt(self, tokenizer, prompt, add_BOS=False):
+            calls.append(("tokenize", prompt, add_BOS))
+            return [1, 2, 3] if add_BOS else [2, 3]
+
+    def _new_engine(max_sequence_length=8, max_tokens=8, materialize_last=False):
+        engine = object.__new__(dynamic_engine.DynamicInferenceEngine)
+        engine.controller = _Controller()
+        engine.context = SimpleNamespace(
+            max_sequence_length=max_sequence_length,
+            max_tokens=max_tokens,
+            block_size_tokens=2,
+            enable_prefix_caching=False,
+            has_unfinished_requests=lambda: False,
+            kv_cache_management_mode=dynamic_engine.KVCacheManagementMode.PERSIST,
+            static_kv_memory_pointers=False,
+            deallocate_inference_state_buffers=lambda: calls.append("deallocate"),
+            reinitialize_inference_state_buffers=lambda: calls.append("reinitialize"),
+            chunked_prefill_request_id=-1,
+        )
+        engine._loop = loop
+        engine.requests = {}
+        engine.waiting_request_ids = dynamic_engine.deque()
+        engine.failed_request_ids = []
+        engine._generation_epoch = None
+        engine.rank = 0
+        engine.materialize_only_last_token_logits = materialize_last
+        engine.enable_chunked_prefill = False
+        engine.track_paused_request_events = True
+        engine.track_generated_token_events = True
+        engine.use_coordinator = False
+        engine.is_mp_coordinator = False
+        engine.state = dynamic_engine.EngineState.RUNNING
+        engine.unified_memory_level = 0
+        engine.resume_request_ids = None
+        engine.stop_word_finished_request_ids = set()
+        engine.stop_word_being_finished_ids = set()
+        return engine
+
+    try:
+        monkeypatch.setattr(dynamic_engine.torch.cuda, "current_device", lambda: "cpu")
+        monkeypatch.setattr(dynamic_engine.torch.distributed, "get_rank", lambda: 0)
+
+        engine = _new_engine()
+        valid_request = DynamicInferenceRequest(
+            request_id=1,
+            prompt_tokens=torch.tensor([4, 5], dtype=torch.long),
+            sampling_params=SamplingParams(
+                num_tokens_total=5,
+                termination_id=None,
+                add_BOS=True,
+                stop_words=["stop"],
+            ),
+        )
+        future = engine._add_request(valid_request)
+        assert future.done() is False
+        assert engine.waiting_request_ids[0] == 1
+        assert valid_request.sampling_params.num_tokens_to_generate == 3
+        assert valid_request.sampling_params.termination_id == 99
+        assert valid_request.stop_word_ids == [[2, 3]]
+        assert valid_request.status == Status.ACTIVE_AND_GENERATING_TOKENS
+        assert valid_request.event_add_engine is not None
+        assert engine.get_request(1) is valid_request
+        assert engine.has_unfinished_requests() is True
+
+        engine._generation_epoch = 7
+        epoch_request = DynamicInferenceRequest(
+            request_id=2,
+            prompt_tokens=torch.tensor([6], dtype=torch.long),
+            sampling_params=SamplingParams(num_tokens_to_generate=1, termination_id=99),
+        )
+        engine._add_request(epoch_request)
+        assert epoch_request.policy_epoch == [(0, 7)]
+        assert epoch_request.kv_cache_epoch == [(0, 7)]
+
+        failed_engine = _new_engine(max_sequence_length=3, max_tokens=2)
+        too_long = DynamicInferenceRequest(
+            request_id=3,
+            prompt_tokens=torch.tensor([1, 2, 3], dtype=torch.long),
+            sampling_params=SamplingParams(num_tokens_to_generate=2, termination_id=99),
+            generated_tokens=[8, 9],
+        )
+        failed_future = failed_engine._add_request(too_long)
+        assert failed_future.done() is True
+        assert too_long.status == Status.FAILED
+        assert 3 in failed_engine.failed_request_ids
+        assert too_long.prompt == "1|2|3"
+        assert too_long.generated_text == "8|9"
+        assert any(event.type == DynamicInferenceEventType.ERROR_NONTRANSIENT for event in too_long.events)
+        assert any(event.type == DynamicInferenceEventType.FAIL for event in too_long.events)
+
+        logprob_engine = _new_engine(materialize_last=True)
+        logprob_request = DynamicInferenceRequest(
+            request_id=4,
+            prompt_tokens=torch.tensor([1], dtype=torch.long),
+            sampling_params=SamplingParams(
+                num_tokens_to_generate=1,
+                return_log_probs=True,
+                skip_prompt_log_probs=False,
+                termination_id=99,
+            ),
+        )
+        with pytest.raises(AssertionError, match="Prompt log probs"):
+            logprob_engine._add_request(logprob_request)
+
+        topn_engine = _new_engine()
+        topn_request = DynamicInferenceRequest(
+            request_id=5,
+            prompt_tokens=torch.tensor([1], dtype=torch.long),
+            sampling_params=SamplingParams(
+                num_tokens_to_generate=1,
+                return_log_probs=False,
+                top_n_logprobs=1,
+                termination_id=99,
+            ),
+        )
+        with pytest.raises(AssertionError, match="top_n_logprobs"):
+            topn_engine._add_request(topn_request)
+
+        add_engine = _new_engine()
+        text_future = add_engine.add_request(
+            6,
+            "hello",
+            SamplingParams(num_tokens_to_generate=1, termination_id=99, add_BOS=True),
+        )
+        assert text_future.done() is False
+        assert calls[-1] == ("tokenize", "hello", True)
+        list_future = add_engine.add_request(
+            7,
+            [7, 8],
+            SamplingParams(num_tokens_to_generate=1, termination_id=99),
+        )
+        assert list_future.done() is False
+        with pytest.raises(Exception, match="specialize"):
+            add_engine.add_request(8, object(), SamplingParams(num_tokens_to_generate=1))
+
+        async def _wait_until_paths():
+            wait_engine = object.__new__(dynamic_engine.DynamicInferenceEngine)
+            wait_engine._state_events = {
+                state: asyncio.Event() for state in dynamic_engine.DynamicInferenceEngine._STATE_EVENTS
+            }
+            wait_engine._state_events[dynamic_engine.EngineState.RUNNING].set()
+            await wait_engine.wait_until(dynamic_engine.EngineState.RUNNING)
+            with pytest.raises(ValueError, match="transient"):
+                await wait_engine.wait_until(dynamic_engine.EngineState.PAUSING)
+
+        loop.run_until_complete(_wait_until_paths())
+
+        monkeypatch.setattr(dynamic_engine, "range_push", lambda name: calls.append(("push", name)))
+        monkeypatch.setattr(dynamic_engine, "range_pop", lambda: calls.append("pop"))
+        monkeypatch.setattr(dynamic_engine.torch.cuda, "memory_stats", lambda: {
+            "allocated_bytes.all.current": 1024,
+            "reserved_bytes.all.current": 2048,
+        })
+        monkeypatch.setattr(dynamic_engine.torch.cuda, "synchronize", lambda: calls.append("sync"))
+        monkeypatch.setattr(dynamic_engine, "HAVE_PSUTIL", False)
+        with dynamic_engine.DynamicInferenceEngine.suspend_resume_ctx(
+            "unit", unified_memory_level=0
+        ):
+            calls.append("inside")
+        assert ("push", "unit-inference-context") in calls
+        assert "pop" in calls
+        assert "inside" in calls
+
+        suspend_engine = _new_engine()
+        suspend_engine.context.kv_cache_management_mode = dynamic_engine.KVCacheManagementMode.RECOMPUTE
+        suspend_engine.waiting_request_ids.extend([10])
+        active_request = DynamicInferenceRequest(
+            request_id=9,
+            prompt_tokens=torch.tensor([1, 2], dtype=torch.long),
+            sampling_params=SamplingParams(num_tokens_to_generate=1, termination_id=99),
+            finished_chunk_token_count=1,
+        )
+        waiting_request = DynamicInferenceRequest(
+            request_id=10,
+            prompt_tokens=torch.tensor([3, 4], dtype=torch.long),
+            sampling_params=SamplingParams(num_tokens_to_generate=1, termination_id=99),
+            finished_chunk_token_count=1,
+        )
+        suspend_engine.requests = {
+            9: dynamic_engine.RequestEntry(
+                record=DynamicInferenceRequestRecord.from_request(active_request),
+                future=loop.create_future(),
+            ),
+            10: dynamic_engine.RequestEntry(
+                record=DynamicInferenceRequestRecord.from_request(waiting_request),
+                future=loop.create_future(),
+            ),
+        }
+        monkeypatch.setattr(dynamic_engine, "delete_cuda_graphs", lambda: calls.append("delete-graphs"))
+        suspend_engine.suspend()
+        assert suspend_engine.state == dynamic_engine.EngineState.SUSPENDED
+        assert set(suspend_engine.resume_request_ids) == {9, 10}
+        assert list(suspend_engine.waiting_request_ids) == []
+        assert active_request.finished_chunk_token_count == 0
+        assert waiting_request.finished_chunk_token_count == 0
+        assert "deallocate" in calls
+        assert "delete-graphs" in calls
+
+        resume_engine = _new_engine()
+        resume_engine.state = dynamic_engine.EngineState.SUSPENDED
+        resume_engine.context.kv_cache_management_mode = dynamic_engine.KVCacheManagementMode.RECOMPUTE
+        resume_engine.resume_request_ids = [21, 22]
+        resume_engine._add_request = lambda request: calls.append(("readd", request.request_id))
+        resume_engine.get_request = lambda request_id: SimpleNamespace(request_id=request_id)
+        resume_engine.create_cuda_graphs = lambda: calls.append("create-graphs")
+        resume_engine._loop = SimpleNamespace(
+            call_soon_threadsafe=lambda create_task, coro: (
+                coro.close(),
+                calls.append(("notify", create_task)),
+            )
+        )
+        resume_engine.resume()
+        assert resume_engine.state == dynamic_engine.EngineState.RUNNING
+        assert ("readd", 21) in calls
+        assert ("readd", 22) in calls
+        assert "reinitialize" in calls
+        assert "create-graphs" in calls
+
+        stopped_engine = _new_engine()
+        stopped_engine.state = dynamic_engine.EngineState.SUSPENDED
+        stopped_engine.suspend()
+        assert stopped_engine.state == dynamic_engine.EngineState.SUSPENDED
+        stopped_engine.state = dynamic_engine.EngineState.RUNNING
+        stopped_engine.resume()
+        assert stopped_engine.state == dynamic_engine.EngineState.RUNNING
+    finally:
+        loop.close()
 
 
 def test_text_generation_server_generate_endpoint_validation_and_success(monkeypatch):
