@@ -4550,7 +4550,13 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
 
     from megatron.core.distributed import finalize_model_grads
     from megatron.core.inference import scheduler as inference_scheduler
-    clip_grads = importlib.import_module("megatron.core.optimizer.clip_grads")
+    from megatron.core.optimizer.clip_grads import (
+        clip_grad_by_total_norm_fp32,
+        count_zeros_fp32,
+        get_grad_norm_fp32,
+    )
+    clip_grads_globals = get_grad_norm_fp32.__globals__
+    clip_torch = clip_grads_globals["torch"]
 
     class _Group:
         def __init__(self, size=2, rank=0, name="group"):
@@ -4724,24 +4730,24 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
 
         return _factory
 
-    monkeypatch.setattr(clip_grads.torch, "zeros", _cpu_tensor_factory(torch.zeros))
-    monkeypatch.setattr(clip_grads.torch, "tensor", _cpu_tensor_factory(torch.tensor))
+    monkeypatch.setattr(clip_torch, "zeros", _cpu_tensor_factory(torch.zeros))
+    monkeypatch.setattr(clip_torch, "tensor", _cpu_tensor_factory(torch.tensor))
     monkeypatch.setattr(
-        clip_grads.torch.distributed,
+        clip_torch.distributed,
         "all_reduce",
         lambda tensor, op=None, group=None: clip_all_reduce_calls.append((tensor.clone(), op, group)),
     )
-    monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: group)
-    monkeypatch.setattr(clip_grads, "to_local_if_dtensor", lambda tensor: tensor)
-    monkeypatch.setattr(clip_grads, "param_is_not_shared", lambda param: True)
-    monkeypatch.setattr(clip_grads, "param_is_not_tensor_parallel_duplicate", lambda param, tp_group=None: True)
-    monkeypatch.setattr(
-        clip_grads,
+    monkeypatch.setitem(clip_grads_globals, "get_data_parallel_group_if_dtensor", lambda grad, group: group)
+    monkeypatch.setitem(clip_grads_globals, "to_local_if_dtensor", lambda tensor: tensor)
+    monkeypatch.setitem(clip_grads_globals, "param_is_not_shared", lambda param: True)
+    monkeypatch.setitem(clip_grads_globals, "param_is_not_tensor_parallel_duplicate", lambda param, tp_group=None: True)
+    monkeypatch.setitem(
+        clip_grads_globals,
         "multi_tensor_applier",
         lambda func, overflow, tensor_lists, *args: func(overflow, tensor_lists, *args),
     )
-    monkeypatch.setattr(
-        clip_grads,
+    monkeypatch.setitem(
+        clip_grads_globals,
         "l2_norm_impl",
         lambda overflow, tensor_lists, per_parameter_norm: (
             torch.linalg.vector_norm(torch.cat([grad.float().view(-1) for grad in tensor_lists[0]])),
@@ -4754,20 +4760,20 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
             dst.copy_(src * float(scale))
         return None
 
-    monkeypatch.setattr(clip_grads, "multi_tensor_scale_impl", _scale_impl)
-    monkeypatch.setattr(clip_grads, "multi_tensor_scale_tensor_impl", _scale_impl)
+    monkeypatch.setitem(clip_grads_globals, "multi_tensor_scale_impl", _scale_impl)
+    monkeypatch.setitem(clip_grads_globals, "multi_tensor_scale_tensor_impl", _scale_impl)
 
     grad_a = torch.tensor([3.0, 4.0])
     grad_b = torch.tensor([0.0, -2.0])
-    assert clip_grads.get_grad_norm_fp32([grad_a, grad_b], norm_type=2, grad_stats_parallel_group="mp") == pytest.approx(
+    assert get_grad_norm_fp32([grad_a, grad_b], norm_type=2, grad_stats_parallel_group="mp") == pytest.approx(
         (3.0**2 + 4.0**2 + 2.0**2) ** 0.5
     )
-    assert clip_grads.get_grad_norm_fp32([grad_a], norm_type=1, grad_stats_parallel_group="mp") == pytest.approx(7.0)
-    assert clip_grads.get_grad_norm_fp32(grad_a, norm_type=float("inf"), grad_stats_parallel_group="mp") == pytest.approx(4.0)
+    assert get_grad_norm_fp32([grad_a], norm_type=1, grad_stats_parallel_group="mp") == pytest.approx(7.0)
+    assert get_grad_norm_fp32(grad_a, norm_type=float("inf"), grad_stats_parallel_group="mp") == pytest.approx(4.0)
 
     decoupled_param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
     decoupled_param.decoupled_grad = torch.tensor([4.0, 0.0])
-    clip_grads.clip_grad_by_total_norm_fp32(
+    clip_grad_by_total_norm_fp32(
         [decoupled_param],
         max_norm=1.0,
         total_norm=4.0,
@@ -4776,7 +4782,7 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
     assert torch.allclose(decoupled_param.decoupled_grad, torch.tensor([1.0, 0.0]), atol=1e-5)
     no_clip_param = torch.nn.Parameter(torch.tensor([1.0]))
     no_clip_param.decoupled_grad = torch.tensor([2.0])
-    clip_grads.clip_grad_by_total_norm_fp32(
+    clip_grad_by_total_norm_fp32(
         [no_clip_param],
         max_norm=10.0,
         total_norm=2.0,
@@ -4786,7 +4792,7 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
 
     zero_param = torch.nn.Parameter(torch.tensor([1.0, 2.0, 3.0]))
     zero_param.decoupled_grad = torch.tensor([0.0, 5.0, 0.0])
-    assert clip_grads.count_zeros_fp32(
+    assert count_zeros_fp32(
         [zero_param],
         grad_stats_parallel_group="mp",
         use_decoupled_grad=True,
@@ -4795,10 +4801,10 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
     fsdp_param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
     fsdp_param.__fsdp_param__ = True
     fsdp_param.grad = SimpleNamespace(_local_tensor=torch.tensor([0.0, 1.0]))
-    assert clip_grads.count_zeros_fp32([fsdp_param], grad_stats_parallel_group="mp") == 1
-    monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: "dp")
+    assert count_zeros_fp32([fsdp_param], grad_stats_parallel_group="mp") == 1
+    monkeypatch.setitem(clip_grads_globals, "get_data_parallel_group_if_dtensor", lambda grad, group: "dp")
     with pytest.raises(ValueError, match="Megatron FSDP"):
-        clip_grads.count_zeros_fp32([fsdp_param, zero_param], "mp", use_decoupled_grad=True)
+        count_zeros_fp32([fsdp_param, zero_param], "mp", use_decoupled_grad=True)
 
     stream_calls = []
 
