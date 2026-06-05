@@ -5044,6 +5044,306 @@ def test_hybrid_cp_scheduler_grouping_and_forward_backward_cpu_paths(monkeypatch
     assert broadcasts
 
 
+def test_pipeline_p2p_communicator_cpu_ops_wrappers_and_warmup_paths(monkeypatch):
+    from megatron.core.pipeline_parallel import p2p_communication
+
+    calls = []
+
+    class _Req:
+        def __init__(self, name):
+            self.name = name
+
+        def wait(self):
+            calls.append(("wait", self.name))
+
+    class _Group:
+        def __init__(self, size=4, rank=1, name="group"):
+            self._size = size
+            self._rank = rank
+            self.name = name
+
+        def size(self):
+            return self._size
+
+        def rank(self):
+            return self._rank
+
+    def _cpu_tensor_factory(original):
+        def _factory(*args, **kwargs):
+            kwargs.pop("device", None)
+            return original(*args, **kwargs)
+
+        return _factory
+
+    monkeypatch.setattr(p2p_communication.torch, "empty", _cpu_tensor_factory(torch.empty))
+    monkeypatch.setattr(p2p_communication.torch, "tensor", _cpu_tensor_factory(torch.tensor))
+    monkeypatch.setattr(
+        p2p_communication,
+        "cur_platform",
+        SimpleNamespace(current_device=lambda: "cpu", synchronize=lambda: calls.append("sync")),
+    )
+    monkeypatch.setattr(p2p_communication.dist, "get_global_rank", lambda group, rank: 100 + rank)
+    monkeypatch.setattr(p2p_communication.dist, "get_backend", lambda group: "nccl")
+    monkeypatch.setattr(p2p_communication.dist, "get_rank", lambda: 101)
+    monkeypatch.setattr(
+        p2p_communication.dist,
+        "get_process_group_ranks",
+        lambda group: [100 + i for i in range(group.size())],
+    )
+    monkeypatch.setattr(
+        p2p_communication.dist,
+        "isend",
+        lambda tensor, dst, group=None: calls.append(("isend", tuple(tensor.shape), dst, group.name if hasattr(group, "name") else group)) or _Req("send"),
+    )
+
+    def _irecv(tensor, src, group=None):
+        tensor.fill_(7)
+        calls.append(("irecv", tuple(tensor.shape), src, group.name if hasattr(group, "name") else group))
+        return _Req("recv")
+
+    monkeypatch.setattr(p2p_communication.dist, "irecv", _irecv)
+
+    class _P2POp:
+        def __init__(self, op, tensor, peer, group):
+            self.op = op
+            self.tensor = tensor
+            self.peer = peer
+            self.group = group
+
+    def _batch_isend_irecv(ops):
+        calls.append(("batch", len(ops)))
+        for op in ops:
+            if op.op is p2p_communication.dist.irecv:
+                if op.tensor.numel() == 3 and op.tensor.dtype == torch.int64:
+                    op.tensor.copy_(torch.tensor([2, 2, 1], dtype=torch.int64))
+                else:
+                    op.tensor.fill_(5)
+        return [_Req(f"batch-{idx}") for idx, _ in enumerate(ops)]
+
+    def _ring_exchange(**kwargs):
+        calls.append(("ring", sorted(kwargs)))
+        for key in ("tensor_recv_prev", "tensor_recv_next"):
+            tensor = kwargs.get(key)
+            if tensor is not None:
+                if tensor.numel() == 3 and tensor.dtype == torch.int64:
+                    tensor.copy_(torch.tensor([1, 1, 1], dtype=torch.int64))
+                else:
+                    tensor.fill_(9)
+
+    monkeypatch.setattr(p2p_communication.dist, "P2POp", _P2POp)
+    monkeypatch.setattr(p2p_communication.dist, "batch_isend_irecv", _batch_isend_irecv)
+    monkeypatch.setattr(p2p_communication.dist, "ring_exchange", _ring_exchange)
+    monkeypatch.setattr(p2p_communication.dist, "group", SimpleNamespace(WORLD=_Group(name="world")))
+    monkeypatch.setattr(p2p_communication, "is_pp_first_stage", lambda group: group.rank() == 0)
+    monkeypatch.setattr(p2p_communication, "is_pp_last_stage", lambda group: group.rank() == group.size() - 1)
+    monkeypatch.setattr(p2p_communication, "get_pg_size", lambda group: group.size())
+    monkeypatch.setattr(p2p_communication, "get_pg_rank", lambda group: group.rank())
+
+    assert p2p_communication.is_single_shape(torch.Size([1, 2, 3])) is True
+    assert p2p_communication.is_single_shape([1, 2, 3]) is True
+    assert p2p_communication.is_single_shape([[1, 2, 3]]) is False
+
+    pp_group = _Group(size=4, rank=1)
+    reqs = p2p_communication._batched_p2p_ops(
+        tensor_send_prev=torch.ones(1),
+        tensor_recv_prev=torch.empty(1),
+        tensor_send_next=torch.ones(2),
+        tensor_recv_next=torch.empty(2),
+        group=pp_group,
+        prev_pipeline_rank=100,
+        next_pipeline_rank=102,
+    )
+    assert len(reqs) == 4
+    assert ("batch", 4) in calls
+
+    odd_reqs = p2p_communication._p2p_ops(
+        tensor_send_prev=torch.ones(1),
+        tensor_recv_prev=torch.empty(1),
+        tensor_send_next=torch.ones(1),
+        tensor_recv_next=torch.empty(1),
+        group=pp_group,
+        prev_pipeline_rank=100,
+        next_pipeline_rank=102,
+    )
+    assert set(odd_reqs) == {"recv_prev", "send_next", "recv_next", "send_prev"}
+    even_reqs = p2p_communication._p2p_ops(
+        tensor_send_prev=torch.ones(1),
+        tensor_recv_prev=torch.empty(1),
+        tensor_send_next=torch.ones(1),
+        tensor_recv_next=torch.empty(1),
+        group=_Group(size=2, rank=0),
+        prev_pipeline_rank=100,
+        next_pipeline_rank=101,
+    )
+    assert set(even_reqs) == {"send_next", "recv_prev", "send_prev", "recv_next"}
+
+    config = SimpleNamespace(
+        virtual_pipeline_model_parallel_size=2,
+        use_ring_exchange_p2p=False,
+        batch_p2p_comm=True,
+        batch_p2p_sync=True,
+        variable_seq_lengths=True,
+        mtp_standalone=False,
+        pipeline_dtype=torch.float32,
+        timers=None,
+        enable_hetero=False,
+    )
+    communicator = p2p_communication.P2PCommunicator(pp_group, config)
+    assert communicator.next_rank == 102
+    assert communicator.prev_rank == 100
+    assert communicator.total_stages == 4
+    assert communicator.current_stage == 1
+    assert communicator.is_pp_first_stage is False
+    assert communicator.is_pp_last_stage is False
+    recv_prev_shape, recv_next_shape = communicator._communicate_shapes(
+        torch.ones(2, 2, 1),
+        torch.ones(3, 1, 1),
+        recv_prev=True,
+        recv_next=True,
+    )
+    assert recv_prev_shape == [2, 2, 1]
+    assert recv_next_shape == [2, 2, 1]
+
+    recv_prev, recv_next, reqs = communicator._communicate(
+        tensor_send_next=torch.ones(2, 2, 1),
+        tensor_send_prev=torch.ones(2, 2, 1),
+        recv_prev=True,
+        recv_next=True,
+        tensor_shape=[2, 2, 1],
+        wait_on_reqs=True,
+    )
+    assert recv_prev.shape == torch.Size([2, 2, 1])
+    assert recv_next.shape == torch.Size([2, 2, 1])
+    assert reqs is None
+    assert "sync" in calls
+
+    config.batch_p2p_comm = False
+    config.variable_seq_lengths = False
+    recv_prev, recv_next, reqs = communicator._communicate(
+        tensor_send_next=torch.ones(1),
+        tensor_send_prev=None,
+        recv_prev=True,
+        recv_next=False,
+        tensor_shape=[1],
+        wait_on_reqs=False,
+        group=_Group(size=3, rank=1),
+    )
+    assert recv_prev.shape == torch.Size([1])
+    assert "recv_prev" in reqs and "send_next" in reqs
+
+    with pytest.raises(RuntimeError, match="pipeline_dtype"):
+        bad_config = SimpleNamespace(**{**config.__dict__, "pipeline_dtype": None})
+        p2p_communication.P2PCommunicator(pp_group, bad_config)._communicate(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=True,
+            recv_next=False,
+            tensor_shape=[1],
+        )
+    with pytest.raises(RuntimeError, match="tensor_shape"):
+        communicator._communicate(
+            tensor_send_next=None,
+            tensor_send_prev=None,
+            recv_prev=False,
+            recv_next=True,
+            tensor_shape=None,
+        )
+
+    config.use_ring_exchange_p2p = True
+    config.pipeline_dtype = torch.float32
+    ring_prev, ring_next, _ = communicator._communicate(
+        tensor_send_next=torch.ones(1),
+        tensor_send_prev=torch.ones(1),
+        recv_prev=True,
+        recv_next=True,
+        tensor_shape=[1],
+    )
+    assert torch.equal(ring_prev, torch.tensor([9.0]))
+    assert torch.equal(ring_next, torch.tensor([9.0]))
+    config.use_ring_exchange_p2p = False
+
+    wrapper_calls = []
+
+    def _fake_communicate(**kwargs):
+        wrapper_calls.append(kwargs)
+        prev = torch.full(torch.Size(kwargs["tensor_shape"]), 11.0) if kwargs["recv_prev"] else None
+        nxt = torch.full(torch.Size(kwargs["tensor_shape"]), 13.0) if kwargs["recv_next"] else None
+        return prev, nxt, {"req": _Req("wrapper")}
+
+    communicator._communicate = _fake_communicate
+    assert communicator.recv_forward([1], is_first_stage=True) is None
+    assert torch.equal(communicator.recv_forward([1], is_first_stage=False), torch.tensor([11.0]))
+    assert communicator.recv_backward([1], is_last_stage=True) is None
+    assert torch.equal(communicator.recv_backward([1], is_last_stage=False), torch.tensor([13.0]))
+    communicator.send_forward(torch.ones(1), is_last_stage=False)
+    communicator.send_backward(torch.ones(1), is_first_stage=False)
+    assert torch.equal(
+        communicator.send_forward_recv_backward(torch.ones(1), torch.Size([1]), is_last_stage=False),
+        torch.tensor([13.0]),
+    )
+    assert torch.equal(
+        communicator.send_backward_recv_forward(torch.ones(1), torch.Size([1]), is_first_stage=False),
+        torch.tensor([11.0]),
+    )
+    overlap_prev, overlap_reqs = communicator.send_forward_recv_forward(
+        torch.ones(1),
+        recv_prev=True,
+        tensor_shape=[1],
+        overlap_p2p_comm=True,
+    )
+    assert torch.equal(overlap_prev, torch.tensor([11.0]))
+    assert "req" in overlap_reqs
+    overlap_next, overlap_reqs = communicator.send_backward_recv_backward(
+        torch.ones(1),
+        recv_next=True,
+        tensor_shape=[1],
+        overlap_p2p_comm=True,
+    )
+    assert torch.equal(overlap_next, torch.tensor([13.0]))
+    both_prev, both_next = communicator.send_forward_backward_recv_forward_backward(
+        torch.ones(1),
+        torch.ones(1),
+        recv_prev=True,
+        recv_next=True,
+        tensor_shape=[1],
+    )
+    assert torch.equal(both_prev, torch.tensor([11.0]))
+    assert torch.equal(both_next, torch.tensor([13.0]))
+    assert wrapper_calls
+
+    warmup_calls = []
+    communicator._communicate = lambda **kwargs: warmup_calls.append(kwargs) or (None, None, None)
+    config.variable_seq_lengths = False
+    communicator.warm_up_comm_group()
+    assert warmup_calls == []
+    config.variable_seq_lengths = True
+    communicator.warm_up_comm_group()
+    assert warmup_calls and config.variable_seq_lengths is True
+
+    hetero_config = SimpleNamespace(**{**config.__dict__, "enable_hetero": True})
+    hetero = p2p_communication.P2PCommunicator(pp_group, hetero_config)
+    monkeypatch.setattr(p2p_communication, "recv_forward_hetero", lambda *args, **kwargs: "rf")
+    monkeypatch.setattr(p2p_communication, "recv_backward_hetero", lambda *args, **kwargs: "rb")
+    monkeypatch.setattr(p2p_communication, "send_forward_hetero", lambda *args, **kwargs: "sf")
+    monkeypatch.setattr(p2p_communication, "send_backward_hetero", lambda *args, **kwargs: "sb")
+    monkeypatch.setattr(
+        p2p_communication,
+        "send_forward_recv_backward_hetero",
+        lambda *args, **kwargs: "sfrb",
+    )
+    monkeypatch.setattr(
+        p2p_communication,
+        "send_backward_recv_forward_hetero",
+        lambda *args, **kwargs: "sbrf",
+    )
+    assert hetero.recv_forward([1], False) == "rf"
+    assert hetero.recv_backward([1], False) == "rb"
+    assert hetero.send_forward(torch.ones(1), False) == "sf"
+    assert hetero.send_backward(torch.ones(1), False) == "sb"
+    assert hetero.send_forward_recv_backward(torch.ones(1), [1], False) == "sfrb"
+    assert hetero.send_backward_recv_forward(torch.ones(1), [1], False) == "sbrf"
+
+
 def test_blended_dataset_indices_cache_defer_and_getitem(monkeypatch, tmp_path):
     import numpy
 
