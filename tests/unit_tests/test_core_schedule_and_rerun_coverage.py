@@ -2350,6 +2350,117 @@ def test_dynamic_context_cpu_state_management_prefix_and_cache_paths(monkeypatch
     assert mamba_ctx.kv_block_allocator.on_blocks_deregistered is not None
 
 
+def test_kv_block_allocator_cpu_prefix_and_lru_eviction_paths(monkeypatch):
+    from megatron.core.inference.config import PrefixCachingEvictionPolicy
+    from megatron.core.inference.contexts import kv_block_allocator
+
+    monkeypatch.setattr(kv_block_allocator.torch.cuda, "current_device", lambda: "cpu")
+
+    base_context = SimpleNamespace(
+        paused_request_count=1,
+        total_request_count=3,
+        request_kv_block_counts=torch.tensor([1, 2, 1], dtype=torch.int32),
+    )
+    allocator = kv_block_allocator.KVBlockAllocator(base_context, total_count=8, paused_count=2)
+    assert allocator.get_total_used() == 0
+    assert allocator.get_paused_used() == 1
+    assert allocator.get_active_used() == 3
+    assert allocator.get_active_avail() == 2
+    assert allocator.get_paused_avail() == 1
+    assert "active 3/5" in str(allocator)
+    blocks = allocator.allocate_memory_blocks(2)
+    assert torch.equal(blocks, torch.tensor([5, 6], dtype=torch.int32))
+    assert allocator.get_total_used() == 2
+    assert allocator.is_memory_available(allocator.total_avail) is True
+    assert allocator.allocate_memory_blocks(allocator.total_avail + 1) is None
+    allocator.release_memory_blocks(torch.empty(0, dtype=torch.int32))
+    allocator.release_memory_blocks(blocks)
+    assert allocator.total_avail == 7
+    allocator.block_bag.fill_(-1)
+    allocator.reset()
+    assert torch.equal(allocator.block_bag, torch.arange(8, dtype=torch.int32))
+
+    prefix_context = SimpleNamespace(
+        paused_request_count=1,
+        total_request_count=3,
+        request_to_kv_block_ids=torch.tensor(
+            [[1, 2, -1], [2, 3, -1], [4, -1, -1]], dtype=torch.int32
+        ),
+        prefix_cache_lru_clock=42,
+    )
+    rz_allocator = kv_block_allocator.KVBlockAllocator(
+        prefix_context,
+        total_count=8,
+        paused_count=2,
+        enable_prefix_caching=True,
+        prefix_caching_eviction_policy=PrefixCachingEvictionPolicy.REF_ZERO,
+    )
+    assert rz_allocator.get_paused_used() == 2
+    assert rz_allocator.get_active_used() == 3
+    assert rz_allocator.is_memory_available(100) is False
+    rz_allocator.register_kv_block_hashes([], [])
+    rz_blocks = rz_allocator.allocate_memory_blocks(2)
+    assert torch.equal(rz_allocator.block_ref_counts[rz_blocks], torch.ones(2, dtype=torch.int32))
+    rz_allocator.register_kv_block_hashes(
+        [int(rz_blocks[0]), int(rz_blocks[1])],
+        [101, 102],
+    )
+    deregistered = []
+    rz_allocator.on_blocks_deregistered = lambda block_ids, hashes: deregistered.append(
+        (block_ids, hashes)
+    )
+    rz_allocator.release_memory_blocks(rz_blocks[:1])
+    assert 101 not in rz_allocator.kv_hash_to_block_id
+    assert rz_allocator.block_hashes[rz_blocks[0]] == -1
+    assert deregistered == [([int(rz_blocks[0])], {101})]
+    rz_allocator._deregister_blocks(torch.empty(0, dtype=torch.int32))
+
+    lru_context = SimpleNamespace(
+        paused_request_count=0,
+        total_request_count=0,
+        request_to_kv_block_ids=torch.full((1, 1), -1, dtype=torch.int32),
+        prefix_cache_lru_clock=7,
+    )
+    lru_allocator = kv_block_allocator.KVBlockAllocator(
+        lru_context,
+        total_count=9,
+        paused_count=2,
+        enable_prefix_caching=True,
+        prefix_caching_eviction_policy=PrefixCachingEvictionPolicy.LRU,
+    )
+    assert hasattr(lru_allocator, "block_timestamps")
+    empty_ids = torch.empty(0, dtype=torch.int64)
+    lru_allocator.update_timestamps(empty_ids)
+    assert int(lru_allocator.block_timestamps.sum().item()) == 0
+
+    unregistered = lru_allocator.allocate_memory_blocks(1)
+    lru_allocator.release_memory_blocks(unregistered)
+    assert lru_allocator.total_avail == 8
+
+    cached_blocks = lru_allocator.allocate_memory_blocks(3)
+    lru_allocator.register_kv_block_hashes(
+        [int(block_id) for block_id in cached_blocks],
+        [201, 202, 203],
+    )
+    lru_allocator.block_ref_counts[cached_blocks] = 0
+    lru_allocator.block_timestamps[cached_blocks] = torch.tensor([30, 10, 20])
+    assert lru_allocator.get_evictable_block_count().item() == 3
+    assert lru_allocator.evict_lru_blocks(4) is False
+    assert lru_allocator.is_memory_available(100) is False
+
+    lru_allocator.total_avail = 0
+    assert lru_allocator.is_memory_available(2) is True
+    recycled = lru_allocator.allocate_memory_blocks(2)
+    assert recycled.numel() == 2
+    assert 202 not in lru_allocator.kv_hash_to_block_id
+    assert 203 not in lru_allocator.kv_hash_to_block_id
+    assert int(lru_allocator.block_ref_counts[recycled].sum().item()) == 2
+    lru_allocator.reset()
+    assert lru_allocator.kv_hash_to_block_id == {}
+    assert int(lru_allocator.block_hashes.max().item()) == -1
+    assert int(lru_allocator.block_timestamps.sum().item()) == 0
+
+
 def test_dynamic_engine_request_failure_suspend_resume_and_context_manager_paths(monkeypatch):
     assert dynamic_engine.format_mem_bytes(1) == "1.0 bytes"
     assert dynamic_engine.format_mem_bytes(2048) == "2.0 kb"
