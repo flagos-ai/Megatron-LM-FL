@@ -4558,6 +4558,10 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
     clip_grads = importlib.util.module_from_spec(clip_grads_spec)
     sys.modules[clip_grads_spec.name] = clip_grads
     clip_grads_spec.loader.exec_module(clip_grads)
+    for _name in ("get_grad_norm_fp32", "count_zeros_fp32"):
+        _func = getattr(clip_grads, _name)
+        if hasattr(_func, "__wrapped__"):
+            monkeypatch.setattr(clip_grads, _name, _func.__wrapped__)
     clip_torch = clip_grads.torch
 
     class _Group:
