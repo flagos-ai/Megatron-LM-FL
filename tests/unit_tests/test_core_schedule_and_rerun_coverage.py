@@ -5044,6 +5044,430 @@ def test_hybrid_cp_scheduler_grouping_and_forward_backward_cpu_paths(monkeypatch
     assert broadcasts
 
 
+def test_pipeline_schedules_forward_backward_no_pipelining_cpu_paths(monkeypatch):
+    from megatron.core.pipeline_parallel import schedules as pipeline_schedules
+    from megatron.core.transformer import multi_token_prediction as mtp_module
+
+    class _Group:
+        def __init__(self, size=2, rank=0, name="group"):
+            self._size = size
+            self._rank = rank
+            self.name = name
+
+        def size(self):
+            return self._size
+
+        def rank(self):
+            return self._rank
+
+    scale_calls = []
+    current_microbatches = []
+    finalize_calls = []
+    graph_calls = []
+    offload_calls = []
+
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "cur_platform",
+        SimpleNamespace(device_name=lambda: "cpu", current_device=lambda: "cpu"),
+    )
+    monkeypatch.setattr(
+        pipeline_schedules.parallel_state,
+        "get_context_parallel_world_size",
+        lambda: 2,
+    )
+    monkeypatch.setattr(
+        pipeline_schedules.parallel_state,
+        "is_pipeline_last_stage",
+        lambda ignore_virtual=False, vp_stage=None: True,
+    )
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "set_current_microbatch",
+        lambda model, microbatch: current_microbatches.append((model.name, microbatch)),
+    )
+    monkeypatch.setattr(
+        pipeline_schedules.MoEAuxLossAutoScaler,
+        "set_loss_scale",
+        lambda value: scale_calls.append(("moe", value.detach().clone())),
+    )
+    monkeypatch.setattr(
+        mtp_module.MTPLossAutoScaler,
+        "set_loss_scale",
+        lambda value: scale_calls.append(("mtp", value.detach().clone())),
+    )
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "create_cudagraphs",
+        lambda: graph_calls.append("create"),
+    )
+    monkeypatch.setattr(
+        pipeline_schedules.off_interface,
+        "reset",
+        lambda: offload_calls.append("reset"),
+    )
+
+    class _NoSync:
+        def __init__(self):
+            self.entries = 0
+
+        def __call__(self):
+            return self
+
+        def __enter__(self):
+            self.entries += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    no_sync = _NoSync()
+
+    def _finalize(model, num_tokens, pg_collection=None, force_all_reduce=False):
+        finalize_calls.append(
+            (
+                len(model),
+                int(num_tokens.item()) if torch.is_tensor(num_tokens) else num_tokens,
+                pg_collection.cp.name,
+                force_all_reduce,
+            )
+        )
+
+    config = SimpleNamespace(
+        timers=None,
+        enable_autocast=False,
+        autocast_dtype=torch.float16,
+        calculate_per_token_loss=False,
+        num_moe_experts=2,
+        grad_scale_func=lambda value: value * 2,
+        mtp_num_layers=1,
+        deallocate_pipeline_outputs=False,
+        overlap_moe_expert_parallel_comm=False,
+        hybrid_context_parallel=False,
+        finalize_model_grads_func=_finalize,
+        no_sync_func=no_sync,
+        barrier_with_L1_time=False,
+        fine_grained_activation_offloading=True,
+        cuda_graph_impl="local",
+        cuda_graph_scope=[],
+    )
+
+    class _ToyModel(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.name = "toy"
+            self.weight = torch.nn.Parameter(torch.tensor(1.5))
+            self.input_tensors = []
+            self.first_microbatch_count = 0
+            self.vp_stage = 3
+
+        def set_input_tensor(self, tensors):
+            self.input_tensors.append(tensors)
+
+        def set_is_first_microbatch(self):
+            self.first_microbatch_count += 1
+
+    model = _ToyModel()
+    monkeypatch.setattr(pipeline_schedules, "get_model_config", lambda value: config)
+    monkeypatch.setattr(pipeline_schedules, "get_model_type", lambda value: "decoder")
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "get_attr_wrapped_model",
+        lambda wrapped_model, attr, return_model_obj=False: getattr(wrapped_model, attr),
+    )
+
+    def _triple_forward_step(data_iterator, wrapped_model, checkpoint_activations_microbatch=None):
+        sample = next(data_iterator)
+        output = wrapped_model.weight * sample
+
+        def _loss_func(output_tensor, non_loss_data=False):
+            if non_loss_data:
+                return {"non_loss": float(output_tensor.detach())}
+            return output_tensor, torch.tensor(2, dtype=torch.int), {
+                "sample": float(sample),
+                "checkpoint": checkpoint_activations_microbatch,
+            }
+
+        return output, _loss_func
+
+    forward_store = []
+    output, num_tokens = pipeline_schedules.forward_step(
+        _triple_forward_step,
+        iter([torch.tensor(4.0)]),
+        model,
+        num_microbatches=2,
+        input_tensor=torch.tensor([0.0]),
+        forward_data_store=forward_store,
+        config=config,
+        cp_group_size=2,
+        checkpoint_activations_microbatch=7,
+        is_first_microbatch=True,
+        current_microbatch=0,
+        vp_stage=3,
+        is_last_stage=True,
+    )
+    assert torch.allclose(output, torch.tensor(3.0))
+    assert int(num_tokens.item()) == 2
+    assert forward_store == [{"sample": 4.0, "checkpoint": 7}]
+    assert model.input_tensors[-1][0].shape == torch.Size([1])
+    assert model.first_microbatch_count == 1
+    assert current_microbatches[-1] == ("toy", 0)
+    assert any(
+        name == "moe" and torch.equal(tensor.cpu(), torch.tensor([2.0]))
+        for name, tensor in scale_calls
+    )
+
+    config.calculate_per_token_loss = True
+    per_token_store = []
+    output, num_tokens = pipeline_schedules.forward_step_calc_loss(
+        model,
+        torch.tensor(5.0, requires_grad=True),
+        lambda output_tensor: (
+            output_tensor * 3,
+            torch.tensor(4, dtype=torch.int),
+            {"reduced": "token"},
+        ),
+        config,
+        vp_stage=3,
+        collect_non_loss_data=False,
+        num_microbatches=8,
+        forward_data_store=per_token_store,
+        cp_group_size=2,
+        is_last_stage=True,
+    )
+    assert torch.allclose(output, torch.tensor(15.0))
+    assert int(num_tokens.item()) == 4
+    assert per_token_store == [{"reduced": "token"}]
+
+    config.calculate_per_token_loss = False
+    legacy_store = []
+    legacy_output, legacy_tokens = pipeline_schedules.forward_step_calc_loss(
+        model,
+        torch.tensor(6.0, requires_grad=True),
+        lambda output_tensor: (output_tensor + 2, {"legacy": "loss"}),
+        config,
+        vp_stage=3,
+        collect_non_loss_data=False,
+        num_microbatches=4,
+        forward_data_store=legacy_store,
+        cp_group_size=3,
+        is_last_stage=True,
+    )
+    assert torch.allclose(legacy_output, torch.tensor(6.0))
+    assert int(legacy_tokens.item()) == 0
+    assert legacy_store == [{"legacy": "loss"}]
+
+    non_loss_store = []
+    returned, _ = pipeline_schedules.forward_step_calc_loss(
+        model,
+        torch.tensor(9.0),
+        lambda output_tensor, non_loss_data=False: {"raw": float(output_tensor)},
+        config,
+        vp_stage=3,
+        collect_non_loss_data=True,
+        num_microbatches=1,
+        forward_data_store=non_loss_store,
+        cp_group_size=1,
+        is_last_stage=True,
+    )
+    assert torch.equal(returned, torch.tensor(9.0))
+    assert non_loss_store == [{"raw": 9.0}]
+
+    passthrough_store = []
+    passthrough, _ = pipeline_schedules.forward_step_calc_loss(
+        model,
+        torch.tensor([1.0, 2.0]),
+        None,
+        config,
+        vp_stage=3,
+        collect_non_loss_data=False,
+        num_microbatches=1,
+        forward_data_store=passthrough_store,
+        cp_group_size=1,
+        is_last_stage=True,
+    )
+    assert torch.equal(passthrough, torch.tensor([1.0, 2.0]))
+    assert len(passthrough_store) == 1
+
+    input_tensor = torch.tensor(2.0, requires_grad=True)
+    grad = pipeline_schedules.backward_step(
+        input_tensor,
+        input_tensor * 4,
+        None,
+        config,
+    )
+    assert torch.allclose(grad, torch.tensor(8.0))
+
+    input_a = torch.tensor(3.0, requires_grad=True)
+    input_b = torch.tensor(5.0, requires_grad=True)
+    grads = pipeline_schedules.backward_step(
+        [input_a, None, input_b],
+        [input_a * 2 + input_b * 3],
+        [None],
+        config,
+    )
+    assert torch.allclose(grads[0], torch.tensor(4.0))
+    assert grads[1] is None
+    assert torch.allclose(grads[2], torch.tensor(6.0))
+
+    multimodule_inputs = {
+        "language": torch.tensor(2.0, requires_grad=True),
+        "vision": [torch.tensor(4.0, requires_grad=True)],
+        "missing": None,
+    }
+    multimodule_outputs = {
+        "language": multimodule_inputs["language"] * 2,
+        "vision": multimodule_inputs["vision"][0] * 3,
+        "skip": torch.ones(1),
+    }
+    multimodule_grads = pipeline_schedules.backward_step_multimodule(
+        multimodule_inputs,
+        multimodule_outputs,
+        None,
+        config,
+        language_model_module_name="language",
+    )
+    assert torch.allclose(multimodule_grads["language"], torch.tensor(4.0))
+    assert torch.allclose(multimodule_grads["vision"], torch.tensor(6.0))
+    assert multimodule_grads["missing"] is None
+
+    pg_collection = SimpleNamespace(
+        tp=_Group(name="tp"),
+        cp=_Group(size=2, name="cp"),
+        embd=_Group(name="embd"),
+        pos_embd=_Group(name="pos"),
+        pp=_Group(name="pp"),
+        dp_cp=_Group(name="dp_cp"),
+    )
+    forward_store = pipeline_schedules.forward_backward_no_pipelining(
+        forward_step_func=_triple_forward_step,
+        data_iterator=iter([torch.tensor(2.0), torch.tensor(4.0)]),
+        model=[model],
+        num_microbatches=2,
+        seq_length=8,
+        micro_batch_size=2,
+        pg_collection=pg_collection,
+        force_all_reduce=True,
+    )
+    assert [item["sample"] for item in forward_store] == [2.0, 4.0]
+    assert finalize_calls[-1] == (1, None, "cp", True)
+    assert no_sync.entries >= 1
+    assert graph_calls == ["create"]
+    assert offload_calls == ["reset"]
+
+    combined_calls = []
+    hybrid_calls = []
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "combined_1f1b_schedule_for_no_pipelining",
+        lambda *args, **kwargs: combined_calls.append(args)
+        or (["combined"], torch.tensor(6, dtype=torch.int)),
+    )
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "hybrid_context_parallel_forward_backward",
+        lambda *args, **kwargs: hybrid_calls.append(args)
+        or (["hybrid"], torch.tensor(7, dtype=torch.int)),
+    )
+    config.overlap_moe_expert_parallel_comm = True
+    config.fine_grained_activation_offloading = False
+    config.cuda_graph_impl = "none"
+    assert pipeline_schedules.forward_backward_no_pipelining(
+        forward_step_func=_triple_forward_step,
+        data_iterator=iter([torch.tensor(1.0)]),
+        model=model,
+        num_microbatches=1,
+        seq_length=8,
+        micro_batch_size=2,
+        pg_collection=pg_collection,
+    ) == ["combined"]
+    assert combined_calls
+
+    config.overlap_moe_expert_parallel_comm = False
+    config.hybrid_context_parallel = True
+    assert pipeline_schedules.forward_backward_no_pipelining(
+        forward_step_func=_triple_forward_step,
+        data_iterator=iter([torch.tensor(1.0)]),
+        model=model,
+        num_microbatches=1,
+        seq_length=8,
+        micro_batch_size=2,
+        pg_collection=pg_collection,
+        forward_only=True,
+        first_val_step=True,
+    ) == ["hybrid"]
+    assert hybrid_calls
+
+    embedding_module = SimpleNamespace(
+        embedding_activation_buffer=[torch.tensor([1.0])],
+        grad_output_buffer=[torch.tensor([2.0])],
+        output_layer=SimpleNamespace(weight="output-weight"),
+        share_embeddings_and_output_weights=True,
+    )
+    model.post_process = embedding_module
+    config.defer_embedding_wgrad_compute = True
+    drain_calls = []
+    monkeypatch.setattr(
+        pipeline_schedules,
+        "drain_embedding_wgrad_compute",
+        lambda cfg, activation_buffer, grad_output_buffer, weight, tp_group: drain_calls.append(
+            (activation_buffer, grad_output_buffer, weight, tp_group.name)
+        ),
+    )
+    returned_embedding = pipeline_schedules.clear_embedding_activation_buffer(
+        config,
+        model,
+        is_last_stage=True,
+    )
+    assert returned_embedding is embedding_module
+    assert embedding_module.embedding_activation_buffer == []
+    pipeline_schedules.finish_embedding_wgrad_compute(
+        config,
+        embedding_module,
+        is_last_stage=True,
+        tp_group=pg_collection.tp,
+    )
+    assert drain_calls[-1][2:] == ("output-weight", "tp")
+    config.defer_embedding_wgrad_compute = False
+    assert pipeline_schedules.clear_embedding_activation_buffer(config, model, True) is None
+
+    assert pipeline_schedules.check_first_val_step(True, True, False) is False
+    assert pipeline_schedules.check_first_val_step(True, True, True) is True
+    assert pipeline_schedules.check_first_val_step(None, False, True) is True
+    assert pipeline_schedules.get_schedule_table(5, 2, 2) == [
+        (0, 0),
+        (1, 0),
+        (0, 1),
+        (1, 1),
+        (2, 0),
+        (3, 0),
+        (2, 1),
+        (3, 1),
+        (4, 0),
+        (4, 1),
+    ]
+    assert pipeline_schedules.get_pp_rank_microbatches(
+        3,
+        num_model_chunks=2,
+        microbatch_group_size_per_vp_stage=1,
+        forward_only=True,
+        p2p_communicator=SimpleNamespace(
+            pp_group=_Group(size=4, rank=2),
+            virtual_pipeline_model_parallel_size=2,
+        ),
+    ) == (6, True, 6, 0)
+    assert pipeline_schedules.get_pp_rank_microbatches(
+        4,
+        num_model_chunks=2,
+        microbatch_group_size_per_vp_stage=2,
+        overlap_moe_expert_parallel_comm=True,
+        p2p_communicator=SimpleNamespace(
+            pp_group=_Group(size=4, rank=1),
+            virtual_pipeline_model_parallel_size=2,
+        ),
+    ) == (8, False, 7, 1)
+
+
 def test_pipeline_p2p_communicator_cpu_ops_wrappers_and_warmup_paths(monkeypatch):
     from megatron.core.pipeline_parallel import p2p_communication
 
