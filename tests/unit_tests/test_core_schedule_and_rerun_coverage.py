@@ -4824,9 +4824,10 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
         use_decoupled_grad=True,
     ) == 2
 
-    fsdp_param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
-    fsdp_param.__fsdp_param__ = True
-    fsdp_param.grad = SimpleNamespace(_local_tensor=torch.tensor([0.0, 1.0]))
+    fsdp_param = SimpleNamespace(
+        __fsdp_param__=True,
+        grad=SimpleNamespace(_local_tensor=torch.tensor([0.0, 1.0])),
+    )
     assert clip_grads.count_zeros_fp32([fsdp_param], grad_stats_parallel_group="mp") == 1
     monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: "dp")
     with pytest.raises(ValueError, match="Megatron FSDP"):
