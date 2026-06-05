@@ -4549,15 +4549,29 @@ def test_hybrid_cp_data_loader_wrapper_cpu_collective_and_reroute_paths(monkeypa
 def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
     from collections import OrderedDict
 
-    from megatron.core.distributed import finalize_model_grads
     from megatron.core.inference import scheduler as inference_scheduler
-    clip_grads_spec = importlib.util.spec_from_file_location(
-        "megatron.core.optimizer._clip_grads_for_coverage",
-        Path(__file__).resolve().parents[2] / "megatron/core/optimizer/clip_grads.py",
+
+    def _load_core_module(module_name, relative_path):
+        spec = importlib.util.spec_from_file_location(
+            module_name, Path(__file__).resolve().parents[2] / relative_path
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    finalize_model_grads = _load_core_module(
+        "megatron.core.distributed._finalize_model_grads_for_coverage",
+        "megatron/core/distributed/finalize_model_grads.py",
     )
-    clip_grads = importlib.util.module_from_spec(clip_grads_spec)
-    sys.modules[clip_grads_spec.name] = clip_grads
-    clip_grads_spec.loader.exec_module(clip_grads)
+    _embedding_grad = finalize_model_grads._allreduce_embedding_grad
+    if hasattr(_embedding_grad, "__wrapped__"):
+        monkeypatch.setattr(finalize_model_grads, "_allreduce_embedding_grad", _embedding_grad.__wrapped__)
+
+    clip_grads = _load_core_module(
+        "megatron.core.optimizer._clip_grads_for_coverage",
+        "megatron/core/optimizer/clip_grads.py",
+    )
     for _name in ("get_grad_norm_fp32", "count_zeros_fp32"):
         _func = getattr(clip_grads, _name)
         if hasattr(_func, "__wrapped__"):
