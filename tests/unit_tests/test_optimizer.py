@@ -748,6 +748,160 @@ def test_distributed_optimizer_range_maps_and_cpu_copy_paths(monkeypatch):
         torch.tensor([21.0, 22.0]),
     )
 
+    bucket = dist_opt.buffers[0].buckets[0]
+    bucket.grad_data = torch.zeros(4, dtype=torch.float32)
+    bucket.numel_unpadded = 4
+    dist_opt.buffers[0].numel_unpadded = 4
+    dist_opt.buffers[0].param_index_map = {
+        bf16_param: (0, 2, None),
+        fp32_param: (2, 4, None),
+    }
+    dist_opt.data_parallel_group = _Group(rank=0, size=1)
+    dist_opt.data_parallel_group_gloo = _Group(rank=0, size=1)
+    dist_opt.data_parallel_group_idx = 3
+    dist_opt.distributed_optimizer_instance_id = 5
+    dist_opt.per_bucket_numel = [{dtype_key: [4]}]
+    dist_opt.per_bucket_numel_unpadded = [{dtype_key: [4]}]
+    dist_opt.model_param_group_index_map = {
+        bf16_param: (0, 0),
+        fp32_param: (0, 1),
+    }
+    dist_opt.optimizer.state = {
+        shard_main[0][0]: {
+            "exp_avg": torch.tensor([0.1, 0.2]),
+            "exp_avg_sq": torch.tensor([0.3, 0.4]),
+            "step": torch.tensor(9.0),
+        },
+        shard_fp32[0][0]: {
+            "exp_avg": torch.tensor([0.5, 0.6]),
+            "exp_avg_sq": torch.tensor([0.7, 0.8]),
+            "step": torch.tensor(9.0),
+        },
+    }
+
+    main_and_state = dist_opt._get_main_param_and_optimizer_states(bf16_param)
+    assert torch.equal(main_and_state["param"], shard_main[0][0])
+    assert torch.equal(main_and_state["exp_avg"], torch.tensor([0.1, 0.2]))
+    dist_opt._set_main_param_and_optimizer_states(
+        bf16_param,
+        {
+            "param": torch.tensor([31.0, 32.0]),
+            "exp_avg": torch.tensor([1.1, 1.2]),
+            "exp_avg_sq": torch.tensor([1.3, 1.4]),
+            "step": torch.tensor(10.0),
+        },
+    )
+    assert torch.equal(shard_main[0][0], torch.tensor([31.0, 32.0]))
+    assert torch.equal(dist_opt.optimizer.state[shard_main[0][0]]["exp_avg"], torch.tensor([1.1, 1.2]))
+
+    reshardable = dist_opt.get_parameter_state_dp_reshardable()
+    assert reshardable["per_bucket_numel"] == [{dtype_key: [4]}]
+    assert len(reshardable[0][dtype_key][0]) == 2
+    assert torch.equal(reshardable[0][dtype_key][0][0]["param"], torch.tensor([31.0, 32.0]))
+    assert reshardable[0][dtype_key][0][1]["gbuf_local_start"] == 2
+
+    sharded_reshardable = dist_opt.sharded_param_state_dp_reshardable({}, metadata={})
+    assert sharded_reshardable["per_bucket_numel"].key.endswith("per_bucket_numel")
+    assert sharded_reshardable[0][dtype_key][0][0]["padding"].obj is False
+    assert sharded_reshardable[0][dtype_key][0][0]["param"].key.endswith("bucket_idx_0.param")
+    assert sharded_reshardable[0][dtype_key][0][0]["step"].obj.item() == 10.0
+    assert sharded_reshardable[0][dtype_key][0][1]["exp_avg"].global_shape == (4,)
+
+    for optimizer_state in dist_opt.optimizer.state.values():
+        optimizer_state.pop("step", None)
+    shard_main[0][0].zero_()
+    shard_fp32[0][0].zero_()
+    loadable_reshardable = {
+        "per_bucket_numel_unpadded": dist_opt.per_bucket_numel_unpadded,
+        0: {
+            dtype_key: [
+                [
+                    {
+                        "param": torch.tensor([41.0, 42.0]),
+                        "exp_avg": torch.tensor([2.1, 2.2]),
+                        "exp_avg_sq": torch.tensor([2.3, 2.4]),
+                        "padding": False,
+                    },
+                    {
+                        "param": torch.tensor([43.0, 44.0]),
+                        "exp_avg": torch.tensor([2.5, 2.6]),
+                        "exp_avg_sq": torch.tensor([2.7, 2.8]),
+                        "padding": False,
+                    },
+                ]
+            ]
+        },
+    }
+    dist_opt.load_parameter_state_from_dp_reshardable(loadable_reshardable)
+    assert torch.equal(shard_main[0][0], torch.tensor([41.0, 42.0]))
+    assert torch.equal(shard_fp32[0][0], torch.tensor([43.0, 44.0]))
+    with pytest.raises(AssertionError, match="unpadded elements"):
+        dist_opt.load_parameter_state_from_dp_reshardable(
+            {**loadable_reshardable, "per_bucket_numel_unpadded": [{dtype_key: [99]}]}
+        )
+
+    dist_opt.load_parameter_state_from_fs_model_space(
+        {
+            0: {
+                "fp32_param": torch.tensor([51.0, 52.0]),
+                "exp_avg": torch.tensor([3.1, 3.2]),
+                "exp_avg_sq": torch.tensor([3.3, 3.4]),
+                "step": torch.tensor(11.0),
+            },
+            1: {
+                "fp32_param": torch.tensor([53.0, 54.0]),
+                "exp_avg": torch.tensor([3.5, 3.6]),
+                "exp_avg_sq": torch.tensor([3.7, 3.8]),
+            },
+        }
+    )
+    assert torch.equal(shard_main[0][0], torch.tensor([51.0, 52.0]))
+    assert torch.equal(shard_fp32[0][0], torch.tensor([53.0, 54.0]))
+
+    assert [
+        tensor.tolist()
+        for tensor in DistributedOptimizer._update_legacy_world_tensors(
+            [torch.tensor([1.0, 2.0]), torch.tensor([3.0, 4.0])],
+            [1, 3],
+        )
+    ] == [[1.0], [2.0, 3.0, 4.0]]
+    with pytest.raises(AssertionError):
+        DistributedOptimizer._update_legacy_world_tensors([torch.ones(2)], [3])
+
+    dist_opt.ddp_config.use_megatron_fsdp = True
+    dist_opt.model_chunks = [
+        SimpleNamespace(
+            config=SimpleNamespace(num_moe_experts=None),
+            named_parameters=lambda: [
+                ("decoder.layer.weight", bf16_param),
+                ("decoder.fp32.weight", fp32_param),
+            ],
+        )
+    ]
+    dist_opt.optimizer.param_groups = [
+        {"params": [bf16_param], "lr": 0.01, "wd_mult": 1.0},
+        {"params": [fp32_param], "lr": 0.02, "wd_mult": 0.5},
+    ]
+    fsdp_state = dist_opt.sharded_param_state_fsdp_dtensor(is_loading=False)
+    assert "decoder.layer.weight" in fsdp_state["param_to_group_meta"]
+    assert fsdp_state["param_to_group_meta"]["decoder.fp32.weight"]["lr"] == 0.02
+    remapped_groups = dist_opt._param2group_meta_to_param_groups(
+        fsdp_state["param_to_group_meta"],
+        dist_opt.optimizer.param_groups,
+    )
+    assert remapped_groups[0]["params"] == ["decoder.layer.weight"]
+    with pytest.raises(ValueError, match="not found"):
+        dist_opt._param2group_meta_to_param_groups({}, dist_opt.optimizer.param_groups)
+    with pytest.raises(ValueError, match="different metadata"):
+        dist_opt._param2group_meta_to_param_groups(
+            {
+                "decoder.layer.weight": {"lr": 0.01, "wd_mult": 1.0},
+                "decoder.fp32.weight": {"lr": 0.03, "wd_mult": 0.5},
+            },
+            [{"params": [bf16_param, fp32_param]}],
+        )
+    dist_opt.ddp_config.use_megatron_fsdp = False
+
     bf16_param.grad = torch.ones_like(bf16_param)
     fp32_param.grad = torch.ones_like(fp32_param)
     shard_main[0][0].grad = torch.ones_like(shard_main[0][0])
