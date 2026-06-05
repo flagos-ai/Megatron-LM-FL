@@ -2351,7 +2351,7 @@ def test_dynamic_context_cpu_state_management_prefix_and_cache_paths(monkeypatch
 
 
 def test_dynamic_engine_request_failure_suspend_resume_and_context_manager_paths(monkeypatch):
-    assert dynamic_engine.format_mem_bytes(1) == "1 bytes"
+    assert dynamic_engine.format_mem_bytes(1) == "1.0 bytes"
     assert dynamic_engine.format_mem_bytes(2048) == "2.0 kb"
     assert dynamic_engine.format_mem_bytes(3 * 1024**2) == "3.0 mb"
     assert dynamic_engine.format_mem_bytes(4 * 1024**3) == "4.0 gb"
