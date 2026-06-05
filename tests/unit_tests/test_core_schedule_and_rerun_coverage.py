@@ -4851,6 +4851,199 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
         full_sched.add_earliest_waiting_request_to_active_pool()
 
 
+def test_hybrid_cp_scheduler_grouping_and_forward_backward_cpu_paths(monkeypatch):
+    from megatron.core.pipeline_parallel import hybrid_cp_schedule
+    from megatron.core.pipeline_parallel import schedules as pipeline_schedules
+
+    class _Group:
+        def __init__(self, size=4, rank=0):
+            self._size = size
+            self._rank = rank
+
+        def size(self):
+            return self._size
+
+        def rank(self):
+            return self._rank
+
+    scheduler = hybrid_cp_schedule.BalancedCPScheduler(
+        max_seq_len_per_rank=8,
+        dp_cp_group=_Group(size=4),
+    )
+    assert scheduler.gpus_needed(1) == 1
+    assert scheduler.gpus_needed(9) == 2
+    assert scheduler.gpus_needed(33) == 8
+    assert scheduler.get_total_workload(16, cp_size=2) == 128
+    empty_group = scheduler.next_hdp_group([], scheduler.get_total_workload, total_gpus=4)
+    assert empty_group == ([[], [], [], []], [], [0.0, 0.0, 0.0, 0.0], [[], [], [], []])
+
+    buckets = scheduler.make_buckets_equal(
+        [(0, 32), (1, 16), (2, 8), (3, 4)],
+        scheduler.get_total_workload,
+    )
+    assert buckets
+    assert sum(len(bucket) for bucket in buckets) == 4
+
+    single_mb, single_leftovers, single_exec, single_ids = scheduler.next_hdp_group(
+        [(10, 8)],
+        scheduler.get_total_workload,
+        total_gpus=4,
+    )
+    assert single_leftovers == []
+    assert all(batch == [8] for batch in single_mb)
+    assert all(ids == [10] for ids in single_ids)
+    assert all(time == scheduler.get_total_workload(8, cp_size=4) for time in single_exec)
+
+    dp_mb, dp_leftovers, dp_exec, dp_ids = scheduler.next_hdp_group(
+        [(0, 32), (1, 16), (2, 8), (3, 8), (4, 4)],
+        scheduler.get_total_workload,
+        total_gpus=4,
+        strategy="dp",
+    )
+    assert len(dp_mb) == 4
+    assert len(dp_ids) == 4
+    assert all(isinstance(exec_time, float) for exec_time in dp_exec)
+    assert all(sample_id in {0, 1, 2, 3, 4} for ids in dp_ids for sample_id in ids)
+    assert all(sample in {(0, 32), (1, 16), (2, 8), (3, 8), (4, 4)} for sample in dp_leftovers)
+
+    pp_mb, _, _, pp_ids = scheduler.next_hdp_group(
+        [(0, 16), (1, 8), (2, 8), (3, 4)],
+        scheduler.get_total_workload,
+        total_gpus=4,
+        strategy="pp",
+    )
+    assert len(pp_mb) == 4
+    assert all(isinstance(ids, list) for ids in pp_ids)
+
+    groups, sample_id_groups = scheduler.get_groups_and_subsamples(
+        [(0, 32), (1, 16), (2, 8), (3, 8), (4, 4)],
+        SimpleNamespace(),
+    )
+    assert groups
+    assert sample_id_groups
+    assert len(groups[0]) == 4
+
+    forward_calls = []
+    backward_calls = []
+    barriers = []
+    broadcasts = []
+
+    def _cpu_tensor_factory(original):
+        def _factory(*args, **kwargs):
+            kwargs.pop("device", None)
+            return original(*args, **kwargs)
+
+        return _factory
+
+    monkeypatch.setattr(hybrid_cp_schedule.torch, "tensor", _cpu_tensor_factory(torch.tensor))
+    monkeypatch.setattr(hybrid_cp_schedule.torch, "empty", _cpu_tensor_factory(torch.empty))
+    monkeypatch.setattr(
+        hybrid_cp_schedule.torch.distributed,
+        "broadcast",
+        lambda item, src, group=None: broadcasts.append((item.clone(), src, group)),
+    )
+    monkeypatch.setattr(
+        hybrid_cp_schedule.torch.distributed,
+        "barrier",
+        lambda group=None: barriers.append(group),
+    )
+    monkeypatch.setattr(
+        hybrid_cp_schedule.parallel_state,
+        "get_data_parallel_rank",
+        lambda with_context_parallel=False: 0,
+    )
+    monkeypatch.setattr(
+        hybrid_cp_schedule.parallel_state,
+        "get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        hybrid_cp_schedule.parallel_state,
+        "get_tensor_model_parallel_src_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        hybrid_cp_schedule.parallel_state,
+        "get_tensor_model_parallel_group",
+        lambda: "tp",
+    )
+    monkeypatch.setattr(
+        hybrid_cp_schedule.parallel_state,
+        "get_data_parallel_group",
+        lambda with_context_parallel=False: "dp_cp",
+    )
+    monkeypatch.setattr(hybrid_cp_schedule, "RerunDataIterator", lambda iterator: iterator)
+
+    def _forward_step(
+        forward_step_func,
+        data_iterator,
+        model,
+        num_microbatches,
+        input_tensor,
+        forward_data_store,
+        config,
+        collect_non_loss_data,
+        is_first_microbatch,
+        current_microbatch,
+    ):
+        sample = next(data_iterator)
+        forward_calls.append((sample["id"], int(sample["local_cp_size"]), is_first_microbatch, current_microbatch))
+        forward_data_store.append(sample["id"])
+        return torch.tensor([float(sample["id"])]), torch.tensor(3)
+
+    def _backward_step(input_tensor, output_tensor, output_tensor_grad, model_type, config):
+        backward_calls.append((output_tensor.clone(), model_type))
+
+    monkeypatch.setattr(pipeline_schedules, "forward_step", _forward_step)
+    monkeypatch.setattr(pipeline_schedules, "backward_step", _backward_step)
+
+    class _NoSync:
+        def __init__(self):
+            self.entries = 0
+
+        def __call__(self):
+            return self
+
+        def __enter__(self):
+            self.entries += 1
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+    no_sync = _NoSync()
+    batch = {
+        0: {"id": 0},
+        2: {"id": 2},
+    }
+    data_iterator = iter([(batch, [[[0], [1]], [[2], [3]]])])
+    forward_store = []
+    returned_store, total_tokens = hybrid_cp_schedule.hybrid_context_parallel_forward_backward(
+        forward_step_func=lambda *args, **kwargs: None,
+        data_iterator=data_iterator,
+        model=["model"],
+        num_microbatches=2,
+        input_tensor=torch.tensor([1.0]),
+        output_tensor_grad=torch.tensor([1.0]),
+        forward_data_store=forward_store,
+        config=SimpleNamespace(),
+        collect_non_loss_data=False,
+        first_val_step=True,
+        forward_only=False,
+        no_sync_func=no_sync,
+        total_num_tokens=0,
+        check_first_val_step=lambda first_val_step, forward_only, cond: cond,
+        model_type="decoder",
+    )
+    assert returned_store == [0, 2]
+    assert total_tokens == 6
+    assert forward_calls == [(0, 1, True, 0), (2, 1, False, 1)]
+    assert len(backward_calls) == 2
+    assert no_sync.entries == 2
+    assert barriers
+    assert broadcasts
+
+
 def test_blended_dataset_indices_cache_defer_and_getitem(monkeypatch, tmp_path):
     import numpy
 
