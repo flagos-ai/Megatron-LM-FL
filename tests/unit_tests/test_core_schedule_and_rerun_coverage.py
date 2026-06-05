@@ -2139,6 +2139,7 @@ def test_dynamic_context_cpu_state_management_prefix_and_cache_paths(monkeypatch
         ctx.paused_request_count = 0
         ctx.num_prefill_requests = 0
         ctx.chunked_prefill_request_id = -1
+        ctx.enable_chunked_prefill = False
         ctx.paused_tokens = None
         ctx.paused_speculative_tokens = None
         ctx._using_cuda_graph_this_step = False
