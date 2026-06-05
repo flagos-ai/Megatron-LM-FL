@@ -4544,6 +4544,313 @@ def test_hybrid_cp_data_loader_wrapper_cpu_collective_and_reroute_paths(monkeypa
     assert implicit_group_wrapper.dp_cp_group is dp_cp_group
 
 
+def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
+    from collections import OrderedDict
+
+    from megatron.core.distributed import finalize_model_grads
+    from megatron.core.inference import scheduler as inference_scheduler
+    from megatron.core.optimizer import clip_grads
+
+    class _Group:
+        def __init__(self, size=2, rank=0, name="group"):
+            self._size = size
+            self._rank = rank
+            self.name = name
+
+        def size(self):
+            return self._size
+
+        def rank(self):
+            return self._rank
+
+    all_reduce_calls = []
+    broadcast_calls = []
+    monkeypatch.setattr(
+        finalize_model_grads.torch.distributed,
+        "all_reduce",
+        lambda tensor, op=None, group=None: all_reduce_calls.append((tensor.clone(), op, group)),
+    )
+    monkeypatch.setattr(
+        finalize_model_grads.torch.distributed,
+        "broadcast",
+        lambda tensor, src, group=None: broadcast_calls.append((tensor.clone(), src, group)),
+    )
+    monkeypatch.setattr(finalize_model_grads.torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(
+        finalize_model_grads.torch.distributed,
+        "get_process_group_ranks",
+        lambda group: [0, 1],
+    )
+    monkeypatch.setattr(finalize_model_grads, "get_pp_last_rank", lambda group: 1)
+    monkeypatch.setattr(finalize_model_grads, "is_pp_first_stage", lambda group: True)
+    monkeypatch.setattr(finalize_model_grads, "is_pp_last_stage", lambda group: False)
+    monkeypatch.setattr(finalize_model_grads, "get_pg_size", lambda group: group.size() if group else 1)
+
+    def _get_attr_wrapped_model(model, attr, return_model_obj=False):
+        if attr == "pre_process" and return_model_obj:
+            return model.pre_process
+        return getattr(model, attr)
+
+    monkeypatch.setattr(finalize_model_grads, "get_attr_wrapped_model", _get_attr_wrapped_model)
+    monkeypatch.setattr(
+        finalize_model_grads,
+        "get_updated_expert_bias",
+        lambda tokens, bias, rate: bias + tokens.to(bias.dtype) * rate,
+    )
+
+    word_weight = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    word_weight.main_grad = torch.tensor([0.5, 1.5])
+    pos_weight = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    pos_weight.grad = torch.tensor([1.0, 1.0])
+    cond_weight_a = torch.nn.Parameter(torch.tensor([1.0]))
+    cond_weight_a.main_grad = torch.tensor([2.0])
+    cond_weight_a.pipeline_parallel = True
+    cond_weight_b = torch.nn.Parameter(torch.tensor([1.0]))
+    cond_weight_b.main_grad = torch.tensor([3.0])
+    cond_weight_b.pipeline_parallel = True
+    seq_param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    seq_param.main_grad = torch.tensor([2.0, 2.0])
+    seq_param.sequence_parallel = True
+    avg_param = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    avg_param.main_grad = torch.tensor([4.0, 4.0])
+    avg_param.average_gradients_across_tp_domain = True
+    q_param = torch.nn.Parameter(torch.tensor([5.0]))
+    q_param.main_grad = torch.tensor([6.0])
+
+    class _ExpertModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.expert_bias = torch.tensor([0.1, 0.2])
+            self.local_tokens_per_expert = torch.tensor([2.0, 4.0])
+            self.training = True
+            self.reset_count = 0
+
+        def reset_global_aux_loss_tracker(self):
+            self.reset_count += 1
+
+    expert_module = _ExpertModule()
+    skipped_expert = SimpleNamespace(
+        expert_bias=torch.tensor([5.0]),
+        local_tokens_per_expert=torch.tensor([1.0]),
+        training=False,
+    )
+
+    class _PreProcess:
+        share_embeddings_and_output_weights = True
+        position_embeddings = SimpleNamespace(weight=pos_weight)
+
+        def shared_embedding_or_output_weight(self):
+            return word_weight
+
+    class _Chunk:
+        def __init__(self):
+            self.ddp_config = SimpleNamespace(use_megatron_fsdp=False)
+            self.pre_process = _PreProcess()
+            self.finished = []
+            self.scaled = []
+
+        def named_parameters(self):
+            return iter(
+                [
+                    ("cond", cond_weight_a),
+                    ("cond_duplicate", cond_weight_b),
+                    ("seq", seq_param),
+                    ("avg", avg_param),
+                    ("q_layernorm.weight", q_param),
+                ]
+            )
+
+        def modules(self):
+            return iter([self, expert_module, skipped_expert])
+
+        def finish_grad_sync(self, force_all_reduce=False):
+            self.finished.append(force_all_reduce)
+
+        def scale_gradients(self, scaling):
+            self.scaled.append(float(scaling))
+
+    chunk = _Chunk()
+    config = SimpleNamespace(
+        has_cond_embedder=True,
+        sequence_parallel=True,
+        qk_layernorm=True,
+        mtp_num_layers=0,
+        moe_router_enable_expert_bias=True,
+        moe_router_load_balancing_type="global_aux_loss",
+        moe_router_bias_update_rate=0.5,
+        timers=None,
+        barrier_with_L1_time=False,
+    )
+    monkeypatch.setattr(finalize_model_grads, "get_model_config", lambda model: config)
+    pg_collection = SimpleNamespace(
+        tp=_Group(name="tp"),
+        pp=_Group(name="pp"),
+        embd=_Group(name="embd"),
+        pos_embd=_Group(name="pos"),
+        dp_cp=_Group(name="dp_cp"),
+    )
+    num_tokens = torch.tensor(4.0)
+    finalize_model_grads.finalize_model_grads(
+        [chunk],
+        num_tokens=num_tokens,
+        pg_collection=pg_collection,
+        force_all_reduce=True,
+    )
+    assert chunk.finished == [True]
+    assert chunk.scaled == [0.25]
+    assert expert_module.reset_count == 1
+    assert torch.equal(expert_module.local_tokens_per_expert, torch.zeros(2))
+    assert torch.allclose(expert_module.expert_bias, torch.tensor([1.1, 2.2]))
+    assert broadcast_calls and broadcast_calls[-1][1] == 1
+    assert len(all_reduce_calls) >= 5
+
+    list_pp_group = [_Group()]
+    list_pp_config = SimpleNamespace(has_cond_embedder=False)
+    finalize_model_grads._allreduce_conditional_embedding_grads(
+        [chunk], list_pp_config, list_pp_group
+    )
+    assert finalize_model_grads._get_shared_word_embedding_weight(
+        SimpleNamespace(share_embeddings_and_output_weights=False, shared_embedding_or_output_weight=lambda: word_weight),
+        SimpleNamespace(mtp_num_layers=0),
+    ) is None
+
+    clip_all_reduce_calls = []
+
+    def _cpu_tensor_factory(original):
+        def _factory(*args, **kwargs):
+            kwargs.pop("device", None)
+            return original(*args, **kwargs)
+
+        return _factory
+
+    monkeypatch.setattr(clip_grads.torch, "zeros", _cpu_tensor_factory(torch.zeros))
+    monkeypatch.setattr(clip_grads.torch, "tensor", _cpu_tensor_factory(torch.tensor))
+    monkeypatch.setattr(
+        clip_grads.torch.distributed,
+        "all_reduce",
+        lambda tensor, op=None, group=None: clip_all_reduce_calls.append((tensor.clone(), op, group)),
+    )
+    monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: group)
+    monkeypatch.setattr(clip_grads, "to_local_if_dtensor", lambda tensor: tensor)
+    monkeypatch.setattr(clip_grads, "param_is_not_shared", lambda param: True)
+    monkeypatch.setattr(clip_grads, "param_is_not_tensor_parallel_duplicate", lambda param, tp_group=None: True)
+    monkeypatch.setattr(
+        clip_grads,
+        "multi_tensor_applier",
+        lambda func, overflow, tensor_lists, *args: func(overflow, tensor_lists, *args),
+    )
+    monkeypatch.setattr(
+        clip_grads,
+        "l2_norm_impl",
+        lambda overflow, tensor_lists, per_parameter_norm: (
+            torch.linalg.vector_norm(torch.cat([grad.float().view(-1) for grad in tensor_lists[0]])),
+            None,
+        ),
+    )
+
+    def _scale_impl(overflow, tensor_lists, scale):
+        for src, dst in zip(tensor_lists[0], tensor_lists[1]):
+            dst.copy_(src * float(scale))
+        return None
+
+    monkeypatch.setattr(clip_grads, "multi_tensor_scale_impl", _scale_impl)
+    monkeypatch.setattr(clip_grads, "multi_tensor_scale_tensor_impl", _scale_impl)
+
+    grad_a = torch.tensor([3.0, 4.0])
+    grad_b = torch.tensor([0.0, -2.0])
+    assert clip_grads.get_grad_norm_fp32([grad_a, grad_b], norm_type=2, grad_stats_parallel_group="mp") == pytest.approx(
+        (3.0**2 + 4.0**2 + 2.0**2) ** 0.5
+    )
+    assert clip_grads.get_grad_norm_fp32([grad_a], norm_type=1, grad_stats_parallel_group="mp") == pytest.approx(7.0)
+    assert clip_grads.get_grad_norm_fp32(grad_a, norm_type=float("inf"), grad_stats_parallel_group="mp") == pytest.approx(4.0)
+
+    decoupled_param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    decoupled_param.decoupled_grad = torch.tensor([4.0, 0.0])
+    clip_grads.clip_grad_by_total_norm_fp32(
+        [decoupled_param],
+        max_norm=1.0,
+        total_norm=4.0,
+        use_decoupled_grad=True,
+    )
+    assert torch.allclose(decoupled_param.decoupled_grad, torch.tensor([1.0, 0.0]), atol=1e-5)
+    no_clip_param = torch.nn.Parameter(torch.tensor([1.0]))
+    no_clip_param.decoupled_grad = torch.tensor([2.0])
+    clip_grads.clip_grad_by_total_norm_fp32(
+        [no_clip_param],
+        max_norm=10.0,
+        total_norm=2.0,
+        use_decoupled_grad=True,
+    )
+    assert torch.equal(no_clip_param.decoupled_grad, torch.tensor([2.0]))
+
+    zero_param = torch.nn.Parameter(torch.tensor([1.0, 2.0, 3.0]))
+    zero_param.decoupled_grad = torch.tensor([0.0, 5.0, 0.0])
+    assert clip_grads.count_zeros_fp32(
+        [zero_param],
+        grad_stats_parallel_group="mp",
+        use_decoupled_grad=True,
+    ) == 2
+
+    fsdp_param = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    fsdp_param.__fsdp_param__ = True
+    fsdp_param.grad = SimpleNamespace(_local_tensor=torch.tensor([0.0, 1.0]))
+    assert clip_grads.count_zeros_fp32([fsdp_param], grad_stats_parallel_group="mp") == 1
+    monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: "dp")
+    with pytest.raises(ValueError, match="Megatron FSDP"):
+        clip_grads.count_zeros_fp32([fsdp_param, zero_param], "mp", use_decoupled_grad=True)
+
+    stream_calls = []
+
+    class _Stream:
+        def __init__(self, request_id, abort_request):
+            self.request_id = request_id
+            self.abort_request = abort_request
+            self.finished = False
+
+        def finish(self, exception=None):
+            self.finished = True
+            stream_calls.append((self.request_id, exception))
+
+    monkeypatch.setattr(inference_scheduler, "AsyncStream", _Stream)
+    monkeypatch.setattr(inference_scheduler.time, "time", lambda: 123.0)
+    sched = inference_scheduler.Scheduler(max_batch_size=1)
+    first_id = sched.add_request(
+        prompt="hello",
+        prompt_tokens=torch.tensor([1, 2]),
+        sampling_params=SamplingParams(num_tokens_to_generate=1),
+        streaming=True,
+    )
+    with pytest.warns(UserWarning, match="renamed"):
+        second_id = sched.add_request(
+            prompt="wait",
+            prompt_tokens=torch.tensor([3]),
+            inference_parameters=SamplingParams(num_tokens_to_generate=2),
+        )
+    explicit = inference_request_module.InferenceRequest(
+        request_id=42,
+        prompt="explicit",
+        prompt_tokens=[4],
+        arrival_time=None,
+        sampling_params=SamplingParams(num_tokens_to_generate=1),
+    )
+    explicit_id = sched.add_request(inference_request=explicit)
+    assert first_id == 0 and second_id == 1 and explicit_id == 42
+    assert sched.requests[42].arrival_time == 123.0
+    assert sched.num_requests_pending() == 3
+    assert sched.have_requests_pending() is True
+    sched.active_request_pool[first_id].status = inference_request_module.Status.COMPLETED
+    sched.update_requests_pools(OrderedDict([(first_id, sched.active_request_pool[first_id])]))
+    assert first_id in sched.completed_request_pool
+    assert second_id in sched.active_request_pool
+    assert sched.waiting_request_pool
+    sched.abort_request(first_id, exception=RuntimeError)
+    assert stream_calls == [(first_id, RuntimeError)]
+    full_sched = inference_scheduler.Scheduler(max_batch_size=0)
+    full_sched.waiting_request_pool[99] = explicit
+    with pytest.raises(AssertionError, match="Active request pool"):
+        full_sched.add_earliest_waiting_request_to_active_pool()
+
+
 def test_blended_dataset_indices_cache_defer_and_getitem(monkeypatch, tmp_path):
     import numpy
 
