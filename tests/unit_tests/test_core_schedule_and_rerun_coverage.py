@@ -1983,6 +1983,7 @@ def test_dynamic_context_errors_factory_and_memory_size_strings():
 
 def test_dynamic_context_cpu_state_management_prefix_and_cache_paths(monkeypatch):
     monkeypatch.setattr(dynamic_context.torch.cuda, "current_device", lambda: "cpu")
+    monkeypatch.setattr(dynamic_context, "triton_append_key_value_cache", None)
     monkeypatch.setattr(dynamic_context.DynamicInferenceContext, "TOKEN_ROUNDER", 4)
     monkeypatch.setattr(dynamic_context.DynamicInferenceContext, "REQUEST_ROUNDER", 2)
     monkeypatch.setattr(dynamic_context.parallel_state, "is_initialized", lambda: False)
