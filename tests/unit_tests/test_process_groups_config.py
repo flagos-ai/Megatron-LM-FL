@@ -147,6 +147,7 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
     )
 
     model = SimpleNamespace(
+        config=SimpleNamespace(context_parallel_size=1),
         ddp_config=SimpleNamespace(
             num_distributed_optimizer_instances=1,
             use_distributed_optimizer=False,
@@ -200,6 +201,7 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
         )
 
     multi_instance_model = SimpleNamespace(
+        config=SimpleNamespace(context_parallel_size=1),
         ddp_config=SimpleNamespace(
             num_distributed_optimizer_instances=2,
             use_distributed_optimizer=True,
