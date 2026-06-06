@@ -101,7 +101,7 @@ def test_optimizer_param_group_overrides_and_buffers_cpu_paths(monkeypatch):
         optimizer_pkg._get_param_groups(
             [model],
             config,
-            {optimizer_pkg.ParamKey(name="linear.weight"): {"params": []}},
+            {optimizer_pkg.ParamKey(name="linear.weight"): {"params": ()}},
         )
 
 
