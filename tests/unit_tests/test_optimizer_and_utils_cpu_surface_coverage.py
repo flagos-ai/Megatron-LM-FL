@@ -269,7 +269,7 @@ def test_optimizer_get_megatron_optimizer_split_chaining_and_dump_paths(monkeypa
         "intra_dp_cp_group_gloo": "dp-gloo",
         "intra_expt_dp_group_gloo": "expert-gloo",
         "intra_dist_opt_group": "intra",
-        "inter_dist_opt_group": _Group(size=2, rank=1),
+        "inter_dist_opt_group": _Group(size=2, rank=0),
         "engram_dp_group": _Group(size=1, rank=0),
         "engram_mp_group": _Group(size=1, rank=0),
         "engram_dp_group_gloo": "engram-gloo",
@@ -297,6 +297,7 @@ def test_optimizer_get_megatron_optimizer_split_chaining_and_dump_paths(monkeypa
             len(kwargs["param_groups"]),
             kwargs["data_parallel_group_idx"],
             kwargs["data_parallel_group_gloo"],
+            kwargs["distributed_optimizer_instance_id"],
         )
         built.append(label)
         return _FakeOpt(label)
@@ -315,6 +316,10 @@ def test_optimizer_get_megatron_optimizer_split_chaining_and_dump_paths(monkeypa
         dump_param_to_param_group_map=str(tmp_path / "map"),
     )
     assert len(result.optimizers) >= 3
+    optimizer_builds = [
+        item for item in built if isinstance(item, tuple) and item[0] != "dump"
+    ]
+    assert all(item[3] == 0 for item in optimizer_builds)
     assert any(item[0] == "dump" for item in built if isinstance(item, tuple))
     assert model.overlap_param_gather_with_optimizer_step is True
 
