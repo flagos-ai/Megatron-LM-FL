@@ -44,6 +44,12 @@ def _range_tuple(range_obj):
     return (range_obj.start, range_obj.end, range_obj.size)
 
 
+def _optimizer_config_with_precision_aware_mode(enabled):
+    config = OptimizerConfig()
+    config.use_precision_aware_optimizer_no_fp8_or_ds_fp8 = enabled
+    return config
+
+
 def test_distributed_optimizer_range_and_gbuf_mapping_static_paths(monkeypatch):
     monkeypatch.setattr(distrib_optimizer.cur_platform, "device_name", lambda: "cpu")
     p0 = torch.nn.Parameter(torch.arange(6, dtype=torch.float32))
@@ -184,7 +190,7 @@ def test_distributed_optimizer_group_ranges_and_main_param_shards_cpu_paths(monk
         [gbuf_ranges[1]],
         {bf16_param: (0, (torch.bfloat16, torch.float32), 0)},
         pa_group_ranges,
-        OptimizerConfig(use_precision_aware_optimizer_no_fp8_or_ds_fp8=True),
+        _optimizer_config_with_precision_aware_mode(True),
     )
     assert pa_groups[4] == [[None]]
     assert pa_group_ranges[0]["orig_group"]["params"][0].dtype == torch.bfloat16
@@ -230,7 +236,7 @@ def test_distributed_optimizer_lightweight_instance_state_helpers(monkeypatch):
             }
         },
     )
-    opt.config = OptimizerConfig(use_precision_aware_optimizer_no_fp8_or_ds_fp8=False)
+    opt.config = _optimizer_config_with_precision_aware_mode(False)
 
     tensors = opt._get_main_param_and_optimizer_states(model_param)
     assert set(tensors) == {"param", "exp_avg", "exp_avg_sq"}
@@ -267,7 +273,7 @@ def test_distributed_optimizer_lightweight_instance_state_helpers(monkeypatch):
             self.scaled[(param, key)] = value
 
     opt.optimizer = _PrecisionAwareOptimizer()
-    opt.config = OptimizerConfig(use_precision_aware_optimizer_no_fp8_or_ds_fp8=True)
+    opt.config = _optimizer_config_with_precision_aware_mode(True)
     tensors = opt._get_main_param_and_optimizer_states(model_param)
     assert set(tensors) == {"param", "exp_avg"}
     assert torch.equal(tensors["param"], torch.ones(2) + 1)
