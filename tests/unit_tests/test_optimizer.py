@@ -340,6 +340,172 @@ def test_proxy_dict_and_chained_optimizer_cpu_paths(monkeypatch, tmp_path):
         chained.load_state_dict([{"only": 1}])
 
 
+def test_distributed_optimizer_static_range_and_param_group_helpers_cpu(monkeypatch):
+    monkeypatch.setattr(
+        distrib_optimizer_module,
+        "cur_platform",
+        SimpleNamespace(device_name=lambda: "cpu"),
+    )
+    copy_calls = []
+    monkeypatch.setattr(
+        distrib_optimizer_module.tensor_parallel,
+        "copy_tensor_model_parallel_attributes",
+        lambda target, source: copy_calls.append((target.shape, source.shape)),
+    )
+    monkeypatch.setattr(distrib_optimizer_module, "is_float8tensor", lambda param: False)
+    monkeypatch.setattr(distrib_optimizer_module, "is_nvfp4tensor", lambda param: False)
+
+    p0 = torch.nn.Parameter(torch.arange(6, dtype=torch.float32), requires_grad=True)
+    p1 = torch.nn.Parameter(torch.arange(6, 10, dtype=torch.float32), requires_grad=True)
+    p2 = torch.nn.Parameter(torch.arange(10, 14, dtype=torch.float16), requires_grad=True)
+    p2.shared = True
+
+    world_map = {
+        p0: (0, 6, 0),
+        p1: (6, 10, 1),
+        p2: (10, 14, 2),
+    }
+    local_map = distrib_optimizer_module.DistributedOptimizer._build_model_gbuf_param_range_map(
+        world_map,
+        distrib_optimizer_module.Range(4, 12),
+        bucket_offset=2,
+    )
+    assert str(distrib_optimizer_module.Range(4, 12)) == "4,12 [8]"
+    assert len(distrib_optimizer_module.Range(4, 12)) == 8
+    assert local_map[p0]["param"].start == 4
+    assert local_map[p0]["param"].end == 6
+    assert local_map[p1]["gbuf_world_in_bucket"].start == 4
+    assert local_map[p2]["param"].end == 2
+
+    class _Group:
+        def __init__(self, rank=1, size=2):
+            self._rank = rank
+            self._size = size
+
+        def rank(self):
+            return self._rank
+
+        def size(self):
+            return self._size
+
+    bucket = SimpleNamespace(
+        grad_data=torch.zeros(16),
+        offset=0,
+        numel_unpadded=14,
+    )
+    buffer = SimpleNamespace(
+        data_parallel_group=_Group(rank=1, size=2),
+        buckets=[bucket],
+        param_dtype=torch.float32,
+        grad_dtype=torch.float32,
+        get_unpacked_index_map=lambda: world_map,
+    )
+    model_range = distrib_optimizer_module.DistributedOptimizer._build_model_gbuf_range(buffer, 0)
+    assert set(model_range["param_map"]) == {p1, p2}
+    gbuf_ranges = [distrib_optimizer_module.DistributedOptimizer._build_gbuf_range_map(buffer)]
+    param_gbuf_map = distrib_optimizer_module.DistributedOptimizer._build_model_param_gbuf_map(
+        gbuf_ranges
+    )
+    assert param_gbuf_map[p1] == (0, (torch.float32, torch.float32), 0)
+    with pytest.raises(AssertionError, match="single bucket"):
+        distrib_optimizer_module.DistributedOptimizer._build_model_param_gbuf_map(
+            [gbuf_ranges[0], gbuf_ranges[0]]
+        )
+
+    param_groups = [
+        _identifier_group([p0, p1], wd_mult=0.0),
+        _identifier_group([p2], lr_mult=2.0),
+    ]
+    local_group_map, group_ranges = (
+        distrib_optimizer_module.DistributedOptimizer._build_optimizer_group_ranges(
+            param_groups, gbuf_ranges
+        )
+    )
+    assert local_group_map[p1] == (0, 0)
+    assert local_group_map[p2] == (1, 0)
+    assert group_ranges[0]["orig_group"] is param_groups[0]
+
+    config = OptimizerConfig(optimizer="adam", lr=0.1)
+    (
+        model_float16_groups,
+        model_fp32_groups,
+        shard_float16_groups,
+        shard_fp32_groups,
+        shard_fp32_from_float16_groups,
+    ) = distrib_optimizer_module.DistributedOptimizer._build_model_and_main_param_groups(
+        gbuf_ranges,
+        param_gbuf_map,
+        group_ranges,
+        config,
+    )
+    assert model_float16_groups[1] == [p2]
+    assert model_fp32_groups[0] == [p1]
+    assert torch.equal(shard_fp32_groups[0][0], p1.view(-1)[:4])
+    assert shard_float16_groups[1][0].dtype == torch.float16
+    assert shard_fp32_from_float16_groups[1][0].dtype == torch.float32
+    assert p2.main_param_sharded is True and p2.main_param is shard_fp32_from_float16_groups[1][0]
+    assert getattr(shard_float16_groups[1][0], "shared") is True
+    assert copy_calls
+    assert param_groups[0]["params"] == shard_fp32_groups[0]
+    assert param_groups[1]["params"] == shard_fp32_from_float16_groups[1]
+
+    precision_param = torch.nn.Parameter(torch.ones(4, dtype=torch.float16), requires_grad=True)
+    precision_ranges = [
+        {
+            (torch.float16, torch.float16): [
+                {
+                    "param_map": {
+                        precision_param: {
+                            "param": distrib_optimizer_module.Range(0, 2),
+                        }
+                    }
+                }
+            ]
+        }
+    ]
+    precision_group = [_identifier_group([precision_param])]
+    _, precision_group_ranges = distrib_optimizer_module.DistributedOptimizer._build_optimizer_group_ranges(
+        precision_group, precision_ranges
+    )
+    precision_config = OptimizerConfig(
+        optimizer="adam",
+        lr=0.1,
+        use_precision_aware_optimizer=True,
+        main_grads_dtype=torch.float32,
+        main_params_dtype=torch.float32,
+        exp_avg_dtype=torch.float32,
+        exp_avg_sq_dtype=torch.float32,
+    )
+    result = distrib_optimizer_module.DistributedOptimizer._build_model_and_main_param_groups(
+        precision_ranges,
+        {precision_param: (0, (torch.float16, torch.float16), 0)},
+        precision_group_ranges,
+        precision_config,
+    )
+    assert result[-1][0] == [None]
+    assert precision_group[0]["params"][0] is result[2][0][0]
+
+    bad_param = torch.nn.Parameter(torch.ones(1, dtype=torch.float64), requires_grad=True)
+    bad_ranges = [
+        {
+            (torch.float64, torch.float64): [
+                {"param_map": {bad_param: {"param": distrib_optimizer_module.Range(0, 1)}}}
+            ]
+        }
+    ]
+    bad_group = [_identifier_group([bad_param])]
+    _, bad_group_ranges = distrib_optimizer_module.DistributedOptimizer._build_optimizer_group_ranges(
+        bad_group, bad_ranges
+    )
+    with pytest.raises(TypeError, match="Wrapped parameters"):
+        distrib_optimizer_module.DistributedOptimizer._build_model_and_main_param_groups(
+            bad_ranges,
+            {bad_param: (0, (torch.float64, torch.float64), 0)},
+            bad_group_ranges,
+            config,
+        )
+
+
 @patch('torch.distributed.get_world_size', return_value=1)
 @patch(
     'torch.distributed.all_gather_object', lambda output_list, obj: output_list.__setitem__(0, obj)
