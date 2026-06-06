@@ -121,6 +121,20 @@ def test_parallel_state_hierarchical_hybrid_groups_and_timeout(monkeypatch):
 
 
 def test_parallel_state_global_rank_size_getters_and_stage_helpers(monkeypatch):
+    class _ProcessGroup:
+        def __init__(self, name, size, rank):
+            self.name = name
+            self._size = size
+            self._rank = rank
+
+        def size(self):
+            return self._size
+
+        def rank(self):
+            return self._rank
+
+    tp_group = _ProcessGroup("tp", size=2, rank=1)
+    pp_group = _ProcessGroup("pp", size=3, rank=2)
     monkeypatch.setattr(ps, "get_parallel_context", lambda: None)
     monkeypatch.setattr(ps, "_MPU_TENSOR_MODEL_PARALLEL_WORLD_SIZE", None)
     monkeypatch.setattr(ps, "_MPU_PIPELINE_MODEL_PARALLEL_WORLD_SIZE", None)
@@ -129,23 +143,23 @@ def test_parallel_state_global_rank_size_getters_and_stage_helpers(monkeypatch):
     monkeypatch.setattr(ps, "_VIRTUAL_PIPELINE_MODEL_PARALLEL_WORLD_SIZE", None)
     monkeypatch.setattr(ps, "_VIRTUAL_PIPELINE_MODEL_PARALLEL_RANK", None)
     monkeypatch.setattr(ps, "_DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE", None)
-    monkeypatch.setattr(ps, "_TENSOR_MODEL_PARALLEL_GROUP", "tp-group")
-    monkeypatch.setattr(ps, "_PIPELINE_MODEL_PARALLEL_GROUP", "pp-group")
-    monkeypatch.setattr(ps, "_MODEL_PARALLEL_GROUP", "mp-group")
-    monkeypatch.setattr(ps, "_EMBEDDING_GROUP", "emb-group")
-    monkeypatch.setattr(ps, "_POSITION_EMBEDDING_GROUP", "pos-group")
+    monkeypatch.setattr(ps, "_TENSOR_MODEL_PARALLEL_GROUP", tp_group)
+    monkeypatch.setattr(ps, "_PIPELINE_MODEL_PARALLEL_GROUP", pp_group)
+    monkeypatch.setattr(ps, "_MODEL_PARALLEL_GROUP", _ProcessGroup("mp", 1, 0))
+    monkeypatch.setattr(ps, "_EMBEDDING_GROUP", _ProcessGroup("embedding", 2, 1))
+    monkeypatch.setattr(ps, "_POSITION_EMBEDDING_GROUP", _ProcessGroup("position", 1, 0))
     monkeypatch.setattr(ps, "_PIPELINE_GLOBAL_RANKS", [2, 3, 4])
     monkeypatch.setattr(ps, "_EMBEDDING_GLOBAL_RANKS", [2, 4])
     monkeypatch.setattr(ps, "_POSITION_EMBEDDING_GLOBAL_RANKS", [99])
     monkeypatch.setattr(
         ps.torch.distributed,
         "get_world_size",
-        lambda group=None: {"tp-group": 2, "pp-group": 3}.get(group, 1),
+        lambda group=None: group.size() if group is not None else 1,
     )
     monkeypatch.setattr(
         ps.torch.distributed,
         "get_rank",
-        lambda group=None: {"tp-group": 1, "pp-group": 2}.get(group, 2),
+        lambda group=None: group.rank() if group is not None else 2,
     )
 
     ps.set_tensor_model_parallel_world_size(8)
