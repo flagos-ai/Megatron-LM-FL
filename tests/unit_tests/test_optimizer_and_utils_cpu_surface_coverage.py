@@ -157,9 +157,9 @@ def test_optimizer_factory_wrapper_selection_cpu_paths(monkeypatch):
     captured = []
 
     class _BaseOptimizer:
-        def __init__(self, **kwargs):
+        def __init__(self, params, **kwargs):
             self.kwargs = kwargs
-            self.param_groups = kwargs["params"]
+            self.param_groups = params
             self.state = {param: {} for group in self.param_groups for param in group["params"]}
 
     class _Wrapper:
@@ -200,6 +200,7 @@ def test_optimizer_factory_wrapper_selection_cpu_paths(monkeypatch):
         model_parallel_group="mp",
     )
     assert isinstance(opt, _FP32)
+    assert opt.args[0].param_groups is param_groups
     assert opt.tp_group.size() == 1
 
     opt = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
@@ -209,6 +210,7 @@ def test_optimizer_factory_wrapper_selection_cpu_paths(monkeypatch):
         model_parallel_group="mp",
     )
     assert isinstance(opt, _FP16)
+    assert opt.args[0].param_groups is param_groups
 
     opt = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
         OptimizerConfig(optimizer="sgd", lr=0.1, use_distributed_optimizer=True),
@@ -222,6 +224,7 @@ def test_optimizer_factory_wrapper_selection_cpu_paths(monkeypatch):
         intra_dist_opt_group="intra",
     )
     assert isinstance(opt, _Dist)
+    assert opt.args[0].param_groups is param_groups
     assert getattr(opt, "grad_stats_parallel_group") == "intra"
 
     offload = optimizer_pkg._get_megatron_optimizer_based_on_param_groups(
