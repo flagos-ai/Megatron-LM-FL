@@ -30,8 +30,14 @@ def _patch_timer_dist(monkeypatch, rank=1, world_size=2, backend="cpu:gloo"):
 
 def test_timers_dummy_real_elapsed_gather_log_and_writer_paths(monkeypatch, caplog):
     _patch_timer_dist(monkeypatch)
-    clock = iter([10.0, 10.25, 12.0, 12.5, 20.0, 21.0, 30.0, 31.0])
-    monkeypatch.setattr(timers_module.time, "time", lambda: next(clock))
+    clock = {"value": 10.0}
+
+    def _time():
+        value = clock["value"]
+        clock["value"] += 0.25
+        return value
+
+    monkeypatch.setattr(timers_module.time, "time", _time)
 
     dummy = timers_module.DummyTimer()
     dummy.start()
