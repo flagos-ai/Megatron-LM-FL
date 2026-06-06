@@ -331,6 +331,12 @@ def test_exchange_utils_distribution_empty_tensor_object_and_dispatch_paths(monk
     with pytest.raises(CheckpointingException, match="Duplicate shard ids"):
         exchange_utils.exchange_loaded_objects_gather_object({})
 
+    monkeypatch.setattr(
+        torch.distributed,
+        "all_gather_object",
+        lambda output, value, group=None: output.__setitem__(0, gathered_payloads[0])
+        or output.__setitem__(1, gathered_payloads[1]),
+    )
     distribution = exchange_utils.ShardDistribution(
         main_rank_for_shard={("a", 0): 0},
         shards_in_this_group={("a", 0)},
