@@ -142,6 +142,9 @@ def test_tensor_parallel_mapping_autograd_wrappers_cpu_paths(monkeypatch):
 
 
 def test_tensor_parallel_rng_tracker_cpu_state_paths(monkeypatch):
+    monkeypatch.setattr(rng, "_CUDA_RNG_STATE_TRACKER", None)
+    monkeypatch.setattr(rng, "_CUDA_RNG_STATE_TRACKER_INITIALIZED", False)
+
     states = {}
     current = {"state": torch.tensor([0], dtype=torch.uint8)}
     seeds = []
