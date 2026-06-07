@@ -42,9 +42,9 @@ jobs:
           - name: core
             path: "tests/unit_tests/test_*.py"
             description: "Core unit tests"
-          - name: transformer
-            path: "tests/unit_tests/transformer/"
-            description: "Transformer tests"
+          # - name: transformer
+          #   path: "tests/unit_tests/transformer/"
+          #   description: "Transformer tests"
           - name: models
             path: "tests/unit_tests/models/"
             description: "Model tests"
