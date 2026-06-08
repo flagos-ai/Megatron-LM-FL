@@ -448,23 +448,15 @@ def _target_to_method_key(target: str) -> str:
     Returns:
         The method_key string.
     """
-    parts = target.rsplit(".", 1)
-    if len(parts) != 2:
+    parts = target.rsplit(".", 2)
+    if len(parts) < 2:
         return target
 
-    prefix, func_name = parts
-    # Get the last segment of the prefix
-    prefix_parts = prefix.rsplit(".", 1)
-    last_segment = prefix_parts[-1] if len(prefix_parts) == 2 else prefix_parts[0]
-
-    # Heuristic: if last_segment starts with uppercase -> class method
-    # otherwise -> module-level function (use module basename as key prefix)
-    if last_segment and last_segment[0].isupper():
-        # Class method: key is "ClassName.method_name"
-        return f"{last_segment}.{func_name}"
-    else:
-        # Module-level function: key is "module_basename.func_name"
-        return f"{last_segment}.{func_name}"
+    # Take the last two segments: covers all three cases uniformly
+    # - Module function: "...clip_grads.get_grad_norm_fp32" -> "clip_grads.get_grad_norm_fp32"
+    # - Class method: "...MixedPrecisionOptimizer._unscale" -> "MixedPrecisionOptimizer._unscale"
+    # - Class itself: "...optimizer_param_scheduler.OptimizerParamScheduler" -> "optimizer_param_scheduler.OptimizerParamScheduler"
+    return f"{parts[-2]}.{parts[-1]}"
 
 
 def register(target: str, impl: str, vendor: str = _DEFAULT_VENDOR) -> None:

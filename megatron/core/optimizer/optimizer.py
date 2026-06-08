@@ -522,6 +522,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             self._copy_model_params_to_main_params(state_dict=state_dict)
 
     def _unscale_main_grads_and_check_for_nan(self):
+
         # Collect main grads.
         if not self.is_stub_optimizer:
             main_grads = self._collect_main_grad_data_for_unscaling()
@@ -536,6 +537,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             )
 
         # Update across all model parallel instances.
+        #### FlagScale Begin ####
         groups = self.get_grad_stats_parallel_group()
         if isinstance(groups, list):
             if "cpu:gloo" == torch.distributed.get_backend(groups[0]):
@@ -551,6 +553,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             )
         if self.found_inf.device != torch.device(cur_platform.device_name()):
             self.found_inf = self.found_inf.to(cur_platform.device())
+        #### FlagScale End ####
 
         # Check for nan.
         found_inf_flag = self.found_inf.item() > 0
@@ -1329,6 +1332,7 @@ class ChainedOptimizer(MegatronOptimizer):
             # FlagScale End
 
     def load_state_dict(self, state_dict):
+        #### FlagScale Begin ####
         if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers
             logger.info(
                 "load_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
@@ -1357,6 +1361,7 @@ class ChainedOptimizer(MegatronOptimizer):
                 new_state_dict = (v for k, v in sorted(new_state_dict.items()))
             for optimizer, state in zip(self.chained_optimizers, new_state_dict):
                 optimizer.load_state_dict(state)
+        #### FlagScale End ####
         else:  # megatron source apply ep
             # If there is only one optimizer, we read the state dict as a single optimizer.
             if len(self.chained_optimizers) == 1:

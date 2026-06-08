@@ -56,7 +56,7 @@ from megatron.plugin.decorators import overridable  # isort: skip
 from megatron.plugin.platform import get_platform  # isort: skip
 
 cur_platform = get_platform()
-########## FlagScale End ##########
+
 
 try:
     from megatron.plugin.utils import get_device_type_for_comm
@@ -65,6 +65,9 @@ except ImportError:
     def get_device_type_for_comm(group):
         """Fallback: return current platform device name for communication."""
         return cur_platform.device_name()
+
+
+########## FlagScale End ##########
 
 
 @overridable  # FlagScale Add
@@ -235,7 +238,9 @@ def count_zeros_fp32(
     #   - grad should not be none
     #   - parameter should not be shared
     #   - should not be a replica due to tensor model parallelism
-    total_num_zeros = torch.zeros(1, dtype=torch.int64, device=cur_platform.device_name())
+    total_num_zeros = torch.zeros(
+        1, dtype=torch.int64, device=cur_platform.device_name()
+    )  # FlagScale Add
     data_parallel_group = None
     use_megatron_fsdp = False
     for param in parameters:
@@ -270,6 +275,7 @@ def count_zeros_fp32(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
         )
     # Sum across all model-parallel GPUs.
+    #### FlagScale Begin ####
     comm_device = get_device_type_for_comm(grad_stats_parallel_group)
     if comm_device == "cpu":
         total_num_zeros = total_num_zeros.cpu()
@@ -281,6 +287,7 @@ def count_zeros_fp32(
             torch.distributed.all_reduce(
                 total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
             )
+    #### FlagScale End ####
     else:
         torch.distributed.all_reduce(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group

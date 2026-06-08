@@ -259,6 +259,7 @@ class OptimizerParamScheduler:
             lr = max_lr * warmup_steps**0.5 / (num_steps**0.5)
             return max(min_lr, lr)
 
+        #### FlagScale Begin ####
         # stablelm2 scheduler of multiple stages
         if self.stablelm2_scheduler_config is not None:
             log_single_rank(
@@ -326,6 +327,7 @@ class OptimizerParamScheduler:
                 return self.max_lr
             else:  # Decay Phase
                 return self.max_lr * 0.5 ** ((self.num_steps - S) / T)
+        #### FlagScale End ####
 
         num_steps_ = self.num_steps - self.lr_warmup_steps
         decay_steps_ = self.lr_decay_steps - self.lr_warmup_steps

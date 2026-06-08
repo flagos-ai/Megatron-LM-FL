@@ -20,6 +20,12 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 
+# FlagScale Begin
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+# FlagScale End
+
 from .. import parallel_state
 from ..transformer.moe.moe_utils import get_updated_expert_bias
 from ..transformer.transformer_config import TransformerConfig
@@ -230,7 +236,7 @@ def _allreduce_embedding_grad(
             gradient is ``None``. Defaults to True.
     """
 
-    embd_group_is_list = isinstance(embd_group, list)
+    embd_group_is_list = isinstance(embd_group, list)  # FlagScale Add
     if (
         not embd_group_is_list
         and
@@ -245,6 +251,7 @@ def _allreduce_embedding_grad(
         elif is_pp_last_stage(pp_group):
             model_module = model[-1]
         elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
             model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
@@ -277,6 +284,7 @@ def _allreduce_embedding_grad(
             model_module = model[0]
         elif is_pp_last_stage(pp_group):
             model_module = model[-1]
+        # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
         elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
             model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.

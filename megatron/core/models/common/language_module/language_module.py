@@ -33,6 +33,8 @@ from megatron.core.utils import (
 )
 
 ########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
@@ -68,10 +70,6 @@ class LanguageModule(MegatronModule):
         self.vp_size = self.config.virtual_pipeline_model_parallel_size
 
     def _is_in_embd_group(self):
-        """
-        Supports both single process group and list of process groups
-        (for heterogeneous mode).
-        """
         if self.embd_group is None:
             return False
 
@@ -99,7 +97,7 @@ class LanguageModule(MegatronModule):
                 else:
                     return True
 
-        # FlagScale Begin
+        #### FlagScale Begin ####
         else:
             if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
                 self.embd_group[0]
@@ -122,7 +120,7 @@ class LanguageModule(MegatronModule):
                     )
                 else:
                     return True
-        # FlagScale End
+        #### FlagScale End ####
 
         return False
 
@@ -223,6 +221,7 @@ class LanguageModule(MegatronModule):
         """
 
         # Mark embedding and output layer for decoupled_lr and other features.
+        # This is the original Megatron attribute used by decoupled_lr, Muon, FSDP, etc.
         if self.pre_process and hasattr(self, 'embedding'):
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
         if (
@@ -233,6 +232,8 @@ class LanguageModule(MegatronModule):
             self.output_layer.weight.is_embedding_or_output_parameter = True
 
         # Mark embedding-class parameters for MuP optimizer grouping.
+        # Under MuP table-8-style grouping, embeddings/output use base LR/eps while
+        # hidden matrix-like params use width-scaled LR/eps.
         mtp_process = getattr(self, 'mtp_process', False)
         if self.config.use_mup and (self.pre_process or mtp_process) and hasattr(self, 'embedding'):
             for param in self.embedding.parameters():
@@ -255,8 +256,7 @@ class LanguageModule(MegatronModule):
         ):
             return
 
-        # if self.config.pipeline_model_parallel_size == 1: # original code of Megatron
-        if parallel_state.get_pipeline_model_parallel_world_size() == 1:
+        if parallel_state.get_pipeline_model_parallel_world_size() == 1:  # FlagScale Add
             # Zero out wgrad if sharing embeddings between two layers on same
             # pipeline stage to make sure grad accumulation into main_grad is
             # correct and does not include garbage values (e.g., from torch.empty).
@@ -306,11 +306,12 @@ class LanguageModule(MegatronModule):
         if torch.distributed.is_initialized():
             if self._is_in_embd_group() and not self.config.init_model_with_meta_device:
                 weight = self.shared_embedding_or_output_weight()
-                weight.data = weight.data.to(cur_platform.device())
-                embedding_group = self.embd_group
-                if not isinstance(embedding_group, list):
+                weight.data = weight.data.to(cur_platform.device())  # FlagScale Add
+                embedding_group = self.embd_group  # FlagScale Add
+                if not isinstance(embedding_group, list):  # FlagScale Add
                     torch.distributed.all_reduce(weight.data, group=self.embd_group)
                 else:  # for multiple embedding groups in heterogeneous mode
+                    #### FlagScale Begin ####
                     with torch.no_grad():
                         original_dtype = weight.dtype
                         if (original_dtype == torch.bfloat16) and torch.distributed.get_backend(
@@ -325,6 +326,7 @@ class LanguageModule(MegatronModule):
                         if original_dtype != weight.dtype:
                             weight = weight.to(original_dtype)
                             weight.data = weight.data.to(cur_platform.device())
+                    #### FlagScale End ####
 
         elif not getattr(LanguageModule, "embedding_warning_printed", False):
             logging.getLogger(__name__).warning(
