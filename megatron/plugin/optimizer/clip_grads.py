@@ -12,7 +12,6 @@ from typing import List, Optional, Union
 import torch
 from torch import inf
 
-from megatron.plugin.decorators import override
 from megatron.core.utils import get_data_parallel_group_if_dtensor
 from megatron.core.utils import to_local_if_dtensor
 from megatron.core.transformer.module import param_is_not_shared
@@ -48,7 +47,6 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-@override("clip_grads", "get_grad_norm_fp32")
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
     norm_type: Union[int, float] = 2,
@@ -163,86 +161,3 @@ def get_grad_norm_fp32(
 
     return total_norm
 
-@override("clip_grads", "count_zeros_fp32")
-def count_zeros_fp32(
-    parameters: Union[List[torch.Tensor], torch.Tensor],
-    grad_stats_parallel_group: torch.distributed.ProcessGroup,
-    use_decoupled_grad: bool = False,
-    tp_group: Optional[torch.distributed.ProcessGroup] = None,
-) -> float:
-    logger.debug(f"Megatron-LM-FL Plugins: count_zeros_fp32")
-    """Counts the number of zeros in gradients associated with the passed-in list of
-    parameters.
-
-    Args:
-        parameters (Iterable[Tensor] or Tensor): an iterable of Tensors or a
-            single Tensor that will have the number of zeros in its corresponding
-            gradient counted.
-        grad_stats_parallel_group (group): Process group for reducing the num_zeros count. This is
-            generally the model-parallel group for non-distributed optimizers, and the entire
-            world for the distributed optimizer.
-        use_decoupled_grad (bool, optional) whether to read grad from ".grad" or ".decoupled_grad",
-            default value is False.
-    """
-
-    if isinstance(parameters, torch.Tensor):
-        parameters = [parameters]
-
-    # Filter parameters based on:
-    #   - grad should not be none
-    #   - parameter should not be shared
-    #   - should not be a replica due to tensor model parallelism
-    total_num_zeros = torch.zeros(1, dtype=torch.int64, device=cur_platform.device_name())
-    data_parallel_group = None
-    use_megatron_fsdp = False
-    for param in parameters:
-        if getattr(param, "__fsdp_param__", False) and param.grad is not None:
-            # If the parameter is managed by Megatron FSDP, we need to handle it differently.
-            use_megatron_fsdp = True
-            grad = param.grad._local_tensor
-            num_zeros = grad.numel() - torch.count_nonzero(grad)
-            total_num_zeros += num_zeros
-            continue
-
-        grad_attr = "decoupled_grad" if use_decoupled_grad else "grad"
-        grad_not_none = hasattr(param, grad_attr) and getattr(param, grad_attr) is not None
-        is_not_shared = param_is_not_shared(param)
-        is_not_tp_duplicate = param_is_not_tensor_parallel_duplicate(param, tp_group=tp_group)
-        if grad_not_none and is_not_shared and is_not_tp_duplicate:
-            grad_obj = getattr(param, grad_attr)
-            data_parallel_group = get_data_parallel_group_if_dtensor(grad_obj, data_parallel_group)
-            grad = to_local_if_dtensor(grad_obj).detach()
-            num_zeros = grad.numel() - torch.count_nonzero(grad)
-            total_num_zeros = num_zeros + total_num_zeros
-
-    if use_megatron_fsdp and data_parallel_group is not None:
-        raise ValueError(
-            "Unexpected use of Megatron FSDP with data parallel group. "
-            "Please ensure that the parameters are properly managed by Megatron FSDP."
-        )
-
-    # Sum across all data-parallel GPUs if using FSDP.
-    if data_parallel_group:
-        torch.distributed.all_reduce(
-            total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
-        )
-    # Sum across all model-parallel GPUs.
-    comm_device = get_device_type_for_comm(grad_stats_parallel_group)
-    if comm_device == "cpu":
-        total_num_zeros = total_num_zeros.cpu()
-
-    if isinstance(grad_stats_parallel_group, list):
-        original_total_num_zeros = total_num_zeros.clone().detach()
-        for group in grad_stats_parallel_group:
-            total_num_zeros.data = original_total_num_zeros.data.clone()
-            torch.distributed.all_reduce(
-                total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
-            )
-    else:
-        torch.distributed.all_reduce(
-            total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
-        )
-
-    total_num_zeros = total_num_zeros.item()
-
-    return total_num_zeros

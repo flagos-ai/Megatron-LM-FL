@@ -37,8 +37,6 @@ except ImportError:
         multi_tensor_applier = local_multi_tensor_applier
         multi_tensor_scale_impl = local_multi_tensor_scale
 
-from megatron.plugin.decorators import overridable  # FlagScale Add
-
 from .. import parallel_state, tensor_parallel
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..dist_checkpointing.mapping import ShardedStateDict
@@ -523,9 +521,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.param_groups:
             self._copy_model_params_to_main_params(state_dict=state_dict)
 
-    @overridable  # FlagScale Add
     def _unscale_main_grads_and_check_for_nan(self):
-
         # Collect main grads.
         if not self.is_stub_optimizer:
             main_grads = self._collect_main_grad_data_for_unscaling()
@@ -540,11 +536,21 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             )
 
         # Update across all model parallel instances.
-        torch.distributed.all_reduce(
-            self.found_inf,
-            op=torch.distributed.ReduceOp.MAX,
-            group=self.get_grad_stats_parallel_group(),
-        )
+        groups = self.get_grad_stats_parallel_group()
+        if isinstance(groups, list):
+            if "cpu:gloo" == torch.distributed.get_backend(groups[0]):
+                self.found_inf = self.found_inf.cpu()
+        else:
+            if "cpu:gloo" == torch.distributed.get_backend(groups):
+                self.found_inf = self.found_inf.cpu()
+        if not isinstance(groups, list):
+            groups = [groups]
+        for group in groups:
+            torch.distributed.all_reduce(
+                self.found_inf, op=torch.distributed.ReduceOp.MAX, group=group
+            )
+        if self.found_inf.device != torch.device(cur_platform.device_name()):
+            self.found_inf = self.found_inf.to(cur_platform.device())
 
         # Check for nan.
         found_inf_flag = self.found_inf.item() > 0
@@ -705,7 +711,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             torch.float16,
                             torch.bfloat16,
                         ):
-                        # FlagScale End
+                            # FlagScale End
                             float16_params_this_group.append(param)
                             # Create a copy
                             main_param = param.detach().clone().float()
@@ -729,14 +735,16 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             param.device.type == cur_platform.device_name()
                             and param.dtype == torch.float32
                         ):
-                        # FlagScale End
+                            # FlagScale End
                             fp32_params_this_group.append(param)
                             param_group['params'][i] = param
 
                         else:
                             raise TypeError(
                                 'Wrapped parameters must be one of '
-                                'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '  # FlagScale Add
+                                'accelerator FloatTensor, '
+                                'accelerator HalfTensor, '
+                                'accelerator BFloat16Tensor. '  # FlagScale Add
                                 'Received {}'.format(param.type())
                             )
 
@@ -944,7 +952,9 @@ class FP32Optimizer(MegatronOptimizer):
 
         super(FP32Optimizer, self).__init__(optimizer, config, init_state_fn)
 
-        self._scale = torch.tensor([1.0], dtype=torch.float, device=cur_platform.device_name())  # FlagScale Add
+        self._scale = torch.tensor(
+            [1.0], dtype=torch.float, device=cur_platform.device_name()
+        )  # FlagScale Add
         self.is_stub_optimizer = True if optimizer is None else False
 
     def zero_grad(self, set_to_none=True):
@@ -1187,7 +1197,9 @@ class ChainedOptimizer(MegatronOptimizer):
         if self.chained_optimizers:
             return self.chained_optimizers[0].get_loss_scale()
         else:
-            return torch.tensor([1.0], dtype=torch.float32, device=cur_platform.current_device())  # FlagScale Add
+            return torch.tensor(
+                [1.0], dtype=torch.float32, device=cur_platform.current_device()
+            )  # FlagScale Add
 
     def _split_state_dict(self, state_dict):
         """Split the state dict into sub-state dicts according to the chunks of each sub-optimizer
@@ -1316,22 +1328,50 @@ class ChainedOptimizer(MegatronOptimizer):
                 return sharded_state_dict
             # FlagScale End
 
-    @overridable  # FlagScale Add
     def load_state_dict(self, state_dict):
-        # If there is only one optimizer, we read the state dict as a single optimizer.
-        if len(self.chained_optimizers) == 1:
-            self.chained_optimizers[0].load_state_dict(state_dict)
-            return
-        if len(self.chained_optimizers) != len(state_dict):
-            raise RuntimeError(
-                f'Expected {len(self.chained_optimizers)} entries'
-                f' in state dict, but got {len(state_dict)}.'
+        if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers
+            logger.info(
+                "load_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
             )
-        if isinstance(state_dict, dict):
-            state_dict = (v for k, v in sorted(state_dict.items()))
-        for optimizer, state in zip(self.chained_optimizers, state_dict):
-            optimizer.load_state_dict(state)
-        self._synchronize_steps()
+            new_state_dict = {}
+            for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
+                new_state_dict[optimizer_idx] = {}
+                new_state_dict[optimizer_idx]['optimizer'] = self.original_sharded_state_dict[
+                    optimizer_idx
+                ]['optimizer']
+                new_state_dict[optimizer_idx]['param_state_sharding_type'] = (
+                    self.original_sharded_state_dict[optimizer_idx]['param_state_sharding_type']
+                )
+                len_param_state = self.original_sharded_state_dict[optimizer_idx]['len_param_state']
+                new_state_dict[optimizer_idx]['param_state'] = {}
+                for i in range(len_param_state):
+                    new_state_dict[optimizer_idx]['param_state'][i] = state_dict['param_state'][
+                        self.mapping_idx[optimizer_idx][i]
+                    ]
+            if len(self.chained_optimizers) != len(new_state_dict):
+                raise RuntimeError(
+                    f'Expected {len(self.chained_optimizers)} entries'
+                    f' in state dict, but got {len(new_state_dict)}.'
+                )
+            if isinstance(new_state_dict, dict):
+                new_state_dict = (v for k, v in sorted(new_state_dict.items()))
+            for optimizer, state in zip(self.chained_optimizers, new_state_dict):
+                optimizer.load_state_dict(state)
+        else:  # megatron source apply ep
+            # If there is only one optimizer, we read the state dict as a single optimizer.
+            if len(self.chained_optimizers) == 1:
+                self.chained_optimizers[0].load_state_dict(state_dict)
+                return
+            if len(self.chained_optimizers) != len(state_dict):
+                raise RuntimeError(
+                    f'Expected {len(self.chained_optimizers)} entries'
+                    f' in state dict, but got {len(state_dict)}.'
+                )
+            if isinstance(state_dict, dict):
+                state_dict = (v for k, v in sorted(state_dict.items()))
+            for optimizer, state in zip(self.chained_optimizers, state_dict):
+                optimizer.load_state_dict(state)
+            self._synchronize_steps()
 
     @torch.no_grad()
     def prepare_grads(self) -> bool:

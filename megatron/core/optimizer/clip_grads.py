@@ -58,6 +58,14 @@ from megatron.plugin.platform import get_platform  # isort: skip
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
+try:
+    from megatron.plugin.utils import get_device_type_for_comm
+except ImportError:
+
+    def get_device_type_for_comm(group):
+        """Fallback: return current platform device name for communication."""
+        return cur_platform.device_name()
+
 
 @overridable  # FlagScale Add
 def get_grad_norm_fp32(
@@ -200,7 +208,6 @@ def clip_grad_by_total_norm_fp32(
         )
 
 
-@overridable  # FlagScale Add
 def count_zeros_fp32(
     parameters: Union[List[torch.Tensor], torch.Tensor],
     grad_stats_parallel_group: torch.distributed.ProcessGroup,
@@ -228,7 +235,7 @@ def count_zeros_fp32(
     #   - grad should not be none
     #   - parameter should not be shared
     #   - should not be a replica due to tensor model parallelism
-    total_num_zeros = torch.zeros(1, dtype=torch.int64, device='cuda')
+    total_num_zeros = torch.zeros(1, dtype=torch.int64, device=cur_platform.device_name())
     data_parallel_group = None
     use_megatron_fsdp = False
     for param in parameters:
@@ -263,9 +270,21 @@ def count_zeros_fp32(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
         )
     # Sum across all model-parallel GPUs.
-    torch.distributed.all_reduce(
-        total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
-    )
+    comm_device = get_device_type_for_comm(grad_stats_parallel_group)
+    if comm_device == "cpu":
+        total_num_zeros = total_num_zeros.cpu()
+
+    if isinstance(grad_stats_parallel_group, list):
+        original_total_num_zeros = total_num_zeros.clone().detach()
+        for group in grad_stats_parallel_group:
+            total_num_zeros.data = original_total_num_zeros.data.clone()
+            torch.distributed.all_reduce(
+                total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
+            )
+    else:
+        torch.distributed.all_reduce(
+            total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group
+        )
 
     total_num_zeros = total_num_zeros.item()
 

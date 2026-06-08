@@ -9,12 +9,15 @@ from megatron.plugin.decorators import (
     _plugin_registry,
     _plugin_impl_cache,
     _original_impl_cache,
+    _lazy_registry,
     _DEFAULT_VENDOR,
     _get_preferred_vendor,
+    _target_to_method_key,
     register_override_method,
     get_override_method,
     override,
     overridable,
+    register,
 )
 
 
@@ -23,6 +26,7 @@ def _clear_registry():
     _plugin_registry.clear()
     _plugin_impl_cache.clear()
     _original_impl_cache.clear()
+    _lazy_registry.clear()
     # Clear environment variables
     os.environ.pop("MG_FL_PREFER", None)
 
@@ -276,6 +280,266 @@ class TestGetPreferredVendor(unittest.TestCase):
     def test_with_whitespace(self):
         os.environ["MG_FL_PREFER"] = "  txda  "
         self.assertEqual(_get_preferred_vendor(), "txda")
+
+
+class TestTargetToMethodKey(unittest.TestCase):
+    """Test the _target_to_method_key helper."""
+
+    def test_module_level_function(self):
+        """Module-level function: last segment of module + func name."""
+        key = _target_to_method_key(
+            "megatron.core.distributed.finalize_model_grads._allreduce_embedding_grad"
+        )
+        self.assertEqual(key, "finalize_model_grads._allreduce_embedding_grad")
+
+    def test_module_level_function_short(self):
+        key = _target_to_method_key("megatron.core.optimizer.clip_grads.get_grad_norm_fp32")
+        self.assertEqual(key, "clip_grads.get_grad_norm_fp32")
+
+    def test_class_method(self):
+        """Class method: PascalCase segment is treated as class name."""
+        key = _target_to_method_key(
+            "megatron.core.optimizer.optimizer.MixedPrecisionOptimizer._unscale_main_grads_and_check_for_nan"
+        )
+        self.assertEqual(key, "MixedPrecisionOptimizer._unscale_main_grads_and_check_for_nan")
+
+    def test_class_method_language_module(self):
+        key = _target_to_method_key(
+            "megatron.core.models.common.language_module.language_module.LanguageModule._is_in_embd_group"
+        )
+        self.assertEqual(key, "LanguageModule._is_in_embd_group")
+
+    def test_class_method_scheduler(self):
+        key = _target_to_method_key(
+            "megatron.core.optimizer_param_scheduler.OptimizerParamScheduler.get_lr"
+        )
+        self.assertEqual(key, "OptimizerParamScheduler.get_lr")
+
+
+class TestRegisterFunction(unittest.TestCase):
+    """Test the centralized register() function."""
+
+    def setUp(self):
+        _clear_registry()
+
+    def tearDown(self):
+        _clear_registry()
+
+    def test_register_adds_to_lazy_registry(self):
+        """register() should add entry to _lazy_registry."""
+        register(
+            target="megatron.core.optimizer.clip_grads.get_grad_norm_fp32",
+            impl="megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32",
+        )
+        key = "clip_grads.get_grad_norm_fp32"
+        self.assertIn(key, _lazy_registry)
+        self.assertIn("default", _lazy_registry[key])
+        self.assertEqual(
+            _lazy_registry[key]["default"],
+            "megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32",
+        )
+
+    def test_register_with_vendor(self):
+        """register() with vendor parameter."""
+        register(
+            target="megatron.core.optimizer.clip_grads.get_grad_norm_fp32",
+            impl="megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32_musa",
+            vendor="musa",
+        )
+        key = "clip_grads.get_grad_norm_fp32"
+        self.assertIn("musa", _lazy_registry[key])
+
+    def test_register_multiple_vendors(self):
+        """Multiple vendors for the same target."""
+        register(
+            target="megatron.core.optimizer.clip_grads.get_grad_norm_fp32",
+            impl="megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32",
+        )
+        register(
+            target="megatron.core.optimizer.clip_grads.get_grad_norm_fp32",
+            impl="megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32_musa",
+            vendor="musa",
+        )
+        key = "clip_grads.get_grad_norm_fp32"
+        self.assertEqual(len(_lazy_registry[key]), 2)
+        self.assertIn("default", _lazy_registry[key])
+        self.assertIn("musa", _lazy_registry[key])
+
+    def test_register_vendor_case_insensitive(self):
+        """Vendor name is lowercased."""
+        register(
+            target="megatron.core.optimizer.clip_grads.get_grad_norm_fp32",
+            impl="megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32_musa",
+            vendor="MUSA",
+        )
+        key = "clip_grads.get_grad_norm_fp32"
+        self.assertIn("musa", _lazy_registry[key])
+
+    def test_lazy_resolve_on_get_override_method(self):
+        """get_override_method should resolve lazy registry entries."""
+        # Create a temporary module with a test function
+        import types
+        test_module = types.ModuleType("megatron.plugin.tests._test_lazy_target")
+        test_module.my_func = lambda: "lazy_resolved"
+        sys.modules["megatron.plugin.tests._test_lazy_target"] = test_module
+
+        try:
+            register(
+                target="megatron.core.tests._test_lazy_target.my_func",
+                impl="megatron.plugin.tests._test_lazy_target.my_func",
+            )
+            result = get_override_method("_test_lazy_target.my_func")
+            self.assertIsNotNone(result)
+            self.assertEqual(result(), "lazy_resolved")
+            # After resolution, should be in _plugin_registry
+            self.assertIn("_test_lazy_target.my_func", _plugin_registry)
+        finally:
+            del sys.modules["megatron.plugin.tests._test_lazy_target"]
+
+    def test_eager_registry_takes_priority(self):
+        """If eager registry has an entry, lazy registry is not consulted."""
+        def eager_fn(): return "eager"
+        register_override_method("foo.bar", eager_fn)
+
+        register(
+            target="megatron.core.foo.bar",
+            impl="megatron.plugin.foo.bar",
+        )
+        result = get_override_method("foo.bar")
+        self.assertEqual(result(), "eager")
+
+
+class TestOverridableClass(unittest.TestCase):
+    """Test @overridable on class definitions."""
+
+    def setUp(self):
+        _clear_registry()
+
+    def tearDown(self):
+        _clear_registry()
+
+    def test_no_override_returns_original_instance(self):
+        """Without override registered, instantiation returns original class instance."""
+        @overridable
+        class MyClass:
+            def __init__(self, value):
+                self.value = value
+
+            def get_value(self):
+                return self.value
+
+        obj = MyClass(42)
+        self.assertEqual(obj.value, 42)
+        self.assertEqual(obj.get_value(), 42)
+        self.assertIsInstance(obj, MyClass)
+
+    def test_override_returns_override_instance(self):
+        """With override registered, instantiation returns override class instance."""
+        @overridable
+        class MyClass:
+            def __init__(self, value):
+                self.value = value
+
+            def get_value(self):
+                return self.value
+
+        class MyClassOverride(MyClass):
+            def __init__(self, value):
+                super().__init__(value * 2)
+
+            def get_value(self):
+                return self.value + 100
+
+        # The method_key for a class is "module_basename.ClassName"
+        # Since we're in test, module is __main__ or the test file
+        # We register using the generic method_key format
+        module_parts = MyClass.__module__.split('.')
+        module_name = module_parts[-1]
+        method_key = f"{module_name}.MyClass"
+        register_override_method(method_key, MyClassOverride)
+
+        obj = MyClass(10)
+        self.assertEqual(obj.value, 20)  # 10 * 2
+        self.assertEqual(obj.get_value(), 120)  # 20 + 100
+        self.assertIsInstance(obj, MyClass)  # isinstance still works
+
+    def test_override_class_isinstance_compatible(self):
+        """Override class instances pass isinstance check against original."""
+        @overridable
+        class BaseScheduler:
+            def __init__(self):
+                self.name = "base"
+
+        class PluginScheduler(BaseScheduler):
+            def __init__(self):
+                super().__init__()
+                self.name = "plugin"
+
+        module_parts = BaseScheduler.__module__.split('.')
+        module_name = module_parts[-1]
+        method_key = f"{module_name}.BaseScheduler"
+        register_override_method(method_key, PluginScheduler)
+
+        obj = BaseScheduler()
+        self.assertEqual(obj.name, "plugin")
+        self.assertIsInstance(obj, BaseScheduler)
+
+    def test_subclass_not_affected(self):
+        """Subclassing the overridable class works normally."""
+        @overridable
+        class MyBase:
+            def __init__(self, x):
+                self.x = x
+
+        class MySub(MyBase):
+            def __init__(self, x):
+                super().__init__(x + 1)
+
+        obj = MySub(5)
+        self.assertEqual(obj.x, 6)
+        self.assertIsInstance(obj, MyBase)
+
+    def test_class_preserves_name(self):
+        """Decorated class preserves __name__ and __qualname__."""
+        @overridable
+        class FancyClass:
+            pass
+
+        self.assertEqual(FancyClass.__name__, "FancyClass")
+
+    def test_lazy_register_class(self):
+        """register() with class target resolves lazily."""
+        import types
+        test_module = types.ModuleType("megatron.plugin.tests._test_cls_override")
+
+        @overridable
+        class OriginalCls:
+            def __init__(self):
+                self.source = "original"
+
+        class OverrideCls(OriginalCls):
+            def __init__(self):
+                super().__init__()
+                self.source = "override"
+
+        test_module.OverrideCls = OverrideCls
+        sys.modules["megatron.plugin.tests._test_cls_override"] = test_module
+
+        try:
+            # Construct target path matching the key format
+            module_parts = OriginalCls.__module__.split('.')
+            module_name = module_parts[-1]
+            # register with a target that produces the right method_key
+            register(
+                target=f"megatron.core.{module_name}.OriginalCls",
+                impl="megatron.plugin.tests._test_cls_override.OverrideCls",
+            )
+
+            obj = OriginalCls()
+            self.assertEqual(obj.source, "override")
+            self.assertIsInstance(obj, OriginalCls)
+        finally:
+            del sys.modules["megatron.plugin.tests._test_cls_override"]
 
 
 if __name__ == "__main__":
