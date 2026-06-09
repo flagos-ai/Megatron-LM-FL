@@ -24,6 +24,16 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+
+try:
+    from megatron.plugin.utils import get_device_type_for_comm
+except ImportError:
+
+    def get_device_type_for_comm(group):
+        """Fallback: return current platform device name for communication."""
+        return cur_platform.device_name()
+
+
 # FlagScale End
 
 from .. import parallel_state
