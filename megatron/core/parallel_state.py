@@ -790,7 +790,7 @@ def initialize_model_parallel(
     ######### FlagScale Begin ########
     if create_dualpipev_parallel_size:
         global _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE
-        _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = pipeline_model_parallel_size
+        _DUALPIPEV_PIPELINE_MODEL_PARALLEL_WORLD_SIZE = 2
     ######### FlagScale End ########
 
     rank = torch.distributed.get_rank()
@@ -1890,7 +1890,7 @@ def get_pipeline_model_parallel_rank(group=None):  # FlagScale Add
     return torch.distributed.get_rank(group=get_pipeline_model_parallel_group())
 
 
-def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None, group=None):  # FlagScale Add
+def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None, group=None, ignore_dualpipev=True, dualpipev_stage=None): # FlagScale Add
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
     # FlagScale Begin
     para_ctx = get_parallel_context()
@@ -1903,10 +1903,17 @@ def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None, group=None):  # 
 
         if vp_stage != 0:
             return False
+
+    if not ignore_dualpipev and get_dualpipev_pipeline_model_parallel_world_size() is not None:
+        assert dualpipev_stage is not None, "dualpipev_stage must be passed if use_dualpipev is enabled"
+
+        if dualpipev_stage != 0:
+            return False
+
     return get_pipeline_model_parallel_rank() == 0
 
 
-def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None, group=None):  # FlagScale Add
+def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None, group=None, ignore_dualpipev=True, dualpipev_stage=None):  # FlagScale Add
     """Return True if in the last pipeline-model-parallel stage, False otherwise."""
     # FlagScale Begin
     para_ctx = get_parallel_context()
@@ -1919,6 +1926,15 @@ def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None, group=None):  # F
 
         if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
             return False
+
+    if not ignore_dualpipev and get_dualpipev_pipeline_model_parallel_world_size() is not None:
+        assert dualpipev_stage is not None, "dualpipev_stage must be passed if use_dualpipev is enabled"
+
+        if dualpipev_stage != (get_dualpipev_pipeline_model_parallel_world_size() - 1):
+            return False
+
+        return get_pipeline_model_parallel_rank() == 0
+
     return get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1)
 
 

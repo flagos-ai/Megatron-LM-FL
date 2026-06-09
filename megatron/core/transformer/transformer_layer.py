@@ -50,12 +50,8 @@ logger = logging.getLogger(__name__)
 
 
 def get_transformer_layer_offset(
-    # FlagScale Begin
-    config: TransformerConfig,
-    vp_stage: Optional[int] = None,
-    pp_rank: Optional[int] = None,
-    is_dualpipev_first_chunk: Optional[bool] = False,
-    # FlagScale End
+    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None, # FlagScale Add
 ):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
     if pp_rank is None:
@@ -156,6 +152,62 @@ def get_transformer_layer_offset(
                             // middle_pipeline_stages
                         )
                     )
+            elif config.use_dualpipev:
+                assert (
+                    dualpipev_stage is not None
+                ), "dualpipev_stage must be provided if use_dualpipev is set"
+
+                # Calculate number of layers in each dualpipev model chunk
+                # If the num_layers_in_first_pipeline_stage and
+                # num_layers_in_last_pipeline_stage are not set, all pipeline stages
+                # will be treated as middle pipeline stages in the calculation
+                num_layers_per_dualpipev_model_chunk_in_first_pipeline_stage = (
+                    0
+                    if config.num_layers_in_first_pipeline_stage is None
+                    else config.num_layers_in_first_pipeline_stage // 2
+                )
+
+                num_layers_per_dualpipev_model_chunk_in_last_pipeline_stage = (
+                    0
+                    if config.num_layers_in_last_pipeline_stage is None
+                    else config.num_layers_in_last_pipeline_stage // 2
+                )
+
+                num_layers_per_dualpipev_model_chunk_in_middle_pipeline_stage = (
+                    middle_num_layers // 2
+                )
+
+                # First stage + middle stage + last stage
+                total_dualpipev_chunks = (
+                    num_layers_per_dualpipev_model_chunk_in_first_pipeline_stage
+                    + num_layers_per_dualpipev_model_chunk_in_middle_pipeline_stage
+                    + num_layers_per_dualpipev_model_chunk_in_last_pipeline_stage
+                )
+
+                # Calculate the layer offset with interleaved uneven pipeline parallelism
+                if pp_rank == 0 and dualpipev_stage == 0:
+                    offset = pp_rank
+                elif pp_rank > 1 and dualpipev_stage == 0:
+                    offset = (
+                        dualpipev_stage * total_dualpipev_chunks
+                        + num_layers_per_dualpipev_model_chunk_in_first_pipeline_stage
+                        + middle_pipeline_rank
+                        * (
+                            num_layers_per_dualpipev_model_chunk_in_middle_pipeline_stage
+                            // middle_pipeline_stages
+                        )
+                    )
+                else:
+                    reverse_middle_pipeline_rank = middle_pipeline_stages - middle_pipeline_rank - 1
+                    offset = (
+                        dualpipev_stage * total_dualpipev_chunks
+                        + num_layers_per_dualpipev_model_chunk_in_first_pipeline_stage
+                        + reverse_middle_pipeline_rank
+                        * (
+                            num_layers_per_dualpipev_model_chunk_in_middle_pipeline_stage
+                            // middle_pipeline_stages
+                        )
+                    )
             else:
                 if middle_pipeline_stages > 0:
                     num_layers_per_pipeline_rank = middle_num_layers // middle_pipeline_stages
@@ -198,6 +250,18 @@ def get_transformer_layer_offset(
                     is_vp_first_stage(vp_stage, vp_size) and is_first_pp_stage
                 ):
                     offset -= 1
+            elif config.use_dualpipev:
+                assert (
+                    dualpipev_stage is not None
+                ), "dualpipev_stage must be provided if use_dualpipev is set"
+                pp_size = parallel_state.get_pipeline_model_parallel_world_size()
+                num_layers_per_dualpipev_rank = num_layers_per_pipeline_rank // 2
+                total_dualpipev_chunks = num_layers // 2
+                if dualpipev_stage == 0:
+                    offset = dualpipev_stage * total_dualpipev_chunks + (pp_rank * num_layers_per_dualpipev_rank)
+                else:
+                    reverse_pp_rank = pp_size - pp_rank - 1
+                    offset = dualpipev_stage * total_dualpipev_chunks + (reverse_pp_rank * num_layers_per_dualpipev_rank)
             else:
                 offset = pp_rank * num_layers_per_pipeline_rank
 
@@ -292,6 +356,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         is_mtp_layer: bool = False,
         add_layer_offset: bool = True,
         pp_layer_offset: Optional[int] = None,
+        dualpipev_stage: Optional[int] = None,
     ):
         self.submodules_config = submodules
         super().__init__(config=config, vp_stage=vp_stage)
@@ -312,7 +377,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             self.layer_number = layer_number
         else:
             self.layer_number = layer_number + get_transformer_layer_offset(
-                self.config, vp_stage, get_pg_rank(pg_collection.pp)
+                self.config, vp_stage, get_pg_rank(pg_collection.pp), dualpipev_stage
             )
         self.hidden_dropout = config.hidden_dropout if hidden_dropout is None else hidden_dropout
         self.is_mtp_layer = is_mtp_layer
