@@ -15,6 +15,21 @@ Multi-vendor support:
         export MG_FL_PREFER=txda      # prefer TXDA vendor implementations
 
     When ``MG_FL_PREFER`` is unset (or empty), the "default" vendor is used.
+
+Centralized registration (recommended):
+    Instead of decorating each plugin function with ``@override``, declare all
+    mappings in a single registry file using :func:`register`::
+
+        # megatron/plugin/override_registry.py
+        from megatron.plugin.decorators import register
+
+        register(
+            target="megatron.core.distributed.finalize_model_grads._allreduce_embedding_grad",
+            impl="megatron.plugin.distributed.finalize_model_grads._allreduce_embedding_grad",
+        )
+
+    The ``impl`` module is lazily imported only when the overridden function is
+    first called.
 """
 
 import functools
@@ -29,9 +44,13 @@ logger = logging.getLogger(__name__)
 # Default vendor name used when @override does not specify a vendor
 _DEFAULT_VENDOR = "default"
 
-# Registry to store override methods
+# Registry to store override methods (eagerly loaded implementations)
 # Key format: "ClassName.method_name" -> { vendor_name: implementation }
 _plugin_registry: dict[str, dict[str, Callable]] = {}
+
+# Lazy registry: stores module paths for deferred import
+# Key format: "ClassName.method_name" -> { vendor_name: "full.module.path.func_name" }
+_lazy_registry: dict[str, dict[str, str]] = {}
 
 # Cache for override methods lookup results
 # _plugin_impl_cache: stores functions that have override methods
@@ -73,6 +92,60 @@ def register_override_method(method_key: str, implementation: Callable,
     logger.debug(f"Registered override method: {method_key} (vendor={vendor})")
 
 
+def _resolve_lazy_impl(method_key: str) -> Optional[Callable]:
+    """Resolve a lazy-registered implementation by importing its module.
+
+    If the method_key exists in ``_lazy_registry``, select the appropriate
+    vendor implementation (using the same priority as ``get_override_method``),
+    import its module, retrieve the function object, register it into
+    ``_plugin_registry``, and return it.
+
+    Returns:
+        The resolved implementation callable, or None if not in lazy registry.
+    """
+    if method_key not in _lazy_registry:
+        return None
+
+    vendor_map = _lazy_registry[method_key]
+
+    # Determine which vendor to load
+    preferred = _get_preferred_vendor()
+    if preferred and preferred in vendor_map:
+        impl_path = vendor_map[preferred]
+    elif _DEFAULT_VENDOR in vendor_map:
+        impl_path = vendor_map[_DEFAULT_VENDOR]
+    elif preferred is None and len(vendor_map) == 1:
+        impl_path = next(iter(vendor_map.values()))
+    else:
+        return None
+
+    # Import the module and get the function
+    try:
+        rsplit = impl_path.rsplit(".", 1)
+        if len(rsplit) != 2:
+            logger.warning(f"Invalid impl path in lazy registry: {impl_path}")
+            return None
+        module_path, func_name = rsplit
+        mod = importlib.import_module(module_path)
+        impl_func = getattr(mod, func_name, None)
+        if impl_func is None:
+            logger.warning(
+                f"Function '{func_name}' not found in module '{module_path}'"
+            )
+            return None
+
+        # Register into the eager registry so future lookups skip lazy loading
+        vendor_for_reg = preferred if (preferred and preferred in vendor_map) else _DEFAULT_VENDOR
+        register_override_method(method_key, impl_func, vendor=vendor_for_reg)
+        return impl_func
+    except (ImportError, ModuleNotFoundError) as e:
+        logger.debug(f"Failed to lazy-import '{impl_path}' for {method_key}: {e}")
+        return None
+    except Exception as e:
+        logger.debug(f"Error resolving lazy impl for {method_key}: {e}")
+        return None
+
+
 def get_override_method(method_key: str) -> Optional[Callable]:
     """
     Get an override method for a method or function.
@@ -89,33 +162,34 @@ def get_override_method(method_key: str) -> Optional[Callable]:
         The override method if available, None otherwise
     """
     vendor_map = _plugin_registry.get(method_key)
-    if vendor_map is None:
+    if vendor_map is not None:
+        preferred = _get_preferred_vendor()
+
+        # 1. Preferred vendor
+        if preferred is not None and preferred in vendor_map:
+            logger.debug(f"Using vendor '{preferred}' for {method_key}")
+            return vendor_map[preferred]
+
+        # 2. Default vendor
+        if _DEFAULT_VENDOR in vendor_map:
+            logger.debug(f"Using vendor '{_DEFAULT_VENDOR}' for {method_key}")
+            return vendor_map[_DEFAULT_VENDOR]
+
+        # 3. Multiple vendors but no preference / no default -- warn and return None
+        if preferred is not None:
+            logger.warning(
+                f"MG_FL_PREFER='{preferred}' but no matching vendor for {method_key}. "
+                f"Available vendors: {list(vendor_map.keys())}"
+            )
         return None
 
-    preferred = _get_preferred_vendor()
-
-    # 1. Preferred vendor
-    if preferred is not None and preferred in vendor_map:
-        logger.debug(f"Using vendor '{preferred}' for {method_key}")
-        return vendor_map[preferred]
-
-    # 2. Default vendor
-    if _DEFAULT_VENDOR in vendor_map:
-        logger.debug(f"Using vendor '{_DEFAULT_VENDOR}' for {method_key}")
-        return vendor_map[_DEFAULT_VENDOR]
-
-    # 3. Multiple vendors but no preference / no default -- warn and return None
-    if preferred is not None:
-        logger.warning(
-            f"MG_FL_PREFER='{preferred}' but no matching vendor for {method_key}. "
-            f"Available vendors: {list(vendor_map.keys())}"
-        )
-    return None
+    # Fallback: check the lazy registry for deferred imports
+    return _resolve_lazy_impl(method_key)
 
 
-def overridable(func: Callable) -> Callable:
+def overridable(func_or_class):
     """
-    Decorator to mark a method or function as replaceable by plugin.
+    Decorator to mark a method, function, or class as replaceable by plugin.
 
     Usage in core code (for methods):
         @overridable
@@ -129,14 +203,108 @@ def overridable(func: Callable) -> Callable:
             # Original implementation (fallback if no plugin)
             ...
 
+    Usage in core code (for classes):
+        @overridable
+        class MyScheduler:
+            def __init__(self, ...):
+                ...
+
+        # Instantiation: MyScheduler(...) will return an instance of the
+        # override class if registered, otherwise the original class.
+        # The override class MUST inherit from the original class to
+        # ensure isinstance() compatibility.
+
     The decorator automatically:
     1. For methods: Detects the class name and method name
     2. For functions: Uses module name and function name
-    3. Looks up override method using the key
-    4. Uses plugin if found, otherwise uses original implementation
+    3. For classes: Uses module name and class name
+    4. Looks up override in the plugin registry
+    5. Uses plugin if found, otherwise uses original implementation
 
     No parameters needed - everything is auto-detected!
     """
+    if inspect.isclass(func_or_class):
+        return _overridable_class(func_or_class)
+    else:
+        return _overridable_func(func_or_class)
+
+
+def _overridable_class(cls):
+    """Handle @overridable on a class definition."""
+    original_module = cls.__module__
+    class_name = cls.__name__
+
+    # method_key: "module_basename.ClassName"
+    module_parts = original_module.split('.')
+    module_name = module_parts[-1] if module_parts else "unknown"
+    method_key = f"{module_name}.{class_name}"
+
+    # State for caching the resolved class (None = not resolved yet)
+    _resolved = {}  # Use dict to allow mutation in closure
+
+    def _resolve_override_class():
+        """Resolve and cache the override class (or mark as not found)."""
+        if 'cls' in _resolved:
+            return _resolved['cls']
+
+        plugin_cls = get_override_method(method_key)
+
+        # If not found, try to lazy import the plugin module
+        if plugin_cls is None:
+            try:
+                if original_module.startswith("megatron.core."):
+                    plugin_module = original_module.replace("megatron.core.", "megatron.plugin.", 1)
+                    try:
+                        importlib.import_module(plugin_module)
+                        plugin_cls = get_override_method(method_key)
+                    except (ImportError, ModuleNotFoundError):
+                        pass
+            except Exception as e:
+                logger.debug(f"Failed to lazy import plugin for {method_key}: {e}")
+
+        if plugin_cls is not None:
+            logger.info(f"Using override class for {method_key}")
+        else:
+            logger.debug(f"Using original class for {method_key}")
+
+        _resolved['cls'] = plugin_cls
+        return plugin_cls
+
+    class OverridableClassProxy(cls):
+        """Proxy class that dispatches instantiation to the override class if registered."""
+
+        def __new__(proxy_cls, *args, **kwargs):
+            # Only dispatch when instantiating the proxy class itself.
+            # If a subclass (including the override class) calls __new__,
+            # skip dispatching to avoid infinite recursion.
+            if proxy_cls is not OverridableClassProxy:
+                return object.__new__(proxy_cls)
+            override_cls = _resolve_override_class()
+            if override_cls is not None:
+                # Create instance of the override class.
+                # Use object.__new__ to avoid re-entering this __new__.
+                instance = object.__new__(override_cls)
+                return instance
+            else:
+                # No override: create instance of the proxy itself
+                # (which inherits cls's __init__ and all methods)
+                return object.__new__(OverridableClassProxy)
+
+        def __init_subclass__(subcls, **kwargs):
+            # Allow normal subclassing without interference
+            super().__init_subclass__(**kwargs)
+
+    # Preserve the original class identity as much as possible
+    OverridableClassProxy.__name__ = cls.__name__
+    OverridableClassProxy.__qualname__ = cls.__qualname__
+    OverridableClassProxy.__module__ = cls.__module__
+    OverridableClassProxy.__doc__ = cls.__doc__
+
+    return OverridableClassProxy
+
+
+def _overridable_func(func):
+    """Handle @overridable on a function or method."""
     # Save the original qualname at decoration time
     # This is crucial for inheritance: when a subclass calls a parent's method,
     # we need the qualname of the method as defined in the parent class, not the subclass
@@ -216,7 +384,7 @@ def overridable(func: Callable) -> Callable:
         # Cache the result
         if plugin_impl is not None:
             _plugin_impl_cache[func] = plugin_impl
-            logger.debug(f"Using override method for {method_key}")
+            logger.info(f"Using override method for {method_key}")
             return plugin_impl(*args, **kwargs)
         else:
             # Cache "not found" result to avoid repeated lookup
@@ -261,3 +429,73 @@ def override(class_or_module_name: str, method_or_function_name: str,
         logger.info(f"Registered override method: {method_key} (vendor={vendor})")
         return impl_func
     return decorator
+
+
+def _target_to_method_key(target: str) -> str:
+    """Convert a full target path to the method_key format used by the registry.
+
+    Rules (matching how ``@overridable`` generates keys):
+    - Module-level function:
+        "megatron.core.distributed.finalize_model_grads._allreduce_embedding_grad"
+        -> method_key = "finalize_model_grads._allreduce_embedding_grad"
+    - Class method (identified by PascalCase segment before the last dot):
+        "megatron.core.optimizer.optimizer.MixedPrecisionOptimizer._unscale_main_grads_and_check_for_nan"
+        -> method_key = "MixedPrecisionOptimizer._unscale_main_grads_and_check_for_nan"
+
+    Args:
+        target: Full dotted path to the original function/method.
+
+    Returns:
+        The method_key string.
+    """
+    parts = target.rsplit(".", 2)
+    if len(parts) < 2:
+        return target
+
+    # Take the last two segments: covers all three cases uniformly
+    # - Module function: "...clip_grads.get_grad_norm_fp32" -> "clip_grads.get_grad_norm_fp32"
+    # - Class method: "...MixedPrecisionOptimizer._unscale" -> "MixedPrecisionOptimizer._unscale"
+    # - Class itself: "...optimizer_param_scheduler.OptimizerParamScheduler" -> "optimizer_param_scheduler.OptimizerParamScheduler"
+    return f"{parts[-2]}.{parts[-1]}"
+
+
+def register(target: str, impl: str, vendor: str = _DEFAULT_VENDOR) -> None:
+    """Register an override mapping from target to implementation (lazy).
+
+    This is the recommended way to declare overrides. All mappings can be
+    collected in a single registry file (e.g., ``megatron/plugin/override_registry.py``).
+    The ``impl`` module will only be imported when the overridden function is
+    first called.
+
+    Args:
+        target: Full dotted path to the original function/method in megatron core.
+            Examples:
+                "megatron.core.distributed.finalize_model_grads._allreduce_embedding_grad"
+                "megatron.core.optimizer.optimizer.MixedPrecisionOptimizer._unscale_main_grads_and_check_for_nan"
+        impl: Full dotted path to the plugin implementation function.
+            Examples:
+                "megatron.plugin.distributed.finalize_model_grads._allreduce_embedding_grad"
+                "megatron.plugin.optimizer.optimizer._unscale_main_grads_and_check_for_nan"
+        vendor: Vendor name (e.g., "musa", "txda"). Defaults to "default".
+
+    Example::
+
+        from megatron.plugin.decorators import register
+
+        register(
+            target="megatron.core.distributed.finalize_model_grads._allreduce_embedding_grad",
+            impl="megatron.plugin.distributed.finalize_model_grads._allreduce_embedding_grad",
+        )
+        register(
+            target="megatron.core.optimizer.clip_grads.get_grad_norm_fp32",
+            impl="megatron.plugin.optimizer.clip_grads.get_grad_norm_fp32",
+            vendor="musa",
+        )
+    """
+    vendor = vendor.lower()
+    method_key = _target_to_method_key(target)
+
+    if method_key not in _lazy_registry:
+        _lazy_registry[method_key] = {}
+    _lazy_registry[method_key][vendor] = impl
+    logger.debug(f"Registered lazy override: {method_key} -> {impl} (vendor={vendor})")
