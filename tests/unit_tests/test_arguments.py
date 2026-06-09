@@ -695,6 +695,12 @@ def test_validate_args_dtype_and_precision_guard_paths(monkeypatch):
 def test_validate_args_rejects_training_configuration_guard_paths(monkeypatch, mutator, match):
     _patch_validate_environment(monkeypatch)
     args = _parse_minimal_training_args(monkeypatch)
+    if match == "nvidia_resiliency_ext is required":
+        monkeypatch.setitem(
+            sys.modules,
+            "nvidia_resiliency_ext.checkpointing.local.ckpt_managers.local_manager",
+            None,
+        )
     mutator(args)
 
     with pytest.raises((AssertionError, RuntimeError, ValueError), match=match):

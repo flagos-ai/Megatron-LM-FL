@@ -193,18 +193,18 @@ jobs:
 
           # Coverage setup
           COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
-          COVERAGE_SOURCE="$GITHUB_WORKSPACE"
-          COVERAGE_INCLUDE="megatron/*"
+          COVERAGE_TRAINING_SOURCE="$GITHUB_WORKSPACE/megatron/training"
+          COVERAGE_PLUGIN_SOURCE="$GITHUB_WORKSPACE/megatron/plugin"
+          COVERAGE_INCLUDE="megatron/training/*,megatron/plugin/*"
           RUNNER_CMD="-m pytest"
           MARKER_OPTS=()
           if [ "$PLATFORM" = "cuda" ]; then
             MARKER_OPTS=(-m "not flaky_in_dev")
-            COVERAGE_SOURCE="$GITHUB_WORKSPACE/megatron/training"
-            COVERAGE_INCLUDE="megatron/training/*"
           fi
           mkdir -p "$COVERAGE_DIR"
-          printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
-            "$COVERAGE_SOURCE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
+          printf '[run]\nparallel = true\nsource =\n    %s\n    %s\ndata_file = %s/.coverage\n' \
+            "$COVERAGE_TRAINING_SOURCE" "$COVERAGE_PLUGIN_SOURCE" "$COVERAGE_DIR" \
+            > "$COVERAGE_DIR/.coveragerc"
           RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
           
           torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
