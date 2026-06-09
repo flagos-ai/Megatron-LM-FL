@@ -51,6 +51,26 @@ def is_vp_last_stage(vp_stage: int, vp_size: int | None):
     return vp_stage == (vp_size - 1)
 
 
+def is_dualpipev_first_stage(dualpipev_stage: int, dualpipev_size: int | None):
+    if dualpipev_size is None or dualpipev_size <= 1:
+        assert dualpipev_stage is None or dualpipev_stage == 0, (
+            f"Expected dualpipev_stage to be 0 or None when dualpipev_size is <= 1 or None, "
+            f"but got dualpipev_stage={dualpipev_stage} and dualpipev_size={dualpipev_size}"
+        )
+        return True
+    return dualpipev_stage == 0
+
+def is_dualpipev_last_stage(dualpipev_stage: int, dualpipev_size: int | None):
+    """Return True if in the last virtual pipeline model-parallel stage, False otherwise."""
+    if dualpipev_size is None or dualpipev_size <= 1:
+        assert dualpipev_stage is None or dualpipev_stage == 0, (
+            f"Expected dualpipev_stage to be 0 or None when dualpipev_size is <= 1 or None, "
+            f"but got dualpipev_stage={dualpipev_stage} and dualpipev_size={dualpipev_size}"
+        )
+        return True
+    return dualpipev_stage == (dualpipev_size - 1)
+
+
 def get_pp_first_rank(pp_group: torch.distributed.ProcessGroup):
     """Return the global rank of the first rank in the pipeline parallel group."""
     pp_ranks = torch.distributed.get_process_group_ranks(pp_group)
@@ -330,6 +350,7 @@ class AbstractSchedulePlan(ABC):
         pre_backward=None,
         post_forward=None,
         post_backward=None,
+        skip_wgrad=False,
     ):
         """run() is the protocol between our schedule logic and model, which is used to schedule
         the forward and backward schedule plans for the models.

@@ -234,7 +234,7 @@ def transformer_block_forward_backward_overlapping(
     with rng_context, outer_fp8_context:
         for l_no, fwd_layer in enumerate(fwd_block.layers):
             inner_fp8_context = (
-                get_fp8_context(fwd_block.config, layer.layer_number - 1)
+                get_fp8_context(fwd_block.config, fwd_layer.layer_number - 1)
                 if use_inner_fp8_context
                 else nullcontext()
             )

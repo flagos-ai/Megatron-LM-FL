@@ -437,6 +437,8 @@ class Float16Module(MegatronModule):
         self.bf16 = config.bf16
         self.vp_size = config.virtual_pipeline_model_parallel_size
         self.vp_stage = getattr(module, 'vp_stage', None)
+        self.dualpipev_size = config.dualpipev_pipeline_model_parallel_size
+        self.dualpipev_stage = getattr(module, 'dualpipev_stage',  None)
         self.pg_collection = getattr(module, 'pg_collection', None)
 
         if self.fp16:
@@ -487,6 +489,8 @@ class Float16Module(MegatronModule):
             is_pp_last_stage,
             is_vp_first_stage,
             is_vp_last_stage,
+            is_dualpipev_first_stage,
+            is_dualpipev_last_stage,
         )
 
         if self.pg_collection is None:
@@ -497,14 +501,14 @@ class Float16Module(MegatronModule):
         ######### FlagScale Begin ########
         # TODO: Fix the dualpipev import issue in the latest Megatron codebase
         if self.config.use_dualpipev:
-            from megatron.plugin.dualpipev.dualpipev_schedules import get_dualpipe_chunk
-
-            dualpipe_first_stage = is_pp_first_stage(pp_group) and get_dualpipe_chunk() == 0
-            if dualpipe_first_stage:
+            if is_dualpipev_first_stage(self.dualpipev_stage, self.dualpipev_size) and is_pp_first_stage(pp_group):
                 inputs = fp32_to_float16(inputs, self.float16_convertor)
             outputs = self.module(*inputs, **kwargs)
-            dualpipe_last_stage = is_pp_last_stage(pp_group) and get_dualpipe_chunk() == 1
-            if dualpipe_last_stage:
+            if (
+                is_dualpipev_last_stage(self.dualpipev_stage, self.dualpipev_size)
+                and is_pp_first_stage(pp_group)
+                and fp32_output is True
+            ):
                 outputs = float16_to_fp32(outputs)
             return outputs
         ######### FlagScale End ########
