@@ -4561,7 +4561,7 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
             module_name, Path(__file__).resolve().parents[2] / relative_path
         )
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
+        monkeypatch.setitem(sys.modules, spec.name, module)
         spec.loader.exec_module(module)
         return module
 
@@ -4595,22 +4595,33 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
 
     all_reduce_calls = []
     broadcast_calls = []
-    monkeypatch.setattr(
-        finalize_model_grads.torch.distributed,
-        "all_reduce",
-        lambda tensor, op=None, group=None: all_reduce_calls.append((tensor.clone(), op, group)),
-    )
-    monkeypatch.setattr(
-        finalize_model_grads.torch.distributed,
-        "broadcast",
-        lambda tensor, src, group=None: broadcast_calls.append((tensor.clone(), src, group)),
-    )
-    monkeypatch.setattr(finalize_model_grads.torch.distributed, "get_rank", lambda: 0)
-    monkeypatch.setattr(
-        finalize_model_grads.torch.distributed,
-        "get_process_group_ranks",
-        lambda group: [0, 1],
-    )
+
+    class _FinalizeDistributedProxy:
+        ReduceOp = torch.distributed.ReduceOp
+
+        @staticmethod
+        def all_reduce(tensor, op=None, group=None):
+            all_reduce_calls.append((tensor.clone(), op, group))
+
+        @staticmethod
+        def broadcast(tensor, src, group=None):
+            broadcast_calls.append((tensor.clone(), src, group))
+
+        @staticmethod
+        def get_rank():
+            return 0
+
+        @staticmethod
+        def get_process_group_ranks(group):
+            return [0, 1]
+
+    class _FinalizeTorchProxy:
+        distributed = _FinalizeDistributedProxy()
+
+        def __getattr__(self, name):
+            return getattr(torch, name)
+
+    monkeypatch.setattr(finalize_model_grads, "torch", _FinalizeTorchProxy())
     monkeypatch.setattr(finalize_model_grads, "get_pp_last_rank", lambda group: 1)
     monkeypatch.setattr(finalize_model_grads, "is_pp_first_stage", lambda group: True)
     monkeypatch.setattr(finalize_model_grads, "is_pp_last_stage", lambda group: False)
@@ -4859,7 +4870,7 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
             stream_calls.append((self.request_id, exception))
 
     monkeypatch.setattr(inference_scheduler, "AsyncStream", _Stream)
-    monkeypatch.setattr(inference_scheduler.time, "time", lambda: 123.0)
+    monkeypatch.setattr(inference_scheduler, "time", SimpleNamespace(time=lambda: 123.0))
     sched = inference_scheduler.Scheduler(max_batch_size=1)
     first_id = sched.add_request(
         prompt="hello",
