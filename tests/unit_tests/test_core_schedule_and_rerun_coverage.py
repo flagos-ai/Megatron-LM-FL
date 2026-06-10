@@ -4577,6 +4577,7 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
         "megatron.core.optimizer._clip_grads_for_coverage",
         "megatron/core/optimizer/clip_grads.py",
     )
+    plugin_clip_grads = importlib.import_module("megatron.plugin.optimizer.clip_grads")
     for _name in ("get_grad_norm_fp32", "count_zeros_fp32"):
         _func = getattr(clip_grads, _name)
         if hasattr(_func, "__wrapped__"):
@@ -4781,6 +4782,10 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
             return torch.tensor(*args, **kwargs)
 
     monkeypatch.setattr(clip_grads, "torch", _TorchProxy())
+    monkeypatch.setattr(
+        clip_grads, "get_device_type_for_comm", lambda group: "cpu", raising=False
+    )
+    monkeypatch.setattr(plugin_clip_grads, "get_device_type_for_comm", lambda group: "cpu")
     monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: group)
     monkeypatch.setattr(clip_grads, "to_local_if_dtensor", lambda tensor: tensor)
     monkeypatch.setattr(clip_grads, "param_is_not_shared", lambda param: True)
