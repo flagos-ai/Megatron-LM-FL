@@ -4581,8 +4581,6 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
         _func = getattr(clip_grads, _name)
         if hasattr(_func, "__wrapped__"):
             monkeypatch.setattr(clip_grads, _name, _func.__wrapped__)
-    clip_torch = clip_grads.torch
-
     class _Group:
         def __init__(self, size=2, rank=0, name="group"):
             self._size = size
@@ -4748,20 +4746,30 @@ def test_training_grad_finalization_clip_and_scheduler_cpu_paths(monkeypatch):
 
     clip_all_reduce_calls = []
 
-    def _cpu_tensor_factory(original):
-        def _factory(*args, **kwargs):
+    class _DistributedProxy:
+        ReduceOp = torch.distributed.ReduceOp
+
+        @staticmethod
+        def all_reduce(tensor, op=None, group=None):
+            clip_all_reduce_calls.append((tensor.clone(), op, group))
+
+    class _TorchProxy:
+        distributed = _DistributedProxy()
+
+        def __getattr__(self, name):
+            return getattr(torch, name)
+
+        @staticmethod
+        def zeros(*args, **kwargs):
             kwargs.pop("device", None)
-            return original(*args, **kwargs)
+            return torch.zeros(*args, **kwargs)
 
-        return _factory
+        @staticmethod
+        def tensor(*args, **kwargs):
+            kwargs.pop("device", None)
+            return torch.tensor(*args, **kwargs)
 
-    monkeypatch.setattr(clip_torch, "zeros", _cpu_tensor_factory(torch.zeros))
-    monkeypatch.setattr(clip_torch, "tensor", _cpu_tensor_factory(torch.tensor))
-    monkeypatch.setattr(
-        clip_torch.distributed,
-        "all_reduce",
-        lambda tensor, op=None, group=None: clip_all_reduce_calls.append((tensor.clone(), op, group)),
-    )
+    monkeypatch.setattr(clip_grads, "torch", _TorchProxy())
     monkeypatch.setattr(clip_grads, "get_data_parallel_group_if_dtensor", lambda grad, group: group)
     monkeypatch.setattr(clip_grads, "to_local_if_dtensor", lambda tensor: tensor)
     monkeypatch.setattr(clip_grads, "param_is_not_shared", lambda param: True)
