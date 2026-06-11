@@ -1470,7 +1470,12 @@ def test_distributed_optimizer_range_maps_and_cpu_copy_paths(monkeypatch):
         {"params": [bf16_param], "lr": 0.01, "wd_mult": 1.0},
         {"params": [fp32_param], "lr": 0.02, "wd_mult": 0.5},
     ]
+    dist_opt.optimizer.state = {
+        bf16_param: {"exp_avg": torch.tensor([0.1, 0.2])},
+        fp32_param: {"exp_avg": torch.tensor([0.3, 0.4, 0.5])},
+    }
     fsdp_state = dist_opt.sharded_param_state_fsdp_dtensor(is_loading=False)
+    assert set(fsdp_state["state"]) == {"decoder.layer.weight", "decoder.fp32.weight"}
     assert "decoder.layer.weight" in fsdp_state["param_to_group_meta"]
     assert fsdp_state["param_to_group_meta"]["decoder.fp32.weight"]["lr"] == 0.02
     remapped_groups = dist_opt._param2group_meta_to_param_groups(
