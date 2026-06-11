@@ -52,3 +52,9 @@ def register_platforms() -> None:
         PLATFORMS["enflame"] = platform_enflame # use lower keys: enflame
         print(f"Megatron-LM-FL Platform: enflame Registered")
     
+    # Register KunLunXin Platform
+    from .platform_kunlunxin import PlatformKunLunXin
+    platform_kunlunxin = PlatformKunLunXin()
+    if platform_kunlunxin.is_available():
+        PLATFORMS["kunlunxin"] = platform_kunlunxin
+        print(f"Megatron-LM-FL Platform: kunlunxin Registered")
