@@ -336,9 +336,11 @@ def get_gpt_layer_with_transformer_engine_submodules(
                 ),
             ),
             self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=hc_module,
             pre_mlp_layernorm=backend.layer_norm(has_residual=True) if num_experts else IdentityOp,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
+            mlp_hyper_connection=hc_module,
             sharded_state_dict_keys_map={
                 "mlp.0.weight": "mlp.linear_fc1.layer_norm_weight",
                 "mlp.0.bias": "mlp.linear_fc1.layer_norm_bias",
@@ -576,7 +578,7 @@ def get_gpt_decoder_layer_specs(
     qk_l2_norm: Optional[bool] = False,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    is_dualpipev_first_chunk: Optional[bool] = False,  # FlagScale Add
+    dualpipev_stage: Optional[bool] = None,  # FlagScale Add
 ) -> TransformerBlockSubmodules:
     """GPT block spec."""
     if use_transformer_engine:
@@ -689,7 +691,7 @@ def get_gpt_decoder_block_spec(
     qk_l2_norm: Optional[bool] = False,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    is_dualpipev_first_chunk: Optional[bool] = False,  # FlagScale Add
+    dualpipev_stage: Optional[bool] = None,  # FlagScale Add
 ) -> TransformerBlockSubmodules:
     """GPT block spec."""
     layer_specs = get_gpt_decoder_layer_specs(
@@ -703,13 +705,14 @@ def get_gpt_decoder_block_spec(
         config,
         vp_stage=vp_stage,
         pp_rank=pp_rank,
-        is_dualpipev_first_chunk=is_dualpipev_first_chunk,
+        dualpipev_stage=dualpipev_stage,
     )
     # FlagScale End
 
     if config.pipeline_model_parallel_layout is not None:
         layout = config.pipeline_model_parallel_layout
         assert isinstance(layout, PipelineParallelLayerLayout)
+        assert dualpipev_stage is None
         local_layer_specs = [
             layer_specs[layer_id]
             for layer_id in layout.get_layer_id_list(
@@ -723,7 +726,7 @@ def get_gpt_decoder_block_spec(
             config,
             vp_stage=vp_stage,
             pp_rank=pp_rank,
-            is_dualpipev_first_chunk=is_dualpipev_first_chunk,
+            dualpipev_stage=dualpipev_stage,
         )
         # FlagScale End
         local_layer_specs = layer_specs[offset : offset + num_layers_to_build]
@@ -748,6 +751,7 @@ def get_gpt_mtp_block_spec(
     use_transformer_engine: bool,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,
 ) -> MultiTokenPredictionBlockSubmodules:
     """GPT Multi-Token Prediction (MTP) block spec."""
     if use_transformer_engine:
@@ -771,7 +775,7 @@ def get_gpt_mtp_block_spec(
             else LocalSpecProvider()
         )
     return get_gpt_mtp_block_spec_for_backend(
-        config=config, spec=spec, backend=backend, vp_stage=vp_stage, pp_rank=pp_rank
+        config=config, spec=spec, backend=backend, vp_stage=vp_stage, pp_rank=pp_rank, dualpipev_stage=dualpipev_stage
     )
 
 
@@ -781,9 +785,10 @@ def get_gpt_mtp_block_spec_for_backend(
     backend: BackendSpecProvider,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,
 ) -> MultiTokenPredictionBlockSubmodules:
     """GPT Multi-Token Prediction (MTP) block spec."""
-    num_layers_to_build = get_mtp_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank)
+    num_layers_to_build = get_mtp_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank, dualpipev_stage=dualpipev_stage)
     if num_layers_to_build == 0:
         return None
 
@@ -805,7 +810,7 @@ def get_gpt_mtp_block_spec_for_backend(
     mtp_num_layers = config.mtp_num_layers if config.mtp_num_layers else 0
     mtp_layer_specs = [mtp_layer_spec] * mtp_num_layers
 
-    offset = get_mtp_layer_offset(config, vp_stage=vp_stage)
+    offset = get_mtp_layer_offset(config, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage)
     # split the mtp layer specs to only include the layers that are built in this pipeline stage.
     mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]
     if len(mtp_layer_specs) > 0:

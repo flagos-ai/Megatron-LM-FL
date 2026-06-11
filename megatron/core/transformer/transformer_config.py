@@ -1271,6 +1271,7 @@ class TransformerConfig(ModelParallelConfig):
                 f"Gated delta net does not support context parallel for now,"
                 f" but got {self.context_parallel_size=}."
             )
+            tp_cp_size = self.tensor_model_parallel_size * self.context_parallel_size
             assert self.linear_num_value_heads % tp_cp_size == 0, (
                 f"{self.linear_num_value_heads=} must be a multiple of "
                 f"({self.tensor_model_parallel_size=} * {self.context_parallel_size=})."
@@ -2396,8 +2397,8 @@ class TransformerConfig(ModelParallelConfig):
                 "2.6.0"
             ), "A2A Overlap encounters hang issue with torch version < 2.6.0"
             if self.pipeline_model_parallel_size > 1:
-                assert self.virtual_pipeline_model_parallel_size is not None, (
-                    "If enabling EP A2A overlap, virtual_pipeline_model_parallel_size "
+                assert self.virtual_pipeline_model_parallel_size is not None or self.dualpipev_pipeline_model_parallel_size is not None, (
+                    "If enabling EP A2A overlap, virtual_pipeline_model_parallel_size or dualpipev_pipeline_model_parallel_size "
                     "must be specified when pipeline_model_parallel_size > 1"
                 )
             # Expert model parallelism requirements

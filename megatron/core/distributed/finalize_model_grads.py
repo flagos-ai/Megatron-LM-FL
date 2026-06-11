@@ -19,7 +19,21 @@ from megatron.core.pipeline_parallel.utils import (
     is_pp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.plugin.decorators import overridable  # FlagScale Add
+
+# FlagScale Begin
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
+
+try:
+    from megatron.plugin.utils import get_device_type_for_comm
+except ImportError:
+
+    def get_device_type_for_comm(group):
+        """Fallback: return current platform device name for communication."""
+        return cur_platform.device_name()
+
 
 from .. import parallel_state
 from ..transformer.moe.moe_utils import get_updated_expert_bias
@@ -209,7 +223,6 @@ def _allreduce_word_embedding_grads(
     )
 
 
-@overridable  # FlagScale Add
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
     embd_group: torch.distributed.ProcessGroup,
@@ -232,7 +245,10 @@ def _allreduce_embedding_grad(
             gradient is ``None``. Defaults to True.
     """
 
+    embd_group_is_list = isinstance(embd_group, list)  # FlagScale Add
     if (
+        not embd_group_is_list
+        and
         # embd_group can be None in cases there is no embd_group
         # get_pg_size(embd_group) will return 1 and the all-reduce will be skipped.
         get_pg_size(embd_group) > 1
@@ -266,6 +282,78 @@ def _allreduce_embedding_grad(
             return
         torch.distributed.all_reduce(grad, group=embd_group)
         setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
+
+    ######## FlagScale Begin ########
+    elif (
+        embd_group_is_list
+        and get_pg_size(embd_group) > 1
+        and torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(embd_group[0])
+    ):
+        if is_pp_first_stage(pp_group):
+            model_module = model[0]
+        elif is_pp_last_stage(pp_group):
+            model_module = model[-1]
+        # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            model_module = model[-1]
+        else:  # We do not support an interleaved schedule for models with encoders yet.
+            model_module = model[0]
+
+        ddp_config = model_module.ddp_config
+        use_dist_opt = ddp_config.use_distributed_optimizer
+        model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
+
+        weight = weight_getter(model_module)
+        if weight is None and skip_if_none:
+            return
+
+        grad_attr = _get_main_grad_attr(weight)
+        orig_grad = getattr(weight, grad_attr)
+        if ddp_config.use_megatron_fsdp:
+            orig_grad = orig_grad._local_tensor if orig_grad is not None else None
+        grad = _unshard_if_dtensor(orig_grad)
+        # When the embedding is frozen, the grad is None.
+        if grad is None and skip_if_none:
+            return
+        com_device = get_device_type_for_comm(embd_group)
+        if com_device == "cpu":
+            grad = grad.cpu()
+        if use_dist_opt:
+            if ddp_config.use_partial_reduce_for_shared_embedding:
+                dp_world_size = parallel_state.get_data_parallel_world_size()
+                dp_rank = parallel_state.get_data_parallel_rank()
+                assert (
+                    grad.shape[0] % dp_world_size == 0
+                ), f"grad shape: {grad.shape[0]}, dp_world_size: {dp_world_size}"
+                per_partion_size = grad.shape[0] // dp_world_size
+                if len(embd_group) == 1:
+                    offset = per_partion_size * dp_rank
+                    torch.distributed.all_reduce(
+                        grad[offset : offset + per_partion_size, :], group=embd_group[0]
+                    )
+                else:
+                    group_idx = 0
+                    per_partion_size = per_partion_size // len(embd_group)
+                    for group in embd_group:
+                        offset = per_partion_size * (dp_rank * len(embd_group) + group_idx)
+                        torch.distributed.all_reduce(
+                            grad[offset : offset + per_partion_size, :], group=group
+                        )
+                        group_idx += 1
+            else:  # megartron default method
+                torch.distributed.all_reduce(grad, group=embd_group[0])
+        else:
+            if len(embd_group) == 1:  # megartron default method
+                torch.distributed.all_reduce(grad, group=embd_group[0])
+            else:
+                original_grad_data = grad.clone().detach().data
+                for group in embd_group:
+                    grad.data.copy_(original_grad_data)
+                    torch.distributed.all_reduce(grad, group=group)
+        if grad.device == torch.device('cpu'):
+            grad.to(cur_platform.current_device())
+        setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
+    ######## FlagScale End ########
 
 
 def _allreduce_position_embedding_grads(
