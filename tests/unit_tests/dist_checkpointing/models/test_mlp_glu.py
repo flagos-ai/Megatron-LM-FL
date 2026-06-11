@@ -99,9 +99,7 @@ class TestParallelMLPWithGLU:
 
         # Compute free memory in bytes
         device = torch.cuda.current_device()
-        allocated = torch.cuda.memory_allocated(device)
-        total = torch.cuda.get_device_properties(device).total_memory
-        free = total - allocated
+        free, _ = torch.cuda.mem_get_info(device)
 
         # We should create two tensor which take up between 50% and 100% of free memory,
         # so that the torch.cat tries to allocate twice as many and OOMs.
