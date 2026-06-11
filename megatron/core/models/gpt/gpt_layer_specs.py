@@ -336,9 +336,11 @@ def get_gpt_layer_with_transformer_engine_submodules(
                 ),
             ),
             self_attn_bda=get_bias_dropout_add,
+            self_attention_hyper_connection=hc_module,
             pre_mlp_layernorm=backend.layer_norm(has_residual=True) if num_experts else IdentityOp,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
+            mlp_hyper_connection=hc_module,
             sharded_state_dict_keys_map={
                 "mlp.0.weight": "mlp.linear_fc1.layer_norm_weight",
                 "mlp.0.bias": "mlp.linear_fc1.layer_norm_bias",
