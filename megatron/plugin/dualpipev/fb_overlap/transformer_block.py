@@ -63,8 +63,6 @@ else:
 
     LayerNormImpl = WrappedTorchNorm
 
-from megatron.training import get_args
-
 from .modules.utils import LayerGraph, P2PCommParams, detach_tensor
 from .transformer_layer import (
     transformer_layer_backward,
@@ -109,7 +107,6 @@ def transformer_block_forward(
 
     assert not self.config.enable_cuda_graph
     layer_graphs = []
-    args = get_args()
 
     with rng_context and fp8_context:
         for l_no, layer in enumerate(self.layers):
