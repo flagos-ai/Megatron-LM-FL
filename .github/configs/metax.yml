@@ -65,7 +65,7 @@ test_matrix:
       # need cuda
       - tests/unit_tests/models/test_mamba_model.py
       # Metax image has an incompatible mamba_ssm/causal_conv1d CUDA extension signature.
-      - tests/unit_tests/models/test_mamba_moe_model.py::TestMambaMoEModel::test_forward
+      - tests/unit_tests/models/test_mamba_moe_model.py
       # Metax C500 MIMO 1F1B 8-GPU layouts hit missing tensor model-parallel group initialization.
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_encoder_tp2_llm_tp2_pp3_8gpu
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_full_pp_8gpu
