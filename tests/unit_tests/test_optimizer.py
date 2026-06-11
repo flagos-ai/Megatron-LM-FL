@@ -130,6 +130,7 @@ def test_fp32_optimizer_cpu_state_and_step_paths(monkeypatch):
     base_optimizer = torch.optim.SGD([_identifier_group([param])], lr=0.1)
     config = OptimizerConfig(optimizer="sgd", lr=0.1, clip_grad=1.0, log_num_zeros_in_grad=True)
     optimizer = optimizer_module.FP32Optimizer(base_optimizer, config, init_state_fn=lambda *_: None)
+    optimizer.tp_group = SimpleNamespace(rank=lambda: 0)
 
     assert optimizer.get_parameters() == [param]
     assert optimizer.get_grad_stats_parallel_group() == "mp"
