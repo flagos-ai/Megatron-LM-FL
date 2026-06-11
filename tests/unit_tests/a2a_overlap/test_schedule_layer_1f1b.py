@@ -398,6 +398,13 @@ class TestA2AOverlap:
             comp_res = compare_captures(capture_ref, capture_a2a_overlap, True)
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
+    @pytest.mark.skipif(
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() < (9, 0)
+        or torch.version.cuda is None
+        or tuple(int(x) for x in torch.version.cuda.split(".")) < (12, 9),
+        reason="FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9",
+    )
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())
@@ -444,6 +451,13 @@ class TestA2AOverlap:
             comp_res = compare_captures(capture_ref, capture_a2a_overlap, True)
             assert comp_res[0], f"[rank {torch.distributed.get_rank()}] {comp_res[1]}"
 
+    @pytest.mark.skipif(
+        not torch.cuda.is_available()
+        or torch.cuda.get_device_capability() < (9, 0)
+        or torch.version.cuda is None
+        or tuple(int(x) for x in torch.version.cuda.split(".")) < (12, 9),
+        reason="FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9",
+    )
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
     @pytest.mark.parametrize("fp8_flag", get_valid_fp8_flags())

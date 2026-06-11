@@ -13,19 +13,19 @@ def attention_forward(
     packed_seq_params=None,
     recompute_norm=False,
 ):
-    # Optional Input Layer norm
-    def pre_norm(hidden_states):
-        args = get_args()
-        input_layernorm_output = self.input_layernorm(hidden_states)
-        if getattr(args, 'input_layernorm_in_fp32', False):
-            input_layernorm_output = input_layernorm_output.float()
-        return input_layernorm_output
+    # # Optional Input Layer norm
+    # def pre_norm(hidden_states):
+    #     args = get_args()
+    #     input_layernorm_output = self.input_layernorm(hidden_states)
+    #     if getattr(args, 'input_layernorm_in_fp32', False):
+    #         input_layernorm_output = input_layernorm_output.float()
+    #     return input_layernorm_output
 
     # # skip recompute
     if recompute_norm:
         assert not recompute_norm, "not support recompute norm"
     else:
-        input_layernorm_output = pre_norm(hidden_states)
+        input_layernorm_output = self.input_layernorm(hidden_states)
 
     # Self attention.
     attention_output_with_bias = self.self_attention(
