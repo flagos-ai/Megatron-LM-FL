@@ -658,7 +658,7 @@ def test_get_param_groups_overlapping_matches(mock_get_world_size):
 @patch(
     'torch.distributed.all_gather_object', lambda output_list, obj: output_list.__setitem__(0, obj)
 )
-def test_get_param_groups_with_standard_config_overrides(apply_wd_to_qk_layernorm: bool):
+def test_get_param_groups_with_standard_config_overrides(mock_get_world_size):
     """In this test, we see if the standard config overrides are applied correctly."""
 
     # Initialize the model with layernorm
@@ -694,15 +694,13 @@ def test_get_param_groups_with_standard_config_overrides(apply_wd_to_qk_layernor
 @patch(
     'torch.distributed.all_gather_object', lambda output_list, obj: output_list.__setitem__(0, obj)
 )
-def test_get_param_groups_appling_wd_to_qk_layernorm(apply_wd_to_qk_layernorm: bool):
+def test_get_param_groups_appling_wd_to_qk_layernorm(mock_get_world_size):
     """In this test, we see if the `apply_wd_to_qk_layernorm` config is applied correctly."""
 
     # Initialize the model with layernorm
     net = Net(add_layernorm=True)
 
-    config = OptimizerConfig(
-        optimizer='adam', lr=0.01, apply_wd_to_qk_layernorm=apply_wd_to_qk_layernorm
-    )
+    config = OptimizerConfig(optimizer='adam', lr=0.01, apply_wd_to_qk_layernorm=True)
     config_overrides = get_standard_config_overrides(config=config)
     param_groups = _get_param_groups([net], config, config_overrides)
 
