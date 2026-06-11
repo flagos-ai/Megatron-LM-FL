@@ -218,10 +218,14 @@ jobs:
             TOKENIZER_CANDIDATES=(
               '/home/gitlab-runner/tokenizers/qwentokenizer'
               '/home/gitlab-runner/tokenizers/Megatron-LM/tokenizers/qwentokenizer'
+              '/opt/data/tokenizers/huggingface'
               '/opt/data/tokenizers/qwentokenizer'
+              '/home/gitlab-runner/data/Qwen2.5-VL-32B-Instruct'
             )
             for candidate in "${TOKENIZER_CANDIDATES[@]}"; do
-              if [[ -f "${candidate}/tokenizer_config.json" ]]; then
+              if [[ -f "${candidate}/tokenizer_config.json" ]] \
+                && [[ -f "${candidate}/tokenizer.json" \
+                  || -f "${candidate}/tokenizer.model" ]]; then
                 QWEN_TOKENIZER_PATH="${candidate}"
                 break
               fi
@@ -230,10 +234,14 @@ jobs:
               for tokenizer_root in "${TOKENIZER_ROOTS[@]}"; do
                 [[ -d "${tokenizer_root}" ]] || continue
                 TOKENIZER_CONFIG=$(find "${tokenizer_root}" -maxdepth 6 -type f \
-                  -path '*/qwentokenizer/tokenizer_config.json' -print -quit)
+                  -path '*/Qwen*/tokenizer_config.json' -print -quit)
                 if [[ -n "${TOKENIZER_CONFIG}" ]]; then
-                  QWEN_TOKENIZER_PATH=$(dirname "${TOKENIZER_CONFIG}")
-                  break
+                  tokenizer_dir=$(dirname "${TOKENIZER_CONFIG}")
+                  if [[ -f "${tokenizer_dir}/tokenizer.json" \
+                    || -f "${tokenizer_dir}/tokenizer.model" ]]; then
+                    QWEN_TOKENIZER_PATH="${tokenizer_dir}"
+                    break
+                  fi
                 fi
               done
             fi
