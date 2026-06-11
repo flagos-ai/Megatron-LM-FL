@@ -27,7 +27,7 @@ MODEL_ARGS:
   --data-path: /home/gitlab-runner/data/pile_wikipedia_demo/pile_wikipedia_demo
   --split: 100,0,0
   --tokenizer-type: HuggingFaceTokenizer
-  --tokenizer-model: /home/gitlab-runner/tokenizers/qwentokenizer
+  --tokenizer-model: ${QWEN_TOKENIZER_PATH}
   --trust-remote-code: true
   --distributed-backend: nccl
   --lr: 1.0e-5
