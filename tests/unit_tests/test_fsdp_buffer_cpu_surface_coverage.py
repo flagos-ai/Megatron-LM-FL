@@ -313,7 +313,12 @@ def test_fsdp_gradient_preprocessing_nan_memory_dtype_and_context_paths(monkeypa
 
     grad = torch.ones(4)
     cfg = DistributedDataParallelConfig(gradient_reduce_div_fusion=True)
-    monkeypatch.setattr(torch.distributed, "_make_nccl_premul_sum", lambda scale: ("premul", scale))
+    monkeypatch.setattr(
+        torch.distributed,
+        "_make_nccl_premul_sum",
+        lambda scale: ("premul", scale),
+        raising=False,
+    )
     assert fsdp_buffer.gradient_reduce_preprocessing(grad.clone(), 2.0, cfg) == ("premul", 2.0)
     cfg.gradient_reduce_div_fusion = False
     scaled = grad.clone()
