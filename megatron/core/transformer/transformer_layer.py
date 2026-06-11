@@ -718,9 +718,6 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
-        ##### FlagScale ##### Common TransformLayer._forward_attention and _forward_mlp has no keyword argument mhc_recompute_manager
-        kwargs.pop("mhc_recompute_manager", None)
-        ##### FlagScale End #####
         hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,
@@ -1327,6 +1324,24 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                 return True
         return False
 
+    def __call__(self, *args, **kwargs):
+        # Extract mhc_recompute_manager before CUDA graph manager processes kwargs,
+        # since CheckpointManager is not a CUDA-graph-supported type.
+        self._mhc_recompute_manager = kwargs.pop("mhc_recompute_manager", None)
+        kwargs.pop("is_last_layer_in_recompute_block", None)
+
+        if self._should_call_local_cudagraph(*args, **kwargs):
+            # Inference mode.
+            if kwargs.get('inference_context') is not None:
+                # dynamic_inference_decode_only is not a real argument to forward, it is only used
+                # to differentiate the cuda graph used for decode from the one used for non-decode
+                # inference.
+                kwargs["dynamic_inference_decode_only"] = kwargs[
+                    'inference_context'
+                ].is_decode_only()
+
+        return super().__call__(*args, **kwargs)
+
     def get_layer_norm_weights(self):
         """
         Get the weights of all layernorms (attention and MLP) in the transformer layer.
@@ -1355,6 +1370,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
         is_mtp_layer: bool = False,
+        dualpipev_stage: Optional[int] = None,
     ):
         super().__init__(
             config=config,
@@ -1364,6 +1380,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             pg_collection=pg_collection,
             vp_stage=vp_stage,
             is_mtp_layer=is_mtp_layer,
+            dualpipev_stage=dualpipev_stage,
         )
 
         if submodules.cross_attention_hyper_connection is not IdentityOp:

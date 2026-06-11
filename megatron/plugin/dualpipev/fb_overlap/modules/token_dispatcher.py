@@ -198,6 +198,8 @@ def alltoall_token_perm1(
         permutated_local_input_tokens,
         permuted_probs,
         self.reversed_local_input_permutation_mapping,
+        _,
+        _,
     ) = permute(
         hidden_states,
         routing_map,

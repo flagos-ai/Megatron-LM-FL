@@ -4,7 +4,6 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.transformer.moe.moe_utils import permute
-from megatron.training import get_args
 
 from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     async_all_to_all,
@@ -23,7 +22,6 @@ from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
 def transformer_layer_backward_moe(layer_output_grad, layer_graph):
     """Backward function of transformer layer, for moe models"""
     self = layer_graph
-    args = get_args()
     dispached_input, fc1_out, act_out, probs, indices, global_input_tokens_local_experts_indices = (
         self.recompute_needed_tensors
     )

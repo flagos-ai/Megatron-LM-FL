@@ -41,6 +41,7 @@ cur_platform = get_platform()
 Shape = Union[List[int], torch.Size]
 
 _DUALPIPE_CHUNK = None
+SPIKY_LOSS_FACTOR = 10
 
 
 def set_dualpipe_chunk(chunkid):
@@ -67,7 +68,7 @@ def disable_dw_detach(model):
     ), 'Dualpipe Schedule only support chunk model for two consecutive chunks'
     for chunk_model in model:
         for module in chunk_model.modules():
-            if hasattr(module, "wgrad_store"):
+            if getattr(module, "wgrad_store", None):
                 module.wgrad_store.disable_delay_wgrad_compute()
 
 
@@ -376,6 +377,180 @@ def generate_dualpipev_schedule(pp_size, num_microbatches):
     return schedule_all_stages
 
 
+def get_batch(data_iterator, vp_stage: Optional[int] = None):
+    """Generate a batch.
+
+    Packed sequence support (SFT / ``--sft`` flag):
+        When ``args.sft`` is True, the dataset emits THD-format batches where
+        multiple sequences are concatenated into a single flat token tensor.
+        The batch includes ``cu_seqlens`` (cumulative sequence lengths, shape
+        ``[1, S+1]``) and ``max_seqlen`` (shape ``[1]``) that describe the
+        individual sequence boundaries.
+
+        This function validates and squeezes those fields:
+          - ``cu_seqlens``:  asserted to have shape ``[1, S+1]`` (micro-batch
+            size must be 1 for packing), then squeezed to ``[S+1]``.
+          - ``max_seqlen``:  asserted to be 1-D; kept as a tensor and passed
+            to ``get_thd_batch_on_this_cp_rank`` which performs the final
+            scalar conversion internally.
+
+        Pipeline stage handling:
+          - First/last PP stages: fetch the full batch (tokens + labels) and
+            route through ``get_thd_batch_on_this_cp_rank`` to produce a
+            ``PackedSeqParams`` object that carries ``cu_seqlens`` and
+            ``max_seqlen`` to the attention kernel.
+          - Middle PP stages: only ``cu_seqlens`` and ``max_seqlen`` are
+            needed for attention masking; all other fields are returned as
+            ``None`` with a ``PackedSeqParams`` built directly here.
+          - MTP ranks (``mtp_on_this_rank``) also receive the full batch,
+            regardless of pipeline stage.
+
+        Difference from ``pretrain_mamba.py``:
+          - Return format: GPT returns a 6-tuple
+            ``(tokens, labels, loss_mask, attention_mask, position_ids,
+            packed_seq_params)`` where ``packed_seq_params`` is a
+            ``PackedSeqParams`` dataclass.  Mamba returns 7 values via
+            ``batch.values()`` with ``cu_seqlens`` and ``max_seqlen`` as
+            separate dict entries (no ``PackedSeqParams`` wrapper).
+          - Middle-stage return: GPT returns ``(None×5, PackedSeqParams)``;
+            Mamba returns an ``empty_batch`` dict with ``cu_seqlens`` and
+            ``max_seqlen`` set.
+          - CP with packed sequences: GPT delegates to
+            ``get_thd_batch_on_this_cp_rank`` (MCore utility); Mamba
+            implements the ``tex.thd_get_partitioned_indices`` CP slicing
+            inline and does not call that helper.
+          - MTP: GPT passes ``mtp_on_this_rank`` to ``get_batch_on_this_tp_rank``
+            and uses it to gate the early-return; Mamba has no MTP support.
+          - ``max_seqlen`` conversion: Mamba converts to a Python int scalar
+            before returning (``int(max_seqlen[0].item())``); GPT keeps it as
+            a tensor and lets ``get_thd_batch_on_this_cp_rank`` convert it,
+            except for the middle-stage ``PackedSeqParams`` where conversion
+            is done inline.
+    """
+    from megatron.training import get_args
+    from megatron.training.arguments import core_transformer_config_from_args
+    from megatron.training.utils import (
+        is_first_or_last_pipeline_stage,
+        get_batch_on_this_tp_rank,
+        get_batch_on_this_cp_rank,
+    )
+    from megatron.core.utils import get_thd_batch_on_this_cp_rank, get_batch_on_this_hybrid_cp_rank
+    from megatron.core.transformer.multi_token_prediction import mtp_on_this_rank
+    from megatron.core.packed_seq_params import PackedSeqParams
+
+    args = get_args()
+    config = core_transformer_config_from_args(args)
+    # TODO: this is pretty hacky, find a better way
+    is_packed_sequence = get_args().sft  # SFT always uses packed sequence
+    if not is_first_or_last_pipeline_stage(vp_stage) and not is_packed_sequence and (
+    (not mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage))):
+        return None, None, None, None, None, None
+
+    # get batches based on the TP rank you are on
+    batch = get_batch_on_this_tp_rank(
+        data_iterator,
+        mtp_on_this_rank=mtp_on_this_rank(config, ignore_virtual=False, vp_stage=vp_stage)
+        )
+
+    cu_seqlens = batch.pop('cu_seqlens', None)
+    cu_seqlens_padded = batch.pop('cu_seqlens_padded', None)
+    max_seqlen = batch.pop('max_seqlen', None)
+    local_cp_size = batch.pop('local_cp_size', None)
+    if local_cp_size is not None:
+        local_cp_size = int(local_cp_size.item())
+
+    if cu_seqlens is not None:
+        assert (
+            cu_seqlens.dim() == 2 and cu_seqlens.shape[0] == 1
+        ), "micro-batch-size must be 1 for packing"
+        cu_seqlens = cu_seqlens[0]
+        assert max_seqlen.dim() == 1
+
+    # For middle pipeline stages with packed sequences, only cu_seqlens and
+    # max_seqlen are needed (for attention masking); skip the full batch.
+    if not is_first_or_last_pipeline_stage(vp_stage) and is_packed_sequence:
+        return None, None, None, None, None, PackedSeqParams(
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_kv=cu_seqlens,
+            max_seqlen_q=int(max_seqlen[0].item()),
+            max_seqlen_kv=int(max_seqlen[0].item()),
+            qkv_format='thd',
+        )
+
+    if cu_seqlens is None and local_cp_size is None:
+        # slice batch along sequence dimension for context parallelism
+        batch = get_batch_on_this_cp_rank(batch)  # The implementation of this function is in MCore
+        packed_seq_params = None
+    elif local_cp_size is None:  # Packed THD format
+        batch, packed_seq_params = get_thd_batch_on_this_cp_rank(batch, cu_seqlens, cu_seqlens_padded, max_seqlen)
+    else: # Hybrid CP format
+        batch, packed_seq_params = get_batch_on_this_hybrid_cp_rank(batch, local_cp_size)
+
+    return (*batch.values(), packed_seq_params)
+
+
+def loss_func(
+    loss_mask: torch.Tensor, output_tensor: torch.Tensor, model: Optional[GPTModel] = None
+):
+    """Loss function.
+
+    Args:
+        loss_mask (torch.Tensor): Used to mask out some portions of the loss
+        output_tensor (torch.Tensor): The tensor with the losses
+        model (GPTModel, optional): The model (can be wrapped)
+
+    Returns:
+        the loss scalar for this micro-batch
+        the number of non-padded tokens in this microbatch
+        a dict containing reporting metrics on the loss and number of tokens across
+            the data parallel ranks
+    """
+    from megatron.training import get_args
+    from megatron.core.rerun_state_machine import get_rerun_state_machine
+
+    args = get_args()
+
+    losses = output_tensor.view(-1).float()
+    loss_mask = loss_mask.view(-1).float()
+    loss = torch.sum(losses * loss_mask)
+
+    num_tokens = loss_mask.sum().clone().detach().to(torch.int)
+    report = {'lm loss': torch.cat([loss.clone().detach().view(1), num_tokens.view(1)])}
+
+    # Check individual rank losses are not NaN prior to DP all-reduce.
+    rerun_state_machine = get_rerun_state_machine()
+    if args.check_for_nan_in_loss_and_grad:
+        rerun_state_machine.validate_result(
+            result=loss,
+            rejection_func=torch.isnan,
+            message="found NaN in local forward loss calculation",
+            tolerance=0.0,  # forward pass calculations are determinisic
+            fatal=True,
+        )
+        rerun_state_machine.validate_result(
+            result=loss,
+            rejection_func=torch.isinf,
+            message="found Inf in local forward loss calculation",
+            tolerance=0.0,  # forward pass calculations are determinisic
+            fatal=True,
+        )
+    # Check for spiky loss
+    if args.check_for_spiky_loss:
+        rerun_state_machine.validate_result(
+            result=loss,
+            rejection_func=partial(
+                rerun_state_machine.is_unexpectedly_large,
+                threshold=SPIKY_LOSS_FACTOR,
+                context="loss",
+            ),
+            message="Spiky loss",
+            tolerance=0.0,  # forward pass calculations are determinisic
+            fatal=False,
+        )
+
+    return loss, num_tokens, report
+
+
 def pretrain_gpt_forward_step_dualpipe(data_iterator, model: GPTModel, extra_block_kwargs=None):
     """Rebuild pretrain_gpt.forward_step
     if extra_block_kwargs is not None, execute forward_backward_overlapping;
@@ -383,15 +558,13 @@ def pretrain_gpt_forward_step_dualpipe(data_iterator, model: GPTModel, extra_blo
     """
     from functools import partial
 
-    from pretrain_gpt import get_batch, loss_func
-
     from megatron.training import get_timers
 
     timers = get_timers()
 
     # Get the batch.
     timers('batch-generator', log_level=2).start()
-    tokens, labels, loss_mask, attention_mask, position_ids = get_batch(data_iterator)
+    tokens, labels, loss_mask, attention_mask, position_ids, packed_seq_params = get_batch(data_iterator)
     timers('batch-generator').stop()
 
     if extra_block_kwargs is not None:
@@ -401,6 +574,7 @@ def pretrain_gpt_forward_step_dualpipe(data_iterator, model: GPTModel, extra_blo
             position_ids,
             attention_mask,
             labels=labels,
+            packed_seq_params=packed_seq_params,
             extra_block_kwargs=extra_block_kwargs,
         )
         return (output_tensor, model_graph, pp_comm_output), partial(loss_func, loss_mask)
@@ -1266,6 +1440,8 @@ def forward_backward_pipelining_with_dualpipev(
                     tensor_shape,
                     tensor_shape,
                 )
+                fwd_pp_comm_params.p2p_communicator = p2p_communicator
+                bwd_pp_comm_params.p2p_communicator = p2p_communicator
 
                 extra_block_kwargs.setdefault(
                     'bwd_model_graph', model_graphs[bwd_model_chunk_id].pop(0)
