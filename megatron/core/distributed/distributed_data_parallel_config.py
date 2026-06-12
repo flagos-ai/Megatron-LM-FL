@@ -28,6 +28,12 @@ class DistributedDataParallelConfig:
     """If true, issue reduce-scatter collectives to aggregate gradients and clean up
        originally allocated model parameters, otherwise issue all-reduce collectives.
     """
+   ##### FlagScale Begin #####
+    use_padded_layerwise_optimizer: bool = False
+    """If true, issue reduce-scatter and all-gather collectives to aggregate gradients and gather
+       model parameters, otherwise issue all-reduce and all-gather collectives.
+    """
+    ##### FlagScale End #####
 
     num_distributed_optimizer_instances: int = 1
     """Sets the factor by which the DP domain is sharded to have the partial DistOpt

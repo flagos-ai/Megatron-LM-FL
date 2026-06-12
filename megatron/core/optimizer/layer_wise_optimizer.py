@@ -47,6 +47,7 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         init_state_fn_list: Optional[List[Callable]] = None,
         model_chunks: Optional[List] = None,
         async_allgather: bool = False,
+        use_padded_layerwise_optimizer: bool = False,    ##### FlagScale Begin #####
     ) -> None:
         """
         Initialize LayerWiseDistributedOptimizer.
@@ -58,14 +59,26 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
             init_state_fn_list: List of init state functions.
             model_chunks: DDP-wrapped model chunks (needed for async_allgather).
             async_allgather: If True, defer param all-gather to forward pre-hooks.
+            use_padded_layerwise_optimizer: If True, pad each bucket's per-rank flattened params
+                to a fixed length before communication.    ##### FlagScale Begin #####
         """
 
         self.pg_collection = pg_collection
-        self.shard_params(optimizers)
+        ##### FlagScale Begin #####
+        if use_padded_layerwise_optimizer:
+            self.apply_ddp_layerwise_shard_param(optimizers, model_chunks)
+        else:
+            self.shard_params(optimizers)
+        ##### FlagScale End #####
 
         # Set up async all-gather using DDP bucket infrastructure.
         self.async_allgather = async_allgather
-        if self.async_allgather:
+        ##### FlagScale Begin #####
+        self.use_padded_layerwise_optimizer = use_padded_layerwise_optimizer
+        if use_padded_layerwise_optimizer:
+            assert async_allgather, "Padded layer-wise optimizer is used to speed up communication. If enable use_padded_layerwise_optimizer, async_allgather must be True"
+        if self.async_allgather and not use_padded_layerwise_optimizer:
+        ##### FlagScale End #####
             assert (
                 model_chunks is not None
             ), "model_chunks must be provided if async_allgather is True"
@@ -115,8 +128,11 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
             return
 
         dp_cp_idx, expt_dp_idx = 0, 0
-        dp_cp_size = get_pg_size(self.pg_collection.dp_cp)
-        expt_dp_size = get_pg_size(self.pg_collection.expt_dp)
+        ##### FlagScale Begin #####
+        # Enable num_distributed_optimizer_instance for layer-wise optimizer.
+        dp_cp_size = get_pg_size(self.pg_collection.intra_dp_cp)
+        expt_dp_size = get_pg_size(self.pg_collection.intra_expt_dp)
+        ##### FlagScal End #####
         # create ping-pong style loop so memory is more balanced
         dp_cp_loop = list(range(dp_cp_size)) + list(range(dp_cp_size))[::-1]
         expt_dp_loop = list(range(expt_dp_size)) + list(range(expt_dp_size))[::-1]
@@ -132,7 +148,7 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         for group_index, group in enumerate(param_groups):
             for p in group["params"]:
                 param_list.append((p, group_index))
-        param_list.sort(key=lambda x: x[0].numel())
+        param_list.sort(key=lambda x: x[0].numel(), reverse=True)  ##### FlagScale Begin #####
         param_groups_this_rank = [[] for g in param_groups]
 
         # assign params to rank in ping-pong style loop
@@ -155,6 +171,37 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
         # simplify when expt_dp group size is 1 or expert parallel is off
         if expt_dp_size == 1 or len(self.expt_dp_params_list[0]) == 0:
             self.expt_dp_params_list = None
+    
+    def apply_ddp_layerwise_shard_param(self, optimizers, model_chunks):
+        """Use precomputed per-rank param lists from DDP to set optimizer shards."""
+        # Merge shard_param_result of ddp chunks (dense and MoE separately) to get global per-rank param list for optimizer sharding. 
+        dp_size = get_pg_size(self.pg_collection.intra_dp_cp)
+        expt_size = get_pg_size(self.pg_collection.intra_expt_dp)
+
+        dense_per_rank = [[] for _ in range(dp_size)]
+        moe_per_rank = [[] for _ in range(expt_size)]
+
+        for ddp in model_chunks:
+            for r in range(dp_size):
+                dense_per_rank[r].extend(ddp.dense_params_per_rank_for_padded_layerwise_opt[r])
+            if moe_per_rank is not None:
+                ddp_moe = getattr(ddp, 'moe_params_per_rank_for_padded_layerwise_opt', None)
+                if ddp_moe is not None:
+                    for r in range(expt_size):
+                        moe_per_rank[r].extend(ddp_moe[r])
+
+        # Current rank's set of parameters to update, which is the union of its shard from dense and MoE lists.
+        my_rank_dp = get_pg_rank(self.pg_collection.dp_cp)
+        my_rank_expt = get_pg_rank(self.pg_collection.expt_dp)
+        my_params = set(dense_per_rank[my_rank_dp])
+        my_params |= set(moe_per_rank[my_rank_expt])
+
+        # Update each optimizer's param_groups to only include params for this rank. This is necessary for the optimizer step to only update local shard.
+        for opt in optimizers:
+            for group in opt.param_groups:
+                group["params"] = [p for p in group["params"] if p in my_params]
+        self.dp_cp_params_list = dense_per_rank
+        self.expt_dp_params_list = moe_per_rank
 
     def set_bucket_layerwise_params_list(self, model_chunks):
         """Map sharded params to DDP buckets for async all-gather.
