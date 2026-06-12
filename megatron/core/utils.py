@@ -2048,6 +2048,38 @@ def get_batch_on_this_cp_rank(
     return batch
 
 
+def get_batch_on_this_cp_rank_contiguous(
+    batch: Dict[str, Any], cp_group: Optional[torch.distributed.ProcessGroup] = None
+):
+    """Slice batch input along sequence dimension with contiguous split.
+
+    Unlike get_batch_on_this_cp_rank which uses 2-chunk pattern for load balancing,
+    this uses simple contiguous split: rank_i gets [i*chunk_size, (i+1)*chunk_size).
+
+    Args:
+        batch (Dict[str, Any]): Input batch tensors.
+        cp_group (Optional[torch.distributed.ProcessGroup]): Context-parallel process group.
+    """
+    if cp_group is not None:
+        cp_size = get_pg_size(cp_group)
+        cp_rank = get_pg_rank(cp_group)
+    else:
+        cp_size = parallel_state.get_context_parallel_world_size()
+        cp_rank = parallel_state.get_context_parallel_rank()
+
+    if cp_size > 1:
+        for key, val in batch.items():
+            if val is not None:
+                seq_dim = 1 if key != 'attention_mask' else 2
+                seq_len = val.shape[seq_dim]
+                chunk_size = seq_len // cp_size
+                start = cp_rank * chunk_size
+                val = val.narrow(seq_dim, start, chunk_size)
+                batch[key] = val
+
+    return batch
+
+
 def get_thd_batch_on_this_cp_rank(
     batch: Dict[str, Any],
     cu_seqlens: torch.Tensor,
