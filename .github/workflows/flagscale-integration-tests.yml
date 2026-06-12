@@ -1,9 +1,9 @@
 name: Trigger FlagScale Training Tests
 
 on:
-  push:
-    branches: ["main", "dev"]
-  # Temporarily disable automatic FlagScale runs for pull requests.
+  # Temporarily disable automatic FlagScale runs.
+  # push:
+  #   branches: ["main", "dev"]
   # pull_request_target:
   #   branches: ["main"]
   workflow_dispatch:
