@@ -45,6 +45,8 @@ class FakeCPGroup:
 
 def _test_fused_mla_rope_inplace(input_format, inverse=False, remove_interleaving=False):
     assert fused_mla_rope_inplace is not None
+    seed = 1234 + (input_format == "thd") + 2 * inverse + 4 * remove_interleaving
+    torch.manual_seed(seed)
     num_heads = 32
     q_dim = 128
     emb_dim = 64
@@ -139,6 +141,8 @@ def _test_fused_mla_rope_inplace(input_format, inverse=False, remove_interleavin
 
 def _test_fused_mla_rope_kv_split(input_format, remove_interleaving=False):
     assert fused_mla_rope_kv_split is not None
+    seed = 4321 + (input_format == "thd") + 2 * remove_interleaving
+    torch.manual_seed(seed)
     num_heads = 32
     k_dim = 128
     v_dim = 128
