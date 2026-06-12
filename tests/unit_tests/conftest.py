@@ -11,6 +11,7 @@ import torch.distributed
 
 from megatron.core import config
 from megatron.core.utils import is_te_min_version
+from megatron.plugin.platform import get_platform
 from tests.test_utils.python_scripts.download_unit_tests_dataset import download_and_extract_asset
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
@@ -38,6 +39,27 @@ def experimental(request):
 def pytest_sessionfinish(session, exitstatus):
     if exitstatus == 5:
         session.exitstatus = 0
+
+
+@pytest.fixture(scope="session", autouse=True)
+def bind_local_device():
+    """Bind each torchrun worker to its device and isolate compiler caches."""
+    local_rank = os.getenv("LOCAL_RANK")
+    if local_rank is None:
+        return
+
+    for cache_var, default_root in (
+        ("TORCHINDUCTOR_CACHE_DIR", "/tmp/.torch_inductor_cache"),
+        ("TRITON_CACHE_DIR", "/tmp/.triton_cache"),
+    ):
+        cache_dir = Path(os.getenv(cache_var, default_root)) / f"rank_{local_rank}"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        os.environ[cache_var] = str(cache_dir)
+
+    platform = get_platform()
+    device_count = platform.device_count()
+    if device_count > 0:
+        platform.set_device(int(local_rank) % device_count)
 
 
 @pytest.fixture(scope="session", autouse=True)
@@ -119,6 +141,8 @@ def reset_env_vars():
 def cleanup_gpu_memory():
     """Clean up GPU memory after each test to prevent OOM in CI."""
     yield
-    gc.collect()
+    # Metax can abort inside cyclic GC during multi-rank pytest teardown.
+    if os.getenv("MEGATRON_TEST_PLATFORM") != "metax":
+        gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()

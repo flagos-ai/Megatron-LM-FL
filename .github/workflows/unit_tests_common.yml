@@ -158,6 +158,7 @@ jobs:
           # Set environment variables
           export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
           export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
+          export MEGATRON_TEST_PLATFORM=$PLATFORM
           mkdir -p $TORCHINDUCTOR_CACHE_DIR
 
           # Build ignore options from ignored_tests input
@@ -192,14 +193,18 @@ jobs:
 
           # Coverage setup
           COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
+          COVERAGE_TRAINING_SOURCE="$GITHUB_WORKSPACE/megatron/training"
+          COVERAGE_PLUGIN_SOURCE="$GITHUB_WORKSPACE/megatron/plugin"
+          COVERAGE_INCLUDE="megatron/training/*,megatron/plugin/*"
           RUNNER_CMD="-m pytest"
           MARKER_OPTS=()
           if [ "$PLATFORM" = "cuda" ]; then
             MARKER_OPTS=(-m "not flaky_in_dev")
           fi
           mkdir -p "$COVERAGE_DIR"
-          printf '[run]\nparallel = true\nsource = %s\ndata_file = %s/.coverage\n' \
-            "$GITHUB_WORKSPACE" "$COVERAGE_DIR" > "$COVERAGE_DIR/.coveragerc"
+          printf '[run]\nparallel = true\nsource =\n    %s\n    %s\ndata_file = %s/.coverage\n' \
+            "$COVERAGE_TRAINING_SOURCE" "$COVERAGE_PLUGIN_SOURCE" "$COVERAGE_DIR" \
+            > "$COVERAGE_DIR/.coveragerc"
           RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
           
           torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
@@ -208,7 +213,7 @@ jobs:
           # Combine coverage fragments and generate JSON report
           coverage combine --rcfile="$COVERAGE_DIR/.coveragerc" "$COVERAGE_DIR" 2>/dev/null || true
           coverage json --rcfile="$COVERAGE_DIR/.coveragerc" \
-            -o "$COVERAGE_DIR/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json" --include="megatron/*" 2>/dev/null || true
+            -o "$COVERAGE_DIR/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json" --include="$COVERAGE_INCLUDE" 2>/dev/null || true
 
           echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code

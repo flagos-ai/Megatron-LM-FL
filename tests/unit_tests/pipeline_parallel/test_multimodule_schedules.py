@@ -57,10 +57,16 @@ def create_hypercomm_grid(offset=0, tp=1, pp=1, dp=1):
 
 def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
+    if dist.is_initialized():
+        # Keep all ranks on the same test before tearing down shared NCCL groups.
+        dist.barrier()
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
+    if dist.is_initialized():
+        # Do not let fast ranks create the next test's groups during teardown.
+        dist.barrier()
 
 
 def get_pg_collection(grid):

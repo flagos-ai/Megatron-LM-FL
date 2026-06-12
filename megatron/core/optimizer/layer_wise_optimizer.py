@@ -173,7 +173,7 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
                         bucket_params_list, self.dp_cp_params_list
                     ):
                         for param in full_params_list:
-                            if param in bucket.params:
+                            if any(param is bucket_param for bucket_param in bucket.params):
                                 bucket_list.append(param)
                     bucket.set_layerwise_params_list(bucket_params_list)
             # Do the same for expert parallel bucket groups.
@@ -187,7 +187,7 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
                             bucket_params_list, self.expt_dp_params_list
                         ):
                             for param in full_params_list:
-                                if param in bucket.params:
+                                if any(param is bucket_param for bucket_param in bucket.params):
                                     bucket_list.append(param)
                         bucket.set_layerwise_params_list(bucket_params_list)
 

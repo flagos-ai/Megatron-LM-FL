@@ -159,9 +159,19 @@ def test_nvtx_range(msg, suffix):
     assert execution_tracker['ranges']
 
 
-def test_nvtx_decorator():
+def test_nvtx_decorator(monkeypatch):
     # Track function execution
     execution_tracker = {'decorated': False, 'decorated_with_message': False}
+
+    class FakeNVTX:
+        @staticmethod
+        def annotate(message=None, color=None):
+            def decorator(func):
+                return func
+
+            return decorator
+
+    monkeypatch.setattr(util, "nvtx", FakeNVTX, raising=False)
 
     # Create decorated functions
     @util.nvtx_decorator()

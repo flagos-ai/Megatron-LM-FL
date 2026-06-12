@@ -207,6 +207,60 @@ jobs:
 
           export PYTHONPATH=${{ github.workspace }}:${PYTHONPATH:-}
 
+          QWEN_TOKENIZER_PATH=''
+          if grep -q '\${QWEN_TOKENIZER_PATH}' \
+            "./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/model_config.yaml"; then
+            TOKENIZER_ROOTS=(
+              '/home/gitlab-runner/tokenizers'
+              '/opt/data/tokenizers'
+              '/home/gitlab-runner/data'
+            )
+            TOKENIZER_CANDIDATES=(
+              '/home/gitlab-runner/tokenizers/qwentokenizer'
+              '/home/gitlab-runner/tokenizers/Megatron-LM/tokenizers/qwentokenizer'
+              '/opt/data/tokenizers/huggingface'
+              '/opt/data/tokenizers/qwentokenizer'
+              '/home/gitlab-runner/data/Qwen2.5-VL-32B-Instruct'
+            )
+            for candidate in "${TOKENIZER_CANDIDATES[@]}"; do
+              if [[ -f "${candidate}/tokenizer_config.json" ]] \
+                && [[ -f "${candidate}/tokenizer.json" \
+                  || -f "${candidate}/tokenizer.model" ]]; then
+                QWEN_TOKENIZER_PATH="${candidate}"
+                break
+              fi
+            done
+            if [[ -z "${QWEN_TOKENIZER_PATH}" ]]; then
+              for tokenizer_root in "${TOKENIZER_ROOTS[@]}"; do
+                [[ -d "${tokenizer_root}" ]] || continue
+                TOKENIZER_CONFIG=$(find "${tokenizer_root}" -maxdepth 6 -type f \
+                  -path '*/Qwen*/tokenizer_config.json' -print -quit)
+                if [[ -n "${TOKENIZER_CONFIG}" ]]; then
+                  tokenizer_dir=$(dirname "${TOKENIZER_CONFIG}")
+                  if [[ -f "${tokenizer_dir}/tokenizer.json" \
+                    || -f "${tokenizer_dir}/tokenizer.model" ]]; then
+                    QWEN_TOKENIZER_PATH="${tokenizer_dir}"
+                    break
+                  fi
+                fi
+              done
+            fi
+            if [[ -z "${QWEN_TOKENIZER_PATH}" ]]; then
+              echo "Qwen tokenizer was not found in the mounted artifact directories." >&2
+              for tokenizer_root in "${TOKENIZER_ROOTS[@]}"; do
+                echo "Contents of ${tokenizer_root}:" >&2
+                if [[ -d "${tokenizer_root}" ]]; then
+                  find "${tokenizer_root}" -maxdepth 3 -mindepth 1 -print 2>/dev/null \
+                    | head -100 || true
+                else
+                  echo "  <missing>" >&2
+                fi
+              done
+              exit 1
+            fi
+            echo "Qwen tokenizer path: ${QWEN_TOKENIZER_PATH}"
+          fi
+
           OUTPUT_DIR="./test_output/${TEST_CASE}"
           TENSORBOARD_PATH="${OUTPUT_DIR}/${TENSORBOARD_SUBPATH}"
           mkdir -p "${OUTPUT_DIR}"
@@ -226,6 +280,10 @@ jobs:
             "N_REPEAT=${N_REPEAT}"
             "ENABLE_LIGHTWEIGHT_MODE=${ENABLE_LIGHTWEIGHT_MODE}"
           )
+
+          if [[ -n "${QWEN_TOKENIZER_PATH}" ]]; then
+            ARGUMENTS+=("QWEN_TOKENIZER_PATH=${QWEN_TOKENIZER_PATH}")
+          fi
 
           if [[ -n "${GPUS_PER_NODE}" ]]; then
             ARGUMENTS+=("GPUS_PER_NODE=${GPUS_PER_NODE}")

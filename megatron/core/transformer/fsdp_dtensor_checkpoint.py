@@ -58,6 +58,9 @@ def get_ep_layer_offset(num_experts: int | None = None) -> int:
     Returns:
         The expert layer offset for the current EP rank.
     """
+    if num_experts is None:
+        return 0
+
     ep_size = parallel_state.get_expert_model_parallel_world_size()
     ep_rank = parallel_state.get_expert_model_parallel_rank()
     num_local_experts = num_experts // ep_size if num_experts else 0
@@ -101,6 +104,9 @@ def handle_experts_in_state_dict(state_dict, num_experts: int | None = None):
     Returns:
         The processed state dictionary with rewritten expert keys.
     """
+    if num_experts is None:
+        return state_dict.copy()
+
     local_expert_start = get_ep_layer_offset(num_experts)
     local_expert_end = num_experts if num_experts else 0
 
