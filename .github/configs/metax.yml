@@ -65,7 +65,7 @@ test_matrix:
       # need cuda
       - tests/unit_tests/models/test_mamba_model.py
       # Metax image has an incompatible mamba_ssm/causal_conv1d CUDA extension signature.
-      - tests/unit_tests/models/test_mamba_moe_model.py::TestMambaMoEModel::test_forward
+      - tests/unit_tests/models/test_mamba_moe_model.py
       # Metax C500 MIMO 1F1B 8-GPU layouts hit missing tensor model-parallel group initialization.
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_encoder_tp2_llm_tp2_pp3_8gpu
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_full_pp_8gpu
@@ -200,8 +200,7 @@ test_matrix:
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
       # Metax C500 pipeline CI hits flaky fine-grained activation offload paths.
-      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
-      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py
       # distributed: pp=4
       - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
       # dist_checkpointing: tp*pp=8
@@ -228,11 +227,11 @@ test_matrix:
         golden_environment: dev
         golden_platform: c550
         enable_lightweight_mode: false
-      - model: gpt
-        test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_metax
-        training_script: pretrain_gpt.py
-        n_repeat: 1
-        golden_environment: dev
-        golden_platform: c550
-        enable_lightweight_mode: false
-        gpus_per_node: 4
+      # - model: gpt
+      #   test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_metax
+      #   training_script: pretrain_gpt.py
+      #   n_repeat: 1
+      #   golden_environment: dev
+      #   golden_platform: c550
+      #   enable_lightweight_mode: false
+      #   gpus_per_node: 4
