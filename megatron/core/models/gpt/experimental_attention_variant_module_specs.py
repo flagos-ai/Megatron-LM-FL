@@ -137,7 +137,7 @@ def get_dsa_module_spec_for_backend(
             q_layernorm=IdentityOp,
             kv_layernorm=IdentityOp,
         ),
-        metainfo={"fuse_input_layernorm": False},  # FlagScale added
+        metainfo={"fuse_input_layernorm": True},  # FlagScale added
     )
 
     return attention
@@ -303,7 +303,6 @@ def get_transformer_block_with_experimental_attention_variant_spec(
     enable_hc = config.enable_hyper_connections
     hc_module = HyperConnectionModule if enable_hc else IdentityOp
     layer_module = HyperConnectionTransformerLayer if enable_hc else TransformerLayer
-
     layer_specs = []
     for layer_number in range(config.num_layers):
         attention = (
