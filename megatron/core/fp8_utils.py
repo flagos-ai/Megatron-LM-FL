@@ -19,6 +19,7 @@ from megatron.core.tensor_parallel import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import get_te_version, is_te_min_version
+from megatron.plugin.decorators import overridable
 # FlagScale Begin
 from megatron.plugin.platform import get_platform
 
@@ -537,7 +538,7 @@ def is_first_last_bf16_layer(config: TransformerConfig, layer_no: int):
 if HAVE_TE:
     from megatron.core import parallel_state
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
-
+    @overridable
     def get_fp8_recipe(config: TransformerConfig):
         """Return fp8 recipe.
 

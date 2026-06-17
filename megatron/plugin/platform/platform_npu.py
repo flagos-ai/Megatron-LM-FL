@@ -4,13 +4,31 @@ import os
 import sys
 import functools
 import torch
+from torch_npu.contrib import transfer_to_npu
 
 from .platform_base import PlatformBase
+import threading
+import logging
+
+logger = logging.getLogger(__name__)
+
+import math
+from functools import wraps
+import torch.distributed
+import importlib.metadata
+
+import importlib
+import inspect
+import types
+from typing import Dict, Union, List
 
 try:
     import torch_npu
 except ImportError:
     pass
+
+# Thread-local storage for range counter and stack
+_range_local = threading.local()
 
 
 class PlatformNPU(PlatformBase):
@@ -22,7 +40,7 @@ class PlatformNPU(PlatformBase):
         try:
             import torch
             # Determine if we are on a NPU device.
-            if torch_npu.npu.device_count() > 0 and torch_npu.npu.is_available():  #ignore-npu
+            if torch_npu.npu.device_count() > 0 and torch_npu.npu.is_available():  # ignore-npu
                 return True
             else:
                 return False
@@ -33,7 +51,7 @@ class PlatformNPU(PlatformBase):
         return torch_npu.npu.get_device_properties(device_index)
 
     def get_device_capability(self, device_index=None):
-        return torch_npu.npu.get_device_capability(device_index)
+        return 9, 0
 
     def is_synchronized_device(self):
         return False
@@ -107,7 +125,7 @@ class PlatformNPU(PlatformBase):
 
     def stream(self, stream):
         return torch_npu.npu.stream(stream)
-    
+
     def set_stream(self, stream):
         return torch_npu.npu.set_stream(stream)
 
@@ -201,13 +219,40 @@ class PlatformNPU(PlatformBase):
         if hasattr(torch_npu.npu.mstx, 'mstx_range'):
             return torch_npu.npu.mstx.mstx_range(msg)
 
+    def _get_thread_range_counter(self):
+        if not hasattr(_range_local, 'counter'):
+            _range_local.counter = 0
+        _range_local.counter += 1
+        return _range_local.counter
+
+    def _get_range_stack(self):
+        if not hasattr(_range_local, 'stack'):
+            _range_local.stack = []
+        return _range_local.stack
+
     def range_push(self, msg):
         if hasattr(torch_npu.npu.mstx, 'range_start'):
-            return torch_npu.npu.mstx.range_start(msg)
+            # return torch_npu.npu.mstx.range_start(msg)
+            range_id = self._get_thread_range_counter()
+            self._get_range_stack().append(range_id)
+            return torch_npu.npu.mstx.range_start(msg, range_id)
 
     def range_pop(self):
         if hasattr(torch_npu.npu.mstx, 'range_end'):
-            return torch_npu.npu.mstx.range_end()
+            stack = self._get_range_stack()
+            if stack:
+                range_id = stack.pop()
+                return torch_npu.npu.mstx.range_end(range_id)
+            else:
+                import traceback
+
+                logger.warning(
+                    "Attempted to pop NVTX range from empty stack. "
+                    "This indicates a mismatch between range_push and range_pop calls. "
+                    "Call stack:\n%s",
+                    traceback.format_stack(),
+                )
+                return None
 
     def lazy_call(self, callback):
         pass
@@ -304,3 +349,266 @@ class PlatformNPU(PlatformBase):
 
     def clock_rate(self):
         pass
+
+
+def type_wrapper(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        res = fn(*args, **kwargs)
+        if isinstance(res, str):
+            res = res.replace('npu', 'cuda')
+        return res
+
+    return wrapper
+
+
+def ensure_contiguous_wrapper(fn):
+    @wraps(fn)
+    def wrapper(tensor, *args, **kwargs):
+        tensor = tensor.contiguous() if not tensor.is_contiguous() else tensor
+        return fn(tensor, *args, **kwargs)
+
+    return wrapper
+
+
+def lcm(a, b):
+    return (a * b) // math.gcd(a, b)
+
+
+def dummy_function(*args, **kwargs):
+    pass
+
+
+def torch_all_reduce_double_dtype_bypass_wrapper(fn):
+    @wraps(fn)
+    def wrapper(*args, **kwargs):
+        if torch.is_tensor(args[0]) and args[0].dtype == torch.double:
+            args = list(args)
+            args[0] = args[0].float()
+            handle = fn(*args, **kwargs)
+            if handle is not None:
+                handle.wait()
+            args[0] = args[0].double()
+            return None
+
+        return fn(*args, **kwargs)
+
+    return wrapper
+
+
+def dummy_compile(*args, **kwargs):
+    if len(args) > 0 and callable(args[0]):
+        def wrapper(*fn_args, **fn_kwargs):
+            return args[0](*fn_args, **fn_kwargs)
+
+        return wrapper
+    else:
+        def compile_wrapper(fn):
+            def wrapper(*fn_args, **fn_kwargs):
+                return fn(*fn_args, **fn_kwargs)
+
+            return wrapper
+
+        return compile_wrapper
+
+
+def version_wrapper(fn):
+    @wraps(fn)
+    def wrapper(name, *args, **kwargs):
+        return '2.2.0' if name == 'transformer-engine' else fn(name, *args, **kwargs)
+
+    return wrapper
+
+
+def get_func_name(func):
+    if isinstance(func, str):
+        return func
+    return '.'.join((func.__module__, func.__qualname__))
+
+
+def dummy_function_wrapper(func_name):
+    def dummy_function(*args, **kwargs):
+        raise RuntimeError('function {} no exist'.format(func_name))
+
+    return dummy_function
+
+
+class Patch:
+    def __init__(self, orig_func_name, new_func, create_dummy):
+        split_name = orig_func_name.rsplit('.', 1)
+        if len(split_name) == 1:
+            self.orig_module_name, self.orig_func_name = orig_func_name, None
+        else:
+            self.orig_module_name, self.orig_func_name = split_name
+        self.orig_module = None
+        self.orig_func = None
+        self.patch_func = None
+        self.final_patch_func = None
+        self.wrappers = []
+        if new_func is None:
+            new_func = dummy_function_wrapper(orig_func_name)
+        self.set_patch_func(new_func)
+        self.is_applied = False
+        self.create_dummy = create_dummy
+
+    @property
+    def orig_func_id(self):
+        return id(self.orig_func)
+
+    @property
+    def patch_func_id(self):
+        return id(self.patch_func)
+
+    def set_patch_func(self, new_func, force_patch=False):
+        if hasattr(new_func, '__name__') and new_func.__name__.endswith(('wrapper', 'decorator')):
+            if new_func not in self.wrappers:
+                self.wrappers.append(new_func)
+        else:
+            if self.patch_func and not force_patch:
+                raise RuntimeError('the patch of {} exist !'.format(self.orig_func_name))
+            self.patch_func = new_func
+        self.is_applied = False
+
+    def remove_wrappers(self, wrapper_names: Union[str, List[str]] = None):
+        if wrapper_names is None:
+            self.wrappers.clear()
+            return
+        if isinstance(wrapper_names, str):
+            wrapper_names = [wrapper_names]
+        for name in wrapper_names:
+            i = 0
+            while i < len(self.wrappers):
+                if self.wrappers[i].__name__ == name:
+                    self.wrappers.pop(i)
+                else:
+                    i += 1
+
+    def remove_patch(self):
+        for key, value in sys.modules.copy().items():
+            if 'megatron_adaptor' in key or 'mindspeed' in key or 'torch.classes' == key:
+                continue
+            if inspect.isclass(self.orig_module) and hasattr(value, self.orig_module_name.split('.')[-1]):
+                value = getattr(value, self.orig_module_name.split('.')[-1])
+            if self.orig_func_name is not None and hasattr(value, self.orig_func_name) \
+                    and id(getattr(value, self.orig_func_name)) == id(self.final_patch_func):
+                setattr(value, self.orig_func_name, self.orig_func)
+        self.patch_func = None
+        self.final_patch_func = None
+        self.is_applied = False
+
+    def apply_patch(self):
+        if self.is_applied:
+            return
+        current_module, current_func = Patch.parse_path(self.orig_module_name, self.orig_func_name, self.create_dummy)
+        if self.orig_module is None:
+            self.orig_module, self.orig_func = current_module, current_func
+        final_patch_func = self.orig_func
+        if self.patch_func is not None:
+            final_patch_func = self.patch_func
+        for wrapper in self.wrappers:
+            final_patch_func = wrapper(final_patch_func)
+        if self.orig_func_name is not None:
+            setattr(self.orig_module, self.orig_func_name, final_patch_func)
+        for _, value in sys.modules.copy().items():
+            if self.orig_func_name is not None and hasattr(value, self.orig_func_name) \
+                    and id(getattr(value, self.orig_func_name)) == id(current_func):
+                setattr(value, self.orig_func_name, final_patch_func)
+        self.is_applied = True
+        self.final_patch_func = final_patch_func
+
+    @staticmethod
+    def parse_path(module_path, function_name, create_dummy):
+        from importlib.machinery import ModuleSpec
+        modules = module_path.split('.')
+        for i in range(1, len(modules) + 1):
+            parent = '.'.join(modules[:i - 1])
+            path = '.'.join(modules[:i])
+            try:
+                importlib.import_module(path)
+            except ModuleNotFoundError as e:
+                if not parent or not hasattr(importlib.import_module(parent), modules[i - 1]):
+                    if not create_dummy:
+                        raise ModuleNotFoundError(e) from e
+                    sys.modules[path] = types.ModuleType(path)
+                    sys.modules[path].__file__ = 'mindspeed.dummy_module.py'
+                    sys.modules[path].__spec__ = ModuleSpec(path, None)
+                    if parent:
+                        setattr(importlib.import_module(parent), modules[i - 1], sys.modules[path])
+                else:
+                    module = getattr(importlib.import_module(parent), modules[i - 1])
+                    if hasattr(module, function_name):
+                        return module, getattr(module, function_name)
+                    elif create_dummy:
+                        return module, dummy_function_wrapper(function_name)
+                    else:
+                        raise RuntimeError('no exist {} of {}'.format(function_name, module))
+
+        if function_name is not None and not hasattr(sys.modules[module_path], function_name):
+            setattr(sys.modules[module_path], function_name, None)
+        return sys.modules[module_path], getattr(sys.modules[module_path],
+                                                 function_name) if function_name is not None else None
+
+
+class PatchesManager:
+    patches_info: Dict[str, Patch] = {}
+
+    @staticmethod
+    def register_patch(orig_func_name, new_func=None, force_patch=False, create_dummy=False):
+        """Patch registration method. When this method is executed, the patch does not take effect in real time.
+        It takes effect only after the apply_patches method is invoked. Other details are as follows:
+
+        1. If `orig_func_name` does not exist and create_dummy is set to True, a dummy function is created to ensure
+        that the import is normal.
+        2. If `orig_func_name` is not None, `orig_func_name` is replaced with `new_func`.
+        3. If the `new_func` function name ends with `wrapper` or `decorator`, then `new_func` is decorated on
+        `orig_func_name` as a decorator, and the decorator can be superimposed repeatedly.
+        4. When force_patch=False, a function cannot be replaced repeatedly (but can be decorated repeatedly),
+        otherwise the replacement is overwritten.
+        """
+        if orig_func_name not in PatchesManager.patches_info:
+            PatchesManager.patches_info[orig_func_name] = Patch(orig_func_name, new_func, create_dummy)
+        else:
+            PatchesManager.patches_info.get(orig_func_name).set_patch_func(new_func, force_patch)
+
+    @staticmethod
+    def remove_wrappers(orig_func_name, wrappers_name, remove_check=True):
+        """Remove wrapper registered in orig_func_name."""
+        if orig_func_name not in PatchesManager.patches_info:
+            raise ValueError('The function <{}> not exist.'.format(orig_func_name))
+        patch = PatchesManager.patches_info.get(orig_func_name)
+        wrappers_len = len(patch.wrappers)
+        patch.remove_wrappers(wrappers_name)
+        if remove_check and wrappers_len == len(patch.wrappers):
+            raise RuntimeError('Remove wrappers has not remove anything.')
+
+    @staticmethod
+    def remove_patches():
+        for patch in PatchesManager.patches_info.values():
+            patch.remove_patch()
+            patch.remove_wrappers()
+
+    @staticmethod
+    def apply_patches():
+        for patch in PatchesManager.patches_info.values():
+            patch.apply_patch()
+
+    @staticmethod
+    def get_patch(orig_func_name):
+        return PatchesManager.patches_info.get(orig_func_name)
+
+
+def registry_patch():
+    PatchesManager.register_patch('torch.compile', dummy_compile)
+    PatchesManager.register_patch('torch.jit.script', dummy_compile)
+    PatchesManager.register_patch('torch.nn.parameter.Parameter.type', type_wrapper)
+    PatchesManager.register_patch('torch.Tensor.type', type_wrapper)
+    PatchesManager.register_patch('torch.Tensor.view', ensure_contiguous_wrapper)
+    PatchesManager.register_patch('torch.distributed.all_reduce', torch_all_reduce_double_dtype_bypass_wrapper)
+    PatchesManager.register_patch('torch._C._jit_set_nvfuser_enabled', dummy_function, create_dummy=True)
+
+    if sys.version_info < (3, 9):
+        PatchesManager.register_patch('math.lcm', lcm, create_dummy=True)
+
+    PatchesManager.register_patch('importlib.metadata.version', version_wrapper)
+
+    PatchesManager.apply_patches()
