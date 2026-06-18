@@ -137,7 +137,7 @@ def get_dsa_module_spec_for_backend(
             q_layernorm=IdentityOp,
             kv_layernorm=IdentityOp,
         ),
-        metainfo={"fuse_input_layernorm": True},  # FlagScale added
+        metainfo={"fuse_input_layernorm": False},  # FlagScale added
     )
 
     return attention
