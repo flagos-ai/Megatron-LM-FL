@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
+from megatron.core.transformer.moe import moe_utils
 from megatron.plugin import utils
 
 
@@ -67,7 +68,7 @@ def test_reduce_aux_losses_tracker_uses_configured_groups(monkeypatch):
     reductions = []
 
     monkeypatch.setattr(
-        utils.parallel_state,
+        moe_utils,
         "get_moe_layer_wise_logging_tracker",
         lambda: tracker,
     )
