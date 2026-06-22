@@ -341,13 +341,25 @@ class PlatformCUDA(PlatformBase):
                 f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")
 
     def temperature(self):
-        return torch.cuda.temperature()
+        try:
+            return torch.cuda.temperature()
+        except ImportError:
+            return -1
 
     def power_draw(self):
-        return torch.cuda.power_draw()
+        try:
+            return torch.cuda.power_draw()
+        except ImportError:
+            return -1
 
     def utilization(self):
-        return torch.cuda.utilization()
+        try:
+            return torch.cuda.utilization()
+        except ImportError:
+            return -1
 
     def clock_rate(self):
-        return torch.cuda.clock_rate()
+        try:
+            return torch.cuda.clock_rate()
+        except ImportError:
+            return -1

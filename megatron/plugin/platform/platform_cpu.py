@@ -240,6 +240,7 @@ class PlatformCPU(PlatformBase):
                 return True
         except:
             return False
+        return False
 
     def supported_dtypes(self):
         supported_dtypes = [torch.float, torch.bfloat16]

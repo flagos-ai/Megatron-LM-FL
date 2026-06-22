@@ -8,6 +8,7 @@ from unittest.mock import patch, MagicMock
 
 from megatron.plugin.platform.platform_base import PlatformBase
 from megatron.plugin.platform.platform_cpu import PlatformCPU
+from megatron.plugin.platform.platform_cuda import PlatformCUDA
 from megatron.plugin.platform import platform_register, platform_manager
 
 
@@ -316,6 +317,21 @@ class TestPlatformCPU(unittest.TestCase):
         """CPU get_device_capability raises NotImplementedError."""
         with self.assertRaises(NotImplementedError):
             self.cpu.get_device_capability()
+
+
+class TestPlatformCUDAOptionalMonitoring(unittest.TestCase):
+    """CUDA monitoring remains usable when optional NVML bindings are absent."""
+
+    def test_monitoring_falls_back_when_nvml_is_unavailable(self):
+        cuda = PlatformCUDA()
+        methods = ("temperature", "power_draw", "utilization", "clock_rate")
+
+        for method in methods:
+            with self.subTest(method=method), patch(
+                f"megatron.plugin.platform.platform_cuda.torch.cuda.{method}",
+                side_effect=ModuleNotFoundError("pynvml is unavailable"),
+            ):
+                self.assertEqual(getattr(cuda, method)(), -1)
 
 
 # ---------- Auto-discovery: Interface Contract Tests for ALL Registered Platforms ----------
