@@ -3,7 +3,10 @@
 # See LICENSE for license information.
 
 import os
+import sys
+import types
 import unittest
+from contextlib import ExitStack
 from unittest.mock import patch, MagicMock
 
 from megatron.plugin.platform.platform_base import PlatformBase
@@ -332,6 +335,355 @@ class TestPlatformCUDAOptionalMonitoring(unittest.TestCase):
                 side_effect=ModuleNotFoundError("pynvml is unavailable"),
             ):
                 self.assertEqual(getattr(cuda, method)(), -1)
+
+
+class _FakeDeviceProps:
+    total_memory = 1024
+
+
+class _FakeTensor:
+    def __init__(self, device):
+        self.device = device
+        self.pinned = False
+
+    def pin_memory(self):
+        self.pinned = True
+        return self
+
+    def is_pinned(self):
+        return self.pinned
+
+
+class _FakeGraph:
+    def __init__(self):
+        self.replayed = False
+
+    def replay(self):
+        self.replayed = True
+
+
+class _FakeAccelerator:
+    Stream = "stream-type"
+    Event = "event-type"
+    MemPool = "pool-type"
+    BFloat16Tensor = "bf16-tensor"
+    ByteTensor = "byte-tensor"
+    DoubleTensor = "double-tensor"
+    FloatTensor = "float-tensor"
+    HalfTensor = "half-tensor"
+    IntTensor = "int-tensor"
+    LongTensor = "long-tensor"
+    MUSAGraph = _FakeGraph
+    TopsGraph = _FakeGraph
+    NPUGraph = _FakeGraph
+    default_generators = ("gen0",)
+
+    def __init__(self, available=True, fp16=True, bf16=True):
+        self._available = available
+        self._fp16 = fp16
+        self._bf16 = bf16
+        self.amp = "amp"
+        self.mstx = types.SimpleNamespace(
+            mstx_range=lambda msg: ("range", msg),
+            range_start=lambda msg: ("push", msg),
+            range_end=lambda: "pop",
+        )
+
+    def is_available(self):
+        return self._available
+
+    def device_count(self):
+        return 2
+
+    def get_device_properties(self, device_index=None):
+        return _FakeDeviceProps()
+
+    def get_device_capability(self, device_index=None):
+        return (8, 0)
+
+    def set_device(self, device_index):
+        self.device_index = device_index
+
+    def current_device(self):
+        return 1
+
+    def synchronize(self, device_index=None):
+        return ("sync", device_index)
+
+    def set_rng_state(self, state, device_index=None):
+        return ("set_rng", state, device_index)
+
+    def get_rng_state(self, device=None):
+        return ("rng", device)
+
+    def manual_seed(self, seed):
+        return ("seed", seed)
+
+    def manual_seed_all(self, seed):
+        return ("seed_all", seed)
+
+    def initial_seed(self):
+        return 123
+
+    def stream(self, stream):
+        return ("stream", stream)
+
+    def set_stream(self, stream):
+        return ("set_stream", stream)
+
+    def current_stream(self, device_index=None):
+        return ("current_stream", device_index)
+
+    def default_stream(self, device_index=None):
+        return ("default_stream", device_index)
+
+    def use_mem_pool(self, pool):
+        return ("pool", pool)
+
+    def empty_cache(self):
+        return "empty"
+
+    def memory_allocated(self, device_index=None):
+        return 24
+
+    def max_memory_allocated(self, device_index=None):
+        return 48
+
+    def reset_max_memory_allocated(self, device_index=None):
+        return "reset_alloc"
+
+    def memory_cached(self, device_index=None):
+        return 64
+
+    def max_memory_cached(self, device_index=None):
+        return 128
+
+    def reset_max_memory_cached(self, device_index=None):
+        return "reset_cached"
+
+    def memory_stats(self, device_index=None):
+        return {"device": device_index}
+
+    def reset_peak_memory_stats(self, device_index=None):
+        return "reset_peak"
+
+    def memory_reserved(self, device_index=None):
+        return 96
+
+    def max_memory_reserved(self, device_index=None):
+        return 192
+
+    def is_bf16_supported(self):
+        return self._bf16
+
+    def is_fp16_supported(self):
+        return self._fp16
+
+    def graph(self, graph, pool=None, stream=None):
+        return ("capture", graph, pool, stream)
+
+
+def _fake_torch_for_platform(accelerator_name, accelerator):
+    fake_nvtx = types.SimpleNamespace(
+        range=lambda msg: ("nvtx_range", msg),
+        range_push=lambda msg: ("nvtx_push", msg),
+        range_pop=lambda: "nvtx_pop",
+    )
+    fake_cuda = types.SimpleNamespace(nvtx=fake_nvtx)
+    fake_torch = types.SimpleNamespace(
+        float="float",
+        half="half",
+        bfloat16="bf16",
+        random="random-module",
+        cuda=fake_cuda,
+        device=lambda name, index=None: f"{name}:{index}" if index is not None else name,
+    )
+    setattr(fake_torch, accelerator_name, accelerator)
+    if accelerator_name == "cuda":
+        fake_torch.cuda = accelerator
+        fake_torch.cuda.nvtx = fake_nvtx
+    return fake_torch
+
+
+class TestMockedVendorPlatforms(unittest.TestCase):
+    """Cover platform wrappers without requiring real vendor hardware."""
+
+    def _exercise_accelerator_platform(
+        self,
+        module_path,
+        class_name,
+        accelerator_name,
+        device_prefix,
+        visible_env,
+        graph_ctor_name,
+        extra_modules=None,
+    ):
+        module = __import__(module_path, fromlist=[class_name])
+        platform_cls = getattr(module, class_name)
+        accelerator = _FakeAccelerator()
+        fake_torch = _fake_torch_for_platform(accelerator_name, accelerator)
+        module_updates = {"torch": fake_torch}
+        if extra_modules:
+            module_updates.update(extra_modules(accelerator))
+
+        with ExitStack() as stack:
+            stack.enter_context(patch.dict(sys.modules, module_updates))
+            stack.enter_context(patch.object(module, "torch", fake_torch))
+            for name, value in module_updates.items():
+                if name != "torch":
+                    stack.enter_context(patch.object(module, name, value, create=True))
+            platform = platform_cls()
+            self.assertTrue(platform.is_available())
+            self.assertEqual(platform.get_device_properties(0).total_memory, 1024)
+            self.assertEqual(platform.get_device_capability(0), (8, 0))
+            self.assertFalse(platform.is_synchronized_device())
+            self.assertFalse(platform.use_host_timers())
+            self.assertFalse(platform.resolves_data_dependency())
+            self.assertFalse(platform.handles_memory_backpressure())
+            self.assertEqual(platform.device_name(), device_prefix)
+            self.assertEqual(platform.device_name(3), f"{device_prefix}:3")
+            self.assertEqual(platform.device(2), f"{device_prefix}:2")
+            self.assertEqual(platform.current_device(), 1)
+            self.assertEqual(platform.current_device_name(), f"{device_prefix}:1")
+            self.assertEqual(platform.device_count(), 2)
+            self.assertEqual(platform.synchronize(0), ("sync", 0))
+            self.assertEqual(platform.random(), "random-module")
+            self.assertEqual(platform.set_rng_state("state"), ("set_rng", "state", None))
+            self.assertEqual(platform.set_rng_state("state", 1), ("set_rng", "state", 1))
+            self.assertEqual(platform.get_rng_state(), ("rng", None))
+            self.assertEqual(platform.get_rng_state(1), ("rng", 1))
+            self.assertEqual(platform.manual_seed(7), ("seed", 7))
+            self.assertEqual(platform.manual_seed_all(8), ("seed_all", 8))
+            self.assertEqual(platform.initial_seed(), 123)
+            self.assertEqual(platform.default_generators, ("gen0",))
+            self.assertEqual(platform.Stream, "stream-type")
+            self.assertEqual(platform.stream("s"), ("stream", "s"))
+            self.assertEqual(platform.set_stream("s"), ("set_stream", "s"))
+            self.assertEqual(platform.current_stream(0), ("current_stream", 0))
+            self.assertEqual(platform.default_stream(0), ("default_stream", 0))
+            self.assertEqual(platform.MemPool, "pool-type")
+            self.assertEqual(platform.use_mem_pool("pool"), ("pool", "pool"))
+            self.assertEqual(platform.Event, "event-type")
+            self.assertEqual(platform.empty_cache(), "empty")
+            self.assertEqual(platform.memory_allocated(0), 24)
+            self.assertEqual(platform.max_memory_allocated(0), 48)
+            self.assertEqual(platform.reset_max_memory_allocated(0), "reset_alloc")
+            self.assertEqual(platform.memory_cached(0), 64)
+            self.assertEqual(platform.max_memory_cached(0), 128)
+            self.assertEqual(platform.reset_max_memory_cached(0), "reset_cached")
+            self.assertEqual(platform.memory_stats(0), {"device": 0})
+            self.assertEqual(platform.reset_peak_memory_stats(0), "reset_peak")
+            self.assertEqual(platform.memory_reserved(0), 96)
+            self.assertEqual(platform.max_memory_reserved(0), 192)
+            self.assertEqual(platform.total_memory(0), 1024)
+            self.assertEqual(platform.available_memory(0), 1000)
+            self.assertTrue(platform.is_fp16_supported())
+            self.assertTrue(platform.is_bf16_supported())
+            self.assertEqual(platform.supported_dtypes(), ["float", "half", "bf16"])
+            self.assertEqual(platform.amp(), "amp")
+            self.assertEqual(platform.range("msg"), ("nvtx_range", "msg"))
+            self.assertEqual(platform.range_push("msg"), ("nvtx_push", "msg"))
+            self.assertEqual(platform.range_pop(), "nvtx_pop")
+            graph = platform.create_graph()
+            if graph is None:
+                graph = _FakeGraph()
+            else:
+                self.assertIsInstance(graph, _FakeGraph)
+            self.assertEqual(platform.capture_to_graph(graph, "pool", "stream"), ("capture", graph, "pool", "stream"))
+            platform.replay_graph(graph)
+            self.assertTrue(graph.replayed)
+            self.assertEqual(platform.BFloat16Tensor, "bf16-tensor")
+            self.assertEqual(platform.ByteTensor, "byte-tensor")
+            self.assertEqual(platform.DoubleTensor, "double-tensor")
+            self.assertEqual(platform.FloatTensor, "float-tensor")
+            self.assertEqual(platform.HalfTensor, "half-tensor")
+            self.assertEqual(platform.IntTensor, "int-tensor")
+            self.assertEqual(platform.LongTensor, "long-tensor")
+            tensor = _FakeTensor(f"{device_prefix}:0")
+            self.assertIs(platform.pin_memory(tensor), tensor)
+            self.assertTrue(platform.is_pinned(tensor))
+            self.assertTrue(platform.on_accelerator(tensor))
+            self.assertFalse(platform.on_accelerator(_FakeTensor("cpu")))
+            env = {}
+            platform.set_visible_devices_envs(env, [1, 3])
+            self.assertEqual(platform.visible_devices_envs(), [visible_env])
+            self.assertEqual(env[visible_env], "1,3")
+            self.assertIsNone(platform.lazy_call(lambda: None))
+            self.assertIsNone(platform.is_triton_supported())
+            self.assertIsNone(platform.get_compile_backend())
+            self.assertIsNone(platform.set_compile_backend("inductor"))
+            self.assertIsNone(platform.temperature())
+            self.assertIsNone(platform.power_draw())
+            self.assertIsNone(platform.utilization())
+            self.assertIsNone(platform.clock_rate())
+
+            accelerator._available = False
+            self.assertFalse(platform.is_fp16_supported())
+            self.assertFalse(platform.is_bf16_supported())
+
+    def test_musa_platform_wrapper_contract_with_mock_backend(self):
+        self._exercise_accelerator_platform(
+            "megatron.plugin.platform.platform_musa",
+            "PlatformMUSA",
+            "musa",
+            "musa",
+            "MUSA_VISIBLE_DEVICES",
+            "MUSAGraph",
+        )
+
+    def test_enflame_platform_wrapper_contract_with_mock_backend(self):
+        self._exercise_accelerator_platform(
+            "megatron.plugin.platform.platform_enflame",
+            "PlatformENFLAME",
+            "gcu",
+            "gcu",
+            "TOPS_VISIBLE_DEVICES",
+            "TopsGraph",
+        )
+
+    def test_txda_platform_wrapper_contract_with_mock_backend(self):
+        def extras(accelerator):
+            return {
+                "torch_txda": types.SimpleNamespace(transfer_to_txda=lambda value: value),
+                "flag_gems": types.SimpleNamespace(),
+            }
+
+        self._exercise_accelerator_platform(
+            "megatron.plugin.platform.platform_txda",
+            "PlatformTXDA",
+            "cuda",
+            "txda",
+            "TXDA_VISIBLE_DEVICES",
+            "CUDAGraph",
+            extras,
+        )
+
+    def test_npu_platform_wrapper_contract_with_mock_backend(self):
+        module = __import__("megatron.plugin.platform.platform_npu", fromlist=["PlatformNPU"])
+        accelerator = _FakeAccelerator()
+        fake_torch = _fake_torch_for_platform("npu", accelerator)
+        fake_torch_npu = types.SimpleNamespace(npu=accelerator)
+        with patch.dict(sys.modules, {"torch": fake_torch, "torch_npu": fake_torch_npu}), patch.object(
+            module, "torch", fake_torch
+        ), patch.object(module, "torch_npu", fake_torch_npu, create=True):
+            platform = module.PlatformNPU()
+            self.assertTrue(platform.is_available())
+            self.assertEqual(platform.device_name(2), "npu:2")
+            self.assertEqual(platform.device(2), "npu:2")
+            self.assertEqual(platform.default_generators, ("gen0",))
+            self.assertEqual(platform.MemPool, "pool-type")
+            self.assertEqual(platform.use_mem_pool("pool"), ("pool", "pool"))
+            self.assertTrue(platform.is_fp16_supported())
+            self.assertTrue(platform.is_bf16_supported())
+            self.assertEqual(platform.range("x"), ("range", "x"))
+            self.assertEqual(platform.range_push("x"), ("push", "x"))
+            self.assertEqual(platform.range_pop(), "pop")
+            graph = platform.create_graph()
+            self.assertIsInstance(graph, _FakeGraph)
+            self.assertEqual(platform.capture_to_graph(graph), ("capture", graph, None, None))
+            platform.replay_graph(graph)
+            self.assertTrue(graph.replayed)
+            self.assertEqual(platform.visible_devices_envs(), ["ASCEND_RT_VISIBLE_DEVICES"])
 
 
 # ---------- Auto-discovery: Interface Contract Tests for ALL Registered Platforms ----------
