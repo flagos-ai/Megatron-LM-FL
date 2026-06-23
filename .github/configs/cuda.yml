@@ -89,6 +89,10 @@ test_matrix:
       - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[long_short_mix] ## TE version does not support CP + THD format attention
       - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
       - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
+      # SBHD KV-split MLA RoPE fusion hits sporadic Triton autotune/compile failures on shared A100 CI.
+      # Keep the smaller THD and inplace MLA RoPE cases enabled for coverage.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-sbhd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-sbhd]
       - tests/unit_tests/dist_checkpointing/test_local.py
       - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
 
