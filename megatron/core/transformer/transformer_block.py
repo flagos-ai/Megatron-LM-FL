@@ -79,8 +79,10 @@ logger = logging.getLogger(__name__)
 
 
 def get_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None,
-    dualpipev_stage: Optional[int] = None # FlagScale Add
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Add
 ) -> int:
     """
     Determine the number of transformer layers to build for the current pipeline stage.
@@ -232,7 +234,9 @@ def get_num_layers_to_build(
             assert num_layers_to_build >= 0, f"Not enough layers in the last virtual pipeline stage"
         elif dualpipev_stage == 1 and is_first_pp_stage:
             num_layers_to_build -= 1
-            assert num_layers_to_build >= 0, f"Not enough layers in the last dualpipev pipeline stage"
+            assert (
+                num_layers_to_build >= 0
+            ), f"Not enough layers in the last dualpipev pipeline stage"
 
     return num_layers_to_build
 
@@ -373,7 +377,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         #     self.norm_factor *= coeff
         def build_layer(layer_spec, layer_number):
             global_layer_number = layer_number + get_transformer_layer_offset(
-                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp), self.dualpipev_stage,
+                self.config, self.vp_stage, get_pg_rank(self.pg_collection.pp), self.dualpipev_stage
             )  # 1-based index
             if self.config.heterogeneous_block_specs:
                 layer_config = self.config.get_config_for_layer(global_layer_number)
@@ -399,7 +403,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     layer_number=layer_number,
                     pg_collection=self.pg_collection,
                     vp_stage=self.vp_stage,
-                    dualpipev_stage=self.dualpipev_stage
+                    dualpipev_stage=self.dualpipev_stage,
                 )
             return module
 
@@ -410,6 +414,18 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 for i, layer_spec in enumerate(self.submodules.layer_specs)
             ]
         )
+
+        # Validate DSA indexer_types: a "shared" layer at the start of a pipeline stage
+        # cannot access the previous layer's topk_indices (which lives in another stage).
+        if self.config.indexer_types is not None and self.config.pipeline_model_parallel_size > 1:
+            first_global_layer_number = self.layers[0].layer_number  # 1-based
+            first_indexer_type = self.config.indexer_types[first_global_layer_number - 1]
+            assert first_indexer_type != "shared", (
+                f"The first layer (global layer {first_global_layer_number}) in this pipeline "
+                f"stage has indexer_type='shared', but there is no preceding layer in the same "
+                f"stage to provide topk_indices. Adjust indexer_types or pipeline partitioning "
+                f"so that each stage's first DSA layer uses indexer_type='full'."
+            )
 
         # @TODO: add back account_for_embedding_in_pipeline_split (see issue #293)
         # In pipeline parallelism, we want to add this LN only to the last stage of the pipeline
@@ -727,7 +743,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 mhc_manager = CheckpointManager()
 
         return layer_managers, is_recompute_block_end
-    
+
     @staticmethod
     def _finalize_mhc_recompute_layer(
         mhc_manager: Optional[CheckpointManager],
@@ -758,7 +774,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         *,
         inference_params: Optional[BaseInferenceContext] = None,
         dynamic_inference_decode_only: Optional[bool] = None,
-        **decoder_extra_block_kwargs
+        **decoder_extra_block_kwargs,
     ):
         """
         Perform the forward pass through the transformer block.
@@ -929,6 +945,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     # No intermediate_hidden_states requested: just hidden_states
                     hidden_states = checkpointed_result
             else:
+                _dsa_prev_topk_indices = None
                 for l_no, layer in enumerate(self.layers):
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
@@ -950,15 +967,25 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         mhc_manager.is_last_layer_in_recompute_block = (
                             mhc_is_last_in_recompute_block[l_no]
                         )
-                    
+
                     with self.offload_context, inner_quantization_context:
-                        #### FlagScale Begin #### 
-                        # Pre-compute embeddings for the next DeepSeekTransformerLayer if engram exists, to overlap with current layer's computation
+                        #### FlagScale Begin ####
+                        # Pre-compute embeddings for the next DeepSeekTransformerLayer
+                        # if engram exists, to overlap with current layer's computation
                         if l_no < len(self.layers) - 1:
                             next_layer = self.layers[l_no + 1]
                             if getattr(next_layer, "is_engram_layer", False):
-                                next_layer.pre_compute_embedding(decoder_extra_block_kwargs["engram_hash_input_ids"])
+                                next_layer.pre_compute_embedding(
+                                    decoder_extra_block_kwargs["engram_hash_input_ids"]
+                                )
                         #### FlagScale End ####
+                        # Pass DSA prev_topk_indices via attribute
+                        if hasattr(layer, 'self_attention') and hasattr(
+                            layer.self_attention, 'core_attention'
+                        ):
+                            layer.self_attention.core_attention.current_topk_indices = (
+                                _dsa_prev_topk_indices
+                            )
                         hidden_states, context = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
@@ -976,6 +1003,13 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             mhc_recompute_manager=mhc_manager,
                             input_ids=input_ids,
                         )
+                        # Read DSA topk_indices for next layer
+                        if hasattr(layer, 'self_attention') and hasattr(
+                            layer.self_attention, 'core_attention'
+                        ):
+                            _dsa_prev_topk_indices = getattr(
+                                layer.self_attention.core_attention, 'current_topk_indices', None
+                            )
                     self._finalize_mhc_recompute_layer(
                         mhc_manager=mhc_manager,
                         hidden_states=hidden_states,
