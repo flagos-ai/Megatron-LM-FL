@@ -8,13 +8,15 @@ described in issue #3775).
 """
 
 from unittest import mock
-
-import pytest
-import torch
+import importlib
 
 from megatron.core.dist_checkpointing.strategies.async_utils import (
     PersistentAsyncCaller,
     TemporalAsyncCaller,
+)
+from megatron.plugin.decorators import get_override_method
+from megatron.plugin.kunlunxin.dist_checkpointing.strategies.filesystem_async import (
+    preload_tensors_kunlunxin,
 )
 
 
@@ -36,6 +38,35 @@ class TestPersistentAsyncCallerShutdown:
         with mock.patch("torch.distributed.is_initialized", return_value=False):
             # Must not raise
             caller.__del__()
+
+
+class TestFileSystemAsyncKunlunxin:
+    """Verify KunLunXin filesystem async checkpoint overrides."""
+
+    def test_filesystem_async_routes_to_kunlunxin_vendor(self, monkeypatch):
+        """KunLunXin vendor must own all migrated filesystem async patch points."""
+        monkeypatch.setenv("MG_FL_PREFER", "kunlunxin")
+        registry = importlib.import_module("megatron.plugin.override_registry")
+        importlib.reload(registry)
+        expected_module = "megatron.plugin.kunlunxin.dist_checkpointing.strategies.filesystem_async"
+        for key in (
+            "FileSystemWriterAsync.prepare_write_data",
+            "filesystem_async.preload_tensors",
+            "filesystem_async.write_preloaded_data",
+        ):
+            impl = get_override_method(key)
+            assert impl.__module__ == expected_module
+
+    def test_preload_tensors_skips_d2h_when_bridge_exists(self):
+        """Bridge mode must keep XME behavior and skip D2H staging."""
+        tensor = mock.Mock()
+        buckets = [("file", "key", ([], [("item", tensor)]))]
+
+        with mock.patch("importlib.util.find_spec", return_value=object()):
+            result = preload_tensors_kunlunxin(buckets, non_blocking=True)
+
+        assert result is buckets
+        tensor.to.assert_not_called()
 
 
 class TestTemporalAsyncCallerShutdown:

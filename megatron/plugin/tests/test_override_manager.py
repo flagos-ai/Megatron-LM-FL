@@ -254,12 +254,38 @@ class TestGetPreferredVendor(unittest.TestCase):
 
     def setUp(self):
         os.environ.pop("MG_FL_PREFER", None)
+        # Mock platform to prevent platform inference from leaking into tests
+        from megatron.plugin.platform import platform_manager
+
+        self._original_platform = platform_manager.cur_platform
+        platform_manager.cur_platform = None
 
     def tearDown(self):
         os.environ.pop("MG_FL_PREFER", None)
+        from megatron.plugin.platform import platform_manager
+
+        platform_manager.cur_platform = self._original_platform
 
     def test_unset(self):
         self.assertIsNone(_get_preferred_vendor())
+
+    def test_unset_uses_selected_kunlunxin_platform(self):
+        """Platform inference returns kunlunxin when that platform is selected."""
+        from megatron.plugin.platform import platform_manager
+
+        class KunlunxinPlatform:
+            """Stub platform returning kunlunxin device name."""
+
+            def device_name(self):
+                """Return the kunlunxin device name."""
+                return "kunlunxin"
+
+        original_platform = platform_manager.cur_platform
+        platform_manager.cur_platform = KunlunxinPlatform()
+        try:
+            self.assertEqual(_get_preferred_vendor(), "kunlunxin")
+        finally:
+            platform_manager.cur_platform = original_platform
 
     def test_empty(self):
         os.environ["MG_FL_PREFER"] = ""

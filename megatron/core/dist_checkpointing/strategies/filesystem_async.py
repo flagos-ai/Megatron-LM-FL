@@ -49,6 +49,7 @@ except ImportError:
 _results_queue = None
 
 # FlagScale Begin
+from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -117,6 +118,7 @@ class FileSystemWriterAsync(FileSystemWriter):
         self.results_queue: Optional[mp.Queue] = None
         self.separation_hint = separation_hint
 
+    @overridable  # FlagScale Add
     def prepare_write_data(self, plan: SavePlan, planner: SavePlanner) -> None:
         """
         First stage of async saving. Copy data to CPU and plan the local saving.
@@ -230,6 +232,7 @@ class FileSystemWriterAsync(FileSystemWriter):
         )
 
     @staticmethod
+    @overridable  # FlagScale Add
     def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List[WriteBucket]:
         """
         Preloads tensors in `state_dict` to host memory via CPU memory.
@@ -366,6 +369,7 @@ class FileSystemWriterAsync(FileSystemWriter):
         logger.debug(f"{w_end}, rank: {rank}, write(sync,threads): {w_end - w_start}")
 
     @staticmethod
+    @overridable  # FlagScale Add
     @_disable_gc()
     def write_preloaded_data(
         transform_list: List[_StorageWriterTransforms],

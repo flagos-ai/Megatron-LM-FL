@@ -60,17 +60,33 @@ _original_impl_cache: set[Callable] = set()
 
 
 def _get_preferred_vendor() -> Optional[str]:
-    """Get the preferred vendor from MG_FL_PREFER environment variable.
+    """Get the preferred override vendor.
+
+    ``MG_FL_PREFER`` remains the explicit override selector. When it is unset,
+    follow the selected ME-FL platform so XPU-only patches activate with the
+    same runtime trigger as XME.
 
     Returns:
-        The vendor name string (lowercased), or None if not set.
+        Optional[str]: The vendor name string (lowercased) from MG_FL_PREFER,
+        or inferred from the selected platform (e.g. 'kunlunxin'), or None.
     """
     vendor = os.environ.get("MG_FL_PREFER")
     if vendor is not None:
         vendor = vendor.strip().lower()
         if vendor == "":
             return None
-    return vendor
+        return vendor
+
+    try:
+        from megatron.plugin.platform import platform_manager
+
+        platform = platform_manager.cur_platform
+        if platform is not None:
+            return platform.device_name()
+    except Exception as e:
+        logger.debug(f"Failed to infer override vendor from platform: {e}")
+
+    return None
 
 
 def register_override_method(method_key: str, implementation: Callable,
@@ -166,9 +182,14 @@ def get_override_method(method_key: str) -> Optional[Callable]:
         preferred = _get_preferred_vendor()
 
         # 1. Preferred vendor
-        if preferred is not None and preferred in vendor_map:
-            logger.debug(f"Using vendor '{preferred}' for {method_key}")
-            return vendor_map[preferred]
+        if preferred is not None:
+            if preferred in vendor_map:
+                logger.debug(f"Using vendor '{preferred}' for {method_key}")
+                return vendor_map[preferred]
+            if method_key in _lazy_registry and preferred in _lazy_registry[method_key]:
+                lazy_impl = _resolve_lazy_impl(method_key)
+                if lazy_impl is not None:
+                    return lazy_impl
 
         # 2. Default vendor
         if _DEFAULT_VENDOR in vendor_map:

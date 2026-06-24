@@ -23,6 +23,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from megatron.core.utils import is_te_min_version, safely_set_viewless_tensor_data
+from megatron.plugin.decorators import overridable  # FlagScale Add
 
 # ---------------------------------------------------------------------------
 # C++ extension: zero-copy storage sharing for CheckpointWithoutOutput
@@ -220,6 +221,7 @@ def get_data_parallel_rng_tracker_name():
     return _DATA_PARALLEL_RNG_TRACKER_NAME
 
 
+@overridable  # FlagScale Add
 class CudaRNGStatesTracker:
     """Tracker for the cuda RNG states.
 
