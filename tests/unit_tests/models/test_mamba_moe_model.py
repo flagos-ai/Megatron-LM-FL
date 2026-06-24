@@ -240,6 +240,7 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "mhc_init_gating_factor": 0.01,
     "mhc_recompute_layer_num": None,
     "mhc_sinkhorn_iterations": 10,
+    "moe_mlp_glu_interleave_size": None,
     ##### FlagScale End #####
     "nccl_all_reduce_for_prefill": False,
     "no_rope_freq": None,
