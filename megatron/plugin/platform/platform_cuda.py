@@ -340,26 +340,22 @@ class PlatformCUDA(PlatformBase):
             raise ValueError(
                 f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")
 
-    def temperature(self):
+    def _get_nvml_metric(self, metric_fn):
+        if pynvml is None:
+            return -1
         try:
-            return torch.cuda.temperature()
+            return metric_fn()
         except ImportError:
             return -1
+
+    def temperature(self):
+        return self._get_nvml_metric(torch.cuda.temperature)
 
     def power_draw(self):
-        try:
-            return torch.cuda.power_draw()
-        except ImportError:
-            return -1
+        return self._get_nvml_metric(torch.cuda.power_draw)
 
     def utilization(self):
-        try:
-            return torch.cuda.utilization()
-        except ImportError:
-            return -1
+        return self._get_nvml_metric(torch.cuda.utilization)
 
     def clock_rate(self):
-        try:
-            return torch.cuda.clock_rate()
-        except ImportError:
-            return -1
+        return self._get_nvml_metric(torch.cuda.clock_rate)
