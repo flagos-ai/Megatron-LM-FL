@@ -40,11 +40,8 @@ jobs:
       matrix:
         test_group:
           - name: core
-            path: "tests/unit_tests/test_*.py"
+            path: "tests/unit_tests/test_*.py megatron/plugin/tests/"
             description: "Core unit tests"
-          - name: plugin
-            path: "megatron/plugin/tests/"
-            description: "Plugin tests"
           # - name: transformer
           #   path: "tests/unit_tests/transformer/"
           #   description: "Transformer tests"
