@@ -18,7 +18,6 @@ class ScaledUpperTriangMaskedSoftmax(ScaledUpperTriangMaskedSoftmax):
         output = torch_npu.npu_scaled_masked_softmax(input_, dummy_mask, scale, True)
         return output.view(size).contiguous()
 
-
 class ScaledMaskedSoftmax(ScaledMaskedSoftmax):
     @staticmethod
     def apply(input_, mask, scale):
