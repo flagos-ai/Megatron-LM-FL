@@ -4,7 +4,6 @@ import os
 import sys
 import functools
 import torch
-from torch_npu.contrib import transfer_to_npu
 
 from .platform_base import PlatformBase
 import threading
@@ -24,6 +23,7 @@ from typing import Dict, Union, List
 
 try:
     import torch_npu
+    from torch_npu.contrib import transfer_to_npu
 except ImportError:
     pass
 
