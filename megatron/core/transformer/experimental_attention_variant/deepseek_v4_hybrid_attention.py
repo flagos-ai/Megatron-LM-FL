@@ -114,17 +114,21 @@ class DSv4HybridAttention(Attention):
             compress_ratio = self.config.csa_compress_ratios[layer_idx]
         else:
             compress_ratio = self.config.csa_compress_ratios[layer_number - 1]
-        rope_base = self.config.rotary_base
-        if compress_ratio > 1:
-            rope_base = self.config.csa_compress_rotary_base
-        if self.config.rope_type == "rope":
+        use_compressed_yarn = compress_ratio > 1
+        rope_base = (
+            self.config.csa_compress_rotary_base if use_compressed_yarn else self.config.rotary_base
+        )
+        self._dsv4_compress_ratio = compress_ratio
+        self._dsv4_rope_base = rope_base
+        self._dsv4_uses_yarn_rope = use_compressed_yarn
+        if not use_compressed_yarn:
             self.rotary_pos_emb = RotaryEmbedding(
                 self.config.qk_pos_emb_head_dim,
                 rotary_percent=self.config.rotary_percent,
                 rotary_base=rope_base,
                 cp_group=self.pg_collection.cp,
             )
-        elif self.config.rope_type == "yarn":
+        else:
             self.rotary_pos_emb = YarnRotaryEmbedding(
                 self.config.qk_pos_emb_head_dim,
                 rotary_base=rope_base,
@@ -136,15 +140,11 @@ class DSv4HybridAttention(Attention):
                 mscale_all_dim=self.config.mscale_all_dim,
                 cp_group=self.pg_collection.cp,
             )
-        else:
-            raise ValueError(
-                f"Unsupported RoPE type: {self.config.rope_type}, supported types are "
-                "'rope' and 'yarn'"
-            )
 
         core_attn_extra_kwargs = {
             "rotary_pos_emb": self.rotary_pos_emb,
             "compress_ratio": compress_ratio,
+            "is_mtp_layer": is_mtp_layer,
         }
         self.core_attention = build_module(
             submodules.core_attention,
@@ -280,10 +280,9 @@ class DSv4HybridAttention(Attention):
                 x=hidden_states,
                 qr=q_compressed,
             )
-        # NOTE: Not implement in version core_v0.17.0
-        # core_attn_out = core_attn_manager.group_offload(
-        #     core_attn_out, forced_released_tensors=[query, key, value]
-        # )
+        core_attn_out = core_attn_manager.group_offload(
+            core_attn_out, forced_released_tensors=[query, key, value]
+        )
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # reshape to same output shape as unpacked case
@@ -314,27 +313,28 @@ class DSv4HybridAttention(Attention):
         else:
             cu_seqlens_kv = None
             rope_seqlen = seq_len
+        # DSv4 reference (DS-Inf) RoPE is pure rotation (norm-preserving). Yarn's
+        # concentration factor (mscale) is NOT part of the DSv4 model contract --
+        # the model relies on Q/KV RMS-norm + unit-magnitude rotation. Force 1.0.
         mscale = 1.0
         rotary_pos_cos = None
         rotary_pos_sin = None
-        if self.config.rope_type == "rope":
-            rotary_pos_emb = self.rotary_pos_emb(rope_seqlen, packed_seq=packed_seq)
+        if self.config.apply_rope_fusion:
+            # ``mscale=1.0`` strips yarn's concentration factor from the
+            # cached cos/sin so the fused kernel matches the unfused
+            # path's forced ``mscale=1.0`` (DSv4 "pure rotation").
+            rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cached_cos_sin(
+                rope_seqlen, dtype=hidden_states.dtype, packed_seq=packed_seq, mscale=mscale
+            )
+            rotary_pos_emb = None
+            assert inference_context is None, "Inference with MLA RoPE fusion is not supported"
+            assert (
+                fused_mla_rope_inplace is not None
+            ), "Fused MLA RoPE apply is not imported successfully"
+        elif self._dsv4_uses_yarn_rope:
+            rotary_pos_emb, _ = self.rotary_pos_emb(rope_seqlen, packed_seq=packed_seq)
         else:
-            if self.config.apply_rope_fusion:
-                rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cached_cos_sin(
-                    rope_seqlen, dtype=hidden_states.dtype, packed_seq=packed_seq
-                )
-                rotary_pos_emb = None
-                assert inference_context is None, "Inference with MLA RoPE fusion is not supported"
-                assert (
-                    fused_mla_rope_inplace is not None
-                ), "Fused MLA RoPE apply is not imported successfully"
-            else:
-                rotary_pos_emb, mscale = self.rotary_pos_emb(rope_seqlen, packed_seq=packed_seq)
-                # DSv4 reference (DS-Inf) RoPE is pure rotation (norm-preserving). Yarn's
-                # concentration factor (mscale) is NOT part of the DSv4 model contract --
-                # the model relies on Q/KV RMS-norm + unit-magnitude rotation. Force 1.0.
-                mscale = 1.0
+            rotary_pos_emb = self.rotary_pos_emb(rope_seqlen, packed_seq=packed_seq)
         if self.config.apply_rope_fusion:
             core_attn_out = fused_mla_rope_inplace(
                 core_attn_out,
@@ -382,8 +382,7 @@ class DSv4HybridAttention(Attention):
         attn_proj_manager = off_interface(self.offload_attn_proj, core_attn_out, "attn_proj")
         with attn_proj_manager as core_attn_out:
             output, bias = self.linear_proj(core_attn_out)
-        # NOTE: Not implement in version core_v0.17.0
-        # output = attn_proj_manager.group_offload(output, forced_released_tensors=[core_attn_out])
+        output = attn_proj_manager.group_offload(output, forced_released_tensors=[core_attn_out])
 
         return output, bias
 
@@ -515,28 +514,29 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         )
 
         # rotary_pos_emb:[s, b, 1, 64]
+        # DSv4 reference (DS-Inf) RoPE is pure rotation (norm-preserving). Yarn's
+        # concentration factor (mscale) is NOT part of the DSv4 model contract --
+        # the model relies on Q/KV RMS-norm + unit-magnitude rotation. Force 1.0.
         mscale = 1.0
         rotary_pos_cos = None
         rotary_pos_sin = None
         packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == 'thd'
-        if self.config.rope_type == "rope":
-            rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len, packed_seq=packed_seq)
+        if self.config.apply_rope_fusion:
+            # ``mscale=1.0`` strips yarn's concentration factor from the
+            # cached cos/sin so the fused kernel matches the unfused
+            # path's forced ``mscale=1.0`` (DSv4 "pure rotation").
+            rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cached_cos_sin(
+                rotary_seq_len, dtype=hidden_states.dtype, packed_seq=packed_seq, mscale=mscale
+            )
+            rotary_pos_emb = None
+            assert inference_context is None, "Inference with MLA RoPE fusion is not supported"
+            assert (
+                fused_mla_rope_inplace is not None
+            ), "Fused MLA RoPE apply is not imported successfully"
+        elif self._dsv4_uses_yarn_rope:
+            rotary_pos_emb, _ = self.rotary_pos_emb(rotary_seq_len, packed_seq=packed_seq)
         else:
-            if self.config.apply_rope_fusion:
-                rotary_pos_cos, rotary_pos_sin = self.rotary_pos_emb.get_cached_cos_sin(
-                    rotary_seq_len, dtype=hidden_states.dtype, packed_seq=packed_seq
-                )
-                rotary_pos_emb = None
-                assert inference_context is None, "Inference with MLA RoPE fusion is not supported"
-                assert (
-                    fused_mla_rope_inplace is not None
-                ), "Fused MLA RoPE apply is not imported successfully"
-            else:
-                rotary_pos_emb, mscale = self.rotary_pos_emb(rotary_seq_len, packed_seq=packed_seq)
-                # DSv4 reference (DS-Inf) RoPE is pure rotation (norm-preserving). Yarn's
-                # concentration factor (mscale) is NOT part of the DSv4 model contract --
-                # the model relies on Q/KV RMS-norm + unit-magnitude rotation. Force 1.0.
-                mscale = 1.0
+            rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len, packed_seq=packed_seq)
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             if packed_seq_params.cu_seqlens_q_padded is not None:
