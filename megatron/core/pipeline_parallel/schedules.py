@@ -233,6 +233,13 @@ def custom_backward(output, grad_output):
     )
 
 
+def get_tensor_device(tensor: Union[torch.Tensor, Dict[str, torch.Tensor]]):
+    """Get the device of a tensor or a dictionary of tensors."""
+    if isinstance(tensor, dict):
+        return next(iter(tensor.values())).device
+    return tensor.device
+
+
 def forward_step_calc_loss(
     model,
     output_tensor,
