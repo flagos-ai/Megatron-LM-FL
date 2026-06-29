@@ -36,11 +36,6 @@ def pytest_addoption(parser):
     parser.addoption("--tensorboard-path", action="store", default=None, help="Path to tensorboard records")
     parser.addoption("--logs-dir", action="store", default=None, help="Path to torchrun output logs")
     parser.addoption("--model-config-path", action="store", default=None, help="Path to model_config.yaml")
-    parser.addoption(
-        '--experimental',
-        action='store_true',
-        help="pass that argument to enable experimental flag during testing (DEFAULT: False)",
-    )
 
 
 @pytest.fixture
