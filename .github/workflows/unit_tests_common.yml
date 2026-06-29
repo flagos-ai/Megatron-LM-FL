@@ -170,7 +170,7 @@ jobs:
             if echo "$TEST_PATH" | grep -q '\*'; then
               # Glob pattern: pytest --ignore does NOT skip explicitly-listed file args.
               # Pre-filter the expanded file list in Python to exclude ignored files directly.
-              FINAL_TEST_PATH=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json, glob; ignored = json.load(sys.stdin); ignored_files = set(t for t in ignored if '::' not in t); files = sorted(f for f in glob.glob('$TEST_PATH') if f not in ignored_files); print(' '.join(files))")
+              FINAL_TEST_PATH=$(IGNORED_TESTS="$IGNORED_TESTS" TEST_PATH="$TEST_PATH" python3 -c "import glob, json, os, shlex; ignored = json.loads(os.environ['IGNORED_TESTS']); ignored_files = set(t for t in ignored if '::' not in t); files = []; [files.extend(sorted(glob.glob(path)) if glob.has_magic(path) else [path]) for path in shlex.split(os.environ['TEST_PATH'])]; print(' '.join(f for f in files if f not in ignored_files))")
               # For glob mode, only --deselect applies (for specific test-case entries containing '::')
               IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--deselect=' + t for t in tests if '::' in t]; print(' '.join(opts))")
             else
@@ -181,6 +181,10 @@ jobs:
             if [ -n "$IGNORE_OPTS" ]; then
               echo "Ignoring tests: $IGNORE_OPTS"
             fi
+          fi
+          if [ -z "$FINAL_TEST_PATH" ]; then
+            echo "::error::No tests selected for $TEST_GROUP from TEST_PATH='$TEST_PATH'"
+            exit 1
           fi
           # Calc GPU num
           if [ "$PLATFORM" = "metax" ]; then
