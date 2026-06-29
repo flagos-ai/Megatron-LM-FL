@@ -1310,6 +1310,7 @@ class TransformerConfig(ModelParallelConfig):
                 self.tensor_model_parallel_size == 1
             ), "DSv4 Hybrid Attention only supports TP size 1."
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
+            self.hetereogenous_dist_checkpoint = True
 
             if self.apply_dsa_kernel_fusion:
                 assert (
