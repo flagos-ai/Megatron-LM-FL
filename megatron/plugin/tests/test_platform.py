@@ -698,6 +698,15 @@ class TestAllRegisteredPlatformsContract(unittest.TestCase):
             with self.subTest(platform=name):
                 check_fn(name, platform)
 
+    def _call_monitoring_api(self, name, platform, method_name):
+        """Call a hardware monitoring API, skipping only missing optional NVML support."""
+        try:
+            return getattr(platform, method_name)()
+        except ModuleNotFoundError as exc:
+            if "pynvml" in str(exc).lower():
+                self.skipTest(f"{name}.{method_name} requires pynvml/NVML support")
+            raise
+
     # --- Basic contract ---
 
     def test_is_platform_base_instance(self):
@@ -823,28 +832,28 @@ class TestAllRegisteredPlatformsContract(unittest.TestCase):
     def test_temperature_returns_numeric(self):
         """temperature() must return a numeric value."""
         def check(name, p):
-            result = p.temperature()
+            result = self._call_monitoring_api(name, p, "temperature")
             self.assertIsInstance(result, (int, float))
         self._for_each_platform(check)
 
     def test_power_draw_returns_numeric(self):
         """power_draw() must return a numeric value."""
         def check(name, p):
-            result = p.power_draw()
+            result = self._call_monitoring_api(name, p, "power_draw")
             self.assertIsInstance(result, (int, float))
         self._for_each_platform(check)
 
     def test_utilization_returns_numeric(self):
         """utilization() must return a numeric value."""
         def check(name, p):
-            result = p.utilization()
+            result = self._call_monitoring_api(name, p, "utilization")
             self.assertIsInstance(result, (int, float))
         self._for_each_platform(check)
 
     def test_clock_rate_returns_numeric(self):
         """clock_rate() must return a numeric value."""
         def check(name, p):
-            result = p.clock_rate()
+            result = self._call_monitoring_api(name, p, "clock_rate")
             self.assertIsInstance(result, (int, float))
         self._for_each_platform(check)
 
