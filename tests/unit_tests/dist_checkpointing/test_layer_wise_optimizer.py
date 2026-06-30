@@ -15,7 +15,7 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_spec,
 )
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.optimizer import ChainedOptimizer
+from megatron.core.optimizer import HAVE_EMERGING_OPTIMIZERS, ChainedOptimizer
 from megatron.core.optimizer.layer_wise_optimizer import LayerWiseDistributedOptimizer
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel import model_parallel_cuda_manual_seed
@@ -121,6 +121,9 @@ def load_checkpoint_no_arg_checks(*args, **kwargs):
             return load_checkpoint(*args, **kwargs)
 
 
+@pytest.mark.skipif(
+    not HAVE_EMERGING_OPTIMIZERS, reason="emerging_optimizers package is not installed"
+)
 class TestLayerWiseOptimizer:
     """Tests for LayerWiseDistributedOptimizer functionality."""
 
