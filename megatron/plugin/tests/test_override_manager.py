@@ -533,6 +533,26 @@ class TestOverridableClass(unittest.TestCase):
 
         self.assertEqual(FancyClass.__name__, "FancyClass")
 
+    def test_class_apply_dispatches_to_override(self):
+        """Class-level apply calls route to the override class when registered."""
+        @overridable
+        class OriginalFunction:
+            @classmethod
+            def apply(cls, value):
+                return f"original:{value}"
+
+        class OverrideFunction(OriginalFunction):
+            @classmethod
+            def apply(cls, value):
+                return f"override:{value}"
+
+        module_parts = OriginalFunction.__module__.split('.')
+        module_name = module_parts[-1]
+        method_key = f"{module_name}.OriginalFunction"
+        register_override_method(method_key, OverrideFunction)
+
+        self.assertEqual(OriginalFunction.apply("x"), "override:x")
+
     def test_lazy_register_class(self):
         """register() with class target resolves lazily."""
         import types
