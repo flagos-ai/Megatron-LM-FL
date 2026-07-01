@@ -368,8 +368,8 @@ class _FakeAccelerator:
         self._bf16 = bf16
         self.amp = "amp"
         self.mstx = types.SimpleNamespace(
-            mstx_range=lambda msg: ("range", msg),
-            range_start=lambda msg: ("push", msg),
+            mstx_range=lambda msg, *args, **kwargs: ("range", msg),
+            range_start=lambda msg, *args, **kwargs: ("push", msg),
             range_end=lambda: "pop",
         )
 
