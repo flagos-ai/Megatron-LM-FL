@@ -398,6 +398,12 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use dense mode for compressed sparse attention. If True, the CSA indexer will be
     disabled."""
 
+    enable_fused_compressor: bool = False
+    """Enable fused Triton kernel for CSA Compressor (fuse GEMM + post-GEMM ops)."""
+
+    enable_compressor_allgather_overlap: bool = False
+    """Overlap compressor all-gather with indexer weights projection."""
+
     ####################
     # linear attention
     ####################
