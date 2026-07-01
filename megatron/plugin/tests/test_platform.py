@@ -346,6 +346,17 @@ class _FakeGraph:
         self.replayed = True
 
 
+class _FakeMstx:
+    def mstx_range(self, msg, *args, **kwargs):
+        return ("range", msg)
+
+    def range_start(self, msg, *args, **kwargs):
+        return ("push", msg)
+
+    def range_end(self, *args, **kwargs):
+        return "pop"
+
+
 class _FakeAccelerator:
     Stream = "stream-type"
     Event = "event-type"
@@ -367,11 +378,7 @@ class _FakeAccelerator:
         self._fp16 = fp16
         self._bf16 = bf16
         self.amp = "amp"
-        self.mstx = types.SimpleNamespace(
-            mstx_range=lambda msg, *args, **kwargs: ("range", msg),
-            range_start=lambda msg, *args, **kwargs: ("push", msg),
-            range_end=lambda: "pop",
-        )
+        self.mstx = _FakeMstx()
 
     def is_available(self):
         return self._available
