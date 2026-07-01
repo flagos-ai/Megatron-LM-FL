@@ -14,6 +14,7 @@ import torch
 from torch import Tensor
 
 from megatron.core import parallel_state
+from megatron.plugin.decorators import overridable  # FlagScale Add
 
 logger = logging.getLogger(__name__)
 
@@ -96,6 +97,7 @@ def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
         return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
+@overridable  # FlagScale Add
 def _apply_rotary_pos_emb_bshd(
     t: Tensor,
     freqs: Tensor,
