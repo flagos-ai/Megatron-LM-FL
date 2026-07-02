@@ -789,23 +789,26 @@ def topk_routing_with_score_function(
             return router_replay.get_replay_topk(
                 scores, topk, num_groups, group_topk, _compute_topk
             )
-
+    # Precision notes:
+    # - Logits are converted to fp32 for score functions.
+    # - All the intermediate calculations are in fp32.
+    # - The final probs are casted to the same dtype as the logits.
     if score_function == "softmax":
         if use_pre_softmax:
-            scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+            scores = torch.softmax(logits, dim=-1, dtype=torch.float32)
             probs, top_indices = compute_topk(scores, topk, num_groups, group_topk)
         else:
             scores, top_indices = compute_topk(logits, topk, num_groups, group_topk)
-            probs = torch.softmax(scores, dim=-1, dtype=torch.float32).type_as(logits)
+            probs = torch.softmax(scores, dim=-1, dtype=torch.float32)
     elif score_function in ("sigmoid", "sqrtsoftplus"):
         if score_function == "sigmoid":
-            scores = torch.sigmoid(logits.float()).type_as(logits)
-        elif score_function == "sqrtsoftplus":
-            scores = torch.nn.functional.softplus(logits.float()).sqrt().type_as(logits)
+            scores = torch.sigmoid(logits.float())
+        else:
+            scores = torch.nn.functional.softplus(logits.float()).sqrt()
         if expert_bias is not None:
-            scores_for_routing = scores + expert_bias
+            scores_for_routing = scores + expert_bias.float()
             _, top_indices = compute_topk(scores_for_routing, topk, num_groups, group_topk)
-            scores = torch.gather(scores, dim=1, index=top_indices).type_as(logits)
+            scores = torch.gather(scores, dim=1, index=top_indices)
         else:
             scores, top_indices = compute_topk(scores, topk, num_groups, group_topk)
         probs = scores / (scores.sum(dim=-1, keepdim=True) + 1e-20) if topk > 1 else scores
@@ -814,6 +817,8 @@ def topk_routing_with_score_function(
 
     if scaling_factor:
         probs = probs * scaling_factor
+
+    probs = probs.type_as(logits)
 
     if dense_output:
         return probs, top_indices

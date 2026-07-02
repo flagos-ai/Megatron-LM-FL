@@ -113,7 +113,9 @@ def _apply_rotary_pos_emb_bshd(
     Args:
         t (Tensor): Input tensor T is of shape [seq_length, ... , dim]
         freqs (Tensor): Rotary Positional embedding tensor freq is of shape [seq_length, ..., dim]
+        rotary_interleaved (bool): Whether to apply interleaving in the rotate half function.
         mla_rotary_interleaved (bool): Whether to apply MLA-style interleaving for RoPE.
+        mscale (float): The scaling factor for the RoPE.
 
     Returns:
         Tensor: The input tensor after applying RoPE
@@ -240,6 +242,7 @@ def _apply_rotary_pos_emb_thd(
             DeprecationWarning,
         )
         mla_rotary_interleaved = multi_latent_attention
+
     if cp_group is None:
         raise ValueError("cp_group must be provided for THD format RoPE")
     cp_size = cp_group.size()

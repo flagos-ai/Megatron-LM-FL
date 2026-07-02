@@ -3,8 +3,9 @@ ENV_VARS:
   NVTE_ALLOW_NONDETERMINISTIC_ALGO: 0
   NCCL_ALGO: Ring
   CUBLAS_WORKSPACE_CONFIG: :4096:8
+  ENABLE_LIGHTWEIGHT_MODE: true
 MODEL_ARGS:
-  --num-layers: 12
+  --num-layers: 6
   --hidden-size: 512
   --num-attention-heads: 8
   --multi-latent-attention: true
@@ -20,16 +21,10 @@ MODEL_ARGS:
   --dsa-indexer-loss-coeff: 0.01
   --dsa-indexer-use-sparse-loss: true
   --csa-window-size: 128
-  --csa-compress-ratios: ([0,4,128,4,0])
+  --csa-compress-ratios: ([0,4,128,4,128,4])
   --csa-compress-rotary-base: 40000
-  --no-dsa-kernel-fusion: true
   --attention-backend: fused
-  --enable-hyper-connections: true
-  --num-residual-streams: 4
-  --mhc-sinkhorn-iterations: 20
-  --mtp-num-layers: 1
-  --mtp-loss-scaling-factor: 0.1
-  --pipeline-model-parallel-layout: "Et|t|t|tmL"
+  --pipeline-model-parallel-layout: "Et|tt|tt|tL"
   --log-params-norm: true
   --log-num-zeros-in-grad: true
   --log-validation-ppl-to-tensorboard: true
@@ -38,16 +33,17 @@ MODEL_ARGS:
   --micro-batch-size: 4
   --global-batch-size: 32
   --seq-length: 1024
+  --position-embedding-type: rope
   --max-position-embeddings: 1024
   --train-iters: 50
   --timing-log-level: 0
   --lr-decay-iters: 320000
   --save: ${CHECKPOINT_SAVE_PATH}
   --load: ${CHECKPOINT_LOAD_PATH}
+  --data-path: ${DATA_PATH}/text/the_pile/shard00/my-gpt3_00_text_document
+  --vocab-file: ${DATA_PATH}/text/the_pile/shard00/bpe/vocab.json
+  --merge-file: ${DATA_PATH}/text/the_pile/shard00/bpe/merges.txt
   --split: 949,50,1
-  --tokenizer-type: NullTokenizer
-  --vocab-size: 8192
-  --mock-data: true
   --distributed-backend: nccl
   --lr: 0.00015
   --lr-decay-style: cosine
@@ -56,21 +52,21 @@ MODEL_ARGS:
   --clip-grad: 1.0
   --lr-warmup-fraction: .01
   --log-interval: 1
-  --save-interval: 10000
+  --save-interval: 25
   --eval-interval: 1000
   --eval-iters: 10
   --transformer-impl: transformer_engine
   --tensor-model-parallel-size: 1
-  --pipeline-model-parallel-size: 1
-  --use-distributed-optimizer: true
+  --pipeline-model-parallel-size: 2
+  --sequence-parallel: true
+  --untie-embeddings-and-output-weights: true
   --deterministic-mode: true
   --no-gradient-accumulation-fusion: true
   --attention-softmax-in-fp32: true
   --use-mcore-models: true
   --ckpt-format: torch_dist
-  --dist-ckpt-strictness: log_all # backward compatibility for TE changes
   --data-cache-path: ${DATA_CACHE_PATH}
   --bf16: true
   --attention-backend: unfused
   --log-memory-to-tensorboard: true
-TEST_TYPE: regular
+TEST_TYPE: ckpt-resume
