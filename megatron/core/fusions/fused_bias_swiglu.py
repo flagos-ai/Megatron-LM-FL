@@ -8,10 +8,12 @@ import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
+from megatron.plugin.decorators import overridable  # FlagScale Add
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
 
+@overridable  # FlagScale Add
 @jit_fuser
 def swiglu(y):
     """Performs SwiGLU (Swish-Gated Linear Unit) activation function.
@@ -260,6 +262,7 @@ class WeightedSwiGLUFunction(torch.autograd.Function):
         return tmp, wgrad, None, None
 
 
+@overridable  # FlagScale Add
 def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False):
     """Implementation of biased SwiGLU that handles different input shapes.
 
@@ -290,6 +293,7 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 
 
+@overridable  # FlagScale Add
 def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp_value=None):
     """
     Token-wise-weighted bias swiglu fusion.

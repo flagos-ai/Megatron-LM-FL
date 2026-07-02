@@ -66,6 +66,7 @@ _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
 }
 
 # FlagScale Begin
+from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -440,6 +441,7 @@ def linear_with_frozen_weight(
     return LinearWithFrozenWeight.apply(*args)
 
 
+@overridable  # FlagScale Add
 class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
     """See linear_with_grad_accumulation_and_async_allreduce"""
 
@@ -977,6 +979,7 @@ class ColumnParallelLinear(torch.nn.Module):
             kwargs['te_fl_prefer'] = self.config.te_fl_prefer  # FlagScale Add
             return linear_with_grad_accumulation_and_async_allreduce(input, weight, *args, **kwargs)
 
+    @overridable  # FlagScale Add
     def forward(
         self,
         input_: torch.Tensor,
