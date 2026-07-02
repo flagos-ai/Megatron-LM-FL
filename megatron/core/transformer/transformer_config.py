@@ -285,7 +285,8 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to enable hyper connections in the transformer block."""
 
     num_residual_streams: int = 4
-    """Number of residual branches for hyper connections. Only used when enable_hyper_connections is True."""
+    """Number of residual branches for hyper connections. 
+    Only used when enable_hyper_connections is True."""
 
     mhc_sinkhorn_iterations: int = 10
     """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
@@ -348,11 +349,14 @@ class TransformerConfig(ModelParallelConfig):
     """Parallel size for Engram embedding"""
 
     engram_embedding_parallel_method: Literal["alltoall", "allreduce"] = "alltoall"
-    """Parallel method for Engram embedding across embedding parallel(alltoall) / tensor parallel(allreduce) groups"""
+    """Parallel method for Engram embedding across 
+    embedding parallel(alltoall) / tensor parallel(allreduce) groups"""
 
     engram_offload_embedding_optimizer_states: bool = False
-    """Whether to offload Engram embedding optimizer states to CPU when using alltoall for Engram embedding parallelism.
-    This is typically used to save GPU memory when Engram embedding is large while accelerators are limited."""
+    """Whether to offload Engram embedding optimizer states to CPU 
+    when using alltoall for Engram embedding parallelism.
+    This is typically used to save GPU memory 
+    when Engram embedding is large while accelerators are limited."""
     ##### FlagScale End #####
 
     ####################
@@ -381,6 +385,23 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_use_sparse_loss: bool = False
     """Whether to use sparse DSA indexer loss. If True, the indexer loss will be computed using the
     top-k indices."""
+
+    ##### FlagScale Begin #####
+    indexer_types: Optional[List[str]] = None
+    """List of indexer types for each layer. If None, all layers will use the 'full' indexer type.
+    Can also be set via indexer_type_rule string, which will be expanded in __post_init__."""
+
+    indexer_type_rule: Optional[str] = None
+    """Compact rule string to generate indexer_types. Format examples:
+      - "2*full + repeat(full, shared, shared, shared)"            — prefix + cyclic pattern
+      - "2*full + repeat(full, shared, shared, shared) + 1*full"   — prefix + cyclic + suffix
+      - "repeat(full, shared)"                                   — alternating for all layers
+    Supported syntax:
+      - N*type  — N consecutive layers of the given type
+      - repeat(type, ...)  — repeating pattern to fill remaining layers
+      - Segments after repeat() become suffix (appended at the end)
+    """
+    ##### FlagScale End #####
 
     ####################
     # DeepSeek-v4 hybrid attention
@@ -1291,8 +1312,24 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.linear_num_value_heads=} must be a multiple of "
                 f"({self.tensor_model_parallel_size=} * {self.context_parallel_size=})."
             )
+        ##### FlagScale Begin #####
         elif self.experimental_attention_variant == "dsa":
-            pass
+            # Expand indexer_type_rule into indexer_types list
+            if self.indexer_type_rule is not None and self.indexer_types is None:
+                self.indexer_types = self._parse_indexer_type_rule(
+                    self.indexer_type_rule, self.num_layers
+                )
+            if self.indexer_types is not None:
+                assert len(self.indexer_types) == self.num_layers, (
+                    f"indexer_types length ({len(self.indexer_types)}) must equal "
+                    f"num_layers ({self.num_layers})"
+                )
+                valid_types = {"full", "shared"}
+                assert all(t in valid_types for t in self.indexer_types), (
+                    f"indexer_types must only contain {valid_types}, "
+                    f"got {set(self.indexer_types) - valid_types}"
+                )
+        ##### FlagScale End #####
         elif self.experimental_attention_variant == "dsv4_hybrid":
             assert self.multi_latent_attention, "DSv4 Hybrid requires multi_latent_attention."
             assert self.csa_compress_ratios is not None, "csa_compress_ratios must be set"
@@ -2093,7 +2130,10 @@ class TransformerConfig(ModelParallelConfig):
                 self.expert_tensor_parallel_size == 1
             ), "Bias in Moe is only supported when ETP==1"
 
-        if self.moe_router_enable_expert_bias and self.moe_router_score_function not in ("sigmoid", "sqrtsoftplus"):
+        if self.moe_router_enable_expert_bias and self.moe_router_score_function not in (
+            "sigmoid",
+            "sqrtsoftplus",
+        ):
             raise ValueError(
                 "Expert bias for aux-loss-free routing only supports 'sigmoid' and 'sqrtsoftplus' "
                 "score functions. Please set --moe-router-score-function to 'sigmoid' or "
@@ -2391,8 +2431,12 @@ class TransformerConfig(ModelParallelConfig):
                 "2.6.0"
             ), "A2A Overlap encounters hang issue with torch version < 2.6.0"
             if self.pipeline_model_parallel_size > 1:
-                assert self.virtual_pipeline_model_parallel_size is not None or self.dualpipev_pipeline_model_parallel_size is not None, (
-                    "If enabling EP A2A overlap, virtual_pipeline_model_parallel_size or dualpipev_pipeline_model_parallel_size "
+                assert (
+                    self.virtual_pipeline_model_parallel_size is not None
+                    or self.dualpipev_pipeline_model_parallel_size is not None
+                ), (
+                    "If enabling EP A2A overlap, virtual_pipeline_model_parallel_size "
+                    "or dualpipev_pipeline_model_parallel_size "
                     "must be specified when pipeline_model_parallel_size > 1"
                 )
             # Expert model parallelism requirements
@@ -2545,6 +2589,88 @@ class TransformerConfig(ModelParallelConfig):
             assert (
                 self.attention_backend == AttnBackend.flash
             ), "Batch invariant mode only supports FlashAttention"
+
+    ##### FlagScale Begin #####
+    @staticmethod
+    def _parse_indexer_type_rule(rule: str, num_layers: int) -> List[str]:
+        """Parse a compact indexer_type_rule string into a list of indexer types.
+
+        Syntax:
+          - "N*type" — N consecutive layers of the given type
+          - "repeat(type, ...)" — repeating pattern to fill remaining layers
+          - Terms are joined with "+"
+          - Segments before repeat() are prefix, segments after are suffix.
+
+        Examples:
+          "2*full + repeat(full, share, share, share)"
+            → 2 full prefix, then cyclic pattern fills all remaining layers
+          "2*full + repeat(full, share, share, share) + 1*full"
+            → 2 full prefix, cyclic pattern in the middle, 1 full suffix
+        """
+        import re
+
+        rule = rule.strip()
+        parts = [p.strip() for p in rule.split("+")]
+
+        prefix: List[str] = []
+        suffix: List[str] = []
+        repeat_pattern: Optional[List[str]] = None
+        # Split parts into prefix, repeat, suffix
+        collecting_suffix = False
+
+        for part in parts:
+            # Match repeat(...)
+            repeat_match = re.match(r"repeat\((.+)\)", part)
+            if repeat_match:
+                if repeat_pattern is not None:
+                    raise ValueError("indexer_type_rule: only one repeat() is allowed")
+                repeat_pattern = [t.strip() for t in repeat_match.group(1).split(",")]
+                collecting_suffix = True
+                continue
+
+            # Match N*type
+            mult_match = re.match(r"(\d+)\*(\w+)", part)
+            if mult_match:
+                count = int(mult_match.group(1))
+                typ = mult_match.group(2)
+                if collecting_suffix:
+                    suffix.extend([typ] * count)
+                else:
+                    prefix.extend([typ] * count)
+                continue
+
+            # Single type name
+            if re.match(r"\w+$", part):
+                if collecting_suffix:
+                    suffix.append(part)
+                else:
+                    prefix.append(part)
+                continue
+
+            raise ValueError(f"indexer_type_rule: cannot parse segment '{part}'")
+
+        if repeat_pattern is not None:
+            fixed_len = len(prefix) + len(suffix)
+            remaining = num_layers - fixed_len
+            if remaining < 0:
+                raise ValueError(
+                    f"indexer_type_rule: prefix ({len(prefix)}) + suffix ({len(suffix)}) "
+                    f"= {fixed_len} exceeds num_layers ({num_layers})"
+                )
+            middle = [repeat_pattern[i % len(repeat_pattern)] for i in range(remaining)]
+            result = prefix + middle + suffix
+        else:
+            # No repeat — the explicit list must match num_layers exactly
+            result = prefix
+            if len(result) != num_layers:
+                raise ValueError(
+                    f"indexer_type_rule: expanded length ({len(result)}) != "
+                    f"num_layers ({num_layers}). Use repeat() to fill remaining layers."
+                )
+
+        return result
+
+    ##### FlagScale End #####
 
 
 @dataclass

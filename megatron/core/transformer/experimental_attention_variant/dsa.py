@@ -20,6 +20,7 @@ from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
+
 # FlagScale Begin
 from megatron.plugin.platform import get_platform
 
@@ -79,7 +80,9 @@ class DSAIndexerLossLoggingHelper:
 
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
-            tracker["values"] = torch.zeros(num_layers, device=cur_platform.current_device())  # FlagScale Add
+            tracker["values"] = torch.zeros(
+                num_layers, device=cur_platform.current_device()
+            )  # FlagScale Add
         tracker["values"][layer_number - 1] += loss.detach()
         tracker["reduce_group"] = reduce_group
         tracker["avg_group"] = avg_group
@@ -1082,9 +1085,17 @@ class DSAttention(MegatronModule):
 
         self.layer_number = layer_number
 
-        self.indexer = build_module(
-            submodules.indexer, config=self.config, pg_collection=pg_collection
-        )
+        # indexer_types is 0-indexed, layer_number is 1-indexed.
+        # "share" means this layer reuses the previous layer's topk indices (no indexer needed).
+        if (
+            self.config.indexer_types is not None
+            and self.config.indexer_types[layer_number - 1] == "share"
+        ):
+            self.indexer = None
+        else:
+            self.indexer = build_module(
+                submodules.indexer, config=self.config, pg_collection=pg_collection
+            )
 
         if softmax_scale is None:
             softmax_scale = 1.0 / math.sqrt(
@@ -1103,6 +1114,7 @@ class DSAttention(MegatronModule):
         attn_mask_type: AttnMaskType = None,
         attention_bias: torch.Tensor = None,
         packed_seq_params: PackedSeqParams = None,
+        prev_topk_indices: Optional[torch.Tensor] = None,
     ):
         """
         Forward pass for Sparse Attention.
@@ -1117,6 +1129,7 @@ class DSAttention(MegatronModule):
             attn_mask_type: Type of attention mask.
             attention_bias: Optional attention bias.
             packed_seq_params: Packed sequence parameters.
+            prev_topk_indices: Top-k indices from previous layer for 'share' mode.
 
         Returns:
             output: Output tensor [sq, b, hidden_size]
@@ -1124,6 +1137,18 @@ class DSAttention(MegatronModule):
         sq, b, np, hn = query.size()
         skv = key.size(0)
         hnv = value.size(3)
+
+        # Share mode: reuse previous layer's topk indices, skip indexer computation
+        if self.indexer is None:
+            assert prev_topk_indices is not None, (
+                f"Layer {self.layer_number} has indexer_type='shared' but no prev_topk_indices "
+                f"available. Ensure the preceding layer has indexer_type='full'."
+            )
+            output = unfused_dsa_fn(query, key, value, prev_topk_indices, self.softmax_scale)
+            self.current_topk_indices = (
+                prev_topk_indices  # Store for potential use by next layer in share mode
+            )
+            return output
 
         # Detach x and qr to prevent gradients of indexer from flowing back to the main model.
         x = x.detach()
@@ -1200,5 +1225,9 @@ class DSAttention(MegatronModule):
             # Run sparse attention kernel
             # ===================================
             output = unfused_dsa_fn(query, key, value, topk_indices, self.softmax_scale)
+
+        self.current_topk_indices = (
+            topk_indices  # Store for potential use by next layer in share mode
+        )
 
         return output
