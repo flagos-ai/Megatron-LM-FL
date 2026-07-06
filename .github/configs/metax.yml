@@ -29,6 +29,7 @@ runner_labels:
 container_volumes:
   - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
   - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /dev/infiniband:/dev/infiniband
 
 # Container options (hardware-specific settings)
 container_options: >-
@@ -39,7 +40,6 @@ container_options: >-
   --ulimit nofile=65535:65535
   --device=/dev/dri
   --device=/dev/mxcd
-  --device=/dev/infiniband
 
 # Device types to run tests on
 device_types:
