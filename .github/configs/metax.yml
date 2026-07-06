@@ -39,6 +39,7 @@ container_options: >-
   --ulimit nofile=65535:65535
   --device=/dev/dri
   --device=/dev/mxcd
+  --device=/dev/infiniband
 
 # Device types to run tests on
 device_types:
