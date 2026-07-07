@@ -138,10 +138,16 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
 
 def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
+    if dist.is_initialized():
+        # Keep all ranks on the same test before tearing down shared NCCL groups.
+        dist.barrier()
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
+    if dist.is_initialized():
+        # Do not let fast ranks create the next test's groups during teardown.
+        dist.barrier()
 
 
 def _get_pg_collection_from_grid(grid):
@@ -198,10 +204,10 @@ class TestBridgeCommunicator:
     @classmethod
     def setup_class(cls):
         """Set up distributed environment for the entire test class."""
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
 
         world_size = dist.get_world_size()
         if world_size != 8:

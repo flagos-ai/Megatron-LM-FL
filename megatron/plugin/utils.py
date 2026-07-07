@@ -57,7 +57,9 @@ def reduce_aux_losses_tracker_across_ranks_hetero(
 ):
     """Collect and reduce the auxiliary losses across ranks."""
     # Lazy import inside function to avoid circular import
-    tracker = parallel_state.get_moe_layer_wise_logging_tracker()
+    from megatron.core.transformer.moe.moe_utils import get_moe_layer_wise_logging_tracker
+
+    tracker = get_moe_layer_wise_logging_tracker()
     if track_names is None:
         track_names = tracker.keys()
     for name in track_names:

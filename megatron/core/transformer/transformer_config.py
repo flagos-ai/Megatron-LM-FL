@@ -4,6 +4,7 @@ import logging
 import math
 import warnings
 from dataclasses import dataclass, field
+from functools import wraps
 from typing import Callable, List, Literal, Optional, Tuple, Union
 
 import torch
@@ -25,6 +26,7 @@ from ..utils import (
     mup_scaled_init_method_normal,
     scaled_init_method_normal,
 )
+from megatron.plugin.decorators import overridable
 
 logger = logging.getLogger(__name__)
 
@@ -36,6 +38,7 @@ except ImportError:
     HAVE_PACKAGING = False
 
 
+@overridable
 @dataclass
 class TransformerConfig(ModelParallelConfig):
     """Configuration object for megatron-core transformers.
@@ -292,7 +295,18 @@ class TransformerConfig(ModelParallelConfig):
     """Initial value of Gating Factor (alpha in paper)."""
 
     use_fused_mhc: bool = False
-    """Use cuTile fused kernels for mHC operations."""
+    """Use unified fused kernels for mHC operations.
+
+    When True, attempts to replace the reference mHC modules (SinkhornKnopp,
+    H_aggregate, H_post_bda, ProjRms) with fused/autograd implementations for
+    better performance on supported GPUs.  Backend selection is internal and
+    op-specific: Triton for Sinkhorn and H_post_bda backward when available,
+    cuTile for the remaining fused kernels when available, then native torch
+    fallback. If every mHC operation uses the native torch fallback,
+    use_fused_mhc remains enabled and a rank-0 warning is emitted. The all-native
+    fallback is functionally equivalent, but may not provide fused backend
+    performance benefits.
+    """
 
     mhc_recompute_layer_num: Optional[int] = None
     """Number of layers per MHC recompute block."""
@@ -1200,6 +1214,7 @@ class TransformerConfig(ModelParallelConfig):
     """Initialization method for LoRA B matrix."""
     # FlagScale End
 
+    @overridable
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.
         See https://docs.python.org/3/library/dataclasses.html#post-init-processing for more
@@ -1709,27 +1724,6 @@ class TransformerConfig(ModelParallelConfig):
                 "recompute_modules with selective recompute to reduce activation memory."
             )
 
-        # Validation for use_fused_mhc
-        if self.use_fused_mhc:
-            if not self.enable_hyper_connections:
-                raise ValueError("use_fused_mhc requires enable_hyper_connections=True.")
-            try:
-                from megatron.core.fusions.fused_mhc_kernels import is_cutile_available
-
-                if not is_cutile_available():
-                    warnings.warn(
-                        "use_fused_mhc is enabled but cuda.tile (cuTile) is not installed. "
-                        "Falling back to reference mHC implementations.",
-                        UserWarning,
-                    )
-                    self.use_fused_mhc = False
-            except ImportError:
-                warnings.warn(
-                    "use_fused_mhc is enabled but fused_mhc_kernels module could not be "
-                    "imported. Falling back to reference mHC implementations.",
-                    UserWarning,
-                )
-                self.use_fused_mhc = False
 
         if self.fine_grained_activation_offloading:
             assert (

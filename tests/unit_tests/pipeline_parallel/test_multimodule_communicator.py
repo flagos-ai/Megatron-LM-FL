@@ -29,10 +29,10 @@ class TestMultiModulePipelineCommunicator:
     @classmethod
     def setup_class(cls):
         """Set up distributed environment for the entire test class."""
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
 
         world_size = dist.get_world_size()
         if world_size != 8:

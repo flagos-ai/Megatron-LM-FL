@@ -233,9 +233,13 @@ class TestMegatronFsdpFullyShard:
     @classmethod
     def setup_class(cls):
         Utils.initialize_model_parallel()
+        # DCP exchanges Python metadata objects. Keep that control-plane traffic
+        # on CPU so it does not depend on the FSDP test's heavily exercised NCCL state.
+        cls.dcp_process_group = torch.distributed.new_group(backend="gloo")
 
     @classmethod
     def teardown_class(cls):
+        torch.distributed.destroy_process_group(cls.dcp_process_group)
         Utils.destroy_model_parallel()
 
     @pytest.mark.skip(reason="PyTorch DTensor does not support cross-mesh foreach operations yet")
@@ -526,12 +530,19 @@ class TestMegatronFsdpFullyShard:
             Path(SHARED_TMP_DIR)
             / TestMegatronFsdpFullyShard.__name__
             / self.test_dcp_checkpoint_save_and_load.__name__
-            / f"checkpoint_shard-{shard_strategy}_outer-{outer_shard_strategy}_{model_type}"
+            / (
+                f"checkpoint_mesh-{'x'.join(map(str, mesh_dim_config))}"
+                f"_shard-{shard_strategy}_outer-{outer_shard_strategy}_{model_type}"
+            )
         )
+        if torch.distributed.get_rank() == 0:
+            shutil.rmtree(CKPT_DIR, ignore_errors=True)
+        torch.distributed.barrier(group=self.dcp_process_group)
         CKPT_DIR.mkdir(parents=True, exist_ok=True, mode=0o777)
         torch.distributed.checkpoint.save(
             {"model": model.state_dict(), "optimizer": optimizer.state_dict()},
             checkpoint_id=str(CKPT_DIR),
+            process_group=self.dcp_process_group,
         )
 
         """
@@ -563,7 +574,11 @@ class TestMegatronFsdpFullyShard:
 
         # Load model from checkpoint.
         ckpt_state_dict = {"model": model.state_dict(), "optimizer": optimizer.state_dict()}
-        torch.distributed.checkpoint.load(state_dict=ckpt_state_dict, checkpoint_id=str(CKPT_DIR))
+        torch.distributed.checkpoint.load(
+            state_dict=ckpt_state_dict,
+            checkpoint_id=str(CKPT_DIR),
+            process_group=self.dcp_process_group,
+        )
         model.load_state_dict(ckpt_state_dict["model"], strict=False)
         optimizer.load_state_dict(ckpt_state_dict["optimizer"])
 
@@ -627,10 +642,18 @@ class TestMegatronFsdpFullyShard:
         # Validate that at least 1 rank has a non-empty model and optimizer state.
         # It is very possible that some ranks have completely empty state!
         global_nonempty_model_state = [False] * torch.distributed.get_world_size()
-        torch.distributed.all_gather_object(global_nonempty_model_state, nonempty_model_state)
+        torch.distributed.all_gather_object(
+            global_nonempty_model_state,
+            nonempty_model_state,
+            group=self.dcp_process_group,
+        )
         assert any(global_nonempty_model_state), "All ranks had an empty model state!"
         global_nonempty_optim_state = [False] * torch.distributed.get_world_size()
-        torch.distributed.all_gather_object(global_nonempty_optim_state, nonempty_optim_state)
+        torch.distributed.all_gather_object(
+            global_nonempty_optim_state,
+            nonempty_optim_state,
+            group=self.dcp_process_group,
+        )
         assert any(global_nonempty_optim_state), "All ranks had an empty optimizer state!"
 
         """
@@ -660,7 +683,7 @@ class TestMegatronFsdpFullyShard:
         # Clean up temporary checkpoint directory.
         if torch.distributed.get_rank() == 0:
             shutil.rmtree(CKPT_DIR)
-        torch.distributed.barrier()
+        torch.distributed.barrier(group=self.dcp_process_group)
 
         # Destroy device mesh.
         destroy_device_mesh(device_mesh)

@@ -3,6 +3,8 @@
 import gc
 import os
 import sys
+from dataclasses import dataclass
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,9 +32,23 @@ from megatron.core.tensor_parallel.random import (
     model_parallel_cuda_manual_seed,
 )
 from megatron.core.transformer.cuda_graphs import (
+    ArgMetadata,
     CudaGraphManager,
+    TensorReusePool,
     TECudaGraphHelper,
+    _check_supported_type,
+    _clone_nested_tensors,
     _CudagraphGlobalRecord,
+    _ensure_generator_state_is_cudagraph_safe,
+    _set_capture_end,
+    _set_capture_start,
+    _set_warmup_end,
+    _set_warmup_start,
+    create_cudagraphs,
+    delete_cuda_graphs,
+    is_graph_capturing,
+    is_graph_warmup,
+    tree_map,
 )
 from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.fused_a2a import reset_hybrid_ep_buffer
@@ -51,6 +67,159 @@ from megatron.training.training import setup_model_and_optimizer
 from tests.unit_tests.test_utilities import Utils
 
 fp8_available, _ = check_fp8_support()
+
+
+def test_cuda_graphs_cpu_metadata_pool_tree_and_state_helpers(monkeypatch):
+    from megatron.core.transformer import cuda_graphs
+
+    monkeypatch.setattr(
+        cuda_graphs,
+        "cur_platform",
+        SimpleNamespace(
+            empty_cache=lambda: None,
+            memory_stats=lambda: {
+                "allocated_bytes.all.current": 0,
+                "reserved_bytes.all.current": 0,
+            },
+        ),
+    )
+
+    tensor = torch.ones(2, requires_grad=True)
+    tensor.cg_buffer_metadata = cuda_graphs.CudagraphBufferMetadata(
+        is_cudagraph_input=True,
+        input_use_count=2,
+    )
+    meta = ArgMetadata(tensor)
+    assert meta.shape == torch.Size([2])
+    assert meta.dtype == torch.float32
+    assert meta.requires_grad is True
+    assert meta.cg_buffer_metadata is tensor.cg_buffer_metadata
+    zeros = meta.zeros_like()
+    assert zeros.shape == tensor.shape and zeros.requires_grad is True
+    assert ArgMetadata(3).value == 3
+    _check_supported_type(meta)
+    _check_supported_type(ArgMetadata(None))
+    _check_supported_type(ArgMetadata(True))
+    with pytest.raises(AssertionError, match="not supported"):
+        _check_supported_type(ArgMetadata(object()))
+
+    pool = TensorReusePool()
+    pool.pool = []
+    pool.tensor_strong_refs = []
+    pool.tensor_strong_refs_dataptrs = set()
+    first = pool.get(meta)
+    assert pool.owns(first) is True
+    pool.insert(first)
+    assert pool.get(meta) is first
+
+    @dataclass
+    class _Nested:
+        value: torch.Tensor
+        payload: dict
+
+    nested = _Nested(torch.tensor([1.0]), {"x": torch.tensor([2.0])})
+    mapped = tree_map(lambda value: value + 1 if torch.is_tensor(value) else value, nested)
+    assert torch.equal(mapped.value, torch.tensor([2.0]))
+    assert torch.equal(mapped.payload["x"], torch.tensor([3.0]))
+
+    cloned = _clone_nested_tensors({"a": tensor, "b": (tensor,)})
+    assert cloned["a"] is not tensor
+    assert torch.equal(cloned["b"][0], tensor)
+    with pytest.raises(TypeError, match="Sets of tensors"):
+        _clone_nested_tensors({tensor})
+
+    _set_capture_start()
+    assert is_graph_capturing() is True
+    _set_capture_end()
+    assert is_graph_capturing() is False
+    _set_warmup_start()
+    assert is_graph_warmup() is True
+    _set_warmup_end()
+    assert is_graph_warmup() is False
+
+    class _Generator:
+        def __init__(self):
+            self.state = torch.tensor([1, 2, 3])
+
+        def graphsafe_get_state(self):
+            return self.state
+
+        def graphsafe_set_state(self, state):
+            self.state = state
+
+    gen = _Generator()
+    before_state = gen.state
+    assert _ensure_generator_state_is_cudagraph_safe(gen) is gen
+    assert torch.equal(gen.state, before_state)
+    assert gen.state is not before_state
+
+
+def test_cuda_graphs_cpu_global_record_and_delete_paths(monkeypatch):
+    from megatron.core.transformer import cuda_graphs
+
+    calls = []
+    monkeypatch.setattr(cuda_graphs.torch.distributed, "get_rank", lambda: 1)
+    monkeypatch.setattr(cuda_graphs.torch.cuda, "set_stream", lambda stream: calls.append(("set_stream", stream)))
+    monkeypatch.setattr(cuda_graphs.torch.cuda, "default_stream", lambda: "default")
+    monkeypatch.setattr(cuda_graphs.gc, "collect", lambda: calls.append("gc"))
+    monkeypatch.setattr(
+        cuda_graphs,
+        "cur_platform",
+        SimpleNamespace(
+            empty_cache=lambda: calls.append("empty_cache"),
+            memory_stats=lambda: {
+                "allocated_bytes.all.current": len(calls),
+                "reserved_bytes.all.current": len(calls) * 2,
+            },
+        ),
+    )
+    monkeypatch.setattr(cuda_graphs, "HAVE_TE_GRAPHS", False)
+    monkeypatch.setattr(cuda_graphs, "HAVE_TQDM", False)
+
+    class _Runner:
+        def __init__(self):
+            self.base_module = torch.nn.Linear(1, 1)
+            self.created = []
+            self.cudagraph_created = False
+            self.fwd_graph_recorded = True
+            self.bwd_graph_recorded = True
+            self.fwd_graph = "fwd"
+            self.bwd_graph = "bwd"
+            self.mempool = "pool"
+
+        def create_fwd_graph(self, args, kwargs, out, clone_inputs=True):
+            self.created.append(("fwd", args, kwargs, out, clone_inputs))
+
+        def create_bwd_graph(self):
+            self.created.append("bwd")
+
+    runner = _Runner()
+    _CudagraphGlobalRecord.cudagraph_created = False
+    _CudagraphGlobalRecord.cudagraph_record = []
+    _CudagraphGlobalRecord.cudagraph_inference_record = []
+    _CudagraphGlobalRecord.record_fwd_graph(runner, (torch.tensor([1.0]),), {"x": 2}, torch.tensor([3.0]))
+    _CudagraphGlobalRecord.record_bwd_graph(runner)
+    stats = create_cudagraphs()
+    assert runner.created[0][0] == "fwd"
+    assert runner.created[1] == "bwd"
+    assert runner.cudagraph_created is True
+    assert _CudagraphGlobalRecord.cudagraph_created is True
+    assert _CudagraphGlobalRecord.cudagraph_record == []
+    assert set(stats) == {"time", "allocated_bytes", "reserved_bytes"}
+    assert ("set_stream", "default") in calls
+
+    with pytest.raises(AssertionError, match="already created"):
+        _CudagraphGlobalRecord.record_bwd_graph(runner)
+        create_cudagraphs()
+
+    _CudagraphGlobalRecord.cudagraph_created = False
+    _CudagraphGlobalRecord.cudagraph_record = [(runner, "fwd")]
+    _CudagraphGlobalRecord.cudagraph_inference_record = []
+    monkeypatch.setattr(cuda_graphs, "_CudaGraphRunner", _Runner)
+    delete_cuda_graphs()
+    assert runner.cudagraph_created is False
+    assert runner.fwd_graph is None
+    assert cuda_graphs.CudaGraphManager.global_mempool is None
 
 
 class TestParallelTransformerBlockCudagraphs:

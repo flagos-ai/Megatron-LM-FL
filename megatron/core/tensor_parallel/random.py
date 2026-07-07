@@ -23,6 +23,9 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from megatron.core.utils import is_te_min_version, safely_set_viewless_tensor_data
+from megatron.plugin.decorators import overridable  # FlagScale Add
+
+from megatron.plugin.decorators import overridable
 
 # ---------------------------------------------------------------------------
 # C++ extension: zero-copy storage sharing for CheckpointWithoutOutput
@@ -128,7 +131,7 @@ def _get_cuda_rng_state(
         return default_generator.clone_state()
     return default_generator.graphsafe_get_state()
 
-
+@overridable
 def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: bool = False):
     """Sets the random number generator state of the current GPU.
 
@@ -220,6 +223,7 @@ def get_data_parallel_rng_tracker_name():
     return _DATA_PARALLEL_RNG_TRACKER_NAME
 
 
+@overridable  # FlagScale Add
 class CudaRNGStatesTracker:
     """Tracker for the cuda RNG states.
 

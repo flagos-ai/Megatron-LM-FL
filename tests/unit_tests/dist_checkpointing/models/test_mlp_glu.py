@@ -93,26 +93,12 @@ class TestParallelMLPWithGLU:
             diffs = diff(state_dict_A, state_dict_B)
             assert not any(map(bool, diffs)), diffs
 
-    def test_oom_is_handled(self, caplog):
+    def test_oom_is_handled(self, caplog, monkeypatch):
         Utils.initialize_model_parallel(Utils.world_size, 1)
         dtype = torch.bfloat16
 
-        # Compute free memory in bytes
-        device = torch.cuda.current_device()
-        allocated = torch.cuda.memory_allocated(device)
-        total = torch.cuda.get_device_properties(device).total_memory
-        free = total - allocated
-
-        # We should create two tensor which take up between 50% and 100% of free memory,
-        # so that the torch.cat tries to allocate twice as many and OOMs.
-        expected_local_num_bytes = free * 0.6
-
-        local_num_elems = expected_local_num_bytes // torch._utils._element_size(dtype)
-        local_num_elems = int(local_num_elems // 1024 * 1024)
-        assert local_num_elems % 1024 == 0
-
-        local_w_plus_v_shape = (local_num_elems // 512, 512)
-        local_w_or_v_shape = (local_num_elems // 1024, 512)
+        local_w_plus_v_shape = (8, 8)
+        local_w_or_v_shape = (4, 8)
 
         fc1_weight_sh_ten = ShardedTensor.from_rank_offsets(
             'a',
@@ -134,7 +120,17 @@ class TestParallelMLPWithGLU:
         # Load happens in-place, so we can just use the same tensors
         loaded_state_dict = [sh_ten.data for sh_ten in sharded_state_dict]
 
-        # The critical part that should OOM:
+        real_cat = torch.cat
+
+        def raise_cuda_oom(tensors, *args, **kwargs):
+            if tensors and tensors[0].is_cuda:
+                raise torch.cuda.OutOfMemoryError("synthetic merge OOM")
+            return real_cat(tensors, *args, **kwargs)
+
+        # Exercise the CPU fallback without consuming most of the shared CI GPU memory.
+        monkeypatch.setattr(torch, "cat", raise_cuda_oom)
         with caplog.at_level(logging.WARNING):
-            fc1_factory.merge_fn(loaded_state_dict)
+            merged = fc1_factory.merge_fn(loaded_state_dict)
             assert "CUDA OutOfMemoryError encountered during tensors merging" in caplog.text
+        assert merged.device.type == "cpu"
+        assert torch.equal(merged, real_cat([tensor.cpu() for tensor in loaded_state_dict]))

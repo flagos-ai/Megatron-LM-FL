@@ -2,8 +2,12 @@
 
 import pytest
 import torch.distributed as dist
+from types import SimpleNamespace
 
-from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.process_groups_config import (
+    MultiModuleProcessGroupCollection,
+    ProcessGroupCollection,
+)
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -120,3 +124,149 @@ class TestPGConfigDefaultInitialization:
         # Test that an error is raised if an invalid process group is requested
         with pytest.raises(ValueError, match=r"Invalid process groups requested"):
             model_pgs = ProcessGroupCollection.use_mpu_process_groups(['tp', 'pp', 'foo'])
+
+
+def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypatch):
+    class _Group:
+        def __init__(self, name, size=1):
+            self.name = name
+            self._size = size
+
+        def size(self):
+            return self._size
+
+        def __repr__(self):
+            return f"Group({self.name})"
+
+    created_groups = []
+    monkeypatch.setattr(dist, "get_rank", lambda: 3)
+    monkeypatch.setattr(
+        dist,
+        "new_group",
+        lambda ranks: created_groups.append(tuple(ranks)) or _Group(f"new-{ranks[0]}"),
+    )
+
+    model = SimpleNamespace(
+        config=SimpleNamespace(context_parallel_size=1),
+        ddp_config=SimpleNamespace(
+            num_distributed_optimizer_instances=1,
+            use_distributed_optimizer=False,
+        )
+    )
+    pg_collection = ProcessGroupCollection(
+        dp=_Group("dp"),
+        expt_dp=None,
+        mp=_Group("mp"),
+        tp=_Group("tp"),
+        pp=_Group("pp"),
+        ep=_Group("ep"),
+        tp_ep_pp=_Group("tp_ep_pp"),
+    )
+
+    optimizer_groups = ProcessGroupCollection.setup_process_groups_for_optimizer(
+        pg_collection,
+        [model],
+        use_gloo_process_groups=False,
+    )
+    assert optimizer_groups["dp_cp_group"] is pg_collection.dp
+    assert optimizer_groups["intra_dp_cp_group"] is pg_collection.dp
+    assert optimizer_groups["inter_dist_opt_group"] is None
+    assert optimizer_groups["engram_dp_group"] is None
+
+    ddp_groups = ProcessGroupCollection.setup_process_groups_for_ddp(
+        pg_collection,
+        SimpleNamespace(context_parallel_size=1),
+        model.ddp_config,
+    )
+    assert ddp_groups["dp_cp_group"] is pg_collection.dp
+    assert ddp_groups["expt_dp_group"].name == "new-3"
+    assert created_groups == [(3,)]
+    assert ddp_groups["tp_group"] is pg_collection.tp
+
+    with pytest.raises(ValueError, match="Gloo process groups"):
+        ProcessGroupCollection.setup_process_groups_for_optimizer(pg_collection, [model])
+
+    with pytest.raises(ValueError, match="dp process group"):
+        ProcessGroupCollection.setup_process_groups_for_optimizer(
+            ProcessGroupCollection(expt_dp=None, mp=None, tp_ep_pp=None),
+            [model],
+            use_gloo_process_groups=False,
+        )
+
+    with pytest.raises(ValueError, match="dp_cp process group"):
+        ProcessGroupCollection.setup_process_groups_for_ddp(
+            ProcessGroupCollection(dp=_Group("dp"), expt_dp=None, tp=_Group("tp"), pp=_Group("pp"), ep=_Group("ep")),
+            SimpleNamespace(context_parallel_size=2),
+            model.ddp_config,
+        )
+
+    multi_instance_model = SimpleNamespace(
+        config=SimpleNamespace(context_parallel_size=1),
+        ddp_config=SimpleNamespace(
+            num_distributed_optimizer_instances=2,
+            use_distributed_optimizer=True,
+        )
+    )
+    complete_pg = ProcessGroupCollection(
+        dp=_Group("dp"),
+        dp_cp=_Group("dp_cp"),
+        expt_dp=_Group("expt_dp"),
+        intra_dp_cp=_Group("intra_dp_cp"),
+        intra_expt_dp=_Group("intra_expt_dp"),
+        inter_dist_opt=_Group("inter"),
+        intra_dist_opt=_Group("intra"),
+        mp=_Group("mp"),
+        tp=_Group("tp"),
+        pp=_Group("pp"),
+        ep=_Group("ep"),
+        tp_ep_pp=_Group("tp_ep_pp"),
+        engram_dp=_Group("engram_dp"),
+        engram_embed=_Group("engram_embed"),
+        engram_mp=_Group("engram_mp"),
+    )
+    multi_groups = ProcessGroupCollection.setup_process_groups_for_optimizer(
+        complete_pg,
+        [multi_instance_model],
+        use_gloo_process_groups=False,
+    )
+    assert multi_groups["intra_dist_opt_group"] is complete_pg.intra_dist_opt
+    assert multi_groups["inter_dist_opt_group"] is complete_pg.inter_dist_opt
+
+
+def test_multi_module_process_group_collection_paths():
+    class _Group:
+        def __init__(self, size):
+            self._size = size
+
+        def size(self):
+            return self._size
+
+    encoder = ProcessGroupCollection(cp=_Group(1))
+    llm = ProcessGroupCollection(cp=_Group(4))
+    collection = MultiModuleProcessGroupCollection(
+        module_pgs={"encoder": encoder, "llm": llm},
+        language_model_module_name="llm",
+    )
+
+    assert collection.has_language_model() is True
+    assert collection.get_language_model_collection() is llm
+    assert collection.get_language_model_cp_size() == 4
+    assert collection.get_module_collection("encoder") is encoder
+    assert collection["llm"] is llm
+    assert len(collection) == 2
+    assert list(collection.keys()) == ["encoder", "llm"]
+    assert list(collection.values()) == [encoder, llm]
+    assert list(collection.items()) == [("encoder", encoder), ("llm", llm)]
+    assert list(iter(collection)) == [encoder, llm]
+    assert "language_model_module_name='llm'" in repr(collection)
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        MultiModuleProcessGroupCollection(module_pgs={})
+    with pytest.raises(ValueError, match="not found"):
+        MultiModuleProcessGroupCollection(module_pgs={"encoder": encoder}, language_model_module_name="llm")
+    no_llm = MultiModuleProcessGroupCollection(module_pgs={"encoder": encoder})
+    assert no_llm.has_language_model() is False
+    with pytest.raises(ValueError, match="No language model"):
+        no_llm.get_language_model_collection()
+    with pytest.raises(ValueError, match="Module 'missing'"):
+        collection.get_module_collection("missing")

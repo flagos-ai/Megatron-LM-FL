@@ -2,6 +2,7 @@
 
 import contextlib
 import math
+from types import SimpleNamespace
 from typing import Optional
 from unittest import mock
 
@@ -10,7 +11,15 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
-from megatron.core.distributed.param_and_grad_buffer import partition_buckets
+from megatron.core.distributed import param_and_grad_buffer as pgb
+from megatron.core.distributed.param_and_grad_buffer import (
+    BufferType,
+    _LayerwiseAllGatherHandle,
+    _ParamAndGradBucket,
+    _ParamAndGradBucketGroup,
+    partition_buckets,
+    shard_buffer,
+)
 from megatron.core.transformer import TransformerConfig
 from tests.unit_tests.test_utilities import TestModel, Utils
 
@@ -376,6 +385,178 @@ def test_force_all_reduce_uses_correct_collective(force_all_reduce: bool):
             ), "Expected all_reduce NOT to be called when force_all_reduce=False"
 
     Utils.destroy_model_parallel()
+
+
+def test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers(monkeypatch):
+    class _Group:
+        def __init__(self, rank=0, size=2):
+            self._rank = rank
+            self._size = size
+
+        def rank(self):
+            return self._rank
+
+        def size(self):
+            return self._size
+
+    class _Handle:
+        def __init__(self):
+            self.waited = False
+
+        def wait(self):
+            self.waited = True
+
+    class _Coalescing:
+        def __init__(self, group, async_ops=False):
+            self.group = group
+            self.async_ops = async_ops
+            self.waited = False
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def wait(self):
+            self.waited = True
+
+    p0 = torch.nn.Parameter(torch.tensor([1.0, 2.0]))
+    p1 = torch.nn.Parameter(torch.tensor([3.0, 4.0]))
+    p0.main_grad = torch.full_like(p0, 5.0)
+    p0.main_grad_copy_in_grad_buffer = torch.zeros_like(p0)
+    param_index_map = {p0: (0, 2, 0), p1: (2, 4, 0)}
+    grad_data = torch.arange(4.0)
+    bucket = _ParamAndGradBucket(
+        params=[p0, p1],
+        param_data=torch.arange(4.0),
+        grad_data=grad_data,
+        offset=0,
+        numel_unpadded=4,
+        gradient_scaling_factor=0.5,
+        bucket_id=0,
+        param_index_map=param_index_map,
+        params_with_extra_main_grads=[p0],
+    )
+    assert bucket.param_to_index[p1] == (2, 4)
+    bucket.set_layerwise_params_list([[p0], [p1]])
+    assert bucket.layerwise_param_flat_sizes == [2, 2]
+    assert [shard.tolist() for shard in shard_buffer(torch.arange(6), 3)] == [[0, 1], [2, 3], [4, 5]]
+    with pytest.raises(AssertionError):
+        shard_buffer(torch.arange(5), 2)
+
+    all_reduce_calls = []
+
+    def _all_reduce(tensor, op=None, group=None, async_op=False):
+        all_reduce_calls.append((tensor.clone(), op, group, async_op))
+        tensor.add_(1.0)
+        return _Handle() if async_op else None
+
+    monkeypatch.setattr(torch.distributed, "all_reduce", _all_reduce)
+    monkeypatch.setattr(torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(pgb, "_coalescing_manager", _Coalescing)
+
+    ddp_config = DistributedDataParallelConfig(overlap_grad_reduce=False)
+    group = _ParamAndGradBucketGroup([bucket], ddp_config, _Group(), 2)
+    group.per_param_grad_ready_counts = {p0: 1, p1: 2}
+    group.reset()
+    assert group.golden_per_param_grad_ready_counts == {p0: 1, p1: 2}
+    assert group.is_first_batch is False
+
+    group.finish_grad_sync(force_all_reduce=True)
+    assert all_reduce_calls
+    torch.testing.assert_close(p0.main_grad, p0.main_grad_copy_in_grad_buffer)
+    assert p0.main_grad_copy_in_grad_buffer.tolist() == [3.5, 3.5]
+
+    overlap_config = DistributedDataParallelConfig(
+        overlap_grad_reduce=True,
+        overlap_param_gather=True,
+    )
+    overlap_group = _ParamAndGradBucketGroup([bucket], overlap_config, _Group(), 2)
+    overlap_group.golden_per_param_grad_ready_counts = {p0: 1, p1: 1}
+    overlap_group.is_first_batch = False
+    overlap_group.register_grad_ready(p0)
+    assert overlap_group.per_param_grad_ready_counts == {p0: 1}
+    with pytest.raises(AssertionError, match="Param is not"):
+        overlap_group.register_grad_ready(torch.nn.Parameter(torch.ones(1)))
+    overlap_group.register_grad_ready(p1, force_all_reduce=True)
+    assert overlap_group.grad_reduce_handle is not None
+    overlap_group.finish_grad_sync()
+    assert overlap_group.grad_reduce_handle is None
+
+    gathered_remote = torch.tensor([9.0, 10.0])
+
+    def _all_gather(gather_list, tensor, group=None, async_op=False):
+        gather_list[1].copy_(gathered_remote)
+        return _Handle() if async_op else None
+
+    monkeypatch.setattr(torch.distributed, "all_gather", _all_gather)
+    bucket.set_layerwise_params_list([[p0], [p1]])
+    overlap_group.start_param_sync(force_sync=True)
+    torch.testing.assert_close(p1.detach(), gathered_remote)
+    assert bucket.layerwise_gather_list is None
+    assert bucket._layerwise_src_buffer is None
+
+    bucket.set_layerwise_params_list([[p0], [p1]])
+    overlap_group.param_gather_dispatched = False
+    overlap_group.start_param_sync()
+    assert overlap_group.param_gather_handle is not None
+    overlap_group.finish_param_sync(skip_next_bucket_dispatch=True)
+    assert overlap_group.param_gather_handle is None
+    torch.testing.assert_close(p1.detach(), gathered_remote)
+
+    pending = _Handle()
+    overlap_group.param_gather_handle = pending
+    bucket.layerwise_gather_list = [torch.empty(2), torch.empty(2)]
+    bucket._layerwise_src_buffer = torch.empty(2)
+    overlap_group.free_overlap_buffers()
+    assert pending.waited is True
+    assert bucket.layerwise_gather_list is None
+
+    wrapper = _LayerwiseAllGatherHandle([_Handle(), _Handle()])
+    last = wrapper.handles[-1]
+    wrapper.wait()
+    assert last.waited is True and wrapper.handles is None
+
+    class _Buffer:
+        def __init__(self, dtype, buckets, config=ddp_config):
+            self.param_dtype = dtype
+            self.buckets = buckets
+            self.ddp_config = config
+            self.data_parallel_group = _Group()
+            self.data_parallel_world_size = 2
+
+    bfloat_buffer = _Buffer(torch.bfloat16, [bucket])
+    fp8_bucket_a = SimpleNamespace(params_list=[])
+    fp8_bucket_b = SimpleNamespace(params_list=[])
+    fp8_buffer = _Buffer(torch.uint8, [fp8_bucket_a, fp8_bucket_b])
+    assert partition_buckets([]) == []
+    assert len(partition_buckets([bfloat_buffer], force_single_bucket_group=True)) == 1
+    assert len(partition_buckets([bfloat_buffer])) == 1
+    fp8_groups = partition_buckets([fp8_buffer, bfloat_buffer])
+    assert fp8_groups[-1].buckets == [fp8_bucket_b, bucket]
+    split_groups = partition_buckets(
+        [fp8_buffer, bfloat_buffer], reduce_scatter_with_fp32_accumulation=True
+    )
+    assert [g.buckets for g in split_groups] == [[fp8_bucket_a], [fp8_bucket_b], [bucket]]
+    with pytest.raises(AssertionError):
+        partition_buckets([bfloat_buffer, _Buffer(torch.bfloat16, [bucket])])
+
+    tiny_buffer = mock.Mock()
+    tiny_buffer.ddp_config = ddp_config
+    tiny_buffer.data_parallel_world_size = 1
+    tiny_buffer.param_data = torch.arange(4.0)
+    tiny_buffer.grad_data = torch.arange(4.0)
+    tiny_buffer.param_data_cpu = None
+    tiny_buffer.grad_data_size = 0
+    tiny_buffer.has_nvfp4_params = False
+    tiny_buffer.param_index_map = param_index_map
+    tiny_buffer._get = pgb._ParamAndGradBuffer._get.__get__(tiny_buffer, pgb._ParamAndGradBuffer)
+    assert tiny_buffer._get(torch.Size([2]), 1, BufferType.PARAM).tolist() == [1.0, 2.0]
+    assert tiny_buffer._get(torch.Size([2]), 2, BufferType.GRAD).tolist() == [2.0, 3.0]
+    with pytest.raises(Exception, match="Illegal buffer type"):
+        tiny_buffer._get(torch.Size([1]), 0, object())
+    assert pgb._ParamAndGradBuffer.get_unpacked_index_map(tiny_buffer) is param_index_map
 
 
 class TestFreeOverlapBuffers:

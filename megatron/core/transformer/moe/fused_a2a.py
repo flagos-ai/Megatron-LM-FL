@@ -5,6 +5,10 @@
 
 from megatron.core.utils import internal_api
 
+########## FlagScale Begin ##########
+from megatron.plugin.decorators import overridable
+########## FlagScale End ##########
+
 try:
     from deep_ep import Buffer
     from deep_ep.utils import EventHandle, EventOverlap
@@ -30,6 +34,7 @@ def get_hidden_bytes(x: torch.Tensor) -> int:
     return x.size(1) * max(x.element_size(), 2)
 
 
+@overridable  # FlagScale Add
 def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
     """Get or create a buffer for all-to-all communication.
 
@@ -66,6 +71,7 @@ def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
     return _buffer
 
 
+@overridable  # FlagScale Add
 class FusedDispatch(torch.autograd.Function):
     """Fused dispatch operation for MoE routing combining computation and communication."""
 
@@ -160,6 +166,7 @@ class FusedDispatch(torch.autograd.Function):
         return grad_x, None, grad_token_probs, None, None, None, None
 
 
+@overridable  # FlagScale Add
 class FusedCombine(torch.autograd.Function):
     """Fused combine operation for MoE output combining computation and communication."""
 
@@ -209,6 +216,7 @@ class FusedCombine(torch.autograd.Function):
 
 if HAVE_DEEP_EP:
 
+    @overridable  # FlagScale Add
     def fused_dispatch(
         x,
         token_indices,
@@ -241,6 +249,7 @@ if HAVE_DEEP_EP:
             allocate_on_comm_stream,
         )
 
+    @overridable  # FlagScale Add
     def fused_combine(x, group, handle, async_finish=False, allocate_on_comm_stream=False):
         """Perform fused combine operation if deep_ep is available.
 

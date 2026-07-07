@@ -39,6 +39,7 @@ from megatron.core.utils import (
 )
 
 ########## FlagScale Begin ##########
+from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -376,6 +377,7 @@ class MTPLossLoggingHelper:
         tracker["reduce_group"] = None
         tracker["avg_group"] = None
 
+    @overridable  # FlagScale Add
     def reduce_loss_in_tracker():
         """Collect and reduce the mtp losses across ranks."""
         tracker = MTPLossLoggingHelper.tracker

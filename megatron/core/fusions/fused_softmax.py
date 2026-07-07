@@ -6,8 +6,9 @@ import torch.nn as nn
 
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.utils import get_default_causal_mask, get_sliding_window_causal_mask
+from megatron.plugin.decorators import overridable
 
-
+@overridable
 class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
     """
     Fused operation which performs following three operations in sequence
@@ -56,7 +57,7 @@ class ScaledUpperTriangMaskedSoftmax(torch.autograd.Function):
 
         return input_grads, None
 
-
+@overridable
 class ScaledMaskedSoftmax(torch.autograd.Function):
     """
     Fused operation which performs following three operations in sequence
@@ -104,7 +105,7 @@ class ScaledMaskedSoftmax(torch.autograd.Function):
         input_grads = scaled_masked_softmax_cuda.backward(output_grads, softmax_results, scale_t[0])
         return input_grads, None, None
 
-
+@overridable
 class ScaledSoftmax(torch.autograd.Function):
     """
     Fused operation which performs following two operations in sequence
@@ -234,7 +235,7 @@ class FusedScaleMaskSoftmax(nn.Module):
             return self.forward_fused_softmax(input, mask)
         else:
             return self.forward_torch_softmax(input, mask, softmax_offset)
-
+    @overridable
     def is_kernel_available(self, mask, b, np, sq, sk):
         """Check whether the fused CUDA kernel can be used for the given shapes and settings.
 
@@ -268,7 +269,7 @@ class FusedScaleMaskSoftmax(nn.Module):
                     if sq % batch_per_block == 0:
                         return True
         return False
-
+    @overridable
     def forward_fused_softmax(self, input, mask):
         """Compute softmax using fused CUDA kernels when available.
 
