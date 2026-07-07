@@ -30,6 +30,13 @@ container_volumes:
   - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
   - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
   - /dev/infiniband:/dev/infiniband
+  # Mount host RDMA userspace libraries/providers to match the runner kernel ABI.
+  - /usr/lib/x86_64-linux-gnu/libibverbs.so.1.14.52.0:/usr/lib/x86_64-linux-gnu/libibverbs.so.1.14.52.0
+  - /usr/lib/x86_64-linux-gnu/libibverbs.so.1:/usr/lib/x86_64-linux-gnu/libibverbs.so.1
+  - /usr/lib/x86_64-linux-gnu/libibverbs.so:/usr/lib/x86_64-linux-gnu/libibverbs.so
+  - /lib/x86_64-linux-gnu/librdmacm.so.1:/usr/lib/x86_64-linux-gnu/librdmacm.so.1
+  - /lib/x86_64-linux-gnu/librdmacm.so:/usr/lib/x86_64-linux-gnu/librdmacm.so
+  - /usr/local/lib/libbnxt_re-rdmav34.so:/usr/lib/x86_64-linux-gnu/libibverbs/libbnxt_re-rdmav34.so
 
 # Container options (hardware-specific settings)
 container_options: >-
