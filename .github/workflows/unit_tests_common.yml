@@ -128,6 +128,7 @@ jobs:
           if [ "$PLATFORM" != "metax" ]; then
             git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
             pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
+            pip install protobuf==6.33.1
           else
             echo "Skipping nvidia-resiliency-ext on Metax because it requires NVIDIA CUPTI."
           fi
