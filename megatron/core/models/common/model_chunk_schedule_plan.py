@@ -19,6 +19,8 @@ from megatron.core.pipeline_parallel.utils import (
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+from megatron.core.transformer.hyper_connection import HyperConnectionModule
+from megatron.core.transformer.transformer_block import TransformerBlock
 ########## FlagScale End ##########
 
 
@@ -84,6 +86,8 @@ class TransformerLayerSchedulePlan:
         self.event = event
         self.comp_stream = comp_stream
         self.comm_stream = comm_stream
+        self.layer_state.mhc_recompute_manager = extra_args.get("mhc_recompute_manager", None)  # FlagScale Add
+        self.layer_state.mhc_is_last_layer_in_recompute_block = extra_args.get("mhc_is_last_layer_in_recompute_block", False)  # FlagScale Add
 
         # get callable nodes for transformer/mtp layer
         self._build_callable_nodes(event, comp_stream, comm_stream, extra_args)
@@ -344,6 +348,34 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self.pre_process = PreProcessNode(
             model, self._model_chunk_state, self._event, get_comp_stream
         )
+        ##### FlagScale Begin #####
+        self.enable_hyper_connections = getattr(model.config, "enable_hyper_connections", False)
+        self.num_residual_streams = getattr(model.config, "num_residual_streams", 1)
+        # Build mhc recompute manager like TransformerBlock. 
+        decoder = model.decoder
+        use_mhc_recompute = (
+            decoder.training
+            and decoder.config.enable_hyper_connections
+            and decoder.config.recompute_granularity == 'selective'
+            and "mhc" in decoder.config.recompute_modules
+        )
+        # If not enable_hyper_connections, the mhc_layer_managers will be all None and mhc_is_last_in_recompute_block will be all False, so it won't have effect on execution.
+        self.mhc_layer_managers, self.mhc_is_last_in_recompute_block = decoder._build_mhc_recompute_layer_plan(use_mhc_recompute)
+        if self.enable_hyper_connections:
+            self._model_chunk_state.hc_head_fn = decoder.hc_head_fn
+            self._model_chunk_state.hc_head_base = decoder.hc_head_base
+            self._model_chunk_state.hc_head_scale = decoder.hc_head_scale
+            self._model_chunk_state.num_residual_streams = self.num_residual_streams
+            self._model_chunk_state.layernorm_epsilon = decoder.config.layernorm_epsilon
+            self._model_chunk_state.enable_mtp = decoder.config.mtp_num_layers is not None
+        else:
+            self._model_chunk_state.hc_head_fn = None
+            self._model_chunk_state.hc_head_base = None
+            self._model_chunk_state.hc_head_scale = None
+            self._model_chunk_state.num_residual_streams = None
+            self._model_chunk_state.layernorm_epsilon = None
+            self._model_chunk_state.enable_mtp = False
+        ##### FlagScale End #####
 
         # build layer schedule plan for each layer.
         # The methods to obtain layers are different for MTP so we need the other build plan for
@@ -370,11 +402,22 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 "is_last_layer": layer_idx == num_layers - 1,
             }
             ########## FlagScale Begin ##########
-            if hasattr(layer, "engram"):
+            if layer.config.use_engram and hasattr(layer, "engram"):
                 extra_args["is_engram"] = True
                 extra_args["engram_hash_input_ids"] = self.state.extra_block_kwargs[
                     "engram_hash_input_ids"
                 ]
+            if self.enable_hyper_connections:
+                mhc_recompute_manager = self.mhc_layer_managers[layer_idx]
+                if mhc_recompute_manager is not None:
+                    mhc_recompute_manager.is_last_layer_in_recompute_block = self.mhc_is_last_in_recompute_block[layer_idx]
+                    extra_args["mhc_recompute_manager"] = mhc_recompute_manager
+                    extra_args["enable_hyper_connections"] = True
+                else:
+                    extra_args["mhc_recompute_manager"] = None
+                    extra_args["enable_hyper_connections"] = False
+                extra_args["mhc_is_last_layer_in_recompute_block"] = self.mhc_is_last_in_recompute_block[layer_idx]
+                
             ########## FlagScale End ##########
             layer_plan = TransformerLayerSchedulePlan(
                 layer,  # FlagScale Add
@@ -428,6 +471,15 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         if self.post_process is not None:
             self.post_process.model_chunk_state = None
             self.post_process = None
+        ##### FlagScale Begin #####
+        if self.enable_hyper_connections:
+            self._model_chunk_state.hc_head_fn = None
+            self._model_chunk_state.hc_head_base = None
+            self._model_chunk_state.hc_head_scale = None
+            self._model_chunk_state.num_residual_streams = None
+            self._model_chunk_state.layernorm_epsilon = None
+            self._model_chunk_state.enable_mtp = None
+        ##### FlagScale End #####
 
     @staticmethod
     def run(
@@ -473,6 +525,10 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 pre_forward(f_schedule_plan.vp_stage)
             f_schedule_plan.record_current_stream()
             f_input = f_schedule_plan.pre_process.forward()
+            ##### FlagScale Begin #####
+            if f_schedule_plan.enable_hyper_connections:
+                f_input = HyperConnectionModule.input_expand(f_input, f_schedule_plan.num_residual_streams)
+            ########## FlagScale End ##########
 
         if b_schedule_plan:
             b_schedule_plan.record_current_stream()
@@ -501,6 +557,13 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 b_grad=b_grad,
                 is_last_layer_in_bwd=(i == b_num_layers - 1),
             )
+            ##### FlagScale #####
+            TransformerBlock._finalize_mhc_recompute_layer(
+                mhc_manager=f_layer.layer_state.mhc_recompute_manager,
+                hidden_states=f_input,
+                is_last_in_recompute_block=f_layer.layer_state.mhc_is_last_layer_in_recompute_block,
+            )
+            ##### FlagScale End #####
             if i < b_num_layers - 1:
                 b_layer.release_state()
             cur_platform.range_pop()  # FlagScale Add
@@ -522,6 +585,13 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             cur_platform.range_push(f"layer_{i}f")  # FlagScale Add
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
             cur_platform.range_pop()  # FlagScale Add
+            ##### FlagScale #####
+            TransformerBlock._finalize_mhc_recompute_layer(
+                mhc_manager=f_layer.layer_state.mhc_recompute_manager,
+                hidden_states=f_input,
+                is_last_in_recompute_block=f_layer.layer_state.mhc_is_last_layer_in_recompute_block,
+            )
+            ##### FlagScale End #####
 
         if f_schedule_plan is not None and post_forward is not None:
             # post_forward()/send_forward_recv_forward() is running in the communication stream,
@@ -548,6 +618,15 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             f_input = f_schedule_plan.post_process.forward(f_input)
         # pre process backward
         if b_schedule_plan is not None:
+            ##### FlagScale Begin #####
+            # If using hyper connections, the gradient accumulated through layers is
+            # multi‑stream [s, b, n*C], but pre_process expects single‑stream [s, b, C].
+            # We manually reduce it (sum over streams) to match the forward expand.
+            if b_schedule_plan.enable_hyper_connections:
+                n = b_schedule_plan.num_residual_streams
+                C = b_grad.shape[-1] // n
+                b_grad = b_grad.view(*b_grad.shape[:-1], n, C).sum(dim=-2)
+            ##### FlagScale End #####
             b_schedule_plan.pre_process.backward(b_grad)
 
         if f_schedule_plan:

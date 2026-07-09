@@ -607,7 +607,7 @@ class TransformerConfig(ModelParallelConfig):
 
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
-    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts".
+    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts", "mhc".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
     "moe_act": recompute the MoE MLP activation function.
@@ -616,6 +616,7 @@ class TransformerConfig(ModelParallelConfig):
     "mlp": recompute the dense MLP submodule.
     "moe": recompute the MoE layer.
     "shared_experts": recompute the shared experts in the MoE layer.
+    "mhc": recompute the hyper connection part of the transformer layer.
     "moe_act", "layernorm", and "mla_up_proj" use output-discarding checkpointing,
     "core_attn", "mlp", "moe", and "shared_experts" use normal checkpointing.
     """
@@ -1274,6 +1275,7 @@ class TransformerConfig(ModelParallelConfig):
             )
 
             # Check tensor parallelism compatibility
+            tp_cp_size = self.tensor_model_parallel_size * self.context_parallel_size
             assert (
                 self.linear_num_key_heads % self.tensor_model_parallel_size == 0
             ), "linear_num_key_heads must be a multiple of tensor_model_parallel_size."
@@ -1576,6 +1578,7 @@ class TransformerConfig(ModelParallelConfig):
                     "mlp",
                     "moe",
                     "shared_experts",
+                    "mhc",
                 }
                 invalid_modules = set(self.recompute_modules) - allowed_modules
                 assert not invalid_modules, (
