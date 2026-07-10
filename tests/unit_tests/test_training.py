@@ -2741,3 +2741,471 @@ class TestSaveGrads:
             assert torch.equal(
                 loaded["model_chunk0"]["layer.bias"], state_dict["model_chunk0"]["layer.bias"]
             )
+
+def test_setup_model_and_optimizer_ckpt_convert_format(monkeypatch):
+    calls = []
+    args = SimpleNamespace(
+        skip_train=False,
+        perform_rl_step=False,
+        no_load_optim=False,
+        use_mup=False,
+        use_gloo_process_groups=False,
+        dump_param_to_param_group_map=False,
+        moe_use_upcycling=False,
+        load=None,
+        pretrained_checkpoint=None,
+        ckpt_convert_format="torch_dist",
+        ckpt_format="torch",
+        ckpt_convert_save="/tmp/converted",
+        save="/tmp/original",
+        fp16=False,
+        bf16=False,
+        use_torch_fsdp2=False,
+        iteration=0,
+        num_floating_point_operations_so_far=0,
+    )
+
+    class FakeTimerObj:
+        def start(self, barrier=False):
+            pass
+
+        def stop(self, barrier=False):
+            pass
+
+        def active_time(self):
+            return 1.5
+
+    class FakeTimers:
+        def __call__(self, name, log_level=None):
+            return FakeTimerObj()
+
+        def log(self, names):
+            pass
+
+    model = [SimpleNamespace()]
+    optimizer, scheduler = "optimizer", "scheduler"
+    optimizer_config = SimpleNamespace(optimizer="adam", timers=None)
+
+    monkeypatch.setattr(training, "get_args", lambda: args)
+    monkeypatch.setattr(training, "get_timers", lambda: FakeTimers())
+    monkeypatch.setattr(training, "get_one_logger", lambda: None)
+    monkeypatch.setattr(training, "get_model", lambda *a, **kw: model)
+    monkeypatch.setattr(training, "unwrap_model", lambda m: m)
+    monkeypatch.setattr(training, "get_megatron_optimizer_config", lambda a: (optimizer_config, {}))
+    monkeypatch.setattr(
+        training,
+        "get_megatron_optimizer",
+        lambda c, m, **kw: calls.append("build-optimizer") or optimizer,
+    )
+    monkeypatch.setattr(training, "get_optimizer_param_scheduler", lambda o: scheduler)
+    monkeypatch.setattr(
+        training, "update_use_dist_ckpt", lambda a: calls.append("update-dist-ckpt")
+    )
+    monkeypatch.setattr(
+        training,
+        "save_checkpoint",
+        lambda it, m, o, s, f, **kw: calls.append(("save", it, f is not None)),
+    )
+    monkeypatch.setattr(training, "print_rank_0", lambda msg: calls.append(("print", msg)))
+    monkeypatch.setattr(training.os, "_exit", lambda code: calls.append(("exit", code)))
+    monkeypatch.setattr(training.torch.distributed, "barrier", lambda **kw: calls.append("barrier"))
+
+    training.setup_model_and_optimizer(lambda: None, training.ModelType.encoder_or_decoder)
+
+    assert "update-dist-ckpt" in calls
+    assert ("save", 0, True) in calls
+    assert calls[-1] == ("exit", 0)
+    assert any("converted checkpoint" in str(c) for c in calls)
+
+
+def test_setup_model_and_optimizer_moe_upcycling(monkeypatch):
+    calls = []
+    args = SimpleNamespace(
+        skip_train=False,
+        perform_rl_step=False,
+        no_load_optim=False,
+        use_mup=False,
+        use_gloo_process_groups=False,
+        dump_param_to_param_group_map=False,
+        moe_use_upcycling=True,
+        num_experts=8,
+        expert_model_parallel_size=2,
+        ffn_hidden_size=4096,
+        moe_upcycling_granularity=2,
+        load=None,
+        pretrained_checkpoint=None,
+        ckpt_convert_format=None,
+        save="/tmp/upcycled",
+        fp16=True,
+        bf16=False,
+        use_torch_fsdp2=False,
+        ckpt_format="torch",
+        iteration=0,
+        num_floating_point_operations_so_far=0,
+    )
+
+    class FakeOptimizer:
+        def reload_model_params(self):
+            calls.append("reload-model-params")
+
+    class FakeTimerObj:
+        def start(self, barrier=False):
+            pass
+
+        def stop(self, barrier=False):
+            pass
+
+        def active_time(self):
+            return 1.5
+
+    class FakeTimers:
+        def __call__(self, name, log_level=None):
+            return FakeTimerObj()
+
+        def log(self, names):
+            pass
+
+    model = [SimpleNamespace()]
+    dense_model = [SimpleNamespace()]
+    optimizer = FakeOptimizer()
+    scheduler = "scheduler"
+    optimizer_config = SimpleNamespace(optimizer="adam", timers=None)
+
+    # first call returns model, second returns dense_model
+    model_calls = [model, dense_model]
+    call_idx = [0]
+
+    def fake_get_model(*a, **kw):
+        result = model_calls[call_idx[0]]
+        call_idx[0] += 1
+        return result
+
+    monkeypatch.setattr(training, "get_args", lambda: args)
+    monkeypatch.setattr(training, "get_timers", lambda: FakeTimers())
+    monkeypatch.setattr(training, "get_one_logger", lambda: None)
+    monkeypatch.setattr(training, "get_model", fake_get_model)
+    monkeypatch.setattr(training, "unwrap_model", lambda m: m)
+    monkeypatch.setattr(
+        training,
+        "get_megatron_optimizer_config",
+        lambda a: (optimizer_config, {}),
+    )
+    monkeypatch.setattr(
+        training,
+        "get_megatron_optimizer",
+        lambda c, m, **kw: calls.append("build-optimizer") or optimizer,
+    )
+    monkeypatch.setattr(training, "get_optimizer_param_scheduler", lambda o: scheduler)
+    monkeypatch.setattr(
+        training,
+        "checkpoint_exists",
+        lambda path: calls.append(("checkpoint-exists", path)) or False,
+    )
+    monkeypatch.setattr(
+        training.torch.distributed,
+        "barrier",
+        lambda **kw: calls.append("barrier"),
+    )
+    monkeypatch.setattr(
+        training,
+        "save_checkpoint",
+        lambda it, m, o, s, f, **kw: calls.append(("save", it)),
+    )
+    monkeypatch.setattr(
+        training, "print_rank_0", lambda msg: calls.append(("print", msg))
+    )
+    monkeypatch.setattr(
+        training,
+        "load_checkpoint",
+        lambda m, o, s, **kw: calls.append("load-checkpoint") or (0, 0.0),
+    )
+    monkeypatch.setattr(
+        training.upcycling_utils,
+        "load_and_upcycle_model",
+        lambda lc, uw, dm, **kw: calls.append("upcycle") or (None, 999.0),
+    )
+
+    training.setup_model_and_optimizer(
+        lambda: None, training.ModelType.encoder_or_decoder
+    )
+
+    assert "barrier" in calls
+    assert ("checkpoint-exists", "/tmp/upcycled") in calls
+    assert "build-optimizer" in calls
+    assert "upcycle" in calls
+    assert "reload-model-params" in calls
+    assert any("Upcycled checkpoint" in str(c) for c in calls)
+
+    assert args.iteration == 1
+    assert args.num_experts == 8
+    assert args.expert_model_parallel_size == 2
+    assert args.ffn_hidden_size == 4096
+
+
+def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
+    calls = []
+    args = SimpleNamespace(
+        seq_length=1024, micro_batch_size=4, global_batch_size=32,
+        save_dgrads_interval=1,
+        save_wgrads_interval=1,
+        reuse_grad_buf_for_mxfp8_param_ag=False,
+        overlap_param_gather=False,
+        empty_unused_memory_level=0,
+        vision_pretraining=False,
+        vision_pretraining_type="",
+        barrier_with_L1_time=False,
+        log_num_zeros_in_grad=False,
+        qk_clip=False,
+        log_max_attention_logit=False,
+    )
+    data_iterator = iter([None])
+
+    class FakeOptimizer:
+        def zero_grad(self):
+            pass
+
+        def step(self):
+            calls.append("optimizer-step")
+            return True, torch.tensor(1.0), torch.tensor(0)
+
+    optimizer = FakeOptimizer()
+    opt_param_scheduler = SimpleNamespace()
+
+    model = [SimpleNamespace()]
+    model[0].force_all_reduce = False
+    model[0].zero_grad_buffer = lambda: None
+
+    class FakeParam:
+        main_grad = None
+
+    def fake_named_parameters():
+        p = FakeParam()
+        p.main_grad = torch.ones(4, 4)
+        yield ("layer.weight", p)
+
+    monkeypatch.setattr(training, "unwrap_model",
+                        lambda m: SimpleNamespace(named_parameters=fake_named_parameters))
+
+    loop_counter = [0]
+
+    class FakeRerunMachine:
+        def should_run_forward_backward(self, di):
+            loop_counter[0] += 1
+            if loop_counter[0] == 1:
+                return True
+            return False
+
+        def should_checkpoint_and_exit(self):
+            return False, False, None
+
+    monkeypatch.setattr(training, "get_args", lambda: args)
+    monkeypatch.setattr(training, "get_timers", lambda: SimpleNamespace())
+    monkeypatch.setattr(training, "get_num_microbatches", lambda: 1)
+    monkeypatch.setattr(training, "get_rerun_state_machine", lambda: FakeRerunMachine())
+    monkeypatch.setattr(training, "has_nvidia_modelopt", False)
+    monkeypatch.setattr(training, "clip_qk", lambda m, **kw: 0.0)
+    monkeypatch.setattr(training, "reduce_max_stat_across_model_parallel_group", lambda v: v)
+    monkeypatch.setattr(training, "logical_and_across_model_parallel_group", lambda v: v)
+    monkeypatch.setattr(training, "enable_dgrad_logging",
+                        lambda m, s: calls.append("enable-dgrad"))
+    monkeypatch.setattr(training, "disable_dgrad_logging",
+                        lambda: calls.append("disable-dgrad"))
+    monkeypatch.setattr(training, "save_dgrads",
+                        lambda it: calls.append(("save-dgrads", it)))
+    monkeypatch.setattr(training.checkpointing, "save_grads",
+                        lambda save_dir, sd, it, label: calls.append(("save-grads", label, it)))
+
+    
+    def fake_forward_backward(**kw):
+        calls.append("fbw")
+        return [{"lm_loss": torch.tensor(1.0)}]
+
+    training.train_step(
+        forward_step_func=lambda *a, **kw: None,
+        data_iterator=data_iterator,
+        model=model,
+        optimizer=optimizer,
+        opt_param_scheduler=opt_param_scheduler,
+        config=SimpleNamespace(timers=None),
+        forward_backward_func=fake_forward_backward,
+        iteration=0,
+    )
+
+    # dgrads path（while 循环内执行）
+    assert "enable-dgrad" in calls
+    assert "fbw" in calls
+    assert "disable-dgrad" in calls
+    assert ("save-dgrads", 1) in calls
+    # wgrads path（while 循环外执行）
+    assert ("save-grads", "wgrads", 1) in calls
+
+
+# ============================================================================
+# 覆盖率提升测试：training_log - GRPO/world_size/显存/memory 指标路径
+# ============================================================================
+def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
+    """覆盖 training_log 中 writer/scalar 写入分支中尚未被覆盖的路径。
+
+    现有测试 test_training_log_skipped_nan_memory_and_auxiliary_metrics
+    设了 writer=None，因此 if writer and ... 块内的所有代码都未执行过。
+    本测试提供 FakeWriter 和对应的 args flag，互补覆盖。
+
+    新覆盖的路径（均在 if writer 块内）：
+      - skipped-train-samples > 0 → writer/wandb 写入
+      - log_world_size_to_tensorboard=True
+      - perform_rl_step=True → GRPO collection iteration
+      - log_memory_to_tensorboard=True → 显存指标
+      - log_loss_scale_to_tensorboard=True
+      - log_max_attention_logit=True
+      - rl_use_sequence_packing + has_rl_utils → RL seq packing 指标
+      - grad_norm 非空 → 正常日志路径
+    """
+    calls = []
+    real_tensor = torch.tensor
+
+    def cpu_tensor(*items, **kwargs):
+        kwargs.pop("device", None)
+        return real_tensor(*items, **kwargs)
+
+    class FakeWriter:
+        def add_scalar(self, name, value, iteration):
+            calls.append(("scalar", name, value, iteration))
+
+    class FakeWandb:
+        def log(self, payload, iteration=None):
+            calls.append(("wandb", tuple(sorted(payload)), iteration))
+
+    class FakeTimer:
+        def elapsed(self, barrier=False, reset=True):
+            return 4.0
+
+    class FakeTimers:
+        def __call__(self, name, log_level=None):
+            return FakeTimer()
+
+        def write(self, *items, **kwargs):
+            pass
+
+        def log(self, names, normalizer=None, reset=True):
+            pass
+
+    class FakeMemStats:
+        def __getitem__(self, key):
+            return 1024
+
+    args = SimpleNamespace(
+        timing_log_level=1,
+        perform_rl_step=True,                          # ★ GRPO
+        rl_use_sequence_packing=True,                 # ★ RL seq packing
+        grpo_iterations=1,
+        grpo_samples_per_iteration=128,
+        global_batch_size=32,
+        micro_batch_size=2,
+        data_parallel_size=2,
+        world_size=8,
+        seq_length=8,
+        tensorboard_log_interval=10,                   # iteration=10 时触发
+        consumed_train_samples=16,
+        skipped_train_samples=10,                      # ★ >0 触发 skipped 标量
+        log_loss_scale_to_tensorboard=True,            # ★
+        log_world_size_to_tensorboard=True,            # ★
+        log_memory_to_tensorboard=True,                # ★
+        log_max_attention_logit=True,                  # ★
+        num_experts=None,                              # 不触发 MoE，简化测试
+        moe_router_load_balancing_type="",
+        moe_z_loss_coeff=None,
+        num_layers=3,
+        moe_per_layer_logging=False,
+        moe_layer_freq=[1, 0, 1],
+        mtp_num_layers=1,
+        dsa_indexer_loss_coeff=0.2,
+        log_interval=2,
+        train_iters=12,
+        log_throughput=True,
+        log_timers_to_tensorboard=False,
+        log_energy=True,
+        record_memory_history=False,
+        memory_snapshot_path="unused",
+        log_memory_interval=2,
+    )
+
+    # ★ rl_utils mock（需同时设 has_rl_utils 和 rl_utils 模块）
+    class FakeRlUtils:
+        @staticmethod
+        def get_sequence_packing_tensorboard_metrics(args):
+            calls.append("rl-packing-metrics")
+            return {"packed_bins": 5}
+
+    monkeypatch.setattr(training.torch, "tensor", cpu_tensor)
+    monkeypatch.setattr(training, "get_args", lambda: args)
+    monkeypatch.setattr(training, "get_timers", lambda: FakeTimers())
+    monkeypatch.setattr(training, "get_tensorboard_writer", lambda: FakeWriter())
+    monkeypatch.setattr(training, "get_wandb_writer", lambda: FakeWandb())
+    monkeypatch.setattr(training, "get_one_logger", lambda: None)
+    monkeypatch.setattr(training, "get_energy_monitor",
+                        lambda: SimpleNamespace(lap=lambda: 40.0))
+    monkeypatch.setattr(training, "get_num_microbatches", lambda: 2)
+    monkeypatch.setattr(training, "reduce_max_stat_across_model_parallel_group",
+                        lambda value: value)
+    monkeypatch.setattr(training.one_logger_utils, "track_app_tag",
+                        lambda *items: None)
+    monkeypatch.setattr(training.one_logger_utils, "track_e2e_metrics",
+                        lambda *items: None)
+    monkeypatch.setattr(training, "num_floating_point_operations",
+                        lambda args, batch_size: 8e12)
+    monkeypatch.setattr(training, "print_rank_last", lambda message: None)
+    monkeypatch.setattr(training, "is_hybrid_model", lambda args: False)
+    monkeypatch.setattr(training, "track_moe_metrics", lambda **kwargs: None)
+    monkeypatch.setattr(training.MTPLossLoggingHelper, "track_mtp_metrics",
+                        lambda *items: None)
+    monkeypatch.setattr(training.DSAIndexerLossLoggingHelper,
+                        "track_indexer_metrics", lambda **kwargs: None)
+    monkeypatch.setattr(training.torch.distributed, "get_rank", lambda: 0)
+    monkeypatch.setattr(training, "report_theoretical_memory",
+                        lambda *items, **kwargs: None)
+    monkeypatch.setattr(training, "report_memory", lambda message: calls.append(("memory", message)))
+    monkeypatch.setattr(training, "get_loaded_iteration", lambda: 0)
+    # ★ RL 相关 mock
+    monkeypatch.setattr(training, "has_rl_utils", True)
+    monkeypatch.setattr(training, "rl_utils", FakeRlUtils())
+    # ★ cuda memory_stats mock
+    monkeypatch.setattr(training.torch.cuda, "memory_stats", lambda: FakeMemStats())
+
+    training_log(
+        {"lm loss": torch.tensor([2.0])},
+        total_loss_dict={},
+        learning_rate=0.0001,
+        iteration=10,                                   # ★ 整除 interval=10
+        loss_scale=64.0,
+        report_memory_flag=True,
+        skipped_iter=0,
+        grad_norm=torch.tensor(1.0),                   # 非空 → 覆盖 grad-norm 路径
+        params_norm=None,
+        num_zeros_in_grad=None,
+        max_attention_logit=0.5,
+    )
+
+    # 验证 writer/scalar 被正确调用
+    scalar_names = {name for (_, name, _, _) in calls if isinstance(name, str)}
+    assert "skipped-train-samples" in scalar_names       # skipped_train_samples=10
+    assert "grpo_collection_iteration" in scalar_names   # perform_rl_step=True
+    assert "world-size" in scalar_names                  # log_world_size=True
+    assert "mem-reserved-bytes" in scalar_names          # log_memory=True
+    assert "mem-allocated-bytes" in scalar_names
+    assert "mem-max-allocated-bytes" in scalar_names
+    assert "loss-scale" in scalar_names                  # log_loss_scale=True
+    assert "max_attention_logit" in scalar_names         # log_max_attention_logit=True
+    assert "grad-norm" in scalar_names                   # grad_norm 非空
+    assert "batch-size" in scalar_names                  # 基本标量
+
+    # 验证 wandb 也写入了
+    assert any(item[0] == "wandb" for item in calls)
+
+    # 验证 GRPO 值计算正确
+    # iteration=10, grpo_iterations=1, grpo_samples_per_iteration=128, global_batch_size=32
+    # grpo_collection_iteration = 10 // (1 * (128//32)) = 10 // 4 = 2
+    grpo_calls = [item for item in calls if item[0] == "scalar" and item[1] == "grpo_collection_iteration"]
+    assert grpo_calls[0][2] == 2
+
+    # 验证 rl_utils 被调用
+    assert "rl-packing-metrics" in calls
