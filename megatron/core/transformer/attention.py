@@ -679,21 +679,7 @@ class Attention(MegatronModule, ABC):
         attn_mask_type: AttnMaskType,
         packed_seq_params: Optional[PackedSeqParams] = None,
     ) -> Tensor:
-        """Run flash-sparse-attention kernel for training and static inference.
-
-        Handles three sub-paths:
-        1. Varlen (thd packed sequences) → flash_sparse_attn_varlen_func
-        2. Static decode (sq == 1, non-packed) → flash_sparse_attn_with_kvcache_func
-        3. Standard (training / prefill) → flash_sparse_attn_func
-        """
-        assert HAVE_FLASH_SPARSE, (
-            "flash-sparse-attn is not installed. "
-            "pip install flash-sparse-attn"
-        )
-
         softmax_scale = self.config.softmax_scale
-        if softmax_scale is None:
-            softmax_scale = 1.0 / math.sqrt(self.config.kv_channels)
         softmax_threshold = self.config.softmax_threshold
         is_quant = self.config.is_quant
         is_local = self.config.is_local
@@ -705,7 +691,6 @@ class Attention(MegatronModule, ABC):
         )
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
-            # Varlen path: query/key/value are [total, np, hn]
             output = flash_sparse_attn_varlen_func(
                 query,
                 key,
@@ -724,30 +709,19 @@ class Attention(MegatronModule, ABC):
                 is_split_qo=True,
             )
         elif query.size(0) == 1 and not self.training:
-            # Static decode path: query is [1, b, np, hn], key/value are [sk, b, np, hn]
-            # FSA kvcache expects q=[B, Hq, D], k/v=[B, Sk, Hkv, D]
-            q = query.squeeze(0).permute(0, 1, 2)       # [b, np, hn]
-            k = key.permute(1, 0, 2, 3)                  # [b, sk, np, hn]
-            v = value.permute(1, 0, 2, 3)                # [b, sk, np, hn]
+            query = query.squeeze(0)
 
             output = flash_sparse_attn_with_kvcache_func(
-                q, k, v,
+                query, key, value,
                 softmax_scale=softmax_scale,
                 softmax_threshold=softmax_threshold,
                 is_local=is_local,
                 is_quant=is_quant,
                 is_autotune=is_autotune,
             )
-            # [B, Hq, D] -> [1, B, Hq, D] -> [1, B, Hq*D]
             output = output.unsqueeze(0)
             output = output.reshape(output.size(0), output.size(1), -1)
         else:
-            # Standard path: query/key/value are [sq, b, np, hn]
-            # FSA expects [B, S, H, D]
-            query = query.permute(1, 0, 2, 3)  # [b, sq, np, hn]
-            key = key.permute(1, 0, 2, 3)
-            value = value.permute(1, 0, 2, 3)
-
             output = flash_sparse_attn_func(
                 query,
                 key,
@@ -757,21 +731,18 @@ class Attention(MegatronModule, ABC):
                 query_scale=None,
                 key_scale=None,
                 value_scale=None,
-                softmax_threshold=-100.0,
-                is_local=True,
-                is_quant=False,
+                window_sizes=None,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
                 is_split_kv=True,
                 is_split_qo=True,
-                pack_gqa=True,
-                is_autotune=False,
+                pack_gqa=False,
+                is_autotune=is_autotune,
                 skip_checks=True,
-                num_heads_kv_global=self.config.num_query_groups,
-                tp_rank=get_tensor_model_parallel_rank(),
             )
 
-            # [B, S, H, D] -> [S, B, H, D] -> [S, B, H*D]
-            output = output.permute(1, 0, 2, 3).contiguous()
-            output = output.reshape(output.size(0), output.size(1), -1)
+        output = output.reshape(output.size(0), output.size(1), -1)
 
         return output
 
