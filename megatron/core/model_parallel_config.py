@@ -55,6 +55,12 @@ class ModelParallelConfig:
        type.
     """
 
+    cp_seq_split_mode: str = "2chunk"
+    """How to split the sequence across CP ranks.
+    '2chunk': Default Megatron pattern (front + tail chunks per rank for load balance).
+    'contiguous': Simple contiguous split (rank_i gets [i*chunk, (i+1)*chunk)).
+    """
+
     max_seqlen_per_dp_cp_rank: Optional[int] = None
     """
     Maximum sequence length per DPxCP rank. This is the maximum sequence length each rank

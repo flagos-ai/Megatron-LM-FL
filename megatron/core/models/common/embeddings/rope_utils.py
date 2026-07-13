@@ -77,6 +77,32 @@ def get_pos_emb_on_this_cp_rank(
     return pos_emb
 
 
+def get_pos_emb_on_this_cp_rank_contiguous(
+    pos_emb: Tensor, seq_dim: int, cp_group: torch.distributed.ProcessGroup
+) -> Tensor:
+    """Get the position embedding on the current CP rank (contiguous split).
+
+    Unlike get_pos_emb_on_this_cp_rank which uses 2-chunk pattern,
+    this uses simple contiguous split: rank_i gets [i*chunk, (i+1)*chunk).
+
+    Args:
+        pos_emb (Tensor): Positional embedding tensor
+        seq_dim (int): Sequence dimension
+        cp_group (torch.distributed.ProcessGroup): The context parallel group
+    """
+    if cp_group is None:
+        raise ValueError("cp_group must be provided to get positional embedding per CP rank")
+    cp_size = cp_group.size()
+    cp_rank = cp_group.rank()
+
+    seq_len = pos_emb.shape[seq_dim]
+    chunk_size = seq_len // cp_size
+    start = cp_rank * chunk_size
+    end = start + chunk_size
+
+    return pos_emb.narrow(seq_dim, start, chunk_size)
+
+
 def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
     """Change sign so the last dimension becomes [-odd, +even]
 

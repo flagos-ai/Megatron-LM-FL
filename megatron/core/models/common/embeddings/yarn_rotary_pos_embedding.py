@@ -169,6 +169,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         offset: int = 0,
         packed_seq: bool = False,
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        contiguous_split: bool = False,
     ) -> Tensor:
         """Forward pass of Yarn Rotary Embedding.
 
@@ -178,6 +179,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             packed_seq (bool, optional): Whether to use packed sequence. Defaults to False.
             cp_group (torch.distributed.ProcessGroup, optional): Context parallel group.
                 Defaults to None.
+            contiguous_split (bool, optional): Use contiguous CP split instead of 2-chunk.
+                Defaults to False.
 
         Returns:
             Tensor: Embeddings after applying Yarn RoPE.
@@ -188,7 +191,14 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         if cp_group is not None and cp_group.size() > 1 and not packed_seq:
             # slice rotary_pos_emb along sequence dimension
             # and select the parition of the current CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
+            if contiguous_split:
+                from megatron.core.models.common.embeddings.rope_utils import (
+                    get_pos_emb_on_this_cp_rank_contiguous,
+                )
+
+                emb = get_pos_emb_on_this_cp_rank_contiguous(emb, 0, cp_group)
+            else:
+                emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
         return emb, _mscale
 
     def _set_cos_sin_cache(self, seq_len, offset, dtype, packed_seq=False):

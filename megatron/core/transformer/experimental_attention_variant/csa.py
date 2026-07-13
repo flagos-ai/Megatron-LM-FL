@@ -13,6 +13,11 @@ from megatron.core.models.common.embeddings import RotaryEmbedding, apply_rotary
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.enums import AttnMaskType
+from megatron.core.transformer.experimental_attention_variant.csa_utils import (
+    _exchange_halo,
+    differentiable_all_gather,
+    get_window_topk_idxs_cp,
+)
 from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAIndexerLossAutoScaler,
     DSAIndexerLossLoggingHelper,
@@ -103,11 +108,20 @@ def _apply_rope(
         total_seq_len = rotary_seq_len
     else:
         total_seq_len = rotary_seq_len * ratio
+
+    contiguous_split = getattr(config, 'cp_seq_split_mode', '2chunk') == 'contiguous'
+    # When CP is enabled, rotary_pos_emb_module.forward() will slice the emb internally,
+    # so we need to pass the full sequence length (local * cp_size).
+    if cp_group is not None and cp_group.size() > 1:
+        total_seq_len = total_seq_len * cp_group.size()
+
     mscale = 1.0
     rotary_pos_cos = None
     rotary_pos_sin = None
     if config.rope_type == "rope":
-        rotary_pos_emb = rotary_pos_emb_module(total_seq_len, packed_seq=False)
+        rotary_pos_emb = rotary_pos_emb_module(
+            total_seq_len, packed_seq=False, contiguous_split=contiguous_split
+        )
         mscale = 1.0
     else:
         if config.apply_rope_fusion:
@@ -119,17 +133,19 @@ def _apply_rope(
                 fused_mla_rope_inplace is not None
             ), "Fused MLA RoPE apply is not imported successfully"
         else:
-            rotary_pos_emb, mscale = rotary_pos_emb_module(total_seq_len, packed_seq=False)
+            rotary_pos_emb, mscale = rotary_pos_emb_module(
+                total_seq_len, packed_seq=False, contiguous_split=contiguous_split
+            )
             # DSv4 reference (DS-Inf) RoPE is pure rotation (norm-preserving). Yarn's
             # concentration factor (mscale) is NOT part of the DSv4 model contract --
             # the model relies on Q/KV RMS-norm + unit-magnitude rotation. Force 1.0.
             mscale = 1.0
     if rotary_pos_emb is not None and ratio > 1:
-        rotary_pos_emb = rotary_pos_emb[:total_seq_len:ratio][:rotary_seq_len]
+        rotary_pos_emb = rotary_pos_emb[::ratio][:rotary_seq_len]
     if rotary_pos_cos is not None and ratio > 1:
-        rotary_pos_cos = rotary_pos_cos[:total_seq_len:ratio][:rotary_seq_len]
+        rotary_pos_cos = rotary_pos_cos[::ratio][:rotary_seq_len]
     if rotary_pos_sin is not None and ratio > 1:
-        rotary_pos_sin = rotary_pos_sin[:total_seq_len:ratio][:rotary_seq_len]
+        rotary_pos_sin = rotary_pos_sin[::ratio][:rotary_seq_len]
 
     squeeze_head = x.dim() == 3
     if squeeze_head:
@@ -335,48 +351,87 @@ class Compressor(MegatronModule):
         new_tensor[1:, :ratio] = tensor[:-1, :, :, :d]
         return new_tensor
 
-    def forward(self, x: torch.Tensor) -> Optional[torch.Tensor]:
-        """Compress hidden states into shorter KV sequence.
+    def compress_local(self, x: torch.Tensor) -> Optional[torch.Tensor]:
+        """Halo exchange + local compression + RoPE. Returns local compressed KV.
+
+        This is everything before the all-gather step.
 
         Args:
-            x: [sq, b, hidden_size]
+            x: [sq, b, hidden_size] — local hidden states (without halo).
 
         Returns:
-            compressed_kv [sq // ratio, b, head_dim] or None if too short.
+            [n_local_compressed, b, head_dim] or None if too short.
         """
-        nvtx_range_push("compressor")
-
         sq, b, _ = x.size()
         ratio = self.compress_ratio
+        cp_group = self.pg_collection.cp
+        cp_size = cp_group.size()
+        cp_rank = cp_group.rank()
 
-        if sq < ratio:
-            nvtx_range_pop("compressor")
+        # --- CP Step 1: Halo exchange for compression boundary ---
+        has_halo = False
+        if cp_size > 1:
+            need_halo = self.overlap or (sq % ratio != 0)
+            if need_halo:
+                x = _exchange_halo(x, ratio, cp_group)
+                if cp_rank > 0:
+                    has_halo = True
+
+        sq_with_halo = x.size(0)
+
+        if sq_with_halo < ratio:
             return None
 
-        kv, _ = self.linear_wkv(x)  # [sq, b, coff * head_dim]
-        score, _ = self.linear_wgate(x)  # [sq, b, coff * head_dim]
+        # --- Core compression ---
+        if self.config.enable_fused_compressor:
+            # Phase 1: Fuse two GEMMs into one
+            import torch.nn.functional as F
+            W_fused = torch.cat([self.linear_wkv.weight, self.linear_wgate.weight], dim=0)
+            kv_score = F.linear(x, W_fused)
+            proj_out_dim = self.coff * self.head_dim
+            kv, score = kv_score.split(proj_out_dim, dim=-1)
 
-        cutoff = (sq // ratio) * ratio
-        if cutoff < sq:
-            kv = kv[:cutoff]
-            score = score[:cutoff]
+            # Phase 2: Fused Triton kernel
+            from megatron.core.transformer.experimental_attention_variant.fused_compressor_kernel import (
+                fused_compressor_post_gemm,
+            )
+            norm_weight = self.norm.weight
+            kv = fused_compressor_post_gemm(
+                kv, score, self.ape, norm_weight,
+                ratio=ratio,
+                head_dim=self.head_dim,
+                has_halo=has_halo,
+                use_overlap=self.overlap,
+                eps=self.config.layernorm_epsilon,
+            )
+            n_compressed = kv.size(0)
+        else:
+            kv, _ = self.linear_wkv(x)
+            score, _ = self.linear_wgate(x)
 
-        n_compressed = cutoff // ratio
+            cutoff = (sq_with_halo // ratio) * ratio
+            if cutoff < sq_with_halo:
+                kv = kv[:cutoff]
+                score = score[:cutoff]
 
-        # Reshape: [n_compressed, ratio, b, coff * head_dim]
-        kv = kv.view(n_compressed, ratio, b, -1)
-        score = score.view(n_compressed, ratio, b, -1)
+            n_compressed = cutoff // ratio
 
-        # APE: [ratio, coff * head_dim] -> [1, ratio, 1, coff * head_dim]
-        score = score + self.ape.view(1, ratio, 1, -1)
+            kv = kv.view(n_compressed, ratio, b, -1)
+            score = score.view(n_compressed, ratio, b, -1)
 
-        if self.overlap:
-            kv = self._overlap_transform(kv, fill_value=0)
-            score = self._overlap_transform(score, fill_value=float("-inf"))
+            score = score + self.ape.view(1, ratio, 1, -1)
 
-        kv = (kv * torch.softmax(score, dim=1)).sum(dim=1)  # [n_compressed, b, head_dim]
+            if self.overlap:
+                kv = self._overlap_transform(kv, fill_value=0)
+                score = self._overlap_transform(score, fill_value=float("-inf"))
 
-        kv = self.norm(kv.to(x.dtype))
+            kv = (kv * torch.softmax(score, dim=1)).sum(dim=1)
+
+            if has_halo:
+                kv = kv[1:]
+                n_compressed = n_compressed - 1
+
+            kv = self.norm(kv.to(x.dtype))
 
         kv = _apply_rope(
             kv,
@@ -386,14 +441,53 @@ class Compressor(MegatronModule):
             self.config,
             n_compressed,
             ratio=ratio,
-            cp_group=self.pg_collection.cp,
+            cp_group=cp_group,
         )
 
         if self.rotate:
             kv = rotate_activation(kv)
 
+        return kv
+
+    def forward(self, x: torch.Tensor, async_allgather: bool = False) -> Optional[torch.Tensor]:
+        """Compress hidden states into shorter KV sequence.
+
+        When CP is active (cp_size > 1), this method internally handles:
+        1. Halo exchange (prepend boundary tokens from previous rank)
+        2. Local compression (discard halo group to avoid duplicates)
+        3. All-gather across CP ranks to produce the global compressed sequence
+
+        Args:
+            x: [sq, b, hidden_size] — local hidden states (without halo).
+            async_allgather: If True, launch all-gather asynchronously.
+                Caller must call async_differentiable_all_gather_wait() before
+                reading the returned tensor.
+
+        Returns:
+            cp_size == 1: [sq // ratio, b, head_dim] or None if too short.
+            cp_size > 1:  [n_compressed_global, b, head_dim] or None if too short.
+        """
+        nvtx_range_push("compressor")
+
+        kv = self.compress_local(x)
+        if kv is None:
+            nvtx_range_pop("compressor")
+            return None
+
+        cp_group = self.pg_collection.cp
+        cp_size = cp_group.size()
+
+        if cp_size > 1:
+            if async_allgather:
+                from megatron.core.transformer.experimental_attention_variant.csa_utils import (
+                    async_differentiable_all_gather_start,
+                )
+                kv = async_differentiable_all_gather_start(kv, cp_group)
+            else:
+                kv = differentiable_all_gather(kv, cp_group)
+
         nvtx_range_pop("compressor")
-        return kv  # [n_compressed, b, head_dim]
+        return kv
 
 
 # ---------------------------------------------------------------------------
@@ -508,10 +602,19 @@ class CSAIndexer(MegatronModule):
         q = rotate_activation(q)
 
         # K path: own compressor
-        k = self.compressor(x)  # [sq//ratio, b, index_head_dim]
-
-        weights, _ = self.linear_weights_proj(x)  # [sq, b, n_heads]
-        weights = weights * (self.index_n_heads**-0.5)
+        if self.config.enable_compressor_allgather_overlap and self.pg_collection.cp.size() > 1:
+            k = self.compressor(x, async_allgather=True)
+            # Overlap: weights projection runs while all-gather is in flight
+            weights, _ = self.linear_weights_proj(x)  # [sq, b, n_heads]
+            weights = weights * (self.index_n_heads**-0.5)
+            from megatron.core.transformer.experimental_attention_variant.csa_utils import (
+                async_differentiable_all_gather_wait,
+            )
+            async_differentiable_all_gather_wait()
+        else:
+            k = self.compressor(x)  # [sq//ratio, b, index_head_dim]
+            weights, _ = self.linear_weights_proj(x)  # [sq, b, n_heads]
+            weights = weights * (self.index_n_heads**-0.5)
 
         nvtx_range_pop("indexer_before_topk")
         return q, k, weights
@@ -660,12 +763,22 @@ class CompressedSparseAttention(MegatronModule):
 
         sq, b, np, hn = query.size()
 
+        cp_size = self.pg_collection.cp.size()
+        cp_rank = self.pg_collection.cp.rank()
+
         # --- Step 1: Prepare single-head KV (squeeze singleton head dim) ---
         kv = key.squeeze(-2)  # [sq, b, 1, v_head_dim] -> [sq, b, v_head_dim]
 
-        # --- Step 2: Compression ---
+        # --- Step 2: Halo exchange for sliding window (CP only) ---
+        if cp_size > 1:
+            halo_size = self.window_size - 1 if cp_rank > 0 else 0
+            kv = _exchange_halo(kv, self.window_size - 1, self.pg_collection.cp, name="kv")
+        else:
+            halo_size = 0
+
+        # --- Step 3: Compression ---
         if self.compressor is not None and self.compress_ratio > 1:
-            compressed_kv = self.compressor(x)  # [n_compressed, b, v_head_dim]
+            compressed_kv = self.compressor(x)
             if compressed_kv is not None:
                 kv_full = torch.cat([kv, compressed_kv], dim=0)
                 n_compressed = compressed_kv.size(0)
@@ -676,12 +789,15 @@ class CompressedSparseAttention(MegatronModule):
             kv_full = kv
             n_compressed = 0
 
-        offset = sq  # compressed indices start after original positions
+        offset = sq + halo_size  # compressed indices start after halo + original positions
 
-        # --- Step 3: Window indices ---
-        window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
+        # --- Step 4: Window indices ---
+        if halo_size > 0:
+            window_idxs = get_window_topk_idxs_cp(self.window_size, b, sq, halo_size, query.device)
+        else:
+            window_idxs = get_window_topk_idxs(self.window_size, b, sq, query.device)
 
-        # --- Step 4: Compressed indices ---
+        # --- Step 5: Compressed indices ---
         indexer_loss = None
 
         if self.force_unfused_dsa:
@@ -691,16 +807,28 @@ class CompressedSparseAttention(MegatronModule):
                     x_det = x.detach()
                     qr_det = qr.detach()
 
-                    causal_mask = (
-                        torch.arange(n_compressed, device=x.device).unsqueeze(0).expand(sq, -1)
-                    )
-                    positions = torch.arange(1, sq + 1, device=x.device).unsqueeze(1)
-                    causal_mask = (
-                        torch.where(
-                            causal_mask >= positions // self.compress_ratio, float("-inf"), 0.0
-                        )
-                        .unsqueeze(0)
-                        .expand(b, -1, -1)
+                    # Causal mask with global positions for CP
+                    # Compressed token j covers [j*ratio, (j+1)*ratio).
+                    # Query at global pos g attends to j iff (j+1)*ratio-1 <= g.
+                    compressed_indices = torch.arange(n_compressed, device=x.device).unsqueeze(
+                        0
+                    )  # [1, n_compressed]
+                    compressed_max_pos = (
+                        compressed_indices + 1
+                    ) * self.compress_ratio - 1  # [1, n_compressed]
+
+                    # Global query positions for current rank
+                    local_positions = torch.arange(1, sq + 1, device=x.device).unsqueeze(
+                        1
+                    )  # [sq, 1]
+                    global_positions = cp_rank * sq + local_positions  # [sq, 1]
+
+                    # Causal constraint: compressed_max_pos <= global_positions
+                    causal_mask = torch.where(
+                        compressed_max_pos > global_positions, float("-inf"), 0.0
+                    )  # [sq, n_compressed]
+                    causal_mask = causal_mask.unsqueeze(0).expand(
+                        b, -1, -1
                     )  # [b, sq, n_compressed]
 
                     if self.training and torch.is_grad_enabled():
@@ -739,15 +867,27 @@ class CompressedSparseAttention(MegatronModule):
                             x_det, qr_det, mask=causal_mask, packed_seq_params=packed_seq_params
                         )
 
-                    n_valid_per_pos = positions // self.compress_ratio  # [sq, 1]
+                    n_valid_per_pos = global_positions // self.compress_ratio  # [sq, 1]
                     valid = topk_indices_compressed < n_valid_per_pos
+                    # compress_topk_idxs = torch.where(
+                    #     valid, topk_indices_compressed + offset, torch.tensor(-1, device="cuda")
+                    # )
                     compress_topk_idxs = torch.where(
-                        valid, topk_indices_compressed + offset, torch.tensor(-1, device=x.device)
+                        valid, topk_indices_compressed + offset, -1
                     )
                 else:
-                    compress_topk_idxs = get_compress_topk_idxs(
-                        self.compress_ratio, b, sq, offset, query.device
-                    )
+                    if cp_size > 1:
+                        # Use global seq len and slice current rank's rows
+                        global_seq_len = sq * cp_size
+                        all_idxs = get_compress_topk_idxs(
+                            self.compress_ratio, b, global_seq_len, offset, query.device
+                        )
+                        start = cp_rank * sq
+                        compress_topk_idxs = all_idxs[:, start : start + sq, :]
+                    else:
+                        compress_topk_idxs = get_compress_topk_idxs(
+                            self.compress_ratio, b, sq, offset, query.device
+                        )
 
                 topk_idxs = torch.cat([window_idxs, compress_topk_idxs], dim=-1)
                 nvtx_range_pop("compressed_indices")
@@ -756,7 +896,7 @@ class CompressedSparseAttention(MegatronModule):
 
             topk_idxs = topk_idxs.int()
 
-            # --- Step 5: Sparse attention ---
+            # --- Step 6: Sparse attention ---
             nvtx_range_push("sparse_attn_kernel")
             output = unfused_compressed_sparse_attn(
                 query, kv_full, self.attn_sink.float(), topk_idxs, self.softmax_scale
@@ -766,7 +906,7 @@ class CompressedSparseAttention(MegatronModule):
         else:
             raise ValueError("Fused path is not supported for CompressedSparseAttention")
 
-        # --- Step 6: Attach indexer loss ---
+        # --- Step 7: Attach indexer loss ---
         if indexer_loss is not None and self.training and torch.is_grad_enabled():
             output = DSAIndexerLossAutoScaler.apply(output, indexer_loss)
 

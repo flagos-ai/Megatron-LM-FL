@@ -26,6 +26,7 @@ from megatron.core.models.common.embeddings.rope_utils import (  # for backward 
     get_pos_emb_on_this_cp_rank,
 )
 from megatron.core.utils import deprecate_inference_params, internal_api
+
 # FlagScale Begin
 from megatron.plugin.platform import get_platform
 
@@ -187,6 +188,7 @@ class RotaryEmbedding(nn.Module):
         offset: int = 0,
         packed_seq: bool = False,
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
+        contiguous_split: bool = False,
     ) -> Tensor:
         """Forward pass of RoPE embedding.
 
@@ -196,6 +198,8 @@ class RotaryEmbedding(nn.Module):
             packed_seq (bool, optional): Whether to use packed sequence. Defaults to False.
             cp_group (torch.distributed.ProcessGroup, optional): Context parallel group.
                 Defaults to None.
+            contiguous_split (bool, optional): Use contiguous CP split instead of 2-chunk.
+                Defaults to False.
 
         Returns:
             Tensor: Embeddings after applying RoPE.
@@ -206,7 +210,14 @@ class RotaryEmbedding(nn.Module):
         if cp_group is not None and cp_group.size() > 1 and not packed_seq:
             # slice rotary_pos_emb along sequence dimension
             # and select the parition of the current CP rank
-            emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
+            if contiguous_split:
+                from megatron.core.models.common.embeddings.rope_utils import (
+                    get_pos_emb_on_this_cp_rank_contiguous,
+                )
+
+                emb = get_pos_emb_on_this_cp_rank_contiguous(emb, 0, cp_group)
+            else:
+                emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
 
         return emb
 
@@ -261,7 +272,9 @@ class RotaryEmbedding(nn.Module):
                 rotary_seq_len = transformer_input.size(0)
 
             if transformer_config.sequence_parallel:
-                rotary_seq_len *= parallel_state.get_tensor_model_parallel_world_size()  # FlagScale Add
+                rotary_seq_len *= (
+                    parallel_state.get_tensor_model_parallel_world_size()
+                )  # FlagScale Add
 
         rotary_seq_len *= transformer_config.context_parallel_size
 
@@ -307,7 +320,9 @@ class MultimodalRotaryEmbedding(nn.Module):
         self.inv_freq = 1.0 / (
             rotary_base
             ** (
-                torch.arange(0, dim, 2, dtype=torch.float32, device=cur_platform.current_device())  # FlagScale Add
+                torch.arange(
+                    0, dim, 2, dtype=torch.float32, device=cur_platform.current_device()
+                )  # FlagScale Add
                 / dim
             )
         )
