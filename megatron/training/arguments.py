@@ -2034,6 +2034,7 @@ def _add_network_size_args(parser):
         "persist_layer_norm",
         "bias_dropout_fusion",
         "apply_rope_fusion",
+        "apply_dsa_kernel_fusion",
     ]
     transformer_factory = ArgumentGroupFactory(TransformerConfig, exclude=exclude)
     transformer_group = transformer_factory.build_group(parser, "transformer configuration")
@@ -3174,6 +3175,12 @@ def _add_mla_args(parser):
         help="Rotary scaling factor for the rotary embeddings.",
     )
     group.add_argument(
+        '--original-max-position-embeddings',
+        type=int,
+        default=4096,
+        help="Original maximum position embeddings for the original model, used by yarn.",
+    )
+    group.add_argument(
         '--mscale', type=float, default=1.0, help="Mscale for YaRN RoPE in multi-latent attention."
     )
     group.add_argument(
@@ -3236,6 +3243,13 @@ def _add_experimental_attention_variant_args(parser):
             'Each value is the compression ratio for the corresponding '
             'transformer layer (valid values: 0, 4, 128). '
             'The list length must equal num_layers.'
+    )
+    group.add_argument(
+        '--no-dsa-kernel-fusion',
+        action='store_false',
+        help='Disable fused DSA sparse-attention kernels (FlashMLA + cuDNN DSA) '
+        'and fall back to unfused PyTorch implementations.',
+        dest='apply_dsa_kernel_fusion',
     )
     return parser
 

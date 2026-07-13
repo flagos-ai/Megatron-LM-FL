@@ -398,6 +398,11 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use dense mode for compressed sparse attention. If True, the CSA indexer will be
     disabled."""
 
+    apply_dsa_kernel_fusion: bool = False
+    """If True, use fused DSA sparse-attention kernels (FlashMLA forward + cuDNN DSA backward,
+    indexer scoring, and top-K selection). Requires ``flash_mla`` and ``nvidia-cudnn-frontend``
+    with CuTe-DSL support. When False, falls back to unfused PyTorch implementations."""
+
     ####################
     # linear attention
     ####################
@@ -1311,6 +1316,45 @@ class TransformerConfig(ModelParallelConfig):
                 self.tensor_model_parallel_size == 1
             ), "DSv4 Hybrid Attention only supports TP size 1."
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
+            self.hetereogenous_dist_checkpoint = True
+
+            if self.apply_dsa_kernel_fusion:
+                assert (
+                    torch.cuda.is_available()
+                ), "apply_dsa_kernel_fusion requires a CUDA device, but none is available."
+                sm = torch.cuda.get_device_capability()
+                assert sm[0] >= 10, (
+                    f"apply_dsa_kernel_fusion requires SM100+ (Blackwell or later), "
+                    f"but current device has compute capability {sm[0]}.{sm[1]}."
+                )
+
+                _flash_mla_available = True
+                try:
+                    from flash_mla import flash_mla_sparse_fwd  # noqa: F401
+                except ImportError:
+                    _flash_mla_available = False
+
+                _cudnn_dsa_available = True
+                try:
+                    from cudnn import DSA  # noqa: F401
+                except ImportError:
+                    _cudnn_dsa_available = False
+
+                if not _flash_mla_available or not _cudnn_dsa_available:
+                    missing = []
+                    if not _flash_mla_available:
+                        missing.append(
+                            "flash_mla (install from "
+                            "https://github.com/deepseek-ai/FlashMLA/tree/nv_dev)"
+                        )
+                    if not _cudnn_dsa_available:
+                        missing.append("cudnn-frontend DSA (nvidia-cudnn-frontend[cutedsl])")
+                    raise ValueError(
+                        f"apply_dsa_kernel_fusion requires fused DSA kernels, but the "
+                        f"following packages are not available: {', '.join(missing)}. "
+                        f"Install them or pass --no-dsa-kernel-fusion to use the unfused "
+                        f"PyTorch fallback."
+                    )
 
         if self.fp8:
             # cannot support first last layer bf16 with delayed scaling
@@ -1971,11 +2015,6 @@ class TransformerConfig(ModelParallelConfig):
                         "use_te_activation_func must be False "
                         "when activation_func_clamp_value is not None for SwiGLU"
                     )
-                if self.use_transformer_engine_op_fuser:
-                    raise ValueError(
-                        "use_transformer_engine_op_fuser must be False "
-                        "when activation_func_clamp_value is not None for SwiGLU"
-                    )
 
         if self.apply_rope_fusion:
             if self.multi_latent_attention:
@@ -2626,7 +2665,12 @@ class MLATransformerConfig(TransformerConfig):
 
     def __post_init__(self):
         super().__post_init__()
-        if self.multi_latent_attention and self.apply_rope_fusion and self.rope_type != "yarn":
+        if (
+            self.multi_latent_attention
+            and self.apply_rope_fusion
+            and self.rope_type != "yarn"
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
             raise ValueError("apply_rope_fusion for MLA only works with YARN RoPE.")
 
         if self.attention_output_gate:

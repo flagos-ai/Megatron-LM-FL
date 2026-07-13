@@ -2011,6 +2011,7 @@ def test_training_log_skipped_nan_memory_and_auxiliary_metrics(monkeypatch):
         record_memory_history=False,
         memory_snapshot_path="unused",
         log_memory_interval=2,
+        csa_compress_ratios=None
     )
 
     monkeypatch.setattr(training.torch, "tensor", cpu_tensor)
