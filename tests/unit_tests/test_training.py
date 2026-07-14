@@ -889,6 +889,7 @@ def test_save_checkpoint_and_time_covers_persistent_progress_and_cleanup(monkeyp
         overlap_param_gather=True,
         fp8=True,
         log_progress=True,
+        log_energy=True,
         async_save=False,
     )
 
@@ -976,6 +977,7 @@ def test_save_checkpoint_and_time_non_persistent_skips_progress(monkeypatch):
         overlap_param_gather=False,
         fp8=False,
         log_progress=True,
+        log_energy=False,
         async_save=True,
     )
 
