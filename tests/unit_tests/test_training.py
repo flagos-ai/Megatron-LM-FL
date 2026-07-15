@@ -2936,10 +2936,12 @@ def test_setup_model_and_optimizer_moe_upcycling(monkeypatch):
     assert ("checkpoint-exists", "/tmp/upcycled") in calls
     assert "build-optimizer" in calls
     assert "upcycle" in calls
+    assert ("save", 1) in calls
     assert "reload-model-params" in calls
     assert any("Upcycled checkpoint" in str(c) for c in calls)
 
-    assert args.iteration == 1
+    assert args.iteration == 0
+    assert args.num_floating_point_operations_so_far == 0
     assert args.num_experts == 8
     assert args.expert_model_parallel_size == 2
     assert args.ffn_hidden_size == 4096

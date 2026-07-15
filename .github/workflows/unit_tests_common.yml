@@ -118,8 +118,12 @@ jobs:
           # Ensure curl is available (required by coverage upload action)
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
+          # Keep all dependency installs on a protobuf version supported by wandb.
+          printf 'protobuf<7\n' > /tmp/megatron-unit-test-constraints.txt
+          export PIP_CONSTRAINT=/tmp/megatron-unit-test-constraints.txt
+
           # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb "protobuf<7" openai httpx nltk msgpack --no-cache-dir
+          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk msgpack --no-cache-dir
           if [ "$PLATFORM" = "metax" ]; then
             pip install fastapi uvicorn --no-cache-dir
           fi
@@ -142,6 +146,7 @@ jobs:
           
           # Build
           pip install -e . --no-deps --no-build-isolation --no-cache-dir
+          python -c 'import google.protobuf, wandb; print("protobuf:", google.protobuf.__version__, "wandb:", wandb.__version__)'
         timeout-minutes: 30
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
