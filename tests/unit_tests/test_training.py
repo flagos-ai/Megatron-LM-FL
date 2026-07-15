@@ -2809,14 +2809,15 @@ def test_setup_model_and_optimizer_ckpt_convert_format(monkeypatch):
         lambda it, m, o, s, f, **kw: calls.append(("save", it, f is not None)),
     )
     monkeypatch.setattr(training, "print_rank_0", lambda msg: calls.append(("print", msg)))
-    monkeypatch.setattr(training.os, "_exit", lambda code: calls.append(("exit", code)))
     monkeypatch.setattr(training.torch.distributed, "barrier", lambda **kw: calls.append("barrier"))
 
-    training.setup_model_and_optimizer(lambda: None, training.ModelType.encoder_or_decoder)
+    with pytest.raises(SystemExit) as exc_info:
+        training.setup_model_and_optimizer(lambda: None, training.ModelType.encoder_or_decoder)
 
+    assert exc_info.value.code is None
     assert "update-dist-ckpt" in calls
     assert ("save", 0, True) in calls
-    assert calls[-1] == ("exit", 0)
+    assert calls[-1] == "barrier"
     assert any("converted checkpoint" in str(c) for c in calls)
 
 

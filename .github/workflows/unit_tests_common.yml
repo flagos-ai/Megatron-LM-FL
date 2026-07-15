@@ -119,7 +119,7 @@ jobs:
           command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
 
           # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk msgpack --no-cache-dir
+          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb "protobuf<7" openai httpx nltk msgpack --no-cache-dir
           if [ "$PLATFORM" = "metax" ]; then
             pip install fastapi uvicorn --no-cache-dir
           fi
