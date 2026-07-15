@@ -3055,35 +3055,35 @@ def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
         iteration=0,
     )
 
-    # dgrads path（while 循环内执行）
+    # The dgrad path runs inside the forward-backward loop.
     assert "enable-dgrad" in calls
     assert "fbw" in calls
     assert "disable-dgrad" in calls
     assert ("save-dgrads", 1) in calls
-    # wgrads path（while 循环外执行）
+    # The wgrad path runs after the forward-backward loop.
     assert ("save-grads", "wgrads", 1) in calls
     assert ("scheduler-step", 4) in calls
 
 
 # ============================================================================
-# 覆盖率提升测试：training_log - GRPO/world_size/显存/memory 指标路径
+# Coverage test for GRPO, world size, and memory metrics in training_log.
 # ============================================================================
 def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
-    """覆盖 training_log 中 writer/scalar 写入分支中尚未被覆盖的路径。
+    """Cover previously untested writer and scalar paths in training_log.
 
-    现有测试 test_training_log_skipped_nan_memory_and_auxiliary_metrics
-    设了 writer=None，因此 if writer and ... 块内的所有代码都未执行过。
-    本测试提供 FakeWriter 和对应的 args flag，互补覆盖。
+    The existing skipped/nan/memory test uses writer=None, so it does not
+    exercise the writer branch. This test supplies writers and enables the
+    corresponding logging options.
 
-    新覆盖的路径（均在 if writer 块内）：
-      - skipped-train-samples > 0 → writer/wandb 写入
+    Covered paths include:
+      - skipped-train-samples > 0 writer and wandb logging
       - log_world_size_to_tensorboard=True
-      - perform_rl_step=True → GRPO collection iteration
-      - log_memory_to_tensorboard=True → 显存指标
+      - perform_rl_step=True GRPO collection iteration
+      - log_memory_to_tensorboard=True memory metrics
       - log_loss_scale_to_tensorboard=True
       - log_max_attention_logit=True
-      - rl_use_sequence_packing + has_rl_utils → RL seq packing 指标
-      - grad_norm 非空 → 正常日志路径
+      - RL sequence-packing metrics
+      - grad norm logging
     """
     calls = []
     real_tensor = torch.tensor
@@ -3120,8 +3120,8 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
 
     args = SimpleNamespace(
         timing_log_level=1,
-        perform_rl_step=True,                          # ★ GRPO
-        rl_use_sequence_packing=True,                 # ★ RL seq packing
+        perform_rl_step=True,
+        rl_use_sequence_packing=True,
         grpo_iterations=1,
         grpo_samples_per_iteration=128,
         global_batch_size=32,
@@ -3129,14 +3129,14 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
         data_parallel_size=2,
         world_size=8,
         seq_length=8,
-        tensorboard_log_interval=10,                   # iteration=10 时触发
+        tensorboard_log_interval=10,                   # Log on iteration 10.
         consumed_train_samples=16,
-        skipped_train_samples=10,                      # ★ >0 触发 skipped 标量
-        log_loss_scale_to_tensorboard=True,            # ★
-        log_world_size_to_tensorboard=True,            # ★
-        log_memory_to_tensorboard=True,                # ★
-        log_max_attention_logit=True,                  # ★
-        num_experts=None,                              # 不触发 MoE，简化测试
+        skipped_train_samples=10,
+        log_loss_scale_to_tensorboard=True,
+        log_world_size_to_tensorboard=True,
+        log_memory_to_tensorboard=True,
+        log_max_attention_logit=True,
+        num_experts=None,                              # Keep MoE logging disabled.
         moe_router_load_balancing_type="",
         moe_z_loss_coeff=None,
         num_layers=3,
@@ -3154,7 +3154,7 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
         log_memory_interval=2,
     )
 
-    # ★ rl_utils mock（需同时设 has_rl_utils 和 rl_utils 模块）
+    # Both the availability flag and RL utility module must be mocked.
     class FakeRlUtils:
         @staticmethod
         def get_sequence_packing_tensorboard_metrics(args):
@@ -3194,47 +3194,47 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
                         lambda *items, **kwargs: None)
     monkeypatch.setattr(training, "report_memory", lambda message: calls.append(("memory", message)))
     monkeypatch.setattr(training, "get_loaded_iteration", lambda: 0)
-    # ★ RL 相关 mock
+    # Enable the mocked RL logging path.
     monkeypatch.setattr(training, "has_rl_utils", True)
     monkeypatch.setattr(training, "rl_utils", FakeRlUtils())
-    # ★ cuda memory_stats mock
+    # Return deterministic CUDA memory statistics.
     monkeypatch.setattr(training.torch.cuda, "memory_stats", lambda: FakeMemStats())
 
     training_log(
         {"lm loss": torch.tensor([2.0])},
         total_loss_dict={},
         learning_rate=0.0001,
-        iteration=10,                                   # ★ 整除 interval=10
+        iteration=10,
         loss_scale=64.0,
         report_memory_flag=True,
         skipped_iter=0,
-        grad_norm=torch.tensor(1.0),                   # 非空 → 覆盖 grad-norm 路径
+        grad_norm=torch.tensor(1.0),
         params_norm=None,
         num_zeros_in_grad=None,
         max_attention_logit=0.5,
     )
 
-    # 验证 writer/scalar 被正确调用
+    # Verify the expected TensorBoard scalars.
     scalar_names = {
         item[1]
         for item in calls
         if isinstance(item, tuple) and len(item) == 4 and item[0] == "scalar"
     }
-    assert "skipped-train-samples" in scalar_names       # skipped_train_samples=10
-    assert "grpo_collection_iteration" in scalar_names   # perform_rl_step=True
-    assert "world-size" in scalar_names                  # log_world_size=True
-    assert "mem-reserved-bytes" in scalar_names          # log_memory=True
+    assert "skipped-train-samples" in scalar_names
+    assert "grpo_collection_iteration" in scalar_names
+    assert "world-size" in scalar_names
+    assert "mem-reserved-bytes" in scalar_names
     assert "mem-allocated-bytes" in scalar_names
     assert "mem-max-allocated-bytes" in scalar_names
-    assert "loss-scale" in scalar_names                  # log_loss_scale=True
-    assert "max_attention_logit" in scalar_names         # log_max_attention_logit=True
-    assert "grad-norm" in scalar_names                   # grad_norm 非空
-    assert "batch-size" in scalar_names                  # 基本标量
+    assert "loss-scale" in scalar_names
+    assert "max_attention_logit" in scalar_names
+    assert "grad-norm" in scalar_names
+    assert "batch-size" in scalar_names
 
-    # 验证 wandb 也写入了
+    # Verify that wandb receives metrics too.
     assert any(item[0] == "wandb" for item in calls)
 
-    # 验证 GRPO 值计算正确
+    # Verify the calculated GRPO collection iteration.
     # iteration=10, grpo_iterations=1, grpo_samples_per_iteration=128, global_batch_size=32
     # grpo_collection_iteration = 10 // (1 * (128//32)) = 10 // 4 = 2
     grpo_calls = [
@@ -3247,5 +3247,5 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
     ]
     assert grpo_calls[0][2] == 2
 
-    # 验证 rl_utils 被调用
+    # Verify that the sequence-packing helper was called.
     assert "rl-packing-metrics" in calls
