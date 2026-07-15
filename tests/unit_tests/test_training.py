@@ -3161,6 +3161,10 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
             calls.append("rl-packing-metrics")
             return {"packed_bins": 5}
 
+        @staticmethod
+        def get_sequence_packing_log_info(args):
+            return " packed bins: 5 |"
+
     monkeypatch.setattr(training.torch, "tensor", cpu_tensor)
     monkeypatch.setattr(training, "get_args", lambda: args)
     monkeypatch.setattr(training, "get_timers", lambda: FakeTimers())
@@ -3211,7 +3215,11 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
     )
 
     # 验证 writer/scalar 被正确调用
-    scalar_names = {name for (_, name, _, _) in calls if isinstance(name, str)}
+    scalar_names = {
+        item[1]
+        for item in calls
+        if isinstance(item, tuple) and len(item) == 4 and item[0] == "scalar"
+    }
     assert "skipped-train-samples" in scalar_names       # skipped_train_samples=10
     assert "grpo_collection_iteration" in scalar_names   # perform_rl_step=True
     assert "world-size" in scalar_names                  # log_world_size=True
@@ -3229,7 +3237,14 @@ def test_training_log_grpo_and_auxiliary_writer_paths(monkeypatch):
     # 验证 GRPO 值计算正确
     # iteration=10, grpo_iterations=1, grpo_samples_per_iteration=128, global_batch_size=32
     # grpo_collection_iteration = 10 // (1 * (128//32)) = 10 // 4 = 2
-    grpo_calls = [item for item in calls if item[0] == "scalar" and item[1] == "grpo_collection_iteration"]
+    grpo_calls = [
+        item
+        for item in calls
+        if isinstance(item, tuple)
+        and len(item) == 4
+        and item[0] == "scalar"
+        and item[1] == "grpo_collection_iteration"
+    ]
     assert grpo_calls[0][2] == 2
 
     # 验证 rl_utils 被调用
