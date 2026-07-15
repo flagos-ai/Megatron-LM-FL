@@ -2950,7 +2950,12 @@ def test_setup_model_and_optimizer_moe_upcycling(monkeypatch):
 def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
     calls = []
     args = SimpleNamespace(
-        seq_length=1024, micro_batch_size=4, global_batch_size=32,
+        seq_length=1024,
+        decoder_seq_length=None,
+        micro_batch_size=4,
+        global_batch_size=32,
+        data_parallel_size=1,
+        save="/tmp/grads",
         save_dgrads_interval=1,
         save_wgrads_interval=1,
         reuse_grad_buf_for_mxfp8_param_ag=False,
@@ -2974,7 +2979,9 @@ def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
             return True, torch.tensor(1.0), torch.tensor(0)
 
     optimizer = FakeOptimizer()
-    opt_param_scheduler = SimpleNamespace()
+    opt_param_scheduler = SimpleNamespace(
+        step=lambda *, increment: calls.append(("scheduler-step", increment))
+    )
 
     model = [SimpleNamespace()]
     model[0].force_all_reduce = False
@@ -3003,8 +3010,19 @@ def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
         def should_checkpoint_and_exit(self):
             return False, False, None
 
+    class FakeTimer:
+        def start(self, barrier=False):
+            pass
+
+        def stop(self, barrier=False):
+            pass
+
+    class FakeTimers:
+        def __call__(self, name, log_level=None):
+            return FakeTimer()
+
     monkeypatch.setattr(training, "get_args", lambda: args)
-    monkeypatch.setattr(training, "get_timers", lambda: SimpleNamespace())
+    monkeypatch.setattr(training, "get_timers", lambda: FakeTimers())
     monkeypatch.setattr(training, "get_num_microbatches", lambda: 1)
     monkeypatch.setattr(training, "get_rerun_state_machine", lambda: FakeRerunMachine())
     monkeypatch.setattr(training, "has_nvidia_modelopt", False)
@@ -3017,8 +3035,9 @@ def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
                         lambda: calls.append("disable-dgrad"))
     monkeypatch.setattr(training, "save_dgrads",
                         lambda it: calls.append(("save-dgrads", it)))
-    monkeypatch.setattr(training.checkpointing, "save_grads",
+    monkeypatch.setattr(training, "save_grads",
                         lambda save_dir, sd, it, label: calls.append(("save-grads", label, it)))
+    monkeypatch.setattr(training.mpu, "is_pipeline_last_stage", lambda **kw: False)
 
     
     def fake_forward_backward(**kw):
@@ -3043,6 +3062,7 @@ def test_train_step_save_dgrads_and_wgrads_paths(monkeypatch):
     assert ("save-dgrads", 1) in calls
     # wgrads path（while 循环外执行）
     assert ("save-grads", "wgrads", 1) in calls
+    assert ("scheduler-step", 4) in calls
 
 
 # ============================================================================
