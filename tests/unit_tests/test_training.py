@@ -2567,6 +2567,7 @@ def test_get_model_wraps_virtual_chunks_with_ddp_config_and_side_stream(monkeypa
         megatron_fsdp_main_params_dtype=torch.float32,
         megatron_fsdp_main_grads_dtype=torch.float32,
         megatron_fsdp_grad_comm_dtype=torch.float32,
+        use_precision_aware_optimizer=True,
         overlap_param_gather_with_optimizer_step=False,
         data_parallel_random_init=False,
     )
