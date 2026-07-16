@@ -8,6 +8,10 @@ from torch.distributed import rendezvous
 
 import megatron.core.parallel_state as ps
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 class TestModel(torch.nn.Module):
     def __init__(
@@ -28,8 +32,15 @@ class TestModel(torch.nn.Module):
 
 class Utils:
 
-    world_size = int(os.environ.get('WORLD_SIZE', '1'))
-    rank = int(os.environ.get('LOCAL_RANK', '0'))
+    # Platform-specific distributed backend mapping
+    PLATFORM_BACKEND_MAP = {
+        'musa': 'mccl',
+        'cuda': 'nccl',
+        'cpu': 'gloo',
+    }
+
+    world_size = int(os.environ['WORLD_SIZE'])
+    rank = int(os.environ['LOCAL_RANK'])
     inited = False
     store = None
 
@@ -45,7 +56,7 @@ class Utils:
                 f'Initializing torch.distributed with rank: {Utils.rank}, '
                 f'world_size: {Utils.world_size}'
             )
-            torch.cuda.set_device(Utils.rank % torch.cuda.device_count())
+            cur_platform.set_device(Utils.rank % cur_platform.device_count())
             init_method = 'tcp://'
             master_ip = os.getenv('MASTER_ADDR', 'localhost')
             master_port = os.getenv('MASTER_PORT', '6000')
@@ -61,8 +72,12 @@ class Utils:
             store = PrefixStore("default_pg", store)
             Utils.store = store
 
+            backend = os.getenv(
+                'DISTRIBUTED_BACKEND',
+                Utils.PLATFORM_BACKEND_MAP.get(cur_platform._name, 'nccl'),
+            )
             torch.distributed.init_process_group(
-                backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
+                backend=backend, world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
             # Free cached CUDA memory before NCCL communicator creation
@@ -73,7 +88,7 @@ class Utils:
 
     @staticmethod
     def set_world_size(world_size=None, rank=None):
-        Utils.world_size = torch.cuda.device_count() if world_size is None else world_size
+        Utils.world_size = cur_platform.device_count() if world_size is None else world_size
         if (
             torch.distributed.is_initialized()
             and Utils.world_size != torch.distributed.get_world_size()
@@ -99,7 +114,7 @@ class Utils:
             # Flush pending CUDA work before the barrier so slow ranks don't
             # time out while fast ranks tear down process groups.
             # NOTE(zhaoyinglia): there is not keyword argument 'timeout' in torch.distributed.barrier()
-            torch.cuda.synchronize()
+            cur_platform.synchronize()
             torch.distributed.barrier()
         except Exception:
             Utils.inited = False
@@ -126,6 +141,7 @@ class Utils:
             tensor_model_parallel_size,
             pipeline_model_parallel_size,
             virtual_pipeline_model_parallel_size,
+            create_gloo_process_groups=False,       # Avoid RuntimeError when destroy_model_parallel on musa
             **kwargs,
         )
         Utils.inited = True
