@@ -574,6 +574,7 @@ def fused_sparse_indexer_loss_and_backward(
     loss_coeff: float,
     calculate_per_token_loss: bool = False,
     idx_nh: int = 1,
+    kv_offset: int = 0,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """One-pass fused: predict + target + KL loss + indexer backward.
 
@@ -585,15 +586,16 @@ def fused_sparse_indexer_loss_and_backward(
         q_idx_bshd: ``(B, S_q, H_q, D_idx)`` bf16 — indexer queries.
         k_idx_bsd: ``(B, S_k, D_idx)`` bf16 — indexer keys.
         w_bsh: ``(B, S_q, H_q)`` bf16 — raw (unscaled) weights.
-        topk_indices_cmp: ``(B, S_q, topk)`` int32.
+        topk_indices_cmp: ``(B, S_q, topk)`` int32 — indices into [0, n_comp).
         q_attn_bshd: ``(B, S_q, np, D_attn)`` bf16 — attention queries.
-        k_attn_bsd: ``(B, S_k, D_attn)`` bf16 — attention keys.
+        k_attn_bsd: ``(B, S_kv, D_attn)`` bf16 — attention keys (full KV buffer).
         lse_bsh: ``(B, S_q, np)`` fp32 — LSE from attention forward.
         indexer_softmax_scale: scale for indexer scores.
         softmax_scale: scale for attention scores.
         loss_coeff: KL loss coefficient.
         calculate_per_token_loss: if True, use sum instead of mean.
         idx_nh: number of indexer heads (qhead_per_kv_head).
+        kv_offset: offset into k_attn_bsd where compressed KV starts.
 
     Returns:
         (indexer_loss, grad_q_indexer, grad_k_indexer, grad_weights)
@@ -602,11 +604,14 @@ def fused_sparse_indexer_loss_and_backward(
     topk = topk_indices_cmp.shape[-1]
     eps = torch.finfo(torch.float32).tiny
 
-    # --- Single gather (shared between indexer and attn) ---
+    # --- Gather indexer keys (0-based into k_idx_bsd of shape (B, n_comp, D_idx)) ---
     idx_expanded = topk_indices_cmp.long().clamp(min=0)  # (B, S_q, topk)
     batch_idx = torch.arange(B, device=k_idx_bsd.device)[:, None, None]  # (B, 1, 1)
     k_idx_gathered = k_idx_bsd.float()[batch_idx, idx_expanded]  # (B, S_q, topk, D_idx)
-    k_attn_gathered = k_attn_bsd.float()[batch_idx, idx_expanded]  # (B, S_q, topk, D_attn)
+
+    # --- Gather attention keys (offset-based into full KV buffer) ---
+    idx_attn_expanded = (topk_indices_cmp.long() + kv_offset).clamp(min=0)  # (B, S_q, topk)
+    k_attn_gathered = k_attn_bsd.float()[batch_idx, idx_attn_expanded]  # (B, S_q, topk, D_attn)
 
     invalid_mask = topk_indices_cmp == -1  # (B, S_q, topk)
 

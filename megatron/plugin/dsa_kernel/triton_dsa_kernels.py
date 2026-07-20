@@ -3,14 +3,15 @@
 """
 Triton-based DSA kernel wrappers — drop-in replacement for ``dsa_kernels.py``.
 
-Provides the same public API as ``dsa_kernels.py`` but uses Triton kernels
+Provides the same high-level API as ``dsa_kernels.py`` but uses Triton kernels
 instead of cuDNN DSA namespace and FlashMLA. No external CUDA kernel
 dependencies required.
 
-Public API (identical to ``dsa_kernels.py``):
+Public API:
 
 * ``build_flat_topk_idxs`` / ``local_to_global_flat`` — index helpers.
-* ``dsa_sparse_attn`` — differentiable sparse attention (Path A / Path C step 2).
+* ``dsa_sparse_attn`` — differentiable sparse attention, flat layout (Path A / Path C step 2).
+* ``dsa_sparse_attn_sbhd`` — sparse attention with SBHD interface (used by csa.py).
 * ``indexer_topk`` — indexer scoring + top-K selection (Path C inference).
 * ``fused_indexer_sparse_attn`` — fused indexer loss + sparse attention (Path B training).
 """
@@ -102,49 +103,66 @@ class _CudaProfiler:
 
 
 def local_to_global_flat(local_idxs: Tensor, batch_size: int, seqlen_kv: int) -> Tensor:
-    """Convert local per-batch indices to global flat indices.
+    """Convert local per-batch indices to global flat indices (SB layout).
 
-    ``local_idxs`` is ``(batch, seq_q, topk)`` with values in ``[0, seqlen_kv)``.
-    Returns ``(batch * seq_q, topk)`` with global flat values suitable for
-    indexing into a ``(total_kv,)``-shaped flat KV buffer.
+    Follows the same convention as ``dsa_kernels.local_to_global_flat``:
+    flat row order is SB (seq-major); global index is ``local * B + b``
+    for valid entries and ``-1`` otherwise.
 
-    Invalid positions (value ``-1``) remain ``-1``.
+    Args:
+        local_idxs: ``(b, sq, topk)`` int, values in ``[0, seqlen_kv)`` or -1.
+        batch_size: ``B``.
+        seqlen_kv: KV sequence length per batch.
+
+    Returns:
+        ``(sq*b, topk)`` int32.
     """
-    B, S_q, TopK = local_idxs.shape
-    device = local_idxs.device
+    b, sq, topk = local_idxs.shape
+    assert b == batch_size
 
-    # Batch offsets: batch_i contributes offset batch_i * seqlen_kv
-    batch_offsets = (
-        torch.arange(B, device=device, dtype=local_idxs.dtype) * seqlen_kv
-    )  # (B,)
-    batch_offsets = batch_offsets.view(B, 1, 1)  # (B, 1, 1)
-
-    global_idxs = local_idxs.clone()
-    valid = global_idxs >= 0
-    global_idxs = torch.where(valid, global_idxs + batch_offsets, global_idxs)
-
-    return global_idxs.reshape(B * S_q, TopK)
+    # Permute to SB order: (b, sq, topk) -> (sq, b, topk) -> (sq*b, topk)
+    idxs_sb = local_idxs.permute(1, 0, 2).reshape(sq * b, topk)
+    valid = idxs_sb >= 0
+    batch_ids = torch.arange(sq * b, device=local_idxs.device) % b
+    batch_ids_exp = batch_ids.unsqueeze(1).expand_as(idxs_sb)
+    idxs_sb = torch.where(valid, idxs_sb * b + batch_ids_exp, idxs_sb)
+    return idxs_sb.int()
 
 
 def build_flat_topk_idxs(
-    window_idxs: Tensor,
-    compress_idxs: Optional[Tensor] = None,
-) -> Tensor:
-    """Concatenate window and compressed top-K indices into flat form.
+    *idx_groups: Tensor, batch_size: int, seqlen_kv: int, compact: bool = False
+) -> Tuple[Tensor, Optional[Tensor]]:
+    """Combine local per-batch index groups and convert to flat global form.
+
+    Drop-in replacement for ``dsa_kernels.build_flat_topk_idxs`` that uses
+    PyTorch argsort for compact instead of cuDNN's ``compactify_wrapper``.
+
+    Each *idx_group* is ``(b, sq, topk_i)`` with local per-batch KV indices.
+    ``-1`` marks invalid positions.
 
     Args:
-        window_idxs: ``(B, S_q, win_topk)`` int32, sliding-window indices.
-        compress_idxs: ``(B, S_q, cmp_topk)`` int32, optional compressed indices.
+        *idx_groups: one or more ``(b, sq, topk_i)`` int tensors.
+        batch_size: ``B``.
+        seqlen_kv: total KV sequence length per batch.
+        compact: if True, pack valid entries to the front of each row and
+            additionally return ``topk_length``; if False, leave as-is.
 
     Returns:
-        flat_idxs: ``(B * S_q, total_topk)`` int32.
+        ``(topk_idxs, topk_length)`` where
+        ``topk_idxs`` is ``(sq*b, total_topk)`` int32 (flat global) and
+        ``topk_length`` is ``(sq*b,)`` int32 when ``compact``, else ``None``.
     """
-    if compress_idxs is not None:
-        combined = torch.cat([compress_idxs, window_idxs], dim=-1)  # (B, S_q, total_topk)
-    else:
-        combined = window_idxs
-    B, S_q, TopK = combined.shape
-    return combined.reshape(B * S_q, TopK)
+    combined = torch.cat(idx_groups, dim=-1)  # (b, sq, total_topk)
+    global_idxs = local_to_global_flat(combined, batch_size, seqlen_kv)
+
+    topk_length_flat = None
+    if compact:
+        valid_mask = global_idxs >= 0
+        sorted_indices = valid_mask.int().argsort(dim=-1, descending=True, stable=True)
+        global_idxs = global_idxs.gather(-1, sorted_indices)
+        topk_length_flat = valid_mask.sum(dim=-1).int()
+
+    return global_idxs, topk_length_flat
 
 
 # ---------------------------------------------------------------------------
@@ -447,6 +465,48 @@ def dsa_sparse_attn(
         return out, lse, None
 
 
+def dsa_sparse_attn_sbhd(
+    query: Tensor,
+    kv: Tensor,
+    attn_sink: Tensor,
+    topk_idxs: Tensor,
+    softmax_scale: float,
+    topk_length: Optional[Tensor] = None,
+    indexer_topk: int = 0,
+) -> Tensor:
+    """Sparse attention with SBHD interface (matches dsa_kernels.dsa_sparse_attn).
+
+    Reshapes from ``(sq, b, np, d)`` layout to flat ``(total_Sq, H, D)`` and
+    delegates to :func:`dsa_sparse_attn`.
+
+    Args:
+        query: ``(sq, b, np, d)`` bf16 SBHD.
+        kv:    ``(skv, b, d)`` bf16 SBD (K=V).
+        attn_sink: ``(np,)`` f32.
+        topk_idxs: ``(sq*b, topk)`` int32 — flat global indices.
+        softmax_scale: scalar float.
+        topk_length: ``(sq*b,)`` int32 — optional compact fast-path.
+        indexer_topk: int; 0 for Paths A/C, positive for Path B.
+
+    Returns:
+        ``(sq, b, np * d_v)`` bf16 output.
+    """
+    sq, b, np_, d = query.shape
+    skv = kv.shape[0]
+    q_flat = query.reshape(sq * b, np_, d)
+    kv_flat = kv.reshape(skv * b, d)
+    # dsa_sparse_attn expects (total_Sq, H_kv, TopK); core produces (total_Sq, TopK)
+    idxs = topk_idxs.unsqueeze(1) if topk_idxs.dim() == 2 else topk_idxs
+    tlen = topk_length
+    if tlen is not None and tlen.dim() == 1:
+        tlen = tlen.unsqueeze(1)
+    out_flat, _lse, _ = dsa_sparse_attn(
+        q_flat, kv_flat, idxs, softmax_scale, d, attn_sink, tlen, indexer_topk
+    )
+    d_v = out_flat.shape[-1]
+    return out_flat.reshape(sq, b, np_ * d_v)
+
+
 # ---------------------------------------------------------------------------
 # Path C inference: indexer_topk
 # ---------------------------------------------------------------------------
@@ -705,6 +765,7 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
                         loss_coeff=loss_coeff,
                         calculate_per_token_loss=calculate_per_token_loss,
                         idx_nh=idx_nh,
+                        kv_offset=kv_offset,
                     )
                 )
                 # BSHD -> SBHD (match input layout)
@@ -717,8 +778,12 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
                     q_idx_bshd, k_idx_bsd, w_bsh_scaled, topk_indices_cmp,
                     qhead_per_kv_head=idx_nh,
                 )
+                # Shift valid compressed indices by kv_offset, keep -1 as-is
+                topk_for_target = topk_indices_cmp.clone()
+                valid_cmp_mask = topk_for_target >= 0
+                topk_for_target[valid_cmp_mask] += kv_offset
                 target_result = sparse_attn_score_recompute(
-                    q_attn_bshd, k_attn_bsd, lse_indexer_bsh, topk_indices_cmp + kv_offset,
+                    q_attn_bshd, k_attn_bsd, lse_indexer_bsh, topk_for_target,
                     softmax_scale, qhead_per_kv_head=np_,
                 )
                 indexer_loss = _kl_loss_from_target_predict(
@@ -1062,6 +1127,7 @@ __all__ = [
     "build_flat_topk_idxs",
     "local_to_global_flat",
     "dsa_sparse_attn",
+    "dsa_sparse_attn_sbhd",
     "indexer_topk",
     "fused_indexer_sparse_attn",
 ]

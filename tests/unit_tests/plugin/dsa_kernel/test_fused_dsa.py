@@ -39,6 +39,14 @@ from torch import Tensor
 # Skip entire module if CUDA is not available
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
+# SM90+ check for module-level tests that use apply_dsa_kernel_fusion=True
+_SM90_AVAILABLE = (
+    torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 9
+)
+_skip_unless_sm90 = pytest.mark.skipif(
+    not _SM90_AVAILABLE, reason="SM90+ (Hopper or later) required for apply_dsa_kernel_fusion"
+)
+
 # ---------------------------------------------------------------------------
 # Logging setup — use `pytest -s --log-cli-level=INFO` for detailed output,
 # or `--log-cli-level=WARNING` to suppress per-test metric prints.
@@ -383,6 +391,729 @@ class TestFusedIndexerSparseAttnAccuracy:
         ratio_actual = loss_2x.item() / max(loss_1x.item(), 1e-12)
         assert abs(ratio_actual - 2.0) < 0.01, (
             f"Loss does not scale linearly: ratio = {ratio_actual:.4f}, expected 2.0"
+        )
+
+
+# ---------------------------------------------------------------------------
+# KL Loss accuracy and calculate_per_token_loss tests
+# ---------------------------------------------------------------------------
+
+
+def _compute_kl_loss_reference(
+    inputs: dict,
+    sparse_loss: bool,
+    calculate_per_token_loss: bool,
+    loss_coeff: float = 0.1,
+) -> Tensor:
+    """Megatron-core unfused KL loss reference (no Triton code).
+
+    Uses the fused path's indexer scoring + top-K selection (same indices),
+    then calls ``compute_dsa_indexer_loss`` for the KL divergence computation.
+
+    This ensures the test validates only the KL computation logic, not
+    differences in top-K selection between implementations.
+
+    Returns scalar loss (f32).
+    """
+    from unittest.mock import MagicMock
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
+        compute_dsa_indexer_loss,
+        _compute_index_scores,
+    )
+    from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
+        _sbhd_to_bshd_indexer_inputs,
+        _indexer_topk_bshd,
+    )
+    from megatron.plugin.dsa_kernel.triton_dsa_utils import compute_ratio_causal_mask
+
+    n_comp = inputs["n_comp"]
+    kv_offset = inputs["kv_offset"]
+    effective_topk = min(inputs["indexer_topk"], n_comp)
+    sq, b, np_, hn = inputs["query"].shape  # noqa: F841
+    ratio = inputs["ratio"]
+
+    # Step 1: Use fused path's indexer scoring + top-K (same as FusedIndexerSparseAttnFunc)
+    q_idx_bshd, k_idx_bsd, w_bsh, w_bsh_scaled = _sbhd_to_bshd_indexer_inputs(
+        inputs["q_indexer"], inputs["k_indexer"],
+        inputs["weights"], inputs["indexer_softmax_scale"],
+    )
+    topk_indices_cmp, _, _ = _indexer_topk_bshd(
+        q_idx_bshd, k_idx_bsd, w_bsh_scaled, effective_topk, ratio
+    )
+    # topk_indices_cmp: (b, sq, effective_topk) — same indices as fused path
+    # Sanitize -1 sentinel values: compute_dsa_indexer_loss uses scatter_ which
+    # does not support negative indices. Replace -1 with 0; the causal_mask ensures
+    # those early rows (all -inf) produce row_valid=False and are zeroed out.
+    topk_indices_for_ref = topk_indices_cmp.clone()
+    topk_indices_for_ref[topk_indices_for_ref < 0] = 0
+
+    # Step 2: Compute index_scores using Megatron-core's _compute_index_scores
+    # (produces full (b, sq, n_comp) scores for compute_dsa_indexer_loss)
+    q_idx = inputs["q_indexer"]        # (sq, b, idx_nh, idx_hd)
+    k_idx = inputs["k_indexer"]        # (n_comp, b, idx_hd)
+    w_idx = inputs["weights"].float() * inputs["indexer_softmax_scale"]  # (sq, b, idx_nh)
+    index_scores = _compute_index_scores(q_idx, w_idx, k_idx)  # (b, sq, n_comp)
+
+    # Step 3: Build causal mask matching fused path
+    causal_mask = compute_ratio_causal_mask(
+        sq, n_comp, ratio, inputs["query"].device, torch.float32
+    ).unsqueeze(0).expand(b, -1, -1)  # (b, sq, n_comp)
+
+    # Apply causal mask to index_scores (same as fused_qk_topk_naive does)
+    index_scores = index_scores + causal_mask
+
+    # Step 4: prepare query and key for attention score computation
+    compressed_kv = inputs["kv_full"][kv_offset:kv_offset + n_comp]  # (n_comp, b, hn)
+    key_for_loss = compressed_kv.unsqueeze(2).expand(-1, -1, np_, -1)  # (n_comp, b, np, hn)
+
+    # Step 5: mock pg_collection with tp.size()=1
+    mock_tp = MagicMock()
+    mock_tp.size.return_value = 1
+    mock_pg = MagicMock()
+    mock_pg.tp = mock_tp
+
+    # Step 6: call compute_dsa_indexer_loss with fused path's topk indices
+    loss = compute_dsa_indexer_loss(
+        index_scores=index_scores,
+        topk_indices=topk_indices_for_ref,
+        query=inputs["query"].detach(),           # (sq, b, np, hn)
+        key=key_for_loss.detach(),                # (n_comp, b, np, hn)
+        softmax_scale=inputs["softmax_scale"],
+        loss_coeff=loss_coeff,
+        sparse_loss=sparse_loss,
+        pg_collection=mock_pg,
+        causal_mask_override=causal_mask,
+        calculate_per_token_loss=calculate_per_token_loss,
+    )
+
+    return loss
+
+
+def _compute_kl_loss_reference_dense(
+    inputs: dict,
+    calculate_per_token_loss: bool,
+    loss_coeff: float = 0.1,
+) -> Tensor:
+    """Dense KL loss reference that matches the fused path's semantics.
+
+    The fused dense path computes target attention probabilities using the FULL
+    LSE from the sparse attention forward (which includes window + compressed +
+    attn_sink positions). This is different from compute_dsa_indexer_loss which
+    computes softmax purely within the compressed key space.
+
+    This reference replicates the fused inference path step-by-step:
+    1. Run indexer top-K selection (same indices as fused)
+    2. Combine indices (compressed + window) and run sparse attention forward
+       to obtain the full LSE
+    3. Call dense_attn_score_recompute with full LSE (target distribution)
+    4. Call dense_indexer_score_recompute (predict distribution)
+    5. Call _kl_loss_from_dense_scores to compute KL divergence
+
+    Returns scalar loss (f32).
+    """
+    from megatron.plugin.dsa_kernel.triton_sparse_attn import triton_sparse_attn_forward
+
+    sq, b, np_, d = inputs["query"].shape
+    n_comp = inputs["n_comp"]
+    kv_offset = inputs["kv_offset"]
+    ratio = inputs["ratio"]
+    softmax_scale = inputs["softmax_scale"]
+    indexer_softmax_scale = inputs["indexer_softmax_scale"]
+    effective_topk = min(inputs["indexer_topk"], n_comp)
+    skv = inputs["kv_full"].shape[0]
+    idx_nh = inputs["q_indexer"].shape[2]
+
+    # Step 1: Indexer top-K (same as fused path)
+    q_idx_bshd, k_idx_bsd, w_bsh, w_bsh_scaled = _sbhd_to_bshd_indexer_inputs(
+        inputs["q_indexer"], inputs["k_indexer"],
+        inputs["weights"], indexer_softmax_scale,
+    )
+    topk_indices_cmp, _, _ = _indexer_topk_bshd(
+        q_idx_bshd, k_idx_bsd, w_bsh_scaled, effective_topk, ratio
+    )
+
+    # Step 2: Combine indices and run sparse attention to get full LSE
+    topk_indices_global = topk_indices_cmp.clone()
+    valid_cmp = topk_indices_global >= 0
+    topk_indices_global[valid_cmp] += kv_offset
+
+    window_idxs = inputs["window_idxs"]
+    combined_idxs = torch.cat([topk_indices_global, window_idxs], dim=-1)
+    total_topk = combined_idxs.shape[-1]
+
+    q_flat = inputs["query"].reshape(sq * b, np_, d)
+    kv_flat = inputs["kv_full"].reshape(skv * b, -1)
+
+    batch_ids = torch.arange(b, device=inputs["query"].device, dtype=combined_idxs.dtype)
+    global_idxs = combined_idxs.clone()
+    valid_mask = global_idxs >= 0
+    global_idxs = torch.where(
+        valid_mask,
+        global_idxs * b + batch_ids.view(b, 1, 1),
+        global_idxs,
+    )
+    global_idxs = global_idxs.permute(1, 0, 2).reshape(sq * b, total_topk)
+    global_idxs = global_idxs.unsqueeze(1)
+    global_idxs_expanded = global_idxs.expand(-1, np_, -1)
+
+    _, lse, _ = triton_sparse_attn_forward(
+        q_flat, kv_flat, global_idxs_expanded, softmax_scale, d,
+        inputs["attn_sink"], indexer_topk=0,
+    )
+    lse_bsh = lse.reshape(sq, b, np_).permute(1, 0, 2)  # (b, sq, np)
+
+    # Step 3: Attention target via dense_attn_score_recompute (full LSE)
+    q_attn_bshd = inputs["query"].permute(1, 0, 2, 3)  # (b, sq, np, d)
+    k_attn_bsd = inputs["kv_full"][kv_offset:kv_offset + n_comp, :, :d].permute(1, 0, 2)
+
+    dense_attn_result = dense_attn_score_recompute(
+        q_attn_bshd, k_attn_bsd, lse_bsh,
+        qhead_per_kv_head=np_, softmax_scale=softmax_scale, ratio=ratio,
+    )
+
+    # Step 4: Indexer predict via dense_indexer_score_recompute
+    dense_idx_result = dense_indexer_score_recompute(
+        q_idx_bshd, k_idx_bsd, w_bsh_scaled,
+        qhead_per_kv_head=idx_nh, sm_scale=indexer_softmax_scale, ratio=ratio,
+    )
+
+    # Step 5: KL loss
+    loss = _kl_loss_from_dense_scores(
+        dense_attn_result["out"], dense_attn_result["denom"],
+        dense_idx_result["out"], dense_idx_result["denom"],
+        topk_indices_cmp, loss_coeff, calculate_per_token_loss,
+    )
+    return loss
+
+
+class TestKLLossAccuracy:
+    """KL loss precision tests and calculate_per_token_loss coverage.
+
+    Verifies:
+    1. Fused KL loss matches a pure-PyTorch reference (both sparse and dense).
+    2. calculate_per_token_loss=True produces correct sum-reduction semantics.
+    3. The relationship: loss_per_token = loss_mean * num_valid_rows holds.
+    """
+
+    @pytest.fixture
+    def device(self):
+        return torch.device("cuda:0")
+
+    # ------------------------------------------------------------------
+    # Per-token vs mean reduction relationship
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "sq,b,np_,hn,n_comp,win_topk,idx_nh,idx_hd,indexer_topk,ratio",
+        [
+            (2048, 1, 32, 128, 512, 128, 4, 64, 256, 4),
+            (2048, 2, 32, 128, 512, 128, 4, 64, 256, 4),
+            (4096, 1, 32, 128, 1024, 256, 4, 64, 384, 4),
+        ],
+        ids=["7B_B1_sq2048", "7B_B2_sq2048", "13B_B1_sq4096"],
+    )
+    @pytest.mark.parametrize("sparse_loss", [True, False], ids=["sparse", "dense"])
+    def test_per_token_vs_mean_reduction(
+        self, sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+        indexer_topk, ratio, sparse_loss, device, dsa_metrics,
+    ):
+        """loss(per_token) = loss(mean) * num_elements / loss_coeff * loss_coeff.
+
+        More precisely: per_token uses sum, mean uses mean over B*S_q rows.
+        So per_token_loss / mean_loss ≈ B * S_q (for all-valid rows).
+        """
+        kv_offset = sq
+        inputs = _make_fused_inputs(
+            sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+            indexer_topk, ratio, kv_offset, device,
+        )
+
+        loss_coeff = 1.0  # Use 1.0 so ratio is cleaner
+
+        # Run with mean reduction (default)
+        _, loss_mean = fused_indexer_sparse_attn(
+            inputs["query"], inputs["kv_full"], inputs["attn_sink"],
+            inputs["window_idxs"], inputs["q_indexer"], inputs["k_indexer"],
+            inputs["weights"], inputs["indexer_topk"], inputs["ratio"],
+            inputs["softmax_scale"], inputs["indexer_softmax_scale"],
+            loss_coeff, sparse_loss, inputs["kv_offset"],
+            calculate_per_token_loss=False,
+        )
+
+        # Run with per-token (sum) reduction
+        _, loss_per_token = fused_indexer_sparse_attn(
+            inputs["query"], inputs["kv_full"], inputs["attn_sink"],
+            inputs["window_idxs"], inputs["q_indexer"], inputs["k_indexer"],
+            inputs["weights"], inputs["indexer_topk"], inputs["ratio"],
+            inputs["softmax_scale"], inputs["indexer_softmax_scale"],
+            loss_coeff, sparse_loss, inputs["kv_offset"],
+            calculate_per_token_loss=True,
+        )
+
+        # Expected number of rows = B * S_q
+        n_rows = b * sq
+        expected_ratio = float(n_rows)
+        actual_ratio = loss_per_token.item() / max(loss_mean.item(), 1e-12)
+
+        # Allow small tolerance due to f32 summation order
+        rel_err = abs(actual_ratio - expected_ratio) / expected_ratio
+        assert rel_err < 0.01, (
+            f"per_token/mean ratio mismatch: got {actual_ratio:.2f}, "
+            f"expected {expected_ratio:.2f} (rel_err={rel_err:.4e})"
+        )
+
+        logger.info(
+            f"[sq={sq}, b={b}, sparse_loss={sparse_loss}] "
+            f"per_token={loss_per_token.item():.6f}, mean={loss_mean.item():.6f}, "
+            f"ratio={actual_ratio:.2f}, expected={expected_ratio:.0f}"
+        )
+        dsa_metrics.record_accuracy(
+            params={"sq": sq, "b": b, "sparse_loss": sparse_loss},
+            cos_sim=1.0 - rel_err, target="per_token_vs_mean",
+        )
+
+    # ------------------------------------------------------------------
+    # KL loss precision: fused vs PyTorch reference (sparse)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "sq,b,np_,hn,n_comp,win_topk,idx_nh,idx_hd,indexer_topk,ratio",
+        [
+            (2048, 1, 32, 128, 512, 128, 4, 64, 256, 4),
+            (2048, 2, 32, 128, 512, 128, 4, 64, 256, 4),
+            (4096, 1, 32, 128, 1024, 256, 4, 64, 384, 4),
+        ],
+        ids=["7B_B1_sq2048", "7B_B2_sq2048", "13B_B1_sq4096"],
+    )
+    @pytest.mark.parametrize(
+        "calculate_per_token_loss", [False, True], ids=["mean", "per_token"]
+    )
+    def test_kl_loss_sparse_vs_reference(
+        self, sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+        indexer_topk, ratio, calculate_per_token_loss, device, dsa_metrics,
+    ):
+        """Fused sparse KL loss matches PyTorch reference."""
+        kv_offset = sq
+        loss_coeff = 0.1
+        inputs = _make_fused_inputs(
+            sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+            indexer_topk, ratio, kv_offset, device,
+        )
+
+        # ===== DEBUG: comprehensive step-by-step diagnosis =====
+        from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
+            _sbhd_to_bshd_indexer_inputs, _indexer_topk_bshd,
+        )
+        from megatron.plugin.dsa_kernel.triton_sparse_attn import triton_sparse_attn_forward
+        from megatron.plugin.dsa_kernel.triton_dsa_utils import compute_ratio_causal_mask
+        from megatron.core.transformer.experimental_attention_variant.dsa import (
+            fused_qk_topk_naive, _compute_index_scores,
+        )
+
+        effective_topk = min(inputs["indexer_topk"], n_comp)
+        q_idx_bshd, k_idx_bsd, w_bsh, w_bsh_scaled = _sbhd_to_bshd_indexer_inputs(
+            inputs["q_indexer"], inputs["k_indexer"],
+            inputs["weights"], inputs["indexer_softmax_scale"],
+        )
+        topk_indices_cmp, _, full_scores_fused = _indexer_topk_bshd(
+            q_idx_bshd, k_idx_bsd, w_bsh_scaled, effective_topk, ratio
+        )
+
+        print(f"\n[DEBUG] ===== STEP-BY-STEP DIAGNOSIS =====")
+        print(f"[DEBUG] shapes: sq={sq}, b={b}, np={np_}, hn={hn}, n_comp={n_comp}, "
+              f"effective_topk={effective_topk}, kv_offset={kv_offset}, ratio={ratio}")
+        print(f"[DEBUG] topk_indices_cmp: shape={topk_indices_cmp.shape}, "
+              f"min={topk_indices_cmp.min().item()}, max={topk_indices_cmp.max().item()}")
+        n_invalid = (topk_indices_cmp < 0).sum().item()
+        print(f"[DEBUG] invalid indices (< 0): {n_invalid} / {topk_indices_cmp.numel()}")
+
+        # ----- STEP A: Compare fused vs reference indexer scores -----
+        causal_mask = compute_ratio_causal_mask(
+            sq, n_comp, ratio, device, torch.float32
+        ).unsqueeze(0).expand(b, -1, -1)
+
+        # Reference scores from _compute_index_scores (SBHD format)
+        w_idx_ref = inputs["weights"].float() * inputs["indexer_softmax_scale"]
+        ref_index_scores = _compute_index_scores(
+            inputs["q_indexer"], w_idx_ref, inputs["k_indexer"]
+        )  # (b, sq, n_comp)
+        print(f"[DEBUG] ref_index_scores: shape={ref_index_scores.shape}, "
+              f"min={ref_index_scores.min().item():.6e}, max={ref_index_scores.max().item():.6e}")
+        print(f"[DEBUG] full_scores_fused: shape={full_scores_fused.shape}, "
+              f"min={full_scores_fused.min().item():.6e}, max={full_scores_fused.max().item():.6e}")
+
+        # Compare the two score computations
+        score_diff = (full_scores_fused - ref_index_scores).abs()
+        print(f"[DEBUG] indexer score diff (fused vs ref): "
+              f"max={score_diff.max().item():.6e}, mean={score_diff.mean().item():.6e}")
+
+        # ----- STEP B: Predict distribution comparison -----
+        # Fused predict: sparse_indexer_score_recompute over topk
+        predict_result = sparse_indexer_score_recompute(
+            q_idx_bshd, k_idx_bsd, w_bsh_scaled, topk_indices_cmp,
+            qhead_per_kv_head=idx_nh,
+        )
+        predict_fused = predict_result["predict"]  # (b, sq, topk)
+
+        # Reference predict: full index_scores + causal_mask + index_mask → softmax
+        ref_scores_masked = ref_index_scores + causal_mask
+        # Apply index_mask (sparse): mask non-topk to -inf
+        # Need to handle -1 in topk_indices_cmp for scatter
+        topk_safe = topk_indices_cmp.clone()
+        valid_topk_mask = topk_safe >= 0
+        topk_safe[~valid_topk_mask] = 0  # dummy position, will be re-masked
+        index_mask_correct = torch.full(
+            (b, sq, n_comp), float("-inf"), dtype=torch.float32, device=device
+        )
+        index_mask_correct.scatter_(-1, topk_safe.long(), 0.0)
+        # Fix: position 0 may have been incorrectly unmasked by invalid (-1→0) entries.
+        # Re-check: for each (b,s), if position 0 is NOT in the valid topk set, re-mask it.
+        pos0_in_valid = (topk_indices_cmp == 0).any(dim=-1)  # (b, sq)
+        index_mask_correct[:, :, 0] = torch.where(
+            pos0_in_valid, torch.zeros_like(index_mask_correct[:, :, 0]),
+            torch.full_like(index_mask_correct[:, :, 0], float("-inf"))
+        )
+        ref_scores_sparse = ref_scores_masked + index_mask_correct
+        # row_valid check
+        row_valid_ref = (causal_mask > float('-inf')).any(dim=-1)  # (b, sq)
+        idx_row_mask = row_valid_ref.view(b, sq, 1)
+        ref_scores_sparse = ref_scores_sparse.masked_fill(~idx_row_mask, 0.0)
+        predict_ref_full = torch.nn.functional.softmax(ref_scores_sparse, dim=-1)  # (b, sq, n_comp)
+        predict_ref_full = predict_ref_full * idx_row_mask.float()
+
+        # Gather reference predict at topk positions for comparison
+        predict_ref_at_topk = predict_ref_full[
+            torch.arange(b, device=device)[:, None, None],
+            torch.arange(sq, device=device)[None, :, None],
+            topk_safe.long(),
+        ]  # (b, sq, topk)
+        predict_ref_at_topk[~valid_topk_mask] = 0.0
+
+        predict_diff = (predict_fused - predict_ref_at_topk).abs()
+        print(f"[DEBUG] PREDICT fused: sum_per_row_mean={predict_fused.sum(-1).mean().item():.6f}, "
+              f"max={predict_fused.max().item():.6e}")
+        print(f"[DEBUG] PREDICT ref_at_topk: sum_per_row_mean={predict_ref_at_topk.sum(-1).mean().item():.6f}, "
+              f"max={predict_ref_at_topk.max().item():.6e}")
+        print(f"[DEBUG] PREDICT diff: max={predict_diff.max().item():.6e}, "
+              f"mean={predict_diff.mean().item():.6e}")
+
+        # ----- STEP C: Target distribution comparison -----
+        # Fused target: via lse_indexer from sparse attn forward
+        q_flat = inputs["query"].reshape(sq * b, np_, hn)
+        kv_flat = inputs["kv_full"].reshape((kv_offset + n_comp) * b, -1)
+        topk_indices_global = topk_indices_cmp.clone()
+        valid_cmp = topk_indices_global >= 0
+        topk_indices_global[valid_cmp] += kv_offset
+        combined_idxs = torch.cat([topk_indices_global, inputs["window_idxs"]], dim=-1)
+        total_topk = combined_idxs.shape[-1]
+        batch_ids = torch.arange(b, device=device, dtype=combined_idxs.dtype)
+        global_idxs = combined_idxs.clone()
+        valid_mask = global_idxs >= 0
+        global_idxs = torch.where(valid_mask, global_idxs * b + batch_ids.view(b, 1, 1), global_idxs)
+        global_idxs = global_idxs.permute(1, 0, 2).reshape(sq * b, total_topk)
+        global_idxs = global_idxs.unsqueeze(1)
+        global_idxs_expanded = global_idxs.expand(-1, np_, -1)
+
+        _, lse_full, lse_indexer_raw = triton_sparse_attn_forward(
+            q_flat, kv_flat, global_idxs_expanded, inputs["softmax_scale"], hn,
+            inputs["attn_sink"], indexer_topk=effective_topk,
+        )
+        lse_indexer_bsh = lse_indexer_raw.reshape(sq, b, np_).permute(1, 0, 2)  # (b, sq, np)
+
+        k_attn_bsd = inputs["kv_full"][:, :, :hn].permute(1, 0, 2)  # (b, skv, d)
+        q_attn_bshd = inputs["query"].permute(1, 0, 2, 3)  # (b, sq, np, hn)
+
+        # Shift valid indices by kv_offset, keep -1 as-is for invalid mask
+        topk_for_target = topk_indices_cmp.clone()
+        valid_cmp_target = topk_for_target >= 0
+        topk_for_target[valid_cmp_target] += kv_offset
+
+        target_result = sparse_attn_score_recompute(
+            q_attn_bshd, k_attn_bsd, lse_indexer_bsh, topk_for_target,
+            inputs["softmax_scale"], qhead_per_kv_head=np_,
+        )
+        target_fused = target_result["target"]  # (b, sq, topk)
+
+        # Reference target: direct softmax over topk attention scores
+        # q @ K_compressed_topk * scale, per head, then softmax, sum heads, L1 norm
+        compressed_kv = inputs["kv_full"][kv_offset:kv_offset + n_comp]  # (n_comp, b, hn)
+        key_for_ref = compressed_kv.unsqueeze(2).expand(-1, -1, np_, -1)  # (n_comp, b, np, hn)
+        # Compute full attention scores: [b*np, sq, n_comp]
+        q_ref = inputs["query"].permute(1, 2, 0, 3).reshape(b * np_, sq, hn).float()
+        k_ref = key_for_ref.permute(1, 2, 3, 0).reshape(b * np_, hn, n_comp).float()
+        attn_scores_full = torch.bmm(q_ref, k_ref) * inputs["softmax_scale"]
+        attn_scores_full = attn_scores_full.reshape(b, np_, sq, n_comp)  # (b, np, sq, n_comp)
+
+        # Apply causal_mask + index_mask
+        attn_scores_full = attn_scores_full + causal_mask.unsqueeze(1)  # (b, 1, sq, n_comp)
+        attn_scores_full = attn_scores_full + index_mask_correct.unsqueeze(1)  # sparse mask
+
+        # row_valid handling
+        attn_row_mask = row_valid_ref.view(b, 1, sq, 1)
+        attn_scores_full = attn_scores_full.masked_fill(~attn_row_mask, 0.0)
+
+        # Softmax per head
+        attn_probs_ref = torch.nn.functional.softmax(attn_scores_full, dim=-1)  # (b, np, sq, n_comp)
+        attn_probs_ref = attn_probs_ref * attn_row_mask.float()
+
+        # Sum heads, L1 normalize
+        attn_target_ref = attn_probs_ref.sum(dim=1)  # (b, sq, n_comp)
+        attn_target_ref = attn_target_ref / attn_target_ref.sum(dim=-1, keepdim=True).clamp(min=1e-10)
+
+        # Gather target at topk positions
+        target_ref_at_topk = attn_target_ref[
+            torch.arange(b, device=device)[:, None, None],
+            torch.arange(sq, device=device)[None, :, None],
+            topk_safe.long(),
+        ]
+        target_ref_at_topk[~valid_topk_mask] = 0.0
+
+        target_diff = (target_fused - target_ref_at_topk).abs()
+        print(f"[DEBUG] TARGET fused: sum_per_row_mean={target_fused.sum(-1).mean().item():.6f}, "
+              f"max={target_fused.max().item():.6e}")
+        print(f"[DEBUG] TARGET ref_at_topk: sum_per_row_mean={target_ref_at_topk.sum(-1).mean().item():.6f}, "
+              f"max={target_ref_at_topk.max().item():.6e}")
+        print(f"[DEBUG] TARGET diff: max={target_diff.max().item():.6e}, "
+              f"mean={target_diff.mean().item():.6e}, "
+              f"rel_max={target_diff.max().item() / max(target_ref_at_topk.abs().max().item(), 1e-10):.4e}")
+
+        # ----- STEP D: Diagnose lse_indexer vs direct softmax -----
+        # For fused target, the per-head probs are exp(score - lse_indexer)
+        # For reference target, they are softmax(scores_at_topk_only)
+        # These should be identical if lse_indexer = logsumexp(scores_at_topk)
+        # Let's check: recompute scores at topk positions and compare with lse_indexer
+        idx_for_gather = (topk_indices_cmp + kv_offset).long().clamp(min=0)  # (b, sq, topk)
+        batch_idx_d = torch.arange(b, device=device)[:, None, None]
+        k_gathered_f32 = k_attn_bsd.float()[batch_idx_d, idx_for_gather]  # (b, sq, topk, hn)
+        scores_at_topk = torch.einsum(
+            "bqhd,bqtd->bqht", q_attn_bshd.float(), k_gathered_f32
+        ) * inputs["softmax_scale"]  # (b, sq, np, topk)
+        # Mask invalid
+        scores_at_topk_masked = scores_at_topk.clone()
+        inv_mask_4d = (~valid_topk_mask).unsqueeze(2).expand_as(scores_at_topk)
+        scores_at_topk_masked[inv_mask_4d] = float("-inf")
+
+        # Direct logsumexp from f32 scores
+        lse_direct_f32 = torch.logsumexp(scores_at_topk_masked, dim=-1)  # (b, sq, np)
+        # Compare with lse_indexer from triton forward
+        lse_diff = (lse_indexer_bsh - lse_direct_f32).abs()
+        print(f"[DEBUG] LSE comparison (triton_fwd vs direct_f32):")
+        print(f"[DEBUG]   lse_indexer: mean={lse_indexer_bsh.mean().item():.4f}, "
+              f"min={lse_indexer_bsh.min().item():.4f}, max={lse_indexer_bsh.max().item():.4f}")
+        print(f"[DEBUG]   lse_direct:  mean={lse_direct_f32.mean().item():.4f}, "
+              f"min={lse_direct_f32.min().item():.4f}, max={lse_direct_f32.max().item():.4f}")
+        print(f"[DEBUG]   diff: max={lse_diff.max().item():.6e}, mean={lse_diff.mean().item():.6e}")
+
+        # Check what softmax probs look like from each LSE
+        probs_from_triton_lse = torch.exp(scores_at_topk_masked - lse_indexer_bsh.unsqueeze(-1))
+        probs_from_direct_lse = torch.exp(scores_at_topk_masked - lse_direct_f32.unsqueeze(-1))
+        print(f"[DEBUG] probs_from_triton_lse: max={probs_from_triton_lse.max().item():.6e}, "
+              f"sum_per_row_mean={probs_from_triton_lse.sum(-1).mean().item():.6f}")
+        print(f"[DEBUG] probs_from_direct_lse: max={probs_from_direct_lse.max().item():.6e}, "
+              f"sum_per_row_mean={probs_from_direct_lse.sum(-1).mean().item():.6f}")
+
+        # ----- STEP E: Compute KL from both paths for final comparison -----
+        # Manual fused-style KL
+        eps = torch.finfo(torch.float32).tiny
+        t_f = target_fused.clamp(min=eps)
+        p_f = predict_fused.clamp(min=eps)
+        kl_fused_rows = (t_f * (torch.log(t_f) - torch.log(p_f))).sum(dim=-1)
+        row_valid_fused = (topk_indices_cmp >= 0).any(dim=-1)
+        kl_fused_rows = torch.where(row_valid_fused, kl_fused_rows, torch.zeros_like(kl_fused_rows))
+        manual_loss = kl_fused_rows.mean() * loss_coeff
+
+        # Manual ref-style KL (same indices, same mask)
+        t_r = target_ref_at_topk.clamp(min=eps)
+        p_r = predict_ref_at_topk.clamp(min=eps)
+        kl_ref_rows = (t_r * (torch.log(t_r) - torch.log(p_r))).sum(dim=-1)
+        kl_ref_rows = torch.where(row_valid_fused, kl_ref_rows, torch.zeros_like(kl_ref_rows))
+        manual_ref_loss = kl_ref_rows.mean() * loss_coeff
+
+        print(f"[DEBUG] ----- KL DECOMPOSITION -----")
+        print(f"[DEBUG] manual_loss (fused target+predict): {manual_loss.item():.6e}")
+        print(f"[DEBUG] manual_ref_loss (ref target+predict): {manual_ref_loss.item():.6e}")
+
+        # Cross KL: fused target with ref predict
+        kl_cross1 = (t_f * (torch.log(t_f) - torch.log(p_r))).sum(dim=-1)
+        kl_cross1 = torch.where(row_valid_fused, kl_cross1, torch.zeros_like(kl_cross1))
+        print(f"[DEBUG] KL(fused_target || ref_predict): {kl_cross1.mean().item() * loss_coeff:.6e}")
+        # Cross KL: ref target with fused predict
+        kl_cross2 = (t_r * (torch.log(t_r) - torch.log(p_f))).sum(dim=-1)
+        kl_cross2 = torch.where(row_valid_fused, kl_cross2, torch.zeros_like(kl_cross2))
+        print(f"[DEBUG] KL(ref_target || fused_predict): {kl_cross2.mean().item() * loss_coeff:.6e}")
+
+        # Show worst rows
+        kl_diff_per_row = (kl_fused_rows - kl_ref_rows).abs()
+        worst_flat = kl_diff_per_row.reshape(-1).topk(5)
+        print(f"[DEBUG] top-5 worst row KL diffs: {worst_flat.values.tolist()}")
+        for idx in worst_flat.indices[:3]:
+            bi = idx.item() // sq
+            si = idx.item() % sq
+            print(f"[DEBUG]   row [{bi},{si}]: "
+                  f"fused_target={target_fused[bi,si,:8].tolist()}, "
+                  f"ref_target={target_ref_at_topk[bi,si,:8].tolist()}")
+            print(f"[DEBUG]            "
+                  f"fused_predict={predict_fused[bi,si,:8].tolist()}, "
+                  f"ref_predict={predict_ref_at_topk[bi,si,:8].tolist()}")
+
+        print(f"[DEBUG] fused loss will be printed after call below...")
+        # ===== END DEBUG =====
+
+        # Fused path
+        _, loss_fused = fused_indexer_sparse_attn(
+            inputs["query"], inputs["kv_full"], inputs["attn_sink"],
+            inputs["window_idxs"], inputs["q_indexer"], inputs["k_indexer"],
+            inputs["weights"], inputs["indexer_topk"], inputs["ratio"],
+            inputs["softmax_scale"], inputs["indexer_softmax_scale"],
+            loss_coeff, True, inputs["kv_offset"],
+            calculate_per_token_loss=calculate_per_token_loss,
+        )
+
+        # Reference
+        loss_ref = _compute_kl_loss_reference(
+            inputs, sparse_loss=True,
+            calculate_per_token_loss=calculate_per_token_loss,
+            loss_coeff=loss_coeff,
+        )
+
+        fused_val = loss_fused.item()
+        ref_val = loss_ref.item()
+        rel_err = abs(fused_val - ref_val) / max(abs(ref_val), 1e-8)
+
+        print(f"[DEBUG] === FINAL COMPARISON ===")
+        print(f"[DEBUG] loss_fused={fused_val:.6e}, loss_ref={ref_val:.6e}, manual_loss={manual_loss.item():.6e}")
+        print(f"[DEBUG] fused vs manual rel_err={abs(fused_val - manual_loss.item()) / max(abs(manual_loss.item()), 1e-8):.4e}")
+        print(f"[DEBUG] manual vs ref rel_err={abs(manual_loss.item() - ref_val) / max(abs(ref_val), 1e-8):.4e}")
+
+        logger.info(
+            f"[sq={sq}, b={b}, per_token={calculate_per_token_loss}] "
+            f"sparse KL: fused={fused_val:.6e}, ref={ref_val:.6e}, rel_err={rel_err:.4e}"
+        )
+
+        assert rel_err < 5e-3, (
+            f"Sparse KL loss mismatch: fused={fused_val:.6e}, ref={ref_val:.6e}, "
+            f"rel_err={rel_err:.4e}"
+        )
+        assert torch.isfinite(loss_fused), f"Fused loss is not finite: {fused_val}"
+
+        dsa_metrics.record_accuracy(
+            params={"sq": sq, "b": b, "per_token": calculate_per_token_loss},
+            cos_sim=1.0 - rel_err, target="kl_loss_sparse",
+        )
+
+    # ------------------------------------------------------------------
+    # KL loss precision: fused vs PyTorch reference (dense)
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "sq,b,np_,hn,n_comp,win_topk,idx_nh,idx_hd,indexer_topk,ratio",
+        [
+            (2048, 1, 32, 128, 512, 128, 4, 64, 256, 4),
+            (2048, 2, 32, 128, 512, 128, 4, 64, 256, 4),
+            (4096, 1, 32, 128, 1024, 256, 4, 64, 384, 4),
+        ],
+        ids=["7B_B1_sq2048", "7B_B2_sq2048", "13B_B1_sq4096"],
+    )
+    @pytest.mark.parametrize(
+        "calculate_per_token_loss", [False, True], ids=["mean", "per_token"]
+    )
+    def test_kl_loss_dense_vs_reference(
+        self, sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+        indexer_topk, ratio, calculate_per_token_loss, device, dsa_metrics,
+    ):
+        """Fused dense KL loss matches PyTorch reference."""
+        kv_offset = sq
+        loss_coeff = 0.1
+        inputs = _make_fused_inputs(
+            sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+            indexer_topk, ratio, kv_offset, device,
+        )
+
+        # Fused path
+        _, loss_fused = fused_indexer_sparse_attn(
+            inputs["query"], inputs["kv_full"], inputs["attn_sink"],
+            inputs["window_idxs"], inputs["q_indexer"], inputs["k_indexer"],
+            inputs["weights"], inputs["indexer_topk"], inputs["ratio"],
+            inputs["softmax_scale"], inputs["indexer_softmax_scale"],
+            loss_coeff, False, inputs["kv_offset"],
+            calculate_per_token_loss=calculate_per_token_loss,
+        )
+
+        # Reference — uses full LSE from sparse attn forward (matches fused semantics)
+        loss_ref = _compute_kl_loss_reference_dense(
+            inputs,
+            calculate_per_token_loss=calculate_per_token_loss,
+            loss_coeff=loss_coeff,
+        )
+
+        fused_val = loss_fused.item()
+        ref_val = loss_ref.item()
+        rel_err = abs(fused_val - ref_val) / max(abs(ref_val), 1e-8)
+
+        logger.info(
+            f"[sq={sq}, b={b}, per_token={calculate_per_token_loss}] "
+            f"dense KL: fused={fused_val:.6e}, ref={ref_val:.6e}, rel_err={rel_err:.4e}"
+        )
+
+        assert rel_err < 5e-3, (
+            f"Dense KL loss mismatch: fused={fused_val:.6e}, ref={ref_val:.6e}, "
+            f"rel_err={rel_err:.4e}"
+        )
+        assert torch.isfinite(loss_fused), f"Fused loss is not finite: {fused_val}"
+
+        dsa_metrics.record_accuracy(
+            params={"sq": sq, "b": b, "per_token": calculate_per_token_loss},
+            cos_sim=1.0 - rel_err, target="kl_loss_dense",
+        )
+
+    # ------------------------------------------------------------------
+    # Per-token loss with gradient — ensure backward still works
+    # ------------------------------------------------------------------
+
+    @pytest.mark.parametrize(
+        "sq,b,np_,hn,n_comp,win_topk,idx_nh,idx_hd,indexer_topk,ratio",
+        [
+            (2048, 1, 32, 128, 512, 128, 4, 64, 256, 4),
+        ],
+    )
+    @pytest.mark.parametrize("sparse_loss", [True, False], ids=["sparse", "dense"])
+    def test_per_token_loss_backward_no_nan(
+        self, sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+        indexer_topk, ratio, sparse_loss, device,
+    ):
+        """Backward with calculate_per_token_loss=True produces no NaN/Inf."""
+        kv_offset = sq
+        inputs = _make_fused_inputs(
+            sq, b, np_, hn, n_comp, win_topk, idx_nh, idx_hd,
+            indexer_topk, ratio, kv_offset, device,
+        )
+
+        query = inputs["query"].clone().detach().requires_grad_(True)
+        kv_full = inputs["kv_full"].clone().detach().requires_grad_(True)
+        attn_sink = inputs["attn_sink"].clone().detach().requires_grad_(True)
+
+        out, loss = fused_indexer_sparse_attn(
+            query, kv_full, attn_sink, inputs["window_idxs"],
+            inputs["q_indexer"], inputs["k_indexer"], inputs["weights"],
+            inputs["indexer_topk"], inputs["ratio"],
+            inputs["softmax_scale"], inputs["indexer_softmax_scale"],
+            0.1, sparse_loss, inputs["kv_offset"],
+            calculate_per_token_loss=True,
+        )
+
+        scalar = out.float().sum() + loss
+        scalar.backward()
+
+        for name, param in [("query", query), ("kv_full", kv_full), ("attn_sink", attn_sink)]:
+            assert param.grad is not None, f"{name}.grad is None"
+            assert not torch.isnan(param.grad).any(), f"{name}.grad has NaN"
+            assert not torch.isinf(param.grad).any(), f"{name}.grad has Inf"
+
+        # Loss should be larger than mean version (since it's sum over B*S_q rows)
+        assert loss.item() > 0, f"Per-token loss should be positive, got {loss.item()}"
+        logger.info(
+            f"[sparse_loss={sparse_loss}] per_token_loss={loss.item():.6f}, "
+            f"grad_query_norm={query.grad.float().norm().item():.4e}"
         )
 
 
@@ -822,9 +1553,13 @@ class TestFusedIndexerSparseAttnPerformance:
                 )
                 q_attn_bshd = inputs["query"].permute(1, 0, 2, 3).contiguous()
                 k_attn_bsd = inputs["kv_full"][:, :, :d].permute(1, 0, 2).contiguous()
+                # Preserve -1 for invalid mask in sparse_attn_score_recompute
+                topk_for_target_perf = topk_indices_cmp.clone()
+                valid_perf = topk_for_target_perf >= 0
+                topk_for_target_perf[valid_perf] += kv_offset
                 target_result = sparse_attn_score_recompute(
                     q_attn_bshd, k_attn_bsd, lse_indexer_bsh,
-                    topk_indices_cmp + kv_offset,
+                    topk_for_target_perf,
                     inputs["softmax_scale"], qhead_per_kv_head=np_,
                 )
                 _loss = _kl_loss_from_target_predict(
@@ -1117,9 +1852,13 @@ class TestFusedIndexerSparseAttnPerformance:
                 q_attn_bshd = unfused_query.permute(1, 0, 2, 3).contiguous()
                 k_attn_bsd = unfused_kv[:, :, :d].permute(1, 0, 2).contiguous()
 
+                # Preserve -1 for invalid mask in sparse_attn_score_recompute
+                topk_for_target_e2e = topk_indices_cmp.clone()
+                valid_e2e = topk_for_target_e2e >= 0
+                topk_for_target_e2e[valid_e2e] += kv_offset
                 target_result = sparse_attn_score_recompute(
                     q_attn_bshd, k_attn_bsd, lse_indexer_bsh,
-                    topk_indices_cmp + kv_offset,
+                    topk_for_target_e2e,
                     inputs["softmax_scale"], qhead_per_kv_head=np_,
                 )
                 target = target_result["target"]
@@ -1239,34 +1978,28 @@ def _oom_guard():
 
 
 # ---------------------------------------------------------------------------
-# Triton dsa_sparse_attn wrapper (SBHD interface matching dsa_kernels.py)
+# Triton dsa_sparse_attn SBHD interface
+#
+# Now that csa.py uses _ensure_dsa_kernels() to lazily import the Triton
+# backend (dsa_sparse_attn_sbhd, build_flat_topk_idxs, etc.), tests that set
+# apply_dsa_kernel_fusion=True in the config no longer need monkey-patching.
+# The globals are populated during CSA construction.
 # ---------------------------------------------------------------------------
 
-
-def _triton_dsa_sparse_attn(
-    query, kv, attn_sink, topk_idxs, softmax_scale, topk_length=None, indexer_topk=0
-):
-    """SBHD wrapper around triton plugin's flat dsa_sparse_attn.
-
-    Matches the signature of ``dsa_kernels.dsa_sparse_attn`` so it can be
-    monkey-patched into csa.py for tests without FlashMLA/cuDNN.
-    """
-    sq, b, np_, d = query.shape
-    skv = kv.shape[0]
-    q_flat = query.reshape(sq * b, np_, d)
-    kv_flat = kv.reshape(skv * b, d)
-    # triton expects (total_Sq, H_kv, TopK); dsa_kernels produces (total_Sq, TopK)
-    if topk_idxs.dim() == 2:
-        topk_idxs = topk_idxs.unsqueeze(1)
-    out_flat, _lse, _ = _triton_dsa_sparse_attn_raw(
-        q_flat, kv_flat, topk_idxs, softmax_scale, d, attn_sink, topk_length, indexer_topk
-    )
-    d_v = out_flat.shape[-1]
-    return out_flat.reshape(sq, b, np_ * d_v)
+from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
+    dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,  # noqa: F401
+)
 
 
+# Patch targets for the csa.py module-level globals (used by _ensure_dsa_kernels).
+# These are needed only when apply_dsa_kernel_fusion was NOT set in the config
+# (so _ensure_dsa_kernels was never called) and you need to inject the Triton
+# implementations manually.
 _PATCH_DSA_SPARSE_ATTN = (
-    'megatron.core.transformer.experimental_attention_variant.csa.dsa_sparse_attn'
+    'megatron.core.transformer.experimental_attention_variant.csa._dsa_sparse_attn'
+)
+_PATCH_BUILD_FLAT_TOPK_IDXS = (
+    'megatron.core.transformer.experimental_attention_variant.csa._build_flat_topk_idxs_fn'
 )
 
 try:
@@ -1291,6 +2024,7 @@ def _make_test_mla_config(
     dsa_indexer_head_dim=64,
     dsa_indexer_loss_coeff=0.1,
     dsa_indexer_use_sparse_loss=True,
+    apply_dsa_kernel_fusion=True,
 ):
     """Helper to create MLATransformerConfig for module-level CSA tests."""
     qk_pos_emb_head_dim = 32
@@ -1321,6 +2055,7 @@ def _make_test_mla_config(
         dsa_indexer_topk=dsa_indexer_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
         dsa_indexer_use_sparse_loss=dsa_indexer_use_sparse_loss,
+        apply_dsa_kernel_fusion=apply_dsa_kernel_fusion,
     )
 
 
@@ -1394,13 +2129,11 @@ def _make_csa_inputs(sq, b, config, device="cuda"):
     return {"query": query, "key": key, "value": key.clone(), "x": x, "qr": qr}
 
 
-# Patch target for fused_indexer_sparse_attn in the csa module
-_PATCH_TARGET = (
-    'megatron.core.transformer.experimental_attention_variant.csa.fused_indexer_sparse_attn'
+# Patch target for fused_indexer_sparse_attn in the csa module (kept for reference;
+# not needed when apply_dsa_kernel_fusion=True is set in the config).
+_PATCH_FUSED_INDEXER = (
+    'megatron.core.transformer.experimental_attention_variant.csa._fused_indexer_sparse_attn'
 )
-
-# Reuse the already-imported triton fused_indexer_sparse_attn
-_triton_fused_indexer_sparse_attn = fused_indexer_sparse_attn
 
 
 def _hadamard_patches():
@@ -1424,6 +2157,7 @@ def _hadamard_patches():
         return stack
 
 
+@_skip_unless_sm90
 class TestCSAFusedVsUnfusedAccuracy:
     """Module-level accuracy: CompressedSparseAttention unfused path vs fused (triton).
 
@@ -1487,18 +2221,17 @@ class TestCSAFusedVsUnfusedAccuracy:
                     qr=inputs["qr"].clone(),
                 )
 
-            # --- Fused path (triton) ---
+            # --- Fused path (triton via _ensure_dsa_kernels) ---
             csa.apply_dsa_kernel_fusion = True
-            with patch(_PATCH_TARGET, _triton_fused_indexer_sparse_attn):
-                torch.manual_seed(7)
-                out_fused = csa(
-                    query=inputs["query"].clone(),
-                    key=inputs["key"].clone(),
-                    value=inputs["value"].clone(),
-                    attention_mask=None,
-                    x=inputs["x"].clone(),
-                    qr=inputs["qr"].clone(),
-                )
+            torch.manual_seed(7)
+            out_fused = csa(
+                query=inputs["query"].clone(),
+                key=inputs["key"].clone(),
+                value=inputs["value"].clone(),
+                attention_mask=None,
+                x=inputs["x"].clone(),
+                qr=inputs["qr"].clone(),
+            )
 
             # Compare
             out_f = out_fused.float()
@@ -1574,12 +2307,11 @@ class TestCSAFusedVsUnfusedAccuracy:
             csa.apply_dsa_kernel_fusion = True
             query_f = inputs["query"].clone().requires_grad_(True)
             key_f = inputs["key"].clone().requires_grad_(True)
-            with patch(_PATCH_TARGET, _triton_fused_indexer_sparse_attn):
-                out_f = csa(
-                    query=query_f, key=key_f, value=key_f.clone(),
-                    attention_mask=None, x=inputs["x"].clone(), qr=inputs["qr"].clone(),
-                )
-                out_f.sum().backward()
+            out_f = csa(
+                query=query_f, key=key_f, value=key_f.clone(),
+                attention_mask=None, x=inputs["x"].clone(), qr=inputs["qr"].clone(),
+            )
+            out_f.sum().backward()
             grad_q_fused = query_f.grad.float().clone()
             grad_k_fused = key_f.grad.float().clone()
 
@@ -1609,6 +2341,7 @@ class TestCSAFusedVsUnfusedAccuracy:
             )
 
 
+@_skip_unless_sm90
 class TestCSAFusedVsUnfusedPerformance:
     """Module-level performance: CompressedSparseAttention unfused vs fused (triton).
 
@@ -1711,8 +2444,7 @@ class TestCSAFusedVsUnfusedPerformance:
                 key_f.grad = None
                 csa.zero_grad()
 
-            with patch(_PATCH_TARGET, _triton_fused_indexer_sparse_attn):
-                time_fused = self._benchmark(run_fused)
+            time_fused = self._benchmark(run_fused)
 
             speedup = time_unfused / max(time_fused, 1e-6)
 
@@ -1800,12 +2532,11 @@ class TestCSAFusedVsUnfusedPerformance:
             key_f = inputs["key"].clone().requires_grad_(True)
 
             # Warmup
-            with patch(_PATCH_TARGET, _triton_fused_indexer_sparse_attn):
-                out = csa(
-                    query=query_f, key=key_f, value=key_f.clone(),
-                    attention_mask=None, x=inputs["x"], qr=inputs["qr"],
-                )
-                out.sum().backward()
+            out = csa(
+                query=query_f, key=key_f, value=key_f.clone(),
+                attention_mask=None, x=inputs["x"], qr=inputs["qr"],
+            )
+            out.sum().backward()
             query_f.grad = None
             key_f.grad = None
             csa.zero_grad()
@@ -1815,12 +2546,11 @@ class TestCSAFusedVsUnfusedPerformance:
             torch.cuda.synchronize()
             mem_before_fused = torch.cuda.memory_allocated(device)
 
-            with patch(_PATCH_TARGET, _triton_fused_indexer_sparse_attn):
-                out = csa(
-                    query=query_f, key=key_f, value=key_f.clone(),
-                    attention_mask=None, x=inputs["x"], qr=inputs["qr"],
-                )
-                out.sum().backward()
+            out = csa(
+                query=query_f, key=key_f, value=key_f.clone(),
+                attention_mask=None, x=inputs["x"], qr=inputs["qr"],
+            )
+            out.sum().backward()
             torch.cuda.synchronize()
             mem_fused_peak = torch.cuda.max_memory_allocated(device) - mem_before_fused
 
@@ -1844,6 +2574,7 @@ class TestCSAFusedVsUnfusedPerformance:
 # ---------------------------------------------------------------------------
 
 
+@_skip_unless_sm90
 class TestCSANoIndexerFusedVsUnfused:
     """E2E accuracy: CompressedSparseAttention with no indexer (ratio=0 or ratio=128).
 
@@ -1909,18 +2640,17 @@ class TestCSANoIndexerFusedVsUnfused:
                     qr=inputs["qr"].clone(),
                 )
 
-            # --- Fused path (triton dsa_sparse_attn) ---
+            # --- Fused path (triton dsa_sparse_attn via _ensure_dsa_kernels) ---
             csa.apply_dsa_kernel_fusion = True
-            with patch(_PATCH_DSA_SPARSE_ATTN, _triton_dsa_sparse_attn):
-                torch.manual_seed(7)
-                out_fused = csa(
-                    query=inputs["query"].clone(),
-                    key=inputs["key"].clone(),
-                    value=inputs["value"].clone(),
-                    attention_mask=None,
-                    x=inputs["x"].clone(),
-                    qr=inputs["qr"].clone(),
-                )
+            torch.manual_seed(7)
+            out_fused = csa(
+                query=inputs["query"].clone(),
+                key=inputs["key"].clone(),
+                value=inputs["value"].clone(),
+                attention_mask=None,
+                x=inputs["x"].clone(),
+                qr=inputs["qr"].clone(),
+            )
 
             # Compare
             out_f = out_fused.float()
@@ -1994,18 +2724,17 @@ class TestCSANoIndexerFusedVsUnfused:
 
             csa.zero_grad()
 
-            # --- Fused path with grad (triton dsa_sparse_attn) ---
+            # --- Fused path with grad (triton dsa_sparse_attn via _ensure_dsa_kernels) ---
             csa.apply_dsa_kernel_fusion = True
             query_f = inputs["query"].clone().requires_grad_(True)
             key_f = inputs["key"].clone().requires_grad_(True)
-            with patch(_PATCH_DSA_SPARSE_ATTN, _triton_dsa_sparse_attn):
-                out_f = csa(
-                    query=query_f, key=key_f, value=key_f.clone(),
-                    attention_mask=None, x=inputs["x"].clone(), qr=inputs["qr"].clone(),
-                )
-                torch.cuda.synchronize()
-                out_f.sum().backward()
-                torch.cuda.synchronize()
+            out_f = csa(
+                query=query_f, key=key_f, value=key_f.clone(),
+                attention_mask=None, x=inputs["x"].clone(), qr=inputs["qr"].clone(),
+            )
+            torch.cuda.synchronize()
+            out_f.sum().backward()
+            torch.cuda.synchronize()
             grad_q_fused = query_f.grad.float().clone()
             grad_k_fused = key_f.grad.float().clone()
 
@@ -2055,6 +2784,7 @@ class TestCSANoIndexerFusedVsUnfused:
 # ---------------------------------------------------------------------------
 
 
+@_skip_unless_sm90
 class TestCSANoIndexerPerformance:
     """E2E performance: CompressedSparseAttention no-indexer path.
 
@@ -2140,7 +2870,7 @@ class TestCSANoIndexerPerformance:
             with _oom_guard():
                 time_unfused = self._benchmark(run_unfused)
 
-            # --- Fused benchmark (triton dsa_sparse_attn) ---
+            # --- Fused benchmark (triton dsa_sparse_attn via _ensure_dsa_kernels) ---
             csa.apply_dsa_kernel_fusion = True
             query_f = inputs["query"].clone().requires_grad_(True)
             key_f = inputs["key"].clone().requires_grad_(True)
@@ -2155,8 +2885,7 @@ class TestCSANoIndexerPerformance:
                 key_f.grad = None
                 csa.zero_grad()
 
-            with patch(_PATCH_DSA_SPARSE_ATTN, _triton_dsa_sparse_attn):
-                time_fused = self._benchmark(run_fused)
+            time_fused = self._benchmark(run_fused)
 
             speedup = time_unfused / max(time_fused, 1e-6)
 
@@ -2241,12 +2970,11 @@ class TestCSANoIndexerPerformance:
             key_f = inputs["key"].clone().requires_grad_(True)
 
             # Warmup
-            with patch(_PATCH_DSA_SPARSE_ATTN, _triton_dsa_sparse_attn):
-                out = csa(
-                    query=query_f, key=key_f, value=key_f.clone(),
-                    attention_mask=None, x=inputs["x"], qr=inputs["qr"],
-                )
-                out.sum().backward()
+            out = csa(
+                query=query_f, key=key_f, value=key_f.clone(),
+                attention_mask=None, x=inputs["x"], qr=inputs["qr"],
+            )
+            out.sum().backward()
             query_f.grad = None
             key_f.grad = None
             csa.zero_grad()
@@ -2256,12 +2984,11 @@ class TestCSANoIndexerPerformance:
             torch.cuda.synchronize()
             mem_before = torch.cuda.memory_allocated(device)
 
-            with patch(_PATCH_DSA_SPARSE_ATTN, _triton_dsa_sparse_attn):
-                out = csa(
-                    query=query_f, key=key_f, value=key_f.clone(),
-                    attention_mask=None, x=inputs["x"], qr=inputs["qr"],
-                )
-                out.sum().backward()
+            out = csa(
+                query=query_f, key=key_f, value=key_f.clone(),
+                attention_mask=None, x=inputs["x"], qr=inputs["qr"],
+            )
+            out.sum().backward()
             torch.cuda.synchronize()
             mem_fused_peak = torch.cuda.max_memory_allocated(device) - mem_before
 
