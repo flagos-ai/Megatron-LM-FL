@@ -122,8 +122,15 @@ jobs:
           printf 'protobuf<7\n' > /tmp/megatron-unit-test-constraints.txt
           export PIP_CONSTRAINT=/tmp/megatron-unit-test-constraints.txt
 
-          # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk msgpack --no-cache-dir
+          # Preserve the validated torch/torch_npu pair shipped in the NPU image.
+          TEST_DEPENDENCIES=(boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk msgpack)
+          if [ "$PLATFORM" = "npu" ]; then
+            python3 -c "import torch, torch_npu; assert torch.__version__ == '2.7.1+cpu', torch.__version__; assert torch_npu.__version__ == '2.7.1.post2', torch_npu.__version__"
+            pip install "${TEST_DEPENDENCIES[@]}" --no-cache-dir
+            python3 -c "import torch, torch_npu; assert torch.__version__ == '2.7.1+cpu', torch.__version__; assert torch_npu.__version__ == '2.7.1.post2', torch_npu.__version__; assert torch.npu.is_available(); assert torch.npu.device_count() >= 8, torch.npu.device_count(); print(f'Torch: {torch.__version__}, torch_npu: {torch_npu.__version__}, NPU devices: {torch.npu.device_count()}')"
+          else
+            pip install torch "${TEST_DEPENDENCIES[@]}" --no-cache-dir
+          fi
           if [ "$PLATFORM" = "metax" ]; then
             pip install fastapi uvicorn --no-cache-dir
           fi
