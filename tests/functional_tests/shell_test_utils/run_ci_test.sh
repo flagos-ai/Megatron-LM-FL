@@ -8,6 +8,9 @@ ulimit -Sn $(ulimit -Hn)
 # Increase soft limit for number of processes to match hard limit
 ulimit -Su $(ulimit -Hu)
 
+# Set umask to 0002 to allow group read/write permissions
+umask 0002
+
 set +x
 for ARGUMENT in "$@"; do
     # Split on first = only, preserving any subsequent = signs in the value
@@ -51,6 +54,10 @@ set -exo pipefail
 # Extract settings from params file
 TEST_TYPE=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.TEST_TYPE')
+ENABLE_LIGHTWEIGHT_MODE=$(cat $TRAINING_PARAMS_PATH |
+    /usr/local/bin/yq '.ENV_VARS.ENABLE_LIGHTWEIGHT_MODE // "false"')
+N_REPEAT=$(cat $TRAINING_PARAMS_PATH |
+    /usr/local/bin/yq '.ENV_VARS.N_REPEAT // "'$N_REPEAT'"')
 MODE=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.MODE // "pretraining"')
 
@@ -67,9 +74,10 @@ mkdir -p $CHECKPOINT_SAVE_PATH
 mkdir -p $CHECKPOINT_LOAD_PATH || true
 _CHECKPOINT_LOAD_PATH=$CHECKPOINT_LOAD_PATH
 _CHECKPOINT_SAVE_PATH=$CHECKPOINT_SAVE_PATH
+_TENSORBOARD_PATH=$TENSORBOARD_PATH
 
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &>/dev/null && pwd)
-ROOT_DIR=$(realpath $SCRIPT_DIR/../../../)
+ROOT_DIR=$(realpath "$SCRIPT_DIR/../../../")
 
 IS_NEMO_TEST=$([[ $(echo "$TRAINING_SCRIPT_PATH" | tr '[:upper:]' '[:lower:]') == *nemo* ]] && echo "true" || echo "false")
 export IS_NEMO_TEST
@@ -121,14 +129,24 @@ NON_DETERMINSTIC_RESULTS=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.ENV_VARS.NON_DETERMINSTIC_RESULTS // "0"')
 SKIP_PYTEST=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.ENV_VARS.SKIP_PYTEST')
+BENCHMARK_TEST=$(cat $TRAINING_PARAMS_PATH |
+    /usr/local/bin/yq '.ENV_VARS.BENCHMARK_TEST // "0"')
 
 export RECORD_CHECKPOINTS=${RECORD_CHECKPOINTS:-"false"}
 
+NODE_RANK=${SLURM_NODEID:-${SLURM_NODEID:-0}}
+
 for i in $(seq 1 $N_REPEAT); do
+    # Move TB logs into a repeat-specific directory
+    DIR=$(dirname "$_TENSORBOARD_PATH")
+    FILE=$(basename "$_TENSORBOARD_PATH")
+    export TENSORBOARD_PATH=$DIR/$i/$FILE
+    mkdir -p $(dirname $TENSORBOARD_PATH)
+
     if [[ $i -gt 1 ]]; then
-        rm -rf $CHECKPOINT_SAVE_PATH/*
-        rm -rf /tmp/checkpoints/*
-        rm -rf $TENSORBOARD_PATH/*
+        rm -rf $CHECKPOINT_SAVE_PATH/* || true
+        rm -rf /tmp/checkpoints/* || true   
+        rm -rf $TENSORBOARD_PATH/* || true
     fi
 
     # First run never loads from a checkpoint
@@ -195,15 +213,18 @@ for i in $(seq 1 $N_REPEAT); do
         echo "No frozen checkpoint found. Will skip second run."
 
         export CHECKPOINT_SAVE_PATH=$_CHECKPOINT_SAVE_PATH
-        rm -rf "$CHECKPOINT_SAVE_PATH/iter_0000$TRAIN_ITERS"
+        if [[ $NODE_RANK -eq 0 ]]; then
+            rm -rf "$CHECKPOINT_SAVE_PATH/iter_0000$TRAIN_ITERS"
+        fi
         echo $((TRAIN_ITERS / 2)) >$CHECKPOINT_SAVE_PATH/latest_checkpointed_iteration.txt
         break
     fi
 
     if [[ "$TEST_TYPE" == "ckpt-resume" && "$TRAINING_EXIT_CODE" -eq 0 ]]; then
         export CHECKPOINT_LOAD_PATH=$CHECKPOINT_SAVE_PATH
-
-        rm -rf "$CHECKPOINT_LOAD_PATH/iter_$(printf "%07d\n" "$TRAIN_ITERS")"
+        if [[ $NODE_RANK -eq 0 ]]; then
+            rm -rf "$CHECKPOINT_LOAD_PATH/iter_$(printf "%07d\n" "$TRAIN_ITERS")"
+        fi
         echo $((TRAIN_ITERS / 2)) >$CHECKPOINT_LOAD_PATH/latest_checkpointed_iteration.txt
 
         export RUN_NUMBER=2
@@ -220,7 +241,9 @@ for i in $(seq 1 $N_REPEAT); do
         bash $ROOT_DIR/tests/functional_tests/shell_test_utils/_run_training.sh || TRAINING_EXIT_CODE=$?
 
         export CHECKPOINT_SAVE_PATH=$_CHECKPOINT_SAVE_PATH
-        rm -rf "$CHECKPOINT_SAVE_PATH/iter_0000$TRAIN_ITERS"
+        if [[ $NODE_RANK -eq 0 ]]; then
+            rm -rf "$CHECKPOINT_SAVE_PATH/iter_0000$TRAIN_ITERS"
+        fi
         echo $((TRAIN_ITERS / 2)) >$CHECKPOINT_SAVE_PATH/latest_checkpointed_iteration.txt
     fi
 
@@ -240,7 +263,7 @@ for i in $(seq 1 $N_REPEAT); do
 
         # Read test values from Tensorboard for non-inference tests.
         # Inference tests will load from JSON instead.
-        if [[ "$MODE" == "pretraining" ]]; then
+        if [[ "$MODE" == "pretraining" && "${BENCHMARK_TEST:-0}" != 1 ]]; then
             uv run --no-sync python $ROOT_DIR/tests/functional_tests/python_test_utils/get_test_results_from_tensorboard_logs.py \
                 --logs-dir $TENSORBOARD_PATH \
                 --train-iters $TRAIN_ITERS \
@@ -276,6 +299,11 @@ for i in $(seq 1 $N_REPEAT); do
             if [[ "$TEST_TYPE" == "checkpoint-consistency" ]]; then
                 echo "Running checkpoint consistency check"
                 uv run --no-sync python $ROOT_DIR/tests/functional_tests/python_test_utils/test_optimizer_grads_match.py "${ITER_CHECKPOINT_DIRS[@]}"
+            elif [[ "${BENCHMARK_TEST:-0}" == 1 ]]; then
+                uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_benchmark_pipeline.py \
+                    --golden-values-path $GOLDEN_VALUES_PATH \
+                    --logs-dir ${OUTPUT_PATH}/logs \
+                    --model-config-path ${TRAINING_PARAMS_PATH}
             else
                 uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_regular_pipeline.py \
                     --golden-values-path $GOLDEN_VALUES_PATH \
@@ -308,25 +336,7 @@ for i in $(seq 1 $N_REPEAT); do
             if [[ "$TEST_TYPE" == "frozen-start" ]]; then
                 uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_inference_regular_pipeline.py \
                     --golden-values-path $GOLDEN_VALUES_PATH \
-                    --test-values-path $TENSORBOARD_PATH \
-                    --model-config-path ${TRAINING_PARAMS_PATH} \
-                    $ALLOW_NONDETERMINISTIC_ALGO_ARG
-            fi
-        fi
-
-        # For rl jobs
-        if [[ "$MODE" == "rl" && ("$TRAINING_EXIT_CODE" -eq 0 || "$TEST_TYPE" == "release") ]]; then
-            if [[ "$TEST_TYPE" == "frozen-start" ]]; then
-                TRAIN_ITERS=$(cat $TRAINING_PARAMS_PATH |
-                    /usr/local/bin/yq '.MODEL_ARGS."--exit-interval" // "50"')
-                uv run --no-sync python $ROOT_DIR/tests/functional_tests/python_test_utils/get_test_results_from_tensorboard_logs.py \
-                    --logs-dir $TENSORBOARD_PATH \
-                    --train-iters $TRAIN_ITERS \
-                    --output-path ${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH) \
-                    "${EXTRACT_ARGS[@]}"
-                uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_grpo_training_loop.py \
-                    --golden-values-path $GOLDEN_VALUES_PATH \
-                    --test-values-path ${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH) \
+                    --test-values-path $INFERENCE_OUTPUT_PATH \
                     --model-config-path ${TRAINING_PARAMS_PATH} \
                     $ALLOW_NONDETERMINISTIC_ALGO_ARG
             fi
@@ -339,4 +349,3 @@ for i in $(seq 1 $N_REPEAT); do
         fi
     fi
 done
-

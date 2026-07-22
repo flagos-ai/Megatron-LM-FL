@@ -1,3 +1,4 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import logging
 import os
 import sys
@@ -108,6 +109,9 @@ def _shard_and_copy_(
         )
 
 
+_active_grids: list = []
+
+
 def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
     """Create a HyperCommGrid with tensor parallelism=2, context parallelism=2, and data parallelism=2."""
     # Set up environment for world size 8 if not already set
@@ -128,7 +132,22 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
     _ = grid.create_pg(["cp"])
     _ = grid.create_pg(["pp"])
     _ = grid.create_pg(["dp"])
+    _active_grids.append(grid)
     return grid
+
+
+def destroy_all_grids():
+    """Destroy all tracked grids and bridge communicator PGs."""
+    if dist.is_initialized():
+        # Keep all ranks on the same test before tearing down shared NCCL groups.
+        dist.barrier()
+    for grid in _active_grids:
+        grid.destroy()
+    _active_grids.clear()
+    BridgeCommunicator.destroy_broadcast_pgs()
+    if dist.is_initialized():
+        # Do not let fast ranks create the next test's groups during teardown.
+        dist.barrier()
 
 
 def _get_pg_collection_from_grid(grid):
@@ -185,10 +204,10 @@ class TestBridgeCommunicator:
     @classmethod
     def setup_class(cls):
         """Set up distributed environment for the entire test class."""
-        if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
+        if not dist.is_initialized():
+            dist.init_process_group(backend="nccl")
 
         world_size = dist.get_world_size()
         if world_size != 8:
@@ -199,6 +218,9 @@ class TestBridgeCommunicator:
 
     def teardown_class(cls):
         Utils.destroy_model_parallel()
+
+    def teardown_method(self):
+        destroy_all_grids()
 
     def test_bridge_communicator_init(self):
 
@@ -469,3 +491,47 @@ class TestBridgeCommunicator:
         assert (
             dest_leaders == expected_dest_leaders
         ), f"Dest leaders: Expected {expected_dest_leaders}, got {dest_leaders}"
+
+    def test_2d_fan_in_fwd_bwd(self):
+        """Fan-in with 2D tensors: 4 src DP ranks → 1 dest DP group, forward + backward."""
+        src_grid = create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=4)
+        dest_grid = create_hypercomm_grid(offset=4, tp=4, cp=1, pp=1, dp=1)
+        bridge = BridgeCommunicator(
+            src_grid,
+            dest_grid,
+            dim_mapping={'s': 0, 'h': 2, 'b': 1},
+            comm_dtype=torch.float32,
+            tensor_ndim=2,
+        )
+
+        rank = dist.get_rank()
+        if bridge.is_current_rank_in_grid(src_grid):
+            tensor = torch.full((577, 128), float(rank + 1), device='cuda')
+            grad = bridge.send_forward_recv_backward(tensor)
+            assert grad.shape == (577, 128)
+        else:
+            grad = torch.randn(577 * 4, 128, device='cuda')
+            activation = bridge.send_backward_recv_forward(grad)
+            assert activation.shape == (577 * 4, 128)
+
+    def test_2d_fan_out_fwd_bwd(self):
+        """Fan-out with 2D tensors: 1 src DP group → 4 dest DP ranks, forward + backward."""
+        src_grid = create_hypercomm_grid(offset=0, tp=4, cp=1, pp=1, dp=1)
+        dest_grid = create_hypercomm_grid(offset=4, tp=1, cp=1, pp=1, dp=4)
+        bridge = BridgeCommunicator(
+            src_grid,
+            dest_grid,
+            dim_mapping={'s': 0, 'h': 2, 'b': 1},
+            comm_dtype=torch.float32,
+            tensor_ndim=2,
+        )
+
+        rank = dist.get_rank()
+        if bridge.is_current_rank_in_grid(src_grid):
+            tensor = torch.randn(577 * 4, 128, device='cuda')
+            grad = bridge.send_forward_recv_backward(tensor)
+            assert grad.shape == (577 * 4, 128)
+        else:
+            grad = torch.full((577, 128), float(rank), device='cuda')
+            activation = bridge.send_backward_recv_forward(grad)
+            assert activation.shape == (577, 128)

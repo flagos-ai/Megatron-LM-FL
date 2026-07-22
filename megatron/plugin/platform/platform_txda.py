@@ -9,7 +9,7 @@ try:
     import torch
     import flag_gems
     from torch_txda import transfer_to_txda
-except ImportError:
+except Exception:
     pass
 
 
@@ -99,7 +99,7 @@ class PlatformTXDA(PlatformBase):
 
     @property
     def default_generators(self):
-        return torch.txda.default_generators
+        return torch.cuda.default_generators
 
     # Streams/Events
     @property

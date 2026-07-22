@@ -1,4 +1,4 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from functools import partial
 from typing import Callable, List, Optional, Union
@@ -20,6 +20,21 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 
+# FlagScale Begin
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+
+
+try:
+    from megatron.plugin.utils import get_device_type_for_comm
+except ImportError:
+
+    def get_device_type_for_comm(group):
+        """Fallback: return current platform device name for communication."""
+        return cur_platform.device_name()
+
+
 from .. import parallel_state
 from ..transformer.moe.moe_utils import get_updated_expert_bias
 from ..transformer.transformer_config import TransformerConfig
@@ -30,7 +45,6 @@ from ..utils import (
     get_tensor_model_parallel_group_if_none,
 )
 
-from megatron.plugin.decorators import overridable
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
     if hasattr(param, "main_grad"):
@@ -103,7 +117,9 @@ def _allreduce_conditional_embedding_grads(
         pp_group = parallel_state.get_pipeline_model_parallel_group()
 
     ######### FlagScale Begin #########
-    assert not(isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
+    assert not (
+        isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)
+    ), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
     if isinstance(pp_group, list):
         return
     ######### FlagScale End #########
@@ -199,17 +215,21 @@ def _allreduce_word_embedding_grads(
             pp_group = parallel_state.get_pipeline_model_parallel_group()
 
     _allreduce_embedding_grad(
-        model, embd_group, pp_group, partial(_get_shared_word_embedding_weight, config=config)
+        model,
+        embd_group,
+        pp_group,
+        partial(_get_shared_word_embedding_weight, config=config),
+        config=config,
     )
 
 
-@overridable
 def _allreduce_embedding_grad(
     model: List[torch.nn.Module],
     embd_group: torch.distributed.ProcessGroup,
     pp_group: torch.distributed.ProcessGroup,
     weight_getter: Callable[[torch.nn.Module], Optional[torch.nn.Parameter]],
     skip_if_none: bool = True,
+    config: TransformerConfig = None,
 ):
     """Unified helper to all-reduce embedding parameters across pipeline stages.
 
@@ -225,7 +245,10 @@ def _allreduce_embedding_grad(
             gradient is ``None``. Defaults to True.
     """
 
+    embd_group_is_list = isinstance(embd_group, list)  # FlagScale Add
     if (
+        not embd_group_is_list
+        and
         # embd_group can be None in cases there is no embd_group
         # get_pg_size(embd_group) will return 1 and the all-reduce will be skipped.
         get_pg_size(embd_group) > 1
@@ -235,6 +258,9 @@ def _allreduce_embedding_grad(
         if is_pp_first_stage(pp_group):
             model_module = model[0]
         elif is_pp_last_stage(pp_group):
+            model_module = model[-1]
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
             model_module = model[-1]
         else:  # We do not support an interleaved schedule for models with encoders yet.
             model_module = model[0]
@@ -256,6 +282,78 @@ def _allreduce_embedding_grad(
             return
         torch.distributed.all_reduce(grad, group=embd_group)
         setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
+
+    ######## FlagScale Begin ########
+    elif (
+        embd_group_is_list
+        and get_pg_size(embd_group) > 1
+        and torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(embd_group[0])
+    ):
+        if is_pp_first_stage(pp_group):
+            model_module = model[0]
+        elif is_pp_last_stage(pp_group):
+            model_module = model[-1]
+        # Embedding for MTP layers is in the last virtual pipeline model parallel stage.
+        elif getattr(config, 'mtp_num_layers', None) is not None and config.mtp_num_layers > 0:
+            model_module = model[-1]
+        else:  # We do not support an interleaved schedule for models with encoders yet.
+            model_module = model[0]
+
+        ddp_config = model_module.ddp_config
+        use_dist_opt = ddp_config.use_distributed_optimizer
+        model_module = get_attr_wrapped_model(model_module, 'pre_process', return_model_obj=True)
+
+        weight = weight_getter(model_module)
+        if weight is None and skip_if_none:
+            return
+
+        grad_attr = _get_main_grad_attr(weight)
+        orig_grad = getattr(weight, grad_attr)
+        if ddp_config.use_megatron_fsdp:
+            orig_grad = orig_grad._local_tensor if orig_grad is not None else None
+        grad = _unshard_if_dtensor(orig_grad)
+        # When the embedding is frozen, the grad is None.
+        if grad is None and skip_if_none:
+            return
+        com_device = get_device_type_for_comm(embd_group)
+        if com_device == "cpu":
+            grad = grad.cpu()
+        if use_dist_opt:
+            if ddp_config.use_partial_reduce_for_shared_embedding:
+                dp_world_size = parallel_state.get_data_parallel_world_size()
+                dp_rank = parallel_state.get_data_parallel_rank()
+                assert (
+                    grad.shape[0] % dp_world_size == 0
+                ), f"grad shape: {grad.shape[0]}, dp_world_size: {dp_world_size}"
+                per_partion_size = grad.shape[0] // dp_world_size
+                if len(embd_group) == 1:
+                    offset = per_partion_size * dp_rank
+                    torch.distributed.all_reduce(
+                        grad[offset : offset + per_partion_size, :], group=embd_group[0]
+                    )
+                else:
+                    group_idx = 0
+                    per_partion_size = per_partion_size // len(embd_group)
+                    for group in embd_group:
+                        offset = per_partion_size * (dp_rank * len(embd_group) + group_idx)
+                        torch.distributed.all_reduce(
+                            grad[offset : offset + per_partion_size, :], group=group
+                        )
+                        group_idx += 1
+            else:  # megartron default method
+                torch.distributed.all_reduce(grad, group=embd_group[0])
+        else:
+            if len(embd_group) == 1:  # megartron default method
+                torch.distributed.all_reduce(grad, group=embd_group[0])
+            else:
+                original_grad_data = grad.clone().detach().data
+                for group in embd_group:
+                    grad.data.copy_(original_grad_data)
+                    torch.distributed.all_reduce(grad, group=group)
+        if grad.device == torch.device('cpu'):
+            grad.to(cur_platform.current_device())
+        setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
+    ######## FlagScale End ########
 
 
 def _allreduce_position_embedding_grads(
@@ -280,7 +378,11 @@ def reset_model_temporary_tensors(config: TransformerConfig, model: List[torch.n
     """
     for model_chunk in model:
         for module in get_attr_wrapped_model(model_chunk, 'modules')():
-            if config.moe_router_enable_expert_bias and hasattr(module, 'expert_bias'):
+            if (
+                config.moe_router_enable_expert_bias
+                and hasattr(module, 'expert_bias')
+                and module.expert_bias is not None
+            ):
                 module.local_tokens_per_expert.zero_()
             if (
                 config.moe_router_load_balancing_type == "global_aux_loss"
@@ -298,7 +400,15 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
     expert_bias_list = []
     for model_chunk in model:
         for module in get_attr_wrapped_model(model_chunk, 'modules')():
-            if hasattr(module, 'expert_bias'):
+            # Only update expert_bias if this module is in the training mode. There are special
+            # cases where only the student is in training mode but the teacher is in eval mode
+            # when using online knoweldge-distillation with Model-Optimizer. In this case, we want
+            # to avoid updating teacher's expert_bias.
+            if (
+                hasattr(module, 'expert_bias')
+                and module.training
+                and module.expert_bias is not None
+            ):
                 tokens_per_expert_list.append(module.local_tokens_per_expert)
                 expert_bias_list.append(module.expert_bias)
     # For hybrid models with both MoE and Dense layers, this list can be empty.
@@ -396,6 +506,7 @@ def finalize_model_grads(
     model: List[torch.nn.Module],
     num_tokens: Optional[torch.Tensor] = None,
     pg_collection: Optional[ProcessGroupCollection] = None,
+    force_all_reduce: Optional[bool] = False,
 ):
     """
     All-reduce all model grads across DP replicas, layernorm grads for sequence parallelism,
@@ -438,7 +549,7 @@ def finalize_model_grads(
     if config.timers is not None:
         config.timers('all-grads-sync', log_level=1).start(barrier=config.barrier_with_L1_time)
     for model_chunk in model:
-        model_chunk.finish_grad_sync()
+        model_chunk.finish_grad_sync(force_all_reduce=force_all_reduce)
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
 

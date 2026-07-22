@@ -3,14 +3,97 @@
 """Learning rate decay and weight decay incr functions."""
 import logging
 import math
-from typing import Optional
+from typing import TYPE_CHECKING, Any, Optional, TypedDict
 
-from megatron.core.optimizer import MegatronOptimizer
+import torch
+
 from megatron.core.utils import log_single_rank
+
+if TYPE_CHECKING:
+    # Avoid circular import.
+    from megatron.core.optimizer import MegatronOptimizer
 
 logger = logging.getLogger(__name__)
 
-from megatron.plugin.decorators import overridable
+
+class ParamGroupOverride(TypedDict):
+    """Override values for a parameter group. These values may be optimizer-state/scheduler related.
+
+    These are the values you see later in param_group.get(...) calls in the
+        OptimizerParamScheduler.get_lr and get_wd methods. If you use a custom optimizer
+        or scheduler, you could override those variables instead.
+
+    Example:
+        >>> param_group_override = ParamGroupOverride(min_lr=1e-4, wd_mult=0.1)
+        >>> param_group_override == ParamGroupOverride(newvar=3) # this is ok too
+
+    """
+
+    max_lr: float
+    min_lr: float
+    start_wd: float
+    end_wd: float
+    wd_mult: float
+
+
+def get_canonical_lr_for_logging(param_groups: list[dict]) -> float | None:
+    """Return the lr of the first ``default_config=True`` param group.
+
+    All ``default_config`` groups share the same LR schedule, so the first one
+    is representative.  This includes empty rank-alignment stub groups, which
+    the scheduler still writes a valid lr onto.
+
+    Args:
+        param_groups (list[dict]): parameter groups from the optimizer.
+
+    Returns:
+        float | None: the canonical learning rate, or None if no
+            ``default_config=True`` group is found.
+    """
+    for param_group in param_groups:
+        if param_group.get('default_config', False):
+            return param_group.get('lr')
+    return None
+
+
+def param_group_override_to_tuple(
+    param_group_override: ParamGroupOverride | None,
+) -> tuple[tuple[str, Any], ...] | None:
+    """Convert a param group override to a tuple for use as a key in a dictionary.
+
+    The tuple is sorted by the keys of the param group override to handle different orderings of
+     the keys in different override dictionaries which still mean the same thing.
+    """
+    if param_group_override is None:
+        return None
+    return tuple(sorted(param_group_override.items()))
+
+
+def combine_param_group_overrides(
+    param_group_overrides: list[ParamGroupOverride | None],
+) -> ParamGroupOverride:
+    """Combine a list of param group overrides into a single param group override.
+
+    This function ensures that the overrides are not conflicting as well.
+
+    Args:
+        param_group_overrides (list[ParamGroupOverride]): list of param group overrides to combine
+
+    Returns:
+        ParamGroupOverride: combined param group override
+    """
+    combined_override = ParamGroupOverride()
+    for override in param_group_overrides:
+        if override is None:
+            continue
+        for key, value in override.items():
+            if key in combined_override:
+                if combined_override[key] != value:
+                    raise ValueError(
+                        f"Conflicting overrides for {key}: {combined_override[key]} and {value}"
+                    )
+            combined_override[key] = value
+    return combined_override
 
 
 class OptimizerParamScheduler:
@@ -40,7 +123,7 @@ class OptimizerParamScheduler:
 
     def __init__(
         self,
-        optimizer: MegatronOptimizer,
+        optimizer: "MegatronOptimizer",
         init_lr: float,
         max_lr: float,
         min_lr: float,
@@ -55,7 +138,7 @@ class OptimizerParamScheduler:
         override_opt_param_scheduler: Optional[bool] = False,
         wsd_decay_steps: Optional[int] = None,
         lr_wsd_decay_style: Optional[str] = None,
-        stablelm2_scheduler_config=None,
+        stablelm2_scheduler_config=None,  # FlagScale Add
     ) -> None:
 
         # Class values.
@@ -93,15 +176,18 @@ class OptimizerParamScheduler:
             assert not self.use_checkpoint_opt_param_scheduler, (
                 'both override and ' 'use-checkpoint are set.'
             )
-        
+
+        # FlagScale Begin
         self.stablelm2_scheduler_config = stablelm2_scheduler_config
         if self.stablelm2_scheduler_config is not None:
-          ## absolute samples
-          self.stablelm2_scheduler_config.rsqrt_samples += \
-              self.stablelm2_scheduler_config.cosine_samples
-          ## N of consine
-          if self.stablelm2_scheduler_config.cosine_period_samples == 0:
-            self.stablelm2_scheduler_config.cosine_period_samples = self.lr_decay_steps
+            ## absolute samples
+            self.stablelm2_scheduler_config.rsqrt_samples += (
+                self.stablelm2_scheduler_config.cosine_samples
+            )
+            ## N of consine
+            if self.stablelm2_scheduler_config.cosine_period_samples == 0:
+                self.stablelm2_scheduler_config.cosine_period_samples = self.lr_decay_steps
+        # FlagScale End
 
         # Set the learning rate
         self.step(0)
@@ -141,7 +227,6 @@ class OptimizerParamScheduler:
 
         return start_wd + coeff * delta_wd
 
-    @overridable
     def get_lr(self, param_group: dict) -> float:
         """Learning rate decay functions from:
         https://openreview.net/pdf?id=BJYwwY9ll pg. 4
@@ -173,6 +258,76 @@ class OptimizerParamScheduler:
             num_steps = max(self.num_steps, 1)
             lr = max_lr * warmup_steps**0.5 / (num_steps**0.5)
             return max(min_lr, lr)
+
+        #### FlagScale Begin ####
+        # stablelm2 scheduler of multiple stages
+        if self.stablelm2_scheduler_config is not None:
+            log_single_rank(
+                logger,
+                logging.INFO,
+                f"> stablelm2_scheduler_config: {self.stablelm2_scheduler_config}",
+            )
+            if self.num_steps <= self.stablelm2_scheduler_config.cosine_samples:
+                ## cosine phase
+                # decay_ratio = float(self.num_steps) / float(self.lr_decay_steps)
+                # TODO
+                decay_ratio = float(self.num_steps) / float(
+                    self.stablelm2_scheduler_config.cosine_period_samples
+                )
+                cosine_min_lr = self.stablelm2_scheduler_config.cosine_max_lr * 0.1
+                delta_lr = self.stablelm2_scheduler_config.cosine_max_lr - cosine_min_lr
+                coeff = 0.5 * (math.cos(2 * math.pi * decay_ratio) + 1.0)
+                self.stablelm2_scheduler_config.cosine_lr = cosine_min_lr + coeff * delta_lr
+                return self.stablelm2_scheduler_config.cosine_lr
+            elif self.num_steps <= self.stablelm2_scheduler_config.rsqrt_samples:
+                ## rsqrt phase
+                alpha = self.stablelm2_scheduler_config.alpha
+                beta = self.stablelm2_scheduler_config.beta
+                gbs = self.stablelm2_scheduler_config.global_batch_size * 1.0
+                self.stablelm2_scheduler_config.rsqrt_lr = alpha / (
+                    (self.num_steps / gbs + beta) ** 0.5
+                )
+                return self.stablelm2_scheduler_config.rsqrt_lr
+            elif self.stablelm2_scheduler_config.decay_samples <= 0:
+                ## optional linear phase
+                decay_steps_ = self.lr_decay_steps - self.stablelm2_scheduler_config.rsqrt_samples
+                num_steps_ = self.num_steps - self.stablelm2_scheduler_config.rsqrt_samples
+                decay_ratio = float(num_steps_) / float(decay_steps_)
+                coeff = 1.0 - decay_ratio
+                return coeff * self.stablelm2_scheduler_config.rsqrt_lr
+            else:
+                ## optional linear phase
+                valid_lr_decay_steps_ = min(
+                    self.lr_decay_steps,
+                    self.stablelm2_scheduler_config.rsqrt_samples
+                    + self.stablelm2_scheduler_config.decay_samples,
+                )
+                if self.num_steps <= valid_lr_decay_steps_:
+                    decay_steps_ = (
+                        valid_lr_decay_steps_ - self.stablelm2_scheduler_config.rsqrt_samples
+                    )
+                    num_steps_ = self.num_steps - self.stablelm2_scheduler_config.rsqrt_samples
+                    decay_ratio = float(num_steps_) / float(decay_steps_)
+                    coeff = 1.0 - decay_ratio
+                    delta_lr = self.stablelm2_scheduler_config.rsqrt_lr - self.min_lr
+                    assert decay_ratio >= 0.0
+                    return coeff * delta_lr + self.min_lr
+                else:
+                    return self.min_lr
+
+        # Warmup-Stable-Decay(WSD)
+        if self.lr_decay_style == 'warmup-stable-decay':
+            W = self.lr_warmup_steps
+            S = round((self.lr_decay_steps - W) * 10.0 / 11.0)
+            ## D is 10% of S.
+            T = self.lr_decay_steps - W - S
+            ## Warmup Phase, see above
+            ## Stable Phase
+            if self.num_steps < S:
+                return self.max_lr
+            else:  # Decay Phase
+                return self.max_lr * 0.5 ** ((self.num_steps - S) / T)
+        #### FlagScale End ####
 
         num_steps_ = self.num_steps - self.lr_warmup_steps
         decay_steps_ = self.lr_decay_steps - self.lr_warmup_steps
@@ -215,8 +370,15 @@ class OptimizerParamScheduler:
             increment (int): number of steps to increment
         """
         self.num_steps += increment
+        # Do not skip empty param groups: get_canonical_lr_for_logging reads lr
+        # from default_config groups regardless of whether they hold parameters.
+        # This is important for logging under model parallelism that may leave
+        # some ranks with empty default_config parameter groups.
         for param_group in self.optimizer.param_groups:
-            param_group['lr'] = self.get_lr(param_group)
+            if isinstance(param_group.get('lr'), torch.Tensor):
+                param_group['lr'].fill_(self.get_lr(param_group))
+            else:
+                param_group['lr'] = self.get_lr(param_group)
             param_group['weight_decay'] = self.get_wd(param_group) * param_group.get('wd_mult', 1.0)
 
     def state_dict(self) -> dict:

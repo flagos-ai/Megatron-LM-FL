@@ -6,9 +6,6 @@ import torch.distributed as dist
 from torch import Tensor
 from torch.autograd.variable import Variable
 
-from megatron.core.parallel_state import get_global_memory_buffer, get_tensor_model_parallel_rank
-from megatron.core.pipeline_parallel import p2p_communication
-
 from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 
@@ -229,6 +226,7 @@ class ModelGraph:
 class P2PCommParams:
     tensor_shape = None
     config = None
+    p2p_communicator = None
 
     def __init__(self, send_next=False, send_prev=False, recv_next=False, recv_prev=False):
         self.send_next = send_next
@@ -274,14 +272,13 @@ def p2p_comm_helper(comm_params: P2PCommParams, tensor_tosend):
     tensor_send_prev = None
     if comm_params.send_prev:
         tensor_send_prev = tensor_tosend
-    tensor_recv_prev, tensor_recv_next, p2p_handles = p2p_communication._communicate(
+    tensor_recv_prev, tensor_recv_next, p2p_handles = comm_params.p2p_communicator._communicate(
         tensor_send_next=tensor_send_next,
         tensor_send_prev=tensor_send_prev,
         recv_prev=comm_params.recv_prev,
         recv_next=comm_params.recv_next,
         tensor_shape=comm_params.tensor_shape,
         wait_on_reqs=False,
-        config=comm_params.config,
     )
 
     if comm_params.recv_next:

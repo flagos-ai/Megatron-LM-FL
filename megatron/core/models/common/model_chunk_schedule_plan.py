@@ -14,10 +14,15 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
-from megatron.core.transformer.multi_token_prediction import get_mtp_num_layers_to_build
 
+########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+from megatron.core.transformer.hyper_connection import HyperConnectionModule
+from megatron.core.transformer.transformer_block import TransformerBlock
+########## FlagScale End ##########
+
 
 class ModelChunkState:
     """State shared across a model chunk.
@@ -37,23 +42,20 @@ class TransformerLayerSchedulePlan:
     mtp post process nodes.
 
     layer (TransformerLayerSchedulePlan)
-    ├── attn (TransformerLayerNode): attention module
-    ├── post_attn (TransformerLayerNode): layernorm -> router -> dispatch preprocess
+    ├── attn (TransformerLayerNode): attention -> layernorm -> router -> dispatch preprocess
     ├── moe_dispatch (TransformerLayerNode): dispatch All2All
     ├── mlp (TransformerLayerNode): mlp module
     ├── moe_combine (TransformerLayerNode): combine All2All
     └── mtp_post_process (PostProcessNode): mtp post process
 
     Note that MTP layer has the same operation and execution order with TransformerLayer regarding
-    post_attn, moe_dispatch, mlp, moe_combine, but contains extra operations in attn and
-    mtp_post_process:
+    moe_dispatch, mlp, moe_combine, but contains extra operations in attn and mtp_post_process:
     * mtp.attn wraps around transformer_layer.attn with extra norm, proj and embedding operations.
     * mtp.mtp_post_process contains output_layer, mtp loss operations, whereas
       transformer_layer.mtp_post_process is empty.
     """
 
     attn = None
-    post_attn = None
     moe_dispatch = None
     mlp = None
     moe_combine = None
@@ -68,8 +70,8 @@ class TransformerLayerSchedulePlan:
             event (torch.cuda.Event):
                 record CUDA event across multiple nodes on different streams for synchronization.
             chunk_state (ModelChunkState): model state shared in the model chunk.
-            comp_stream (torch.cuda.Stream): CUDA stream for computation.
-            comm_stream (torch.cuda.Stream): CUDA stream for communication.
+            comp_stream (Callable): Func that returns CUDA stream for computation.
+            comm_stream (Callable): Func that returns CUDA stream for communication.
             extra_args (dict): extra arguments for the layer.
 
         The event and chunk_state are binded to the TransformerModelChunkSchedulePlan
@@ -77,20 +79,46 @@ class TransformerLayerSchedulePlan:
         """
         from megatron.core.models.gpt.fine_grained_callables import TransformerLayerState
 
+        self.config = layer.config
         self.layer_state = TransformerLayerState()
         self.chunk_state = chunk_state
         self.layer = layer
         self.event = event
         self.comp_stream = comp_stream
         self.comm_stream = comm_stream
+        self.layer_state.mhc_recompute_manager = extra_args.get("mhc_recompute_manager", None)  # FlagScale Add
+        self.layer_state.mhc_is_last_layer_in_recompute_block = extra_args.get("mhc_is_last_layer_in_recompute_block", False)  # FlagScale Add
 
         # get callable nodes for transformer/mtp layer
         self._build_callable_nodes(event, comp_stream, comm_stream, extra_args)
 
+    def release_state(self):
+        """Release reference, this helps avoid memory leak."""
+        if hasattr(self, 'attn') and self.attn is not None:
+            del self.attn
+            self.attn = None
+        if hasattr(self, 'moe_dispatch') and self.moe_dispatch is not None:
+            del self.moe_dispatch
+            self.moe_dispatch = None
+        if hasattr(self, 'mlp') and self.mlp is not None:
+            del self.mlp
+            self.mlp = None
+        if hasattr(self, 'moe_combine') and self.moe_combine is not None:
+            del self.moe_combine
+            self.moe_combine = None
+        if hasattr(self, 'mtp_post_process') and self.mtp_post_process is not None:
+            del self.mtp_post_process
+            self.mtp_post_process = None
+        if hasattr(self, 'layer_state') and self.layer_state is not None:
+            del self.layer_state
+            self.layer_state = None
+        if hasattr(self, 'layer'):
+            del self.layer
+
     def _build_callable_nodes(self, event, comp_stream, comm_stream, extra_args):
         """
         Builds the callable nodes for the transformer/mtp layer:
-            attn, post_attn, mlp, moe_dispatch and moe_combine, and mtp_post_process.
+            attn, mlp, moe_dispatch and moe_combine, and mtp_post_process.
         """
         from megatron.core.models.gpt.fine_grained_callables import (
             TransformerLayerNode,
@@ -104,24 +132,21 @@ class TransformerLayerSchedulePlan:
 
         # get flags for latter use
         is_mtp = isinstance(self.layer, MultiTokenPredictionLayer)
-        is_moe = (
-            isinstance(self.layer.transformer_layer.mlp, MoELayer)
-            if is_mtp
-            else isinstance(self.layer.mlp, MoELayer)
-        )
+        transformer_layer = self.layer.mtp_model_layer if is_mtp else self.layer
+        is_moe = isinstance(transformer_layer.mlp, MoELayer)
+        num_local_experts = transformer_layer.mlp.num_local_experts if is_moe else None
 
-        enable_deepep = (
-            self.layer.config.moe_token_dispatcher_type == "flex"
-            and self.layer.config.moe_flex_dispatcher_backend == "deepep"
-        )
-        extra_args["enable_deepep"] = enable_deepep
+        extra_args["config"] = self.layer.config
         extra_args["is_moe"] = is_moe
+        extra_args["num_local_experts"] = num_local_experts
         extra_args["delay_wgrad_compute"] = self.layer.config.delay_wgrad_compute
         extra_args["is_mtp"] = is_mtp
+        ########## FlagScale Begin ##########
         if extra_args.get("is_engram", False):
             self.layer_state.engram = getattr(self.layer, "engram")
             self.layer_state.engram_hash_layer_id = getattr(self.layer, "engram_hash_layer_id")
             self.layer_state.is_engram = True
+        ########## FlagScale End ##########
 
         # wrapper to help create TransformerLayerNode
         def create_node(stream, module, name):
@@ -139,7 +164,6 @@ class TransformerLayerSchedulePlan:
 
         (
             attn_module,
-            post_attn_module,
             moe_dispatch_module,
             mlp_module,
             moe_combine_module,
@@ -151,11 +175,9 @@ class TransformerLayerSchedulePlan:
         self.attn = create_node(comp_stream, attn_module, "attn")
         self.mlp = create_node(comp_stream, mlp_module, "mlp")
         if is_moe:
-            self.post_attn = create_node(comp_stream, post_attn_module, "post_attn")
             self.moe_dispatch = create_node(comm_stream, moe_dispatch_module, "moe_dispatch")
             self.moe_combine = create_node(comm_stream, moe_combine_module, "moe_combine")
         else:
-            self.post_attn = NoopScheduleNode()
             self.moe_dispatch = NoopScheduleNode()
             self.moe_combine = NoopScheduleNode()
 
@@ -188,8 +210,8 @@ class TransformerLayerSchedulePlan:
         to maximize parallelism and efficiency.
 
         When f_layer and b_layer are not None, forward and backward pass are overlapped as follows:
-        comm_stream: combine_bwd            | dispatch_fwd->dispatch_bwd  | combine_fwd
-        comp_stream: attn_fwd->post_attn_fwd| mlp_bwd->mlp_bwd_dw->mlp_fwd| post_attn_bwd->attn_bwd
+        comm_stream: combine_bwd | dispatch_fwd->dispatch_bwd  | combine_fwd
+        comp_stream: attn_fwd    | mlp_bwd->mlp_bwd_dw->mlp_fwd| attn_bwd
         For MTP, mtp_post_process_fwd is executed after the combine_fwd in the comp_stream,
         and mtp_post_process_bwd is executed before the combine_bwd in the comp_stream.
 
@@ -212,7 +234,6 @@ class TransformerLayerSchedulePlan:
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.attn.forward(f_input)
-                f_input = f_layer.post_attn.forward(f_input)
 
         if b_layer is not None:
             b_grad = b_layer.mlp.backward(b_grad)
@@ -225,6 +246,9 @@ class TransformerLayerSchedulePlan:
             b_layer.mlp.backward_dw()
             b_grad = b_layer.moe_dispatch.backward(b_grad)
 
+        if b_layer is not None and b_layer.config.ep_overlap_early_attn_memory_release:
+            b_grad = b_layer.attn.backward(b_grad)
+
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.mlp.forward(f_input)
@@ -234,8 +258,7 @@ class TransformerLayerSchedulePlan:
                 f_input = f_layer.moe_combine.forward(f_input)
                 f_input = f_layer.mtp_post_process.forward(f_input)
 
-        if b_layer is not None:
-            b_grad = b_layer.post_attn.backward(b_grad)
+        if b_layer is not None and not b_layer.config.ep_overlap_early_attn_memory_release:
             b_grad = b_layer.attn.backward(b_grad)
 
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
@@ -273,6 +296,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         extra_block_kwargs=None,
         runtime_gather_output: Optional[bool] = None,
         loss_mask: Optional[Tensor] = None,
+        padding_mask=None,
     ):
         """Initialize the schedule plan of all Transformer layers' sub-modules.
 
@@ -298,13 +322,10 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
 
         self._model_chunk_state = ModelChunkState()
         self._transformer_layers = []
-        self._event = cur_platform.Event()
+        self._event = cur_platform.Event()  # FlagScale Add
         self.pre_process = None
         self.post_process = None
         self.vp_stage = model.vp_stage
-
-        comp_stream = get_comp_stream()
-        comm_stream = get_comm_stream()
 
         # save the inputs of model.forward() to ModelChunkState
         self._model_chunk_state.input_ids = input_ids
@@ -315,6 +336,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._model_chunk_state.mtp_hidden_states = None
         self._model_chunk_state.loss_mask = loss_mask
         self._model_chunk_state.packed_seq_params = packed_seq_params
+        self._model_chunk_state.padding_mask = padding_mask
         self._model_chunk_state.extra_block_kwargs = extra_block_kwargs
         self._model_chunk_state.runtime_gather_output = runtime_gather_output
         self._model_chunk_state.model = model
@@ -322,44 +344,90 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._model_chunk_state.context_mask = None
         self._model_chunk_state.attention_bias = None
 
-        transformer_num_layers = model.decoder.num_layers_per_pipeline_rank
-        mtp_num_layers = get_mtp_num_layers_to_build(model.config, vp_stage=self.vp_stage)
-
         # build preprocess
-        self.pre_process = PreProcessNode(model, self._model_chunk_state, self._event, comp_stream)
-        # build layer schedule plan for each layer
-        for layer_idx in range(transformer_num_layers):
-            layer = model.decoder._get_layer(layer_idx)
-            # build engram layers
-            if hasattr(layer, "engram"):
-                extra_args = {
-                    "is_engram": True,
-                    "engram_hash_input_ids": self._model_chunk_state.extra_block_kwargs["engram_hash_input_ids"]
-                }
-            else:
-                extra_args = {}
-            layer_plan = TransformerLayerSchedulePlan(
-                layer, self._event, self._model_chunk_state, comp_stream, comm_stream, extra_args
-            )
-            self._transformer_layers.append(layer_plan)
+        self.pre_process = PreProcessNode(
+            model, self._model_chunk_state, self._event, get_comp_stream
+        )
+        ##### FlagScale Begin #####
+        self.enable_hyper_connections = getattr(model.config, "enable_hyper_connections", False)
+        self.num_residual_streams = getattr(model.config, "num_residual_streams", 1)
+        # Build mhc recompute manager like TransformerBlock. 
+        decoder = model.decoder
+        use_mhc_recompute = (
+            decoder.training
+            and decoder.config.enable_hyper_connections
+            and decoder.config.recompute_granularity == 'selective'
+            and "mhc" in decoder.config.recompute_modules
+        )
+        # If not enable_hyper_connections, the mhc_layer_managers will be all None and mhc_is_last_in_recompute_block will be all False, so it won't have effect on execution.
+        self.mhc_layer_managers, self.mhc_is_last_in_recompute_block = decoder._build_mhc_recompute_layer_plan(use_mhc_recompute)
+        if self.enable_hyper_connections:
+            self._model_chunk_state.hc_head_fn = decoder.hc_head_fn
+            self._model_chunk_state.hc_head_base = decoder.hc_head_base
+            self._model_chunk_state.hc_head_scale = decoder.hc_head_scale
+            self._model_chunk_state.num_residual_streams = self.num_residual_streams
+            self._model_chunk_state.layernorm_epsilon = decoder.config.layernorm_epsilon
+            self._model_chunk_state.enable_mtp = decoder.config.mtp_num_layers is not None
+        else:
+            self._model_chunk_state.hc_head_fn = None
+            self._model_chunk_state.hc_head_base = None
+            self._model_chunk_state.hc_head_scale = None
+            self._model_chunk_state.num_residual_streams = None
+            self._model_chunk_state.layernorm_epsilon = None
+            self._model_chunk_state.enable_mtp = False
+        ##### FlagScale End #####
 
-        # build mtp layers
-        for layer_idx in range(mtp_num_layers):
-            extra_args = {
-                "is_first_layer": layer_idx == 0,
-                "is_last_layer": layer_idx == mtp_num_layers - 1,
-            }
-            layer = model.mtp.layers[layer_idx]
-            layer_plan = TransformerLayerSchedulePlan(
-                layer, self.event, self.state, comp_stream, comm_stream, extra_args
-            )
-            self._transformer_layers.append(layer_plan)
+        # build layer schedule plan for each layer.
+        # The methods to obtain layers are different for MTP so we need the other build plan for
+        # MTP. Also, this can help annotate MTP layer so that it can know where MTP is.
+        self._build_layer_schedule_plan(model.decoder, get_comp_stream, get_comm_stream)
+        self._build_layer_schedule_plan(
+            getattr(model, "mtp", None), get_comp_stream, get_comm_stream
+        )
 
         # build post process
         if model.post_process:
             self.post_process = PostProcessNode(
-                model, self._model_chunk_state, self._event, comp_stream
+                model, self._model_chunk_state, self._event, get_comp_stream
             )
+
+    def _build_layer_schedule_plan(self, module, comp_stream, comm_stream):
+        if module is None:
+            return
+        num_layers = len(module.layers)
+        for layer_idx in range(num_layers):
+            layer = module.layers[layer_idx]  # FlagScale Add
+            extra_args = {
+                "is_first_layer": layer_idx == 0,
+                "is_last_layer": layer_idx == num_layers - 1,
+            }
+            ########## FlagScale Begin ##########
+            if layer.config.use_engram and hasattr(layer, "engram"):
+                extra_args["is_engram"] = True
+                extra_args["engram_hash_input_ids"] = self.state.extra_block_kwargs[
+                    "engram_hash_input_ids"
+                ]
+            if self.enable_hyper_connections:
+                mhc_recompute_manager = self.mhc_layer_managers[layer_idx]
+                if mhc_recompute_manager is not None:
+                    mhc_recompute_manager.is_last_layer_in_recompute_block = self.mhc_is_last_in_recompute_block[layer_idx]
+                    extra_args["mhc_recompute_manager"] = mhc_recompute_manager
+                    extra_args["enable_hyper_connections"] = True
+                else:
+                    extra_args["mhc_recompute_manager"] = None
+                    extra_args["enable_hyper_connections"] = False
+                extra_args["mhc_is_last_layer_in_recompute_block"] = self.mhc_is_last_in_recompute_block[layer_idx]
+                
+            ########## FlagScale End ##########
+            layer_plan = TransformerLayerSchedulePlan(
+                layer,  # FlagScale Add
+                self.event,
+                self.state,
+                comp_stream,
+                comm_stream,
+                extra_args,
+            )
+            self._transformer_layers.append(layer_plan)
 
     @property
     def event(self):
@@ -368,18 +436,22 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
 
     def record_current_stream(self):
         """Records the current CUDA stream in the event."""
-        stream = cur_platform.current_stream()
+        stream = cur_platform.current_stream()  # FlagScale Add
         self.event.record(stream)
 
     def wait_current_stream(self):
         """Waits for the event to complete on the current CUDA stream."""
-        stream = cur_platform.current_stream()
+        stream = cur_platform.current_stream()  # FlagScale Add
         self.event.wait(stream)
 
     def get_layer(self, i):
         """Gets the transformer layer at the specified index."""
         assert i < self.num_layers()
         return self._transformer_layers[i]
+
+    def pop_layer(self):
+        """Pops the transformer layer in FILO order."""
+        return self._transformer_layers.pop()
 
     def num_layers(self):
         """Gets the number of transformer layers."""
@@ -399,6 +471,15 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         if self.post_process is not None:
             self.post_process.model_chunk_state = None
             self.post_process = None
+        ##### FlagScale Begin #####
+        if self.enable_hyper_connections:
+            self._model_chunk_state.hc_head_fn = None
+            self._model_chunk_state.hc_head_base = None
+            self._model_chunk_state.hc_head_scale = None
+            self._model_chunk_state.num_residual_streams = None
+            self._model_chunk_state.layernorm_epsilon = None
+            self._model_chunk_state.enable_mtp = None
+        ##### FlagScale End #####
 
     @staticmethod
     def run(
@@ -444,6 +525,10 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 pre_forward(f_schedule_plan.vp_stage)
             f_schedule_plan.record_current_stream()
             f_input = f_schedule_plan.pre_process.forward()
+            ##### FlagScale Begin #####
+            if f_schedule_plan.enable_hyper_connections:
+                f_input = HyperConnectionModule.input_expand(f_input, f_schedule_plan.num_residual_streams)
+            ########## FlagScale End ##########
 
         if b_schedule_plan:
             b_schedule_plan.record_current_stream()
@@ -459,11 +544,12 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         b_num_layers = b_schedule_plan.num_layers() if b_schedule_plan is not None else 0
         overlapped_layers = min(f_num_layers, b_num_layers)
 
+        f_layer = b_layer = None
         # combined forward and backward pass for overlapped layers
         for i in range(overlapped_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-            cur_platform.range_push(f"layer_{i}f-layer_{b_num_layers - 1 - i}b")
+            b_layer = b_schedule_plan.pop_layer()
+            cur_platform.range_push(f"layer_{i}f-layer_{b_schedule_plan.num_layers()}b")  # FlagScale Add
             f_input, b_grad = TransformerLayerSchedulePlan.run(
                 f_layer,
                 b_layer,
@@ -471,28 +557,46 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                 b_grad=b_grad,
                 is_last_layer_in_bwd=(i == b_num_layers - 1),
             )
-            cur_platform.range_pop()
+            ##### FlagScale #####
+            TransformerBlock._finalize_mhc_recompute_layer(
+                mhc_manager=f_layer.layer_state.mhc_recompute_manager,
+                hidden_states=f_input,
+                is_last_in_recompute_block=f_layer.layer_state.mhc_is_last_layer_in_recompute_block,
+            )
+            ##### FlagScale End #####
+            if i < b_num_layers - 1:
+                b_layer.release_state()
+            cur_platform.range_pop()  # FlagScale Add
 
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
-            b_layer = b_schedule_plan.get_layer(b_num_layers - 1 - i)
-            cur_platform.range_push(f"layer_{b_num_layers - 1 - i}b")
+            b_layer = b_schedule_plan.pop_layer()
+            cur_platform.range_push(f"layer_{b_schedule_plan.num_layers()}b")  # FlagScale Add
             _, b_grad = TransformerLayerSchedulePlan.run(
                 None, b_layer, b_grad=b_grad, is_last_layer_in_bwd=(i == b_num_layers - 1)
             )
-            cur_platform.range_pop()
+            if i < b_num_layers - 1:
+                b_layer.release_state()
+            cur_platform.range_pop()  # FlagScale Add
 
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            cur_platform.range_push(f"layer_{i}f")
+            cur_platform.range_push(f"layer_{i}f")  # FlagScale Add
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
-            cur_platform.range_pop()
+            cur_platform.range_pop()  # FlagScale Add
+            ##### FlagScale #####
+            TransformerBlock._finalize_mhc_recompute_layer(
+                mhc_manager=f_layer.layer_state.mhc_recompute_manager,
+                hidden_states=f_input,
+                is_last_in_recompute_block=f_layer.layer_state.mhc_is_last_layer_in_recompute_block,
+            )
+            ##### FlagScale End #####
 
         if f_schedule_plan is not None and post_forward is not None:
             # post_forward()/send_forward_recv_forward() is running in the communication stream,
             # so the p2p comm could be overlapped with the attn backward
-            with cur_platform.stream(get_comm_stream()):
+            with cur_platform.stream(get_comm_stream()):  # FlagScale Add
                 f_schedule_plan.wait_current_stream()
                 post_forward(f_input, f_schedule_plan.vp_stage)
 
@@ -505,22 +609,31 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
         if b_num_layers > 0:
-            b_schedule_plan.get_layer(0).attn.backward_dw()
+            assert b_layer is not None
+            b_layer.attn.backward_dw()
+            b_layer.release_state()
 
         # post process forward
         if f_schedule_plan is not None and f_schedule_plan.post_process is not None:
             f_input = f_schedule_plan.post_process.forward(f_input)
         # pre process backward
         if b_schedule_plan is not None:
+            ##### FlagScale Begin #####
+            # If using hyper connections, the gradient accumulated through layers is
+            # multi‑stream [s, b, n*C], but pre_process expects single‑stream [s, b, C].
+            # We manually reduce it (sum over streams) to match the forward expand.
+            if b_schedule_plan.enable_hyper_connections:
+                n = b_schedule_plan.num_residual_streams
+                C = b_grad.shape[-1] // n
+                b_grad = b_grad.view(*b_grad.shape[:-1], n, C).sum(dim=-2)
+            ##### FlagScale End #####
             b_schedule_plan.pre_process.backward(b_grad)
 
         if f_schedule_plan:
             f_schedule_plan.wait_current_stream()
         if b_schedule_plan:
             b_schedule_plan.wait_current_stream()
-
-        # Release reference as early as possible, this helps avoid memory leak.
-        if b_schedule_plan is not None:
+            # Release reference as early as possible, this helps avoid memory leak.
             b_schedule_plan.release_state()
 
         return f_input

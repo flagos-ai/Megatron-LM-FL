@@ -1,7 +1,8 @@
-# Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 # Parts of the code here are adapted from PyTorch
 # repo: https://github.com/pytorch/pytorch
+from __future__ import annotations
 
 import os
 import warnings
@@ -11,6 +12,7 @@ from typing import Any, Callable, List, Optional, Tuple
 import torch
 import torch.nn.functional as F
 from torch.nn.parameter import Parameter
+from typing_extensions import override
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.parallel_state import (
@@ -56,24 +58,33 @@ except ImportError:
     HAVE_TE = False
 
 _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS = {
+    "expert_tp": False,
+    "is_qkv": False,
     "tensor_model_parallel": False,
     "partition_dim": -1,
     "partition_stride": 1,
 }
 
+# FlagScale Begin
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+# FlagScale End
 
 try:
     if is_torch_min_version("2.4.0a0"):
         custom_fwd = partial(torch.amp.custom_fwd, device_type="cuda")
         custom_bwd = partial(torch.amp.custom_bwd, device_type="cuda")
     else:
+        # FlagScale Begin
         custom_fwd = cur_platform.amp.custom_fwd
         custom_bwd = cur_platform.amp.custom_bwd
+        # FlagScale End
 except:
+    # FlagScale Begin
     custom_fwd = cur_platform.amp.custom_fwd
     custom_bwd = cur_platform.amp.custom_bwd
+    # FlagScale End
 
 try:
     if is_torch_min_version("1.13.0"):
@@ -87,12 +98,16 @@ except:
     dist_reduce_scatter_func = torch.distributed._reduce_scatter_base
 
 
-def param_is_not_tensor_parallel_duplicate(param):
+def param_is_not_tensor_parallel_duplicate(param, tp_group=None):
     """Returns true if the passed-in parameter is not a duplicate parameter
     on another TP rank."""
-    return (hasattr(param, "tensor_model_parallel") and param.tensor_model_parallel) or (
-        get_tensor_model_parallel_rank() == 0
-    )
+    if hasattr(param, "tensor_model_parallel") and param.tensor_model_parallel:
+        return True
+    # Prefer provided tp_group when available (new explicit path).
+    if tp_group is not None:
+        return tp_group.rank() == 0
+    # Fallback to legacy global state (back-compat).
+    return get_tensor_model_parallel_rank() == 0
 
 
 def set_tensor_model_parallel_attributes(tensor, is_parallel, dim, stride):
@@ -255,7 +270,7 @@ class VocabParallelEmbedding(torch.nn.Module):
                 torch.empty(
                     self.num_embeddings_per_partition,
                     self.embedding_dim,
-                    device=cur_platform.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                     dtype=config.params_dtype,
                 )
             )
@@ -313,6 +328,8 @@ class VocabParallelEmbedding(torch.nn.Module):
                 key=weight_prefix,
                 allow_shape_mismatch=True,
                 prepend_offsets=sharded_offsets,
+                tp_group=self.tp_group,
+                dp_cp_group=metadata["dp_cp_group"],
             )
         }
 
@@ -362,7 +379,6 @@ def linear_with_frozen_weight(
     tp_group: Optional[torch.distributed.ProcessGroup],
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: None = None,
-    async_grad_allreduce: Optional[bool] = None,
 ) -> torch.Tensor:
     """Linear layer execution with weight.requires_grad == False.
 
@@ -399,18 +415,7 @@ def linear_with_frozen_weight(
 
     wgrad_deferral_limit (int optional): dummy argument, used to
     keep the API unified between all forward implementation functions.
-
-
-    async_grad_allreduce (bool optional): Will be removed with 0.11.0.
-                                          Please use allreduce_dgrad instead.
-
     """
-
-    if async_grad_allreduce is not None:
-        warnings.warn(
-            "async_grad_allreduce is deprecated, not in use anymore and will"
-            " be fully removed with 0.11.0. Please use allreduce_dgrad instead."
-        )
 
     assert grad_output_buffer is None, (
         "grad_output_buffer kwarg is only supported with "
@@ -451,7 +456,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
-        te_fl_prefer,
+        te_fl_prefer,  # FlagScale Add
     ):
         """Forward."""
         if gradient_accumulation_fusion and hasattr(weight, "main_grad"):
@@ -470,7 +475,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         ctx.wgrad_deferral_limit = wgrad_deferral_limit
         ctx.grad_output_buffer = grad_output_buffer
         ctx.tp_group = tp_group
-        ctx.te_fl_prefer = te_fl_prefer
+        ctx.te_fl_prefer = te_fl_prefer  # FlagScale Add
 
         if sequence_parallel:
             dim_size = list(input.size())
@@ -546,7 +551,12 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             assert not ctx.allreduce_dgrad
             dim_size = list(input.size())
             sub_grad_input = torch.empty(
-                dim_size, dtype=input.dtype, device=cur_platform.current_device(), requires_grad=False
+                # FlagScale Begin
+                dim_size,
+                dtype=input.dtype,
+                device=cur_platform.current_device(),
+                requires_grad=False,
+                # FlagScale End
             )
             # reduce_scatter
             handle = dist_reduce_scatter_func(
@@ -562,6 +572,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                     weight.main_grad = weight.get_main_grad()
                     torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
+                    # FlagScale Begin
                     if not (ctx.te_fl_prefer == 'flagos' or ctx.te_fl_prefer == 'reference'):
                         if weight.main_grad.dtype == torch.float32:
                             fused_weight_gradient_mlp_cuda.wgrad_gemm_accum_fp32(
@@ -574,13 +585,18 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         else:
                             raise RuntimeError(
                                 "Unsupported gradient type for gradient accumulation fusion"
-                        )
+                            )
+                    # FlagScale End
                     else:
+                        # FlagScale Begin
                         if weight.main_grad.dtype in (torch.float32, torch.float16, torch.bfloat16):
                             grad_weight = torch.matmul(grad_output.t(), total_input)
                             weight.main_grad += grad_weight.view_as(weight.main_grad)
                         else:
-                            raise RuntimeError("Unsupported gradient type for gradient accumulation fusion")
+                            raise RuntimeError(
+                                "Unsupported gradient type for gradient accumulation fusion"
+                            )
+                        # FlagScale End
 
             if hasattr(weight, "grad_added_to_main_grad"):
                 # When overlap_grad_reduce is True, need to ensure that backward hooks
@@ -598,7 +614,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         grad_weight = torch.zeros(
                             weight.main_grad.shape,
                             dtype=input.dtype,
-                            device=cur_platform.current_device(),
+                            device=cur_platform.current_device(),  # FlagScale Add
                             requires_grad=False,
                         )
                 else:
@@ -608,7 +624,7 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                         grad_weight = torch.empty(
                             weight.main_grad.shape,
                             dtype=input.dtype,
-                            device=cur_platform.current_device(),
+                            device=cur_platform.current_device(),  # FlagScale Add
                             requires_grad=False,
                         )
                 weight.grad_added_to_main_grad = True
@@ -622,12 +638,25 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
-            return (sub_grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None)
+            # FlagScale Begin
+            return (
+                sub_grad_input,
+                grad_weight,
+                grad_bias,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            # FlagScale End
 
         if ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None
+        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None  # FlagScale Add
 
 
 def linear_with_grad_accumulation_and_async_allreduce(
@@ -639,9 +668,8 @@ def linear_with_grad_accumulation_and_async_allreduce(
     sequence_parallel: bool,
     grad_output_buffer: Optional[List[torch.Tensor]] = None,
     wgrad_deferral_limit: Optional[int] = 0,
-    async_grad_allreduce: Optional[bool] = None,
     tp_group: Optional[torch.distributed.ProcessGroup] = None,
-    te_fl_prefer: Optional[str] = 'vendor',
+    te_fl_prefer: Optional[str] = 'vendor',  # FlagScale Add
 ) -> torch.Tensor:
     """Linear layer execution with asynchronous communication and
     gradient accumulation fusion in backprop.
@@ -704,16 +732,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         wgrad_deferral_limit (int optional): Limit on the number of
             micro-batches for which embedding weight gradient GEMM should be
             deferred. Disable by setting this to 0. Defaults to 0.
-
-        async_grad_allreduce (bool optional): Will be removed with 0.11.0.
-                                            Please use allreduce_dgrad instead.
     """
-
-    if async_grad_allreduce is not None:
-        warnings.warn(
-            "async_grad_allreduce is deprecated, not in use anymore and will"
-            " be fully removed with 0.11.0. Please use allreduce_dgrad instead."
-        )
 
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
 
@@ -727,7 +746,7 @@ def linear_with_grad_accumulation_and_async_allreduce(
         grad_output_buffer,
         wgrad_deferral_limit,
         tp_group,
-        te_fl_prefer,
+        te_fl_prefer,  # FlagScale Add
     ]
 
     if not linear_with_grad_accumulation_and_async_allreduce.warned:
@@ -819,7 +838,7 @@ class ColumnParallelLinear(torch.nn.Module):
         embedding_activation_buffer: Optional[List[torch.Tensor]] = None,
         grad_output_buffer: Optional[List[torch.Tensor]] = None,
         is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
+        tp_comm_buffer_name: Optional[str] = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
@@ -876,7 +895,7 @@ class ColumnParallelLinear(torch.nn.Module):
                     torch.empty(
                         self.output_size_per_partition,
                         self.input_size,
-                        device=cur_platform.current_device(),
+                        device=cur_platform.current_device(),  # FlagScale Add
                         dtype=config.params_dtype,
                     )
                 )
@@ -902,7 +921,7 @@ class ColumnParallelLinear(torch.nn.Module):
                 self.bias = Parameter(
                     torch.empty(
                         self.output_size_per_partition,
-                        device=cur_platform.current_device(),
+                        device=cur_platform.current_device(),  # FlagScale Add
                         dtype=config.params_dtype,
                     )
                 )
@@ -955,7 +974,7 @@ class ColumnParallelLinear(torch.nn.Module):
         if not weight.requires_grad:
             return linear_with_frozen_weight(input, weight, *args, **kwargs)
         else:
-            kwargs['te_fl_prefer'] = self.config.te_fl_prefer
+            kwargs['te_fl_prefer'] = self.config.te_fl_prefer  # FlagScale Add
             return linear_with_grad_accumulation_and_async_allreduce(input, weight, *args, **kwargs)
 
     def forward(
@@ -963,7 +982,7 @@ class ColumnParallelLinear(torch.nn.Module):
         input_: torch.Tensor,
         weight: Optional[torch.Tensor] = None,
         runtime_gather_output: Optional[bool] = None,
-    ):
+    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward of ColumnParallelLinear
 
         Args:
@@ -1057,11 +1076,23 @@ class ColumnParallelLinear(torch.nn.Module):
         output_bias = self.bias if self.skip_bias_add else None
         return output, output_bias
 
+    def backward_dw(self) -> None:
+        """Compute weight gradients during the backward pass if delay_wgrad_compute is enabled.
+
+        Not supported - does nothing.
+        """
+        pass
+
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 0, bias sharded"""
         state_dict = self.state_dict(prefix="", keep_vars=True)
         return make_sharded_tensors_for_checkpoint(
-            state_dict, prefix, {"weight": 0, "bias": 0}, sharded_offsets
+            state_dict,
+            prefix,
+            {"weight": 0, "bias": 0},
+            sharded_offsets,
+            tp_group=self.tp_group,
+            dp_cp_group=metadata['dp_cp_group'],
         )
 
     def set_extra_state(self, state: Any):
@@ -1071,12 +1102,16 @@ class ColumnParallelLinear(torch.nn.Module):
         """Keep compatibility with TE state dict."""
         return None
 
-    def __repr__(self):
+    @override
+    def extra_repr(self) -> str:
+        """Extra context to add to the module's string representation."""
         tp = self.output_size // self.output_size_per_partition
         use_bias = self.bias is not None and self.bias is True
         return (
-            f"{type(self).__name__}(in_features={self.input_size}, "
-            f"out_features={self.output_size}, bias={use_bias}, TP={tp})"
+            f"in_features={self.input_size}, "
+            f"out_features={self.output_size}, "
+            f"bias={use_bias}, "
+            f"TP={tp}"
         )
 
 
@@ -1129,7 +1164,7 @@ class RowParallelLinear(torch.nn.Module):
         stride: int = 1,
         keep_master_weight_for_test: bool = False,
         is_expert: bool = False,
-        tp_comm_buffer_name: str = None,  # Not used
+        tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
     ):
         super(RowParallelLinear, self).__init__()
@@ -1189,7 +1224,7 @@ class RowParallelLinear(torch.nn.Module):
                 torch.empty(
                     self.output_size,
                     self.input_size_per_partition,
-                    device=cur_platform.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                     dtype=config.params_dtype,
                 )
             )
@@ -1210,7 +1245,7 @@ class RowParallelLinear(torch.nn.Module):
                 self.bias = Parameter(
                     torch.empty(
                         self.output_size,
-                        device=cur_platform.current_device(),
+                        device=cur_platform.current_device(),  # FlagScale Add
                         dtype=config.params_dtype,
                     )
                 )
@@ -1237,7 +1272,7 @@ class RowParallelLinear(torch.nn.Module):
         else:
             return linear_with_grad_accumulation_and_async_allreduce(input, weight, *args, **kwargs)
 
-    def forward(self, input_):
+    def forward(self, input_: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward of RowParallelLinear
 
         Args:
@@ -1295,11 +1330,23 @@ class RowParallelLinear(torch.nn.Module):
             output_bias = self.bias
         return output, output_bias
 
+    def backward_dw(self) -> None:
+        """Compute weight gradients during the backward pass if delay_wgrad_compute is enabled.
+
+        Not supported - does nothing.
+        """
+        pass
+
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
         """Sharding along axis 1, bias not sharded"""
         state_dict = self.state_dict(prefix="", keep_vars=True)
         return make_sharded_tensors_for_checkpoint(
-            state_dict, prefix, {"weight": 1}, sharded_offsets
+            state_dict,
+            prefix,
+            {"weight": 1},
+            sharded_offsets,
+            tp_group=self.tp_group,
+            dp_cp_group=metadata['dp_cp_group'],
         )
 
     def set_extra_state(self, state: Any):
@@ -1309,10 +1356,14 @@ class RowParallelLinear(torch.nn.Module):
         """Keep compatibility with TE state dict."""
         return None
 
-    def __repr__(self):
+    @override
+    def extra_repr(self) -> str:
+        """Extra context to add to the module's string representation."""
         tp = self.input_size // self.input_size_per_partition
         use_bias = self.bias is not None and self.bias is True
         return (
-            f"{type(self).__name__}(in_features={self.input_size}, "
-            f"out_features={self.output_size}, bias={use_bias}, TP={tp})"
+            f"in_features={self.input_size}, "
+            f"out_features={self.output_size}, "
+            f"bias={use_bias}, "
+            f"TP={tp}"
         )

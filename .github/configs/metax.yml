@@ -1,0 +1,263 @@
+# Metax Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Metax-based testing
+# Test configurations are defined in tests/test_utils/config/platforms/metax.yaml
+
+hardware_name: metax
+display_name: 'Metax Tests'
+
+# CI image for Metax dev env
+# ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
+
+# CI image for online env
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
+
+# Runner labels for Metax node
+runner_labels:
+  - mx-4g-cicd-megatron
+
+# Container volumes (hardware-specific paths)
+# container_volumes:
+#   - /home/flagscale_cicd/flask/static:/workspace/report
+#   - /home/flagscale_cicd/flask/config:/workspace/config
+#   - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
+#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
+#   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
+#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+
+# The mx-4g-cicd-megatron runner publishes shared artifacts under
+# /mnt/airs-business. Using the legacy /mnt/op paths creates empty bind mounts.
+container_volumes:
+  - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
+  - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ulimit nofile=65535:65535
+  --device=/dev/dri
+  --device=/dev/mxcd
+
+# Device types to run tests on
+device_types:
+  - c550
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    devices:
+      - c550
+    # Ignored test files for unit tests
+    # These files will be skipped when running pytest
+    ignored_tests:
+      # single test cases below are unstable on Metax now, need further investigation
+      ## 1.core
+      - tests/unit_tests/test_fp8_param.py
+      # Keep the generic optimizer tests enabled. These cases construct CUDA tensors,
+      # Transformer Engine optimizers, device meshes, or real distributed optimizers.
+      - tests/unit_tests/test_optimizer.py::test_chained_optimizer
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_fused_adam
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_optimizer
+      - tests/unit_tests/test_optimizer.py::test_distrib_optimizer_save_load_with_non_tensor_state
+      - tests/unit_tests/test_optimizer.py::test_optim_sharded_state_dict
+      - tests/unit_tests/test_optimizer.py::test_optimizer_reload_model_params
+      - tests/unit_tests/test_optimizer.py::test_get_megatron_optimizer_with_custom_process_groups
+      - tests/unit_tests/test_optimizer.py::test_get_megatron_optimizer_custom_process_groups_validation
+      - tests/unit_tests/test_utils.py::test_straggler_detector
+      # Metax C500 CPU optimizer offload overlap has larger numeric drift than CUDA tolerance.
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
+
+      # 2.models
+      # ZeroDivisionError: integer modulo by zero
+      - tests/unit_tests/models/test_heterogeneous_gpt_model.py
+      # need cuda
+      - tests/unit_tests/models/test_mamba_model.py
+      # Metax image has an incompatible mamba_ssm/causal_conv1d CUDA extension signature.
+      - tests/unit_tests/models/test_mamba_moe_model.py::TestMambaMoEModel::test_forward
+      # Metax C500 MIMO 1F1B 8-GPU layouts hit missing tensor model-parallel group initialization.
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_encoder_tp2_llm_tp2_pp3_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_full_pp_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp4_to_dp1_llm_tp2_pp2_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_out_dp1_to_dp4_enc_tp2_pp2_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp2_to_dp1_llm_pp3_8gpu
+      # Metax C500 MIMO checkpoint follows the same HyperCommGrid + TE attention path and fails with
+      # "tensor model parallel group is not initialized" when GPTModel/SelfAttention is instantiated.
+      - tests/unit_tests/models/test_mimo_checkpoint.py
+      # Metax C500 TE package misses transformer_engine_torch.get_fused_attn_backend.
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward_fsdp
+
+      # 3.transformer
+      # TE _extra_state compatibility issue with AbsorbedMLA
+      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      # Precision issues with DSA attention variant
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
+      # ZeroDivisionError: integer modulo by zero
+      - tests/unit_tests/transformer/test_attention_no_rope.py
+      - tests/unit_tests/transformer/test_attention_packed_seq.py
+      - tests/unit_tests/transformer/test_attention.py
+      - tests/unit_tests/transformer/test_mlp.py
+      - tests/unit_tests/transformer/test_multi_latent_attention.py
+      - tests/unit_tests/transformer/test_multi_token_prediction.py
+      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
+      - tests/unit_tests/transformer/test_transformer_block.py
+      - tests/unit_tests/transformer/test_utils.py
+      - tests/unit_tests/transformer/moe/test_grouped_mlp.py
+      - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
+      - tests/unit_tests/transformer/moe/test_routers.py
+      - tests/unit_tests/transformer/moe/test_upcycling.py
+      - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
+      - tests/unit_tests/transformer/moe/test_aux_loss.py
+      # need cuda
+      - tests/unit_tests/transformer/test_cuda_graphs.py
+      - tests/unit_tests/transformer/test_full_cuda_graph.py
+
+      # 4.data
+      # need cuda. No module named 'nltk'
+      - tests/unit_tests/data/test_bin_reader.py
+      - tests/unit_tests/data/test_preprocess_data.py
+      - tests/unit_tests/data/test_preprocess_mmdata.py
+      # ZeroDivisionError: integer modulo by zero
+      - tests/unit_tests/data/test_fim_dataset.py
+
+      # 5.dist_checkpointing
+      # ZeroDivisionError: integer modulo by zero
+      - tests/unit_tests/dist_checkpointing/test_fp8.py
+      - tests/unit_tests/dist_checkpointing/test_fully_parallel.py
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py
+      - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py
+      # Parent directory /tmp/pytest-of-root/tmp_dist_ckpt does not exist.
+      - tests/unit_tests/dist_checkpointing/test_safe_globals.py
+      # No CUDA GPUs are available
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+      # Metax C500 8-GPU layer-wise optimizer checkpointing times out in
+      # determine_main_replica_uniform_distribution/all_gather_object during fully-parallel save.
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_optimizer_common_state_dict
+      # Metax CI image does not install nvidia-resiliency-ext; keep mcore async strategy covered.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
+      # Metax torch-dist checkpointing strategy does not expose remove_sharded_tensors in this image.
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors
+
+      # 6.distributed
+      - tests/unit_tests/distributed/test_distributed_data_parallel.py
+      - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py
+      - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
+      # Metax C500 lacks TE FP8/fused-topk features required by this MCore FSDP E2E matrix.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_compatible_with_nd_parallel
+      # test_fully_shard leaves behind corrupted NCCL state according to the test file itself and CI shows
+      # sporadic SIGSEGV during torchrun teardown after otherwise passing cases on Metax C500.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_ez
+      # Metax C500 still hits NCCL internal errors in the custom dtype FSDP matrix.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
+      # TE quantized FP8 FSDP path uses FP8 recipes without a C500-compatible support gate.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
+
+      # 7.export
+      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
+
+      #8.fusions
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
+      # TE fused residual RMSNorm hits an aliasing/in-place view limitation on Metax C500.
+      - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+
+      #9.post training
+      # ModelOpt is optional on Metax; model_provider does not export the ModelOpt builder when unavailable.
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel::test_inference
+
+      #10.tokenizers
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+      #11.unit_tests/utils
+
+      # === Need >2 GPU（model_size > 2） ===
+      # Metax runner has recovered to 8 GPUs. In ignored_tests, uncommented "- ..." entries
+      # are skipped by pytest, so keep these historical records commented to let CI run them.
+      # core: tp=2,pp=4 or tp=world_size
+      # - tests/unit_tests/test_parallel_state.py
+      # - tests/unit_tests/test_hyper_comm_grid.py
+      # models: tp>=4
+      # - tests/unit_tests/models/test_t5_model.py
+      # - tests/unit_tests/models/test_llava_model.py
+      # transformer: tp*pp>2 or ep>2
+      # - tests/unit_tests/transformer/test_transformer_layer.py
+      # - tests/unit_tests/transformer/test_submodule_callables.py
+      # - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
+      # - tests/unit_tests/transformer/moe/test_sequential_mlp.py
+      # - tests/unit_tests/transformer/moe/test_token_dispatcher.py
+      # tensor_parallel: tp>=4 or tp*pp=8
+      # - tests/unit_tests/tensor_parallel/test_cross_entropy.py
+      # - tests/unit_tests/tensor_parallel/test_mappings.py
+      # - tests/unit_tests/tensor_parallel/test_data.py
+      # - tests/unit_tests/tensor_parallel/test_random.py
+      # - tests/unit_tests/tensor_parallel/test_initialization.py
+      # - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py
+      # - tests/unit_tests/tensor_parallel/test_layers.py
+      # pipeline_parallel: pp>=4
+      # - tests/unit_tests/pipeline_parallel/test_schedules.py
+      # - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py
+      # - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      # distributed: pp=4
+      # - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      # dist_checkpointing: tp*pp=8
+      # - tests/unit_tests/dist_checkpointing/test_serialization.py
+      # - tests/unit_tests/dist_checkpointing/test_strict.py
+      # - tests/unit_tests/dist_checkpointing/test_async_save.py
+      # - tests/unit_tests/dist_checkpointing/test_msc.py
+      # - tests/unit_tests/dist_checkpointing/test_torch_dist.py
+      # - tests/unit_tests/dist_checkpointing/test_replication.py
+      # ssm: cp>=4 or tp=4
+      # - tests/unit_tests/ssm/test_mamba_mixer.py
+      # - tests/unit_tests/ssm/test_mamba_context_parallel.py
+
+      # Metax runtime aborts in multimodule bridge communicator teardown.
+      - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py
+      # Metax C500 TE package misses transformer_engine_torch.get_fused_attn_backend, so the 8-GPU
+      # multimodule schedule path aborts inside TE attention backend selection.
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+      # Metax C500 bridge communicator combined send/recv paths hit Maca invalid device pointer.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator::test_send_forward_recv_backward_send_backward_recv_forward
+      # Metax C500 transformer-block bridge path hits NCCL/Maca invalid device pointer during all_reduce.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator::test_bridge_communicator_with_transformer_blocks
+      # Metax C500 TE package misses transformer_engine_torch.get_fused_attn_backend.
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py::test_forward_vpp
+      # Metax C500 pipeline CI hits flaky fine-grained activation offload paths.
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      # specific case that are unstable on Metax
+      # models
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+
+  functional:
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: c550
+        enable_lightweight_mode: false
+      # Temporarily disabled while investigating the C550 TP2/PP2 performance timeout.
+      # - model: gpt
+      #   test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_metax
+      #   training_script: pretrain_gpt.py
+      #   n_repeat: 1
+      #   golden_environment: dev
+      #   golden_platform: c550
+      #   enable_lightweight_mode: false
+      #   gpus_per_node: 4

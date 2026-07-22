@@ -3,31 +3,6 @@ import pytest
 from tests.functional_tests.python_test_utils import common
 
 
-def pytest_addoption(parser):
-    """
-    Additional command-line arguments passed to pytest.
-    """
-    parser.addoption(
-        "--allow-nondeterministic-algo",
-        action="store_true",
-        default=False,
-        help="If set, test system checks for approximate results.",
-    )
-    parser.addoption("--golden-values-path", action="store", help="Path to golden values")
-    parser.addoption("--actual-values-path", action="store", help="Path to actual values")
-    parser.addoption("--actual-values-first-run-path", action="store", help="Path to actual values")
-    parser.addoption(
-        "--actual-values-second-run-path", action="store", help="Path to actual values"
-    )
-    parser.addoption("--scope", action="store", help="Test scope (MR, weekly, prerelease, release)")
-    parser.addoption(
-        "--train-iters", action="store", default=100, help="Number of train iters", type=int
-    )
-    parser.addoption("--test-values-path", action="store", help="Path to tensorboard records")
-    parser.addoption("--tensorboard-path", action="store", help="Path to tensorboard records")
-    parser.addoption("--model-config-path", action="store", help="Path to model_config.yaml")
-
-
 @pytest.fixture
 def compare_approximate_results(request) -> bool:
     """Simple fixture returning whether to check against results approximately."""
@@ -97,6 +72,12 @@ def test_values_path(request):
 def tensorboard_path(request):
     """Simple fixture returning path to tensorboard logs."""
     return request.config.getoption("--tensorboard-path")
+
+
+@pytest.fixture
+def logs_dir(request):
+    """Simple fixture returning path to torchrun output logs."""
+    return request.config.getoption("--logs-dir")
 
 
 @pytest.fixture
