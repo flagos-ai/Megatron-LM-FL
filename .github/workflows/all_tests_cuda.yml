@@ -5,7 +5,7 @@ on:
     branches: ["main"]
   pull_request:
     branches: ["main"]
-  workflow_dispatch:
+  workflow_dispatch: # Allows manual triggering
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.actor }}
@@ -17,6 +17,8 @@ jobs:
     uses: ./.github/workflows/all_tests_common.yml
     with:
       platform: cuda
+      run_unit_tests: true
+      run_functional_tests: true
 
   all_tests:
     needs: run_tests

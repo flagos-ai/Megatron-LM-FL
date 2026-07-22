@@ -18,8 +18,12 @@ try:
 except Exception:
     dist_all_gather_func = torch.distributed._all_gather_base
 
+# FlagScale Begin
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+# FlagScale End
+
 
 def split_tensor_along_last_dim(
     tensor: torch.Tensor, num_partitions: int, contiguous_split_chunks: bool = False
@@ -69,7 +73,7 @@ def split_tensor_into_1d_equal_chunks(tensor, new_buffer=False, tp_group=None):
         data = torch.empty(
             partition_size,
             dtype=tensor.dtype,
-            device=cur_platform.current_device(),
+            device=cur_platform.current_device(),  # FlagScale Add
             requires_grad=False,
         )
         data.copy_(tensor.view(-1)[start_index:end_index])
@@ -90,7 +94,12 @@ def gather_split_1d_tensor(tensor, tp_group=None):
     tp_group = get_tensor_model_parallel_group_if_none(tp_group)
     numel_gathered = torch.numel(tensor) * tp_group.size()
     gathered = torch.empty(
-        numel_gathered, dtype=tensor.dtype, device=cur_platform.current_device(), requires_grad=False
+        # FlagScale Begin
+        numel_gathered,
+        dtype=tensor.dtype,
+        device=cur_platform.current_device(),
+        requires_grad=False,
+        # FlagScale End
     )
     dist_all_gather_func(gathered, tensor, group=tp_group)
     return gathered

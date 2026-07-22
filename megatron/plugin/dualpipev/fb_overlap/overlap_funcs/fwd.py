@@ -39,9 +39,8 @@ def transformer_layer_forward_moe(
 ):
     """Forward function of transformer layer, for moe models"""
     # hidden_states: [s, b, h]
-    args = get_args()
     use_shared_experts = hasattr(self.mlp, 'shared_experts') and self.mlp.shared_experts is not None
-    recomp_norm = getattr(args, 'recompute_norm', False)
+    recomp_norm = getattr(self, 'recompute_input_layernorm', False)
 
     detached_layer_input = detach_tensor(hidden_states, checkpoint_forward=checkpoint)
 

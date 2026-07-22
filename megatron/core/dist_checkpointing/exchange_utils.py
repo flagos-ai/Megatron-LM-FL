@@ -11,7 +11,6 @@ from typing import Any, Dict, List, NamedTuple, Optional, Set, Tuple, TypeVar, c
 import numpy as np
 import torch
 
-from ..utils import get_pg_rank, get_pg_size
 from .core import CheckpointingException
 from .dict_utils import nested_values
 from .mapping import ShardedStateDict, ShardedTensor, is_main_replica
@@ -36,8 +35,11 @@ def is_float8tensor(tensor: torch.Tensor) -> bool:
 
 logger = logging.getLogger(__name__)
 
+# FlagScale Begin
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+# FlagScale End
 
 
 class ShardDistribution(NamedTuple):
@@ -65,10 +67,7 @@ class ShardDistribution(NamedTuple):
 
 def _shard_size(sh_ten: ShardedTensor):
     """Returns size in bytes of a given sharded tensor."""
-    if sh_ten.flattened_range is None:
-        numel = np.prod(sh_ten.local_shape)
-    else:
-        numel = sh_ten.flattened_range.stop - sh_ten.flattened_range.start
+    numel = np.prod(sh_ten.local_shape)
     return numel * torch._utils._element_size(sh_ten.dtype)
 
 
@@ -101,19 +100,19 @@ def _get_empty_tensor_for_exchange(
         orig_device = None  # this tensor will be discarded anyway
         sh_ten = unneeded_shards[shard_id]
         if sh_ten.data is None:
-            sh_ten.init_data(cur_platform.device_name())
+            sh_ten.init_data(cur_platform.device_name())  # FlagScale Add
             tensor = sh_ten.data
             sh_ten.data = None  # won't be used. free memory
         else:
             tensor = sh_ten.data
             if tensor.device.type == "cpu":
-                tensor = torch.empty_like(tensor, device=cur_platform.device_name())
+                tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Add
     else:
-        local_unloaded_sh_ten.init_data(cur_platform.device_name())
+        local_unloaded_sh_ten.init_data(cur_platform.device_name())  # FlagScale Add
         orig_device = local_unloaded_sh_ten.data.device
         tensor = local_unloaded_sh_ten.data
         if tensor.device.type == "cpu":
-            tensor = torch.empty_like(tensor, device=cur_platform.device_name())
+            tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Add
         loaded_tensors[shard_id] = tensor
     return tensor, orig_device
 
@@ -203,6 +202,8 @@ def determine_main_replica_uniform_distribution(
         parallelization. Returns None if the process_group is trivial (1 rank)
 
     """
+    from ..utils import get_pg_size
+
     if parallelization_group is None:
         parallelization_group = torch.distributed.group.WORLD
     group_size = get_pg_size(group=parallelization_group)
@@ -291,6 +292,8 @@ def exchange_loaded_tensors_gather_rounds(
             needed by this rank to load a given state dict. Includes
             previously loaded tensors (from `loaded_tensors` input)
     """
+    from ..utils import get_pg_rank, get_pg_size
+
     if parallelization_group is None:
         parallelization_group = torch.distributed.group.WORLD
     main_rank_for_shard, _, shard_to_metadata, all_ranks_for_shard = shard_distribution
@@ -329,7 +332,7 @@ def exchange_loaded_tensors_gather_rounds(
                 for rank, shard_id in enumerate(round_shard_ids):
                     if shard_id is None:
                         # if no more useful data, the given rank will exchange empty tensor
-                        local_ten = torch.empty(0, dtype=dtype, device=cur_platform.device_name())
+                        local_ten = torch.empty(0, dtype=dtype, device=cur_platform.device_name())  # FlagScale Add
                         orig_device = None
                     else:
                         assert isinstance(shard_id, tuple), type(shard_id)
@@ -339,7 +342,11 @@ def exchange_loaded_tensors_gather_rounds(
                                 all_loaded_tensors.keys(),
                             )
                             orig_device = all_loaded_tensors[shard_id]
-                            all_loaded_tensors[shard_id] = all_loaded_tensors[shard_id].to(cur_platform.device())
+                            # FlagScale Begin
+                            all_loaded_tensors[shard_id] = all_loaded_tensors[shard_id].to(
+                                cur_platform.device()
+                            )
+                            # FlagScale End
                             local_ten = all_loaded_tensors[shard_id]
                         else:
                             local_ten, orig_device = _get_empty_tensor_for_exchange(
@@ -404,6 +411,8 @@ def exchange_loaded_tensors_gather_object(
             previously loaded tensors (from `loaded_tensors` input)
 
     """
+    from ..utils import log_single_rank
+
     all_loaded_tensors_list = [None] * torch.distributed.get_world_size(group=parallelization_group)
     torch.distributed.all_gather_object(
         all_loaded_tensors_list, loaded_tensors, group=parallelization_group
@@ -414,11 +423,11 @@ def exchange_loaded_tensors_gather_object(
     # Error checks
     if len(all_loaded_tensors) != sum(map(len, all_loaded_tensors_list)):
         err_msg = "Duplicate shard ids loaded by different ranks"
-        if torch.distributed.get_rank() == 0:
-            logger.error(
-                f"{err_msg}. Shards ids by rank:"
-                f" {[lt.keys() for lt in all_loaded_tensors_list]}"
-            )
+        log_single_rank(
+            logger,
+            logging.ERROR,
+            f"{err_msg}. Shards ids by rank:" f" {[lt.keys() for lt in all_loaded_tensors_list]}",
+        )
         raise CheckpointingException(err_msg)
 
     return all_loaded_tensors
@@ -437,6 +446,8 @@ def exchange_loaded_objects_gather_object(
         Dict[_ShardId, Any]: dictionary mapping shard ids to objects needed by this rank to
          load a given state dict.
     """
+    from ..utils import log_single_rank
+
     all_loaded_objects_list = [None] * torch.distributed.get_world_size()
     torch.distributed.all_gather_object(all_loaded_objects_list, loaded_objects, group=None)
     all_loaded_objects_list = cast(List[Dict[_ShardId, Any]], all_loaded_objects_list)
@@ -445,11 +456,11 @@ def exchange_loaded_objects_gather_object(
     # Error checks
     if len(all_loaded_objects) != sum(map(len, all_loaded_objects_list)):
         err_msg = "Duplicate shard ids loaded by different ranks"
-        if torch.distributed.get_rank() == 0:
-            logger.error(
-                f"{err_msg}. Shards ids by rank:"
-                f" {[lt.keys() for lt in all_loaded_objects_list]}"
-            )
+        log_single_rank(
+            logger,
+            logging.ERROR,
+            f"{err_msg}. Shards ids by rank:" f" {[lt.keys() for lt in all_loaded_objects_list]}",
+        )
         raise CheckpointingException(err_msg)
 
     return all_loaded_objects
@@ -502,7 +513,7 @@ def exchange_loaded_tensors_broadcast(
         if rank == local_rank:
             assert shard_id in all_loaded_tensors, (shard_id, all_loaded_tensors.keys())
             orig_device = all_loaded_tensors[shard_id].device
-            local_ten = all_loaded_tensors[shard_id].to(cur_platform.device())
+            local_ten = all_loaded_tensors[shard_id].to(cur_platform.device())  # FlagScale Add
         else:
             local_ten, orig_device = _get_empty_tensor_for_exchange(
                 shard_id, unloaded_shards, shard_to_metadata, all_loaded_tensors

@@ -37,11 +37,13 @@ def is_built_on_zero_rank():
         else:
             return False
 
+    no_shared_fs = getattr(args, "no_shared_fs", False)
+
     is_built = False
-    if not args.no_shared_fs \
+    if not no_shared_fs \
         and torch.distributed.get_rank() == 0:
         is_built = True
-    elif args.no_shared_fs \
+    elif no_shared_fs \
         and int(os.environ["LOCAL_RANK"]) == 0:
         is_built = True
     else:

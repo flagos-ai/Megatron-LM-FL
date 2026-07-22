@@ -1,3 +1,4 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import os
 from datetime import timedelta
 
@@ -27,8 +28,8 @@ class TestModel(torch.nn.Module):
 
 class Utils:
 
-    world_size = int(os.environ['WORLD_SIZE'])
-    rank = int(os.environ['LOCAL_RANK'])
+    world_size = int(os.environ.get('WORLD_SIZE', '1'))
+    rank = int(os.environ.get('LOCAL_RANK', '0'))
     inited = False
     store = None
 
@@ -64,6 +65,9 @@ class Utils:
                 backend='nccl', world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
+            # Free cached CUDA memory before NCCL communicator creation
+            torch.cuda.empty_cache()
+
             torch.distributed.barrier()
         Utils.inited = True
 
@@ -90,7 +94,16 @@ class Utils:
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
         if not Utils.inited:
             return
-        torch.distributed.barrier()
+
+        try:
+            # Flush pending CUDA work before the barrier so slow ranks don't
+            # time out while fast ranks tear down process groups.
+            # NOTE(zhaoyinglia): there is not keyword argument 'timeout' in torch.distributed.barrier()
+            torch.cuda.synchronize()
+            torch.distributed.barrier()
+        except Exception:
+            Utils.inited = False
+            return
         ps.destroy_model_parallel()
         Utils.inited = False
 

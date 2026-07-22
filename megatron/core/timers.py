@@ -31,8 +31,11 @@ except:
 
 logger = logging.getLogger(__name__)
 
+# FlagScale Begin
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
+# FlagScale End
 
 
 class TimerBase(ABC):
@@ -152,7 +155,7 @@ class Timer(TimerBase):
         assert not self._started, 'timer has already been started'
         if barrier:
             torch.distributed.barrier(group=self._barrier_group)
-        cur_platform.synchronize()
+        cur_platform.synchronize()  # FlagScale Add
         self._start_time = time.time()
         self._started = True
 
@@ -165,7 +168,7 @@ class Timer(TimerBase):
         assert self._started, 'timer is not started'
         if barrier:
             torch.distributed.barrier(group=self._barrier_group)
-        cur_platform.synchronize()
+        cur_platform.synchronize()  # FlagScale Add
         elapsed = time.time() - self._start_time
         self._elapsed += elapsed
         self._active_time += elapsed
@@ -176,6 +179,17 @@ class Timer(TimerBase):
         # Don't reset _active_time
         self._elapsed = 0.0
         self._started = False
+
+    def set_elapsed(self, value):
+        """Directly set the elapsed time.
+
+        This is useful for injecting pre-computed timing values (e.g., startup
+        timestamps) into the timer so they can be reported via timers.log().
+
+        Args:
+            value (float): The elapsed time value in seconds.
+        """
+        self._elapsed = value
 
     def elapsed(self, reset=True, barrier=False):
         """Calculates the elapsed time and restarts timer.
@@ -292,7 +306,7 @@ class Timers:
         # and since we are only gathering a small amount of data,
         # it should be ok to use all-gather instead of gather.
         rank_name_to_time = torch.zeros(
-            (world_size, len(names)), dtype=torch.float, device=cur_platform.current_device()
+            (world_size, len(names)), dtype=torch.float, device=cur_platform.current_device()  # FlagScale Add
         )
         for i, name in enumerate(names):
             if name in self._timers:
@@ -302,8 +316,10 @@ class Timers:
                 # groups inside their class.
                 rank_name_to_time[rank, i] = self._timers[name].elapsed(reset=reset)
 
+        # FlagScale Begin
         if "cpu:gloo" == torch.distributed.get_backend():
             rank_name_to_time = rank_name_to_time.cpu()
+        # FlagScale End
         # See the note above for why we are not using gather.
         dist_all_gather_func(rank_name_to_time.view(-1), rank_name_to_time[rank, :].view(-1))
 

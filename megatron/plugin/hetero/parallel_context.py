@@ -246,7 +246,7 @@ class ProcessMesh:
         self._order = order
         self._offset = offset
         self._args = args
-        self.create_gloo_process_groups = args.enable_gloo_process_groups
+        self.create_gloo_process_groups = getattr(args, 'use_gloo_process_groups', True)
 
         self._timeout = timedelta(minutes=distributed_timeout_minutes)
         self._rank = torch.distributed.get_rank()
@@ -992,6 +992,12 @@ class ParallelContext:
             assert group is not None, 'model parallel group is not initialized'
         return group
 
+    def get_model_parallel_src_rank(self):
+        """Calculate the global rank corresponding to the first local rank
+        in the model parallel group."""
+        ranks = self.get_global_group_ranks("tp-pp", is_expert=False, check_initialized=True)
+        return ranks[0]
+
     def get_tensor_model_parallel_group(self, check_initialized=True):
         """Get the tensor model parallel group the caller rank belongs to."""
         current_process_mesh = self._process_meshes[self._current_process_mesh_index]
@@ -1672,7 +1678,7 @@ class ParallelContext:
 
         def _build_optimzer_config(args):
             # Use specific optimizer config class based on optimizer type, matching Megatron-LM-FL behavior
-            from megatron.training.utils import get_megatron_optimizer_config
+            from megatron.training.training import get_megatron_optimizer_config
             config, config_overrides = get_megatron_optimizer_config(args)
             return config, config_overrides
 
