@@ -741,7 +741,7 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         # This replaces the separate step 6 (score_recompute + KL) and step 7
         # (indexer backward), eliminating redundant gather/einsum operations.
         prof.start("step6_7_indexer_loss_bwd")
-        needs_grad = torch.is_grad_enabled() and any(
+        needs_grad = any(
             t.requires_grad for t in (query, kv_full, attn_sink, q_indexer, k_indexer, weights)
         )
 
@@ -821,10 +821,14 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
                 # Inference: only compute loss
                 dense_idx_result = dense_indexer_score_recompute(
                     q_idx_bshd, k_idx_bsd, w_bsh_scaled,
-                    qhead_per_kv_head=idx_nh, sm_scale=indexer_softmax_scale, ratio=ratio,
+                    qhead_per_kv_head=idx_nh, sm_scale=1.0, ratio=ratio,
                 )
+                # Pass lse=None so dense_attn_score_recompute uses self-contained
+                # softmax over compressed keys only (matching unfused reference).
+                # Using the full LSE (which includes window tokens in the
+                # denominator) would make compressed-token probabilities too small.
                 dense_attn_result = dense_attn_score_recompute(
-                    q_attn_bshd, k_attn_bsd, lse_bsh,
+                    q_attn_bshd, k_attn_bsd, None,
                     qhead_per_kv_head=np_, softmax_scale=softmax_scale, ratio=ratio,
                 )
                 indexer_loss = _kl_loss_from_dense_scores(
