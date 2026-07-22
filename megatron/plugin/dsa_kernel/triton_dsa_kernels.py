@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, FlagOS Contributors. All rights reserved.
 
 """
 Triton-based DSA kernel wrappers — drop-in replacement for ``dsa_kernels.py``.

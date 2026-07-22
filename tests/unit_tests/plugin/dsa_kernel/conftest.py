@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, FlagOS Contributors. All rights reserved.
 
 """
 Pytest conftest for DSA kernel tests — metrics collection and report generation.

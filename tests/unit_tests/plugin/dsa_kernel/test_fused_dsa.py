@@ -1,4 +1,4 @@
-# Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2026, FlagOS Contributors. All rights reserved.
 
 """
 Accuracy and performance tests for FusedIndexerSparseAttnFunc.
@@ -2865,34 +2865,6 @@ class TestIndexerGradAccuracy:
         g_fused = fused_res["grad_q_indexer"].float()
         g_unfused = unfused_res["grad_q_indexer"].float()
 
-        logger.warning(
-            f"  [DEBUG test] fused_loss={fused_res['loss']:.6e}, unfused_loss={unfused_res['loss']:.6e}"
-        )
-        logger.warning(
-            f"  [DEBUG test] g_fused: norm={g_fused.norm().item():.6e}, "
-            f"all_zero={(g_fused == 0).all().item()}, max_abs={g_fused.abs().max().item():.6e}, "
-            f"shape={list(g_fused.shape)}, dtype_orig={fused_res['grad_q_indexer'].dtype}"
-        )
-        logger.warning(
-            f"  [DEBUG test] g_unfused: norm={g_unfused.norm().item():.6e}, "
-            f"all_zero={(g_unfused == 0).all().item()}, max_abs={g_unfused.abs().max().item():.6e}, "
-            f"shape={list(g_unfused.shape)}, dtype_orig={unfused_res['grad_q_indexer'].dtype}"
-        )
-        # Check if fused grad is zero but unfused is not
-        if (g_fused == 0).all() and not (g_unfused == 0).all():
-            logger.warning(
-                "  [DEBUG test] FUSED GRAD IS ALL ZERO! Investigating precomputed grad..."
-            )
-            # Check grad_k and grad_w to see if they are also zero
-            gk_fused = fused_res["grad_k_indexer"].float()
-            gw_fused = fused_res["grad_weights"].float()
-            logger.warning(
-                f"  [DEBUG test] grad_k_fused: norm={gk_fused.norm().item():.6e}, all_zero={(gk_fused==0).all().item()}"
-            )
-            logger.warning(
-                f"  [DEBUG test] grad_w_fused: norm={gw_fused.norm().item():.6e}, all_zero={(gw_fused==0).all().item()}"
-            )
-
         cos_sim = torch.nn.functional.cosine_similarity(
             g_fused.reshape(-1).unsqueeze(0),
             g_unfused.reshape(-1).unsqueeze(0),
@@ -3294,4 +3266,3 @@ class TestIndexerLossConsistency:
             f"[sparse_loss={sparse_loss}] per_token_loss={loss.item():.6f}, "
             f"grad_query_norm={query.grad.float().norm().item():.4e}"
         )
-
