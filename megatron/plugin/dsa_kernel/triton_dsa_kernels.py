@@ -226,8 +226,8 @@ class _DSASparseAttnFunc(torch.autograd.Function):
     """
 
     # Mirror the forward dispatch thresholds from triton_sparse_attn.py
-    _PYTORCH_FWD_TOPK_THRESHOLD = 512
-    _PYTORCH_FWD_MAX_GATHER_ELEMENTS = 2 * 1024 * 1024
+    _PYTORCH_FWD_TOPK_THRESHOLD = 256
+    _PYTORCH_FWD_MAX_GATHER_ELEMENTS = 1 * 1024 * 1024
 
     @staticmethod
     def forward(
@@ -249,19 +249,33 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         # BMM to keep the score recomputation numerically consistent with LSE.
         TopK = topk_idxs.shape[-1]
         total_Sq, H = topk_idxs.shape[0], topk_idxs.shape[1]
+        D = query.shape[-1]
         shared = (topk_idxs.stride(1) == 0)
         gather_elements = total_Sq * TopK if shared else total_Sq * H * TopK
+
+        # Check if head-parallel WGMMA kernel was used (shared + aligned dims)
+        hp_eligible = (
+            shared and H >= 16 and (H % 16 == 0)
+            and (D % 16 == 0) and (d_v % 16 == 0)
+        )
+
         ctx.used_pytorch_fwd = (
-            TopK <= _DSASparseAttnFunc._PYTORCH_FWD_TOPK_THRESHOLD
+            not hp_eligible
+            and TopK <= _DSASparseAttnFunc._PYTORCH_FWD_TOPK_THRESHOLD
             and gather_elements <= _DSASparseAttnFunc._PYTORCH_FWD_MAX_GATHER_ELEMENTS
         )
+        # When HP kernel was used, backward must recompute scores with f16 inputs
+        # (matching tl.dot f16×f16→f32) instead of f32 inputs.
+        ctx.used_hp_fwd = hp_eligible
         ctx.shared_indices = shared
 
         logger.debug(
             "_DSASparseAttnFunc.forward: total_Sq=%d, H=%d, TopK=%d, shared=%s, "
             "fwd_path=%s",
             total_Sq, H, TopK, shared,
-            "pytorch_bmm" if ctx.used_pytorch_fwd else "triton",
+            "hp_wgmma" if hp_eligible else (
+                "pytorch_bmm" if ctx.used_pytorch_fwd else "triton"
+            ),
         )
 
         if attn_sink is not None:
@@ -281,19 +295,30 @@ class _DSASparseAttnFunc(torch.autograd.Function):
             attn_sink = None
 
         logger.debug(
-            "_DSASparseAttnFunc.backward: used_pytorch_fwd=%s, shared_indices=%s, "
-            "bwd_path=%s",
-            ctx.used_pytorch_fwd, ctx.shared_indices,
-            "bmm" if (ctx.used_pytorch_fwd and ctx.shared_indices) else "triton",
+            "_DSASparseAttnFunc.backward: used_pytorch_fwd=%s, used_hp_fwd=%s, "
+            "shared_indices=%s, bwd_path=%s",
+            ctx.used_pytorch_fwd, ctx.used_hp_fwd, ctx.shared_indices,
+            "bmm_f16" if ctx.used_hp_fwd else (
+                "bmm_f32" if (ctx.used_pytorch_fwd and ctx.shared_indices) else "triton"
+            ),
         )
 
-        if ctx.used_pytorch_fwd and ctx.shared_indices:
+        if ctx.used_hp_fwd:
+            # --- BMM backward with f16 score recomputation ---
+            # HP forward used tl.dot(Q_f16, K_f16^T) → f32 accumulator.
+            # cuBLAS BMM with f16 inputs also does f16×f16→f32 accumulation,
+            # so exp(scores_bwd - lse_fwd) is numerically consistent.
+            dq, dkv, d_sink = _DSASparseAttnFunc._bmm_backward(
+                grad_out, query, kv, topk_idxs, out, lse, attn_sink,
+                ctx.softmax_scale, ctx.d_v, score_dtype=torch.float16,
+            )
+        elif ctx.used_pytorch_fwd and ctx.shared_indices:
             # --- BMM backward: matches the PyTorch BMM forward path ---
-            # Recomputes scores via cuBLAS BMM (same accumulation as forward)
+            # Recomputes scores via cuBLAS BMM (f32 inputs, same accumulation as forward)
             # so that exp(scores - lse) is numerically consistent.
             dq, dkv, d_sink = _DSASparseAttnFunc._bmm_backward(
                 grad_out, query, kv, topk_idxs, out, lse, attn_sink,
-                ctx.softmax_scale, ctx.d_v,
+                ctx.softmax_scale, ctx.d_v, score_dtype=torch.float32,
             )
         else:
             # --- Triton backward: forward also used Triton kernel ---
@@ -317,11 +342,17 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         attn_sink: Optional[Tensor],  # (H,) f32 or None
         softmax_scale: float,
         d_v: int,
+        score_dtype: torch.dtype = torch.float32,
     ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
         """BMM-based backward for shared-index sparse attention.
 
         Adapted from FusedIndexerSparseAttnFunc.backward (optimized path).
         Uses cuBLAS BMM for score recomputation to match the forward's LSE.
+
+        Args:
+            score_dtype: dtype for score recomputation inputs.
+                - torch.float32: matches PyTorch BMM forward (f32 × f32 → f32).
+                - torch.float16: matches HP WGMMA forward (f16 × f16 → f32 acc).
         """
         total_Sq, H, D = query.shape
         total_Skv = kv.shape[0]
@@ -333,7 +364,7 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         valid_shared = idxs_shared >= 0    # (total_Sq, TopK)
         safe_shared = idxs_shared.clamp(min=0).long()
 
-        # Gather KV once in bf16 (cuBLAS bf16 BMM does f32 internal accumulation)
+        # Gather KV once in bf16
         flat_idxs = safe_shared.reshape(-1)  # (total_Sq * TopK)
         kv_gathered = kv[flat_idxs].reshape(total_Sq, TopK, D_full)  # bf16
 
@@ -342,14 +373,15 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         # Di = sum(dO * O) per (query, head)
         Di = (grad_out.float() * out.float()).sum(dim=-1)  # (total_Sq, H)
 
-        # Recompute scores via f32 BMM — must match _pytorch_sparse_attn_fwd
-        # which uses torch.bmm(q.float(), k.float().T) * scale.
-        # Using f32 inputs ensures identical accumulation and thus exp(s - lse) ≈ 1
-        # at the correct positions (no bf16 truncation mismatch).
+        # Recompute scores via BMM — must match the forward's dot-product precision.
+        # score_dtype=f32: matches PyTorch BMM fwd (torch.bmm(q.float(), k.float().T))
+        # score_dtype=f16: matches HP WGMMA fwd (tl.dot(Q_f16, K_f16^T) → f32 acc)
+        q_score = query.to(score_dtype)  # (S, H, D)
+        k_score = kv_gathered[:, :, :D].to(score_dtype)  # (S, TopK, D)
         scores = torch.bmm(
-            query.float(),  # (S, H, D) f32
-            kv_gathered[:, :, :D].float().transpose(1, 2)  # (S, D, TopK) f32
-        ) * softmax_scale  # f32
+            q_score, k_score.transpose(1, 2)
+        ).float() * softmax_scale  # always f32 output
+        del q_score, k_score
 
         # P = exp(scores - lse) * valid_mask
         P = fused_exp_mask(scores, lse, valid_shared, H)
