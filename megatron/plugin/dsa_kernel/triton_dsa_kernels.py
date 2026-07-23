@@ -32,6 +32,9 @@ from megatron.plugin.dsa_kernel.triton_sparse_attn import (
 from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
     fused_mask_scatter_add,
     fused_exp_mask,
+    fused_dq,
+    fused_dkv,
+    sorted_scatter_add,
 )
 from megatron.plugin.dsa_kernel.triton_indexer_kernels import (
     sparse_indexer_score_recompute,
@@ -313,11 +316,17 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         softmax_scale: float,
         d_v: int,
     ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
-        """BMM-based backward for HP WGMMA forward path.
+        """Fused backward for HP WGMMA forward path.
 
-        Uses cuBLAS BMM with f16 inputs for score recomputation, matching the
-        HP forward kernel's tl.dot(Q_f16, K_f16^T) → f32 accumulation.
-        This ensures exp(scores_bwd - lse_fwd) is numerically consistent.
+        Uses cuBLAS BMM with f16 inputs for score recomputation (numerical
+        consistency with forward tl.dot), then fused Triton kernels for dQ
+        and dKV that keep P, dov, dS in registers — eliminating ~768MB of
+        intermediate GMEM allocations.
+
+        For D==DV (shared latent, always true in training):
+          - fused_dq: scores + lse + Di + dO + K → dQ (no P/dov/dS materialized)
+          - fused_dkv: scores + lse + Di + dO + Q + K → dKV (no P/dov/dS materialized)
+          - sorted_scatter_add: local reduction before atomic (less contention)
         """
         total_Sq, H, D = query.shape
         total_Skv = kv.shape[0]
@@ -333,59 +342,36 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         flat_idxs = safe_shared.reshape(-1)  # (total_Sq * TopK)
         kv_gathered = kv[flat_idxs].reshape(total_Sq, TopK, D_full)  # bf16
 
-        kv_is_shared = (D == d_v == D_full)
-
         # Di = sum(dO * O) per (query, head)
         Di = (grad_out.float() * out.float()).sum(dim=-1)  # (total_Sq, H)
 
-        # Recompute scores via BMM in f16 — matches HP WGMMA forward
+        # Recompute scores via cuBLAS BMM in f16 — matches HP WGMMA forward
         # (tl.dot(Q_f16, K_f16^T) → f32 accumulator)
         q_score = query.to(torch.float16)  # (S, H, D)
         k_score = kv_gathered[:, :, :D].to(torch.float16)  # (S, TopK, D)
         scores = torch.bmm(
             q_score, k_score.transpose(1, 2)
-        ).float() * softmax_scale  # always f32 output
+        ).float() * softmax_scale  # (S, H, TopK) f32
         del q_score, k_score
 
-        # P = exp(scores - lse) * valid_mask
-        P = fused_exp_mask(scores, lse, valid_shared, H)
+        # --- Fused dQ: eliminates P, dov, dS materialization ---
+        # dQ = sum_k( exp(scores-lse)*valid * (dO@K^T - Di) * scale ) @ K
+        dq = fused_dq(
+            scores, lse, Di, grad_out, kv_gathered[:, :, :D], valid_shared, softmax_scale
+        )
+
+        # --- Fused dKV: eliminates P, dov, dS materialization ---
+        # dKV[q,k,:] = sum_h( dS[q,h,k]*Q[q,h,:] + P[q,h,k]*dO[q,h,:] )
+        dkv_gathered = fused_dkv(
+            scores, lse, Di, grad_out, query, kv_gathered[:, :, :D],
+            valid_shared, softmax_scale
+        )
         del scores
 
-        # dov = dO @ V^T (f32 for precision in dS computation)
-        dov = torch.bmm(
-            grad_out.float(), kv_gathered[:, :, :d_v].float().transpose(1, 2)
-        )  # (S, H, TopK) f32
-
-        # dS = P * (dov - Di) * scale
-        dS = P * (dov - Di.unsqueeze(-1)) * softmax_scale
-        del dov
-
-        # dQ = dS @ K (f32 for precision)
-        dq = torch.bmm(dS, kv_gathered[:, :, :D].float())  # (S, H, D) f32
-
-        # dKV: dK = dS^T @ Q, dV = P^T @ dO
-        q_f32 = query.float()
-        dO_f32 = grad_out.float()
-
-        dkv_gathered = torch.bmm(dS.transpose(1, 2), q_f32)  # (S, TopK, D) f32
-        del dS
-        if kv_is_shared:
-            # dV = P^T @ dO: in-place add (dK + dV into same buffer)
-            torch.baddbmm(dkv_gathered, P.transpose(1, 2), dO_f32, out=dkv_gathered)
-        else:
-            dv = torch.bmm(P.transpose(1, 2), dO_f32)
-            dkv_tmp = torch.zeros(
-                total_Sq, TopK, D_full, dtype=torch.float32, device=query.device
-            )
-            dkv_tmp[:, :, :D] = dkv_gathered
-            dkv_tmp[:, :, :d_v] += dv
-            dkv_gathered = dkv_tmp
-        del P, q_f32, dO_f32
-
-        # Scatter dkv_gathered back to full KV positions
+        # --- Scatter with sorted local reduction ---
         valid_flat = valid_shared.reshape(-1)
         dkv = torch.zeros(total_Skv, D_full, dtype=torch.float32, device=query.device)
-        fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv)
+        sorted_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv)
 
         dq_out = dq.to(query.dtype)
         dkv_out = dkv.to(kv.dtype)

@@ -446,6 +446,9 @@ def triton_sparse_attn_bwd(
 from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
     fused_mask_scatter_add,
     fused_exp_mask,
+    fused_dq,
+    fused_dkv,
+    sorted_scatter_add,
     should_use_triton_bwd,
 )
 

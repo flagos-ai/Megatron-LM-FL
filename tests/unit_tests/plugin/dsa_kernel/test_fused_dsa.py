@@ -3266,3 +3266,323 @@ class TestIndexerLossConsistency:
             f"[sparse_loss={sparse_loss}] per_token_loss={loss.item():.6f}, "
             f"grad_query_norm={query.grad.float().norm().item():.4e}"
         )
+
+
+# ===========================================================================
+# Tests: Fused Backward Kernels (fused_dq, fused_dkv, sorted_scatter_add)
+# ===========================================================================
+
+
+def _reference_dq_dkv(
+    scores: Tensor,
+    lse: Tensor,
+    Di: Tensor,
+    dO: Tensor,
+    query: Tensor,
+    kv_gathered: Tensor,
+    valid_shared: Tensor,
+    softmax_scale: float,
+):
+    """Reference PyTorch implementation of dQ and dKV (original BMM path)."""
+    from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import fused_exp_mask
+
+    S, H, TopK = scores.shape
+
+    # P = exp(scores - lse) * valid
+    P = fused_exp_mask(scores, lse, valid_shared, H)
+
+    # dov = dO @ V^T (K==V in shared latent)
+    dov = torch.bmm(dO.float(), kv_gathered.float().transpose(1, 2))
+
+    # dS = P * (dov - Di) * scale
+    dS = P * (dov - Di.unsqueeze(-1)) * softmax_scale
+
+    # dQ = dS @ K
+    dq = torch.bmm(dS, kv_gathered.float())
+
+    # dKV = dS^T @ Q + P^T @ dO (combined dK + dV for shared latent)
+    dkv_gathered = torch.bmm(dS.transpose(1, 2), query.float())
+    torch.baddbmm(dkv_gathered, P.transpose(1, 2), dO.float(), out=dkv_gathered)
+
+    return dq, dkv_gathered
+
+
+def _make_fused_bwd_tensors(
+    total_Sq: int = 64,
+    H: int = 32,
+    D: int = 512,
+    TopK: int = 128,
+    total_Skv: int = 4096,
+    invalid_ratio: float = 0.1,
+    device: str = "cuda",
+    seed: int = 42,
+):
+    """Generate random test tensors mimicking HP backward inputs."""
+    torch.manual_seed(seed)
+
+    query = torch.randn(total_Sq, H, D, dtype=torch.bfloat16, device=device)
+    kv = torch.randn(total_Skv, D, dtype=torch.bfloat16, device=device)
+    dO = torch.randn(total_Sq, H, D, dtype=torch.bfloat16, device=device)
+    out = torch.randn(total_Sq, H, D, dtype=torch.bfloat16, device=device)
+
+    # Generate random indices (some invalid = -1)
+    topk_idxs = torch.randint(0, total_Skv, (total_Sq, TopK), device=device)
+    n_invalid = int(total_Sq * TopK * invalid_ratio)
+    if n_invalid > 0:
+        invalid_pos = torch.randperm(total_Sq * TopK, device=device)[:n_invalid]
+        topk_idxs.view(-1)[invalid_pos] = -1
+
+    valid_shared = topk_idxs >= 0
+    safe_shared = topk_idxs.clamp(min=0).long()
+
+    # Gather KV
+    flat_idxs = safe_shared.reshape(-1)
+    kv_gathered = kv[flat_idxs].reshape(total_Sq, TopK, D)
+
+    # Scores via BMM (same as real backward)
+    softmax_scale = 1.0 / (D ** 0.5)
+    q_f16 = query.to(torch.float16)
+    k_f16 = kv_gathered[:, :, :D].to(torch.float16)
+    scores = torch.bmm(q_f16, k_f16.transpose(1, 2)).float() * softmax_scale
+
+    # LSE (simulate forward online softmax)
+    scores_masked = scores.clone()
+    scores_masked[:, :, :][~valid_shared.unsqueeze(1).expand_as(scores)] = float("-inf")
+    lse = scores_masked.max(dim=-1).values + torch.log(
+        torch.exp(scores_masked - scores_masked.max(dim=-1, keepdim=True).values)
+        .sum(dim=-1).clamp(min=1e-6)
+    )
+
+    # Di
+    Di = (dO.float() * out.float()).sum(dim=-1)
+
+    return {
+        "scores": scores,
+        "lse": lse,
+        "Di": Di,
+        "dO": dO,
+        "query": query,
+        "kv_gathered": kv_gathered,
+        "valid_shared": valid_shared,
+        "flat_idxs": flat_idxs,
+        "kv": kv,
+        "softmax_scale": softmax_scale,
+        "total_Skv": total_Skv,
+    }
+
+
+@_skip_unless_sm90
+class TestFusedDQ:
+    """Tests for fused_dq Triton kernel."""
+
+    @pytest.fixture(autouse=True)
+    def device(self):
+        return "cuda"
+
+    @pytest.mark.parametrize("total_Sq,H,D,TopK", [
+        (32, 16, 512, 64),
+        (64, 32, 512, 128),
+        (128, 128, 512, 256),
+    ])
+    def test_numerical_accuracy(self, total_Sq, H, D, TopK, device):
+        """Fused dQ matches reference BMM-based dQ."""
+        from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import fused_dq
+
+        data = _make_fused_bwd_tensors(total_Sq=total_Sq, H=H, D=D, TopK=TopK, device=device)
+
+        ref_dq, _ = _reference_dq_dkv(
+            data["scores"], data["lse"], data["Di"], data["dO"],
+            data["query"], data["kv_gathered"], data["valid_shared"],
+            data["softmax_scale"],
+        )
+
+        fused_result = fused_dq(
+            data["scores"], data["lse"], data["Di"], data["dO"],
+            data["kv_gathered"], data["valid_shared"], data["softmax_scale"],
+        )
+
+        # bf16 WGMMA vs f32 BMM — relaxed tolerance
+        torch.testing.assert_close(fused_result, ref_dq, atol=5e-2, rtol=5e-2)
+        logger.info(
+            f"fused_dq [{total_Sq=}, {H=}, {D=}, {TopK=}]: "
+            f"max_diff={( fused_result - ref_dq).abs().max().item():.4e}"
+        )
+
+    def test_no_nan_inf(self, device):
+        """Fused dQ produces no NaN or Inf."""
+        from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import fused_dq
+
+        data = _make_fused_bwd_tensors(total_Sq=64, H=32, D=512, TopK=128, device=device)
+        result = fused_dq(
+            data["scores"], data["lse"], data["Di"], data["dO"],
+            data["kv_gathered"], data["valid_shared"], data["softmax_scale"],
+        )
+        assert not torch.isnan(result).any(), "dQ contains NaN"
+        assert not torch.isinf(result).any(), "dQ contains Inf"
+
+
+@_skip_unless_sm90
+class TestFusedDKV:
+    """Tests for fused_dkv Triton kernel."""
+
+    @pytest.fixture(autouse=True)
+    def device(self):
+        return "cuda"
+
+    @pytest.mark.parametrize("total_Sq,H,D,TopK", [
+        (32, 16, 512, 64),
+        (64, 32, 512, 128),
+        (128, 128, 512, 256),
+    ])
+    def test_numerical_accuracy(self, total_Sq, H, D, TopK, device):
+        """Fused dKV matches reference BMM-based dKV."""
+        from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import fused_dkv
+
+        data = _make_fused_bwd_tensors(total_Sq=total_Sq, H=H, D=D, TopK=TopK, device=device)
+
+        _, ref_dkv = _reference_dq_dkv(
+            data["scores"], data["lse"], data["Di"], data["dO"],
+            data["query"], data["kv_gathered"], data["valid_shared"],
+            data["softmax_scale"],
+        )
+
+        fused_result = fused_dkv(
+            data["scores"], data["lse"], data["Di"], data["dO"],
+            data["query"], data["kv_gathered"], data["valid_shared"],
+            data["softmax_scale"],
+        )
+
+        torch.testing.assert_close(fused_result, ref_dkv, atol=5e-2, rtol=5e-2)
+        logger.info(
+            f"fused_dkv [{total_Sq=}, {H=}, {D=}, {TopK=}]: "
+            f"max_diff={(fused_result - ref_dkv).abs().max().item():.4e}"
+        )
+
+    def test_no_nan_inf(self, device):
+        """Fused dKV produces no NaN or Inf."""
+        from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import fused_dkv
+
+        data = _make_fused_bwd_tensors(total_Sq=64, H=32, D=512, TopK=128, device=device)
+        result = fused_dkv(
+            data["scores"], data["lse"], data["Di"], data["dO"],
+            data["query"], data["kv_gathered"], data["valid_shared"],
+            data["softmax_scale"],
+        )
+        assert not torch.isnan(result).any(), "dKV contains NaN"
+        assert not torch.isinf(result).any(), "dKV contains Inf"
+
+
+@_skip_unless_sm90
+class TestSortedScatterAdd:
+    """Tests for sorted_scatter_add kernel."""
+
+    @pytest.fixture(autouse=True)
+    def device(self):
+        return "cuda"
+
+    @pytest.mark.parametrize("total_Sq,TopK,total_Skv,D", [
+        (64, 128, 4096, 512),
+        (128, 256, 8192, 512),
+    ])
+    def test_numerical_accuracy(self, total_Sq, TopK, total_Skv, D, device):
+        """Sorted scatter_add matches reference fused_mask_scatter_add."""
+        from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
+            sorted_scatter_add,
+            fused_mask_scatter_add,
+        )
+
+        torch.manual_seed(42)
+
+        dkv_gathered = torch.randn(total_Sq, TopK, D, dtype=torch.float32, device=device)
+        flat_idxs_raw = torch.randint(0, total_Skv, (total_Sq * TopK,), device=device)
+        valid_flat = torch.ones(total_Sq * TopK, dtype=torch.bool, device=device)
+        n_invalid = int(total_Sq * TopK * 0.1)
+        invalid_pos = torch.randperm(total_Sq * TopK, device=device)[:n_invalid]
+        valid_flat[invalid_pos] = False
+        flat_idxs = flat_idxs_raw.long()
+
+        # Reference
+        ref_out = torch.zeros(total_Skv, D, dtype=torch.float32, device=device)
+        fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, ref_out)
+
+        # Sorted scatter
+        test_out = torch.zeros(total_Skv, D, dtype=torch.float32, device=device)
+        sorted_scatter_add(dkv_gathered, flat_idxs, valid_flat, test_out)
+
+        torch.testing.assert_close(test_out, ref_out, atol=1e-5, rtol=1e-5)
+        logger.info(
+            f"sorted_scatter_add [{total_Sq=}, {TopK=}, {total_Skv=}]: "
+            f"max_diff={(test_out - ref_out).abs().max().item():.4e}"
+        )
+
+    def test_high_contention(self, device):
+        """Sorted scatter handles high-contention (many writes to same target)."""
+        from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
+            sorted_scatter_add,
+            fused_mask_scatter_add,
+        )
+
+        torch.manual_seed(123)
+        total_Sq, TopK, D = 128, 64, 512
+        total_Skv = 256  # Small KV pool → high contention
+
+        dkv_gathered = torch.randn(total_Sq, TopK, D, dtype=torch.float32, device=device)
+        flat_idxs = torch.randint(0, total_Skv, (total_Sq * TopK,), dtype=torch.int64, device=device)
+        valid_flat = torch.ones(total_Sq * TopK, dtype=torch.bool, device=device)
+
+        ref_out = torch.zeros(total_Skv, D, dtype=torch.float32, device=device)
+        fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, ref_out)
+
+        test_out = torch.zeros(total_Skv, D, dtype=torch.float32, device=device)
+        sorted_scatter_add(dkv_gathered, flat_idxs, valid_flat, test_out)
+
+        torch.testing.assert_close(test_out, ref_out, atol=1e-4, rtol=1e-4)
+        avg_run = (total_Sq * TopK) / total_Skv
+        logger.info(
+            f"sorted_scatter_add [high contention, avg_run≈{avg_run:.1f}]: "
+            f"max_diff={(test_out - ref_out).abs().max().item():.4e}"
+        )
+
+
+@_skip_unless_sm90
+class TestFusedBackwardIntegration:
+    """End-to-end test: fused backward produces valid gradients via autograd."""
+
+    @pytest.fixture(autouse=True)
+    def device(self):
+        return "cuda"
+
+    @pytest.mark.parametrize("total_Sq,H,D,TopK,total_Skv", [
+        (64, 32, 512, 128, 2048),
+        (128, 128, 512, 256, 4096),
+    ])
+    def test_autograd_no_nan(self, total_Sq, H, D, TopK, total_Skv, device):
+        """Full forward+backward via dsa_sparse_attn produces non-NaN gradients."""
+        from megatron.plugin.dsa_kernel.triton_dsa_kernels import dsa_sparse_attn
+
+        torch.manual_seed(42)
+
+        query = torch.randn(total_Sq, H, D, dtype=torch.bfloat16, device=device, requires_grad=True)
+        kv = torch.randn(total_Skv, D, dtype=torch.bfloat16, device=device, requires_grad=True)
+        topk_idxs = torch.randint(0, total_Skv, (total_Sq, 1, TopK), dtype=torch.int32, device=device)
+        topk_idxs[:, :, -10:] = -1  # Some invalid entries
+        attn_sink = torch.randn(H, dtype=torch.float32, device=device, requires_grad=True)
+        softmax_scale = 1.0 / (D ** 0.5)
+
+        out, lse, _ = dsa_sparse_attn(query, kv, topk_idxs, softmax_scale, D, attn_sink)
+
+        grad_out = torch.randn_like(out)
+        out.backward(grad_out)
+
+        for name, param in [("query", query), ("kv", kv), ("attn_sink", attn_sink)]:
+            assert param.grad is not None, f"{name}.grad is None"
+            assert not torch.isnan(param.grad).any(), f"{name}.grad has NaN"
+            assert not torch.isinf(param.grad).any(), f"{name}.grad has Inf"
+            assert param.grad.abs().sum() > 0, f"{name}.grad is all zeros"
+
+        logger.info(
+            f"autograd_no_nan [{total_Sq=}, {H=}, {TopK=}]: "
+            f"dq_norm={query.grad.float().norm().item():.4e}, "
+            f"dkv_norm={kv.grad.float().norm().item():.4e}"
+        )
+
