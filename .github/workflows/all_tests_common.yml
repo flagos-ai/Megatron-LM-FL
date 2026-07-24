@@ -6,7 +6,7 @@ on:
       platform:
         required: true
         type: string
-        description: Platform name (e.g., cuda, default)
+        description: Platform configuration name
       run_unit_tests:
         required: false
         type: boolean
@@ -31,7 +31,11 @@ jobs:
       container_volumes: ${{ steps.config.outputs.container_volumes }}
       container_options: ${{ steps.config.outputs.container_options }}
       device_types: ${{ steps.config.outputs.device_types }}
+      setup_script: ${{ steps.config.outputs.setup_script }}
+      nproc_per_node: ${{ steps.config.outputs.nproc_per_node }}
       train_test_matrix: ${{ steps.config.outputs.train_test_matrix }}
+      unit_test_groups: ${{ steps.config.outputs.unit_test_groups }}
+      unit_pytest_extra_args: ${{ steps.config.outputs.unit_pytest_extra_args }}
       ignored_tests: ${{ steps.config.outputs.ignored_tests }}
     steps:
       - name: Checkout source code
@@ -71,12 +75,35 @@ jobs:
           DEVICE_TYPES=$(yq '.device_types | tojson(0)' "$CONFIG_FILE")
           echo "device_types=$DEVICE_TYPES" >> $GITHUB_OUTPUT
 
+          # Read the platform setup entry point shared by all test suites.
+          SETUP_SCRIPT=$(yq '.setup_script' "$CONFIG_FILE")
+          NPROC_PER_NODE=$(yq '.nproc_per_node' "$CONFIG_FILE")
+          if [ -z "$SETUP_SCRIPT" ] || [ "$SETUP_SCRIPT" = "null" ]; then
+            echo "::error::setup_script is required"
+            exit 1
+          fi
+          if ! [[ "$NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::nproc_per_node must be a positive integer"
+            exit 1
+          fi
+          echo "setup_script=$SETUP_SCRIPT" >> $GITHUB_OUTPUT
+          echo "nproc_per_node=$NPROC_PER_NODE" >> $GITHUB_OUTPUT
+
           # Read test matrix for training
           TRAIN_MATRIX=$(yq '.test_matrix.functional.train | tojson(0)' "$CONFIG_FILE")
           echo "train_test_matrix=$TRAIN_MATRIX" >> $GITHUB_OUTPUT
 
-          # Read ignored tests list from test_matrix.unit (default to empty array if not defined)
+          # Read the complete unit-test contract from the platform configuration.
+          UNIT_TEST_GROUPS=$(yq '.test_matrix.unit.groups | tojson(0)' "$CONFIG_FILE")
+          UNIT_PYTEST_EXTRA_ARGS=$(yq '.test_matrix.unit.pytest_extra_args // [] | tojson(0)' "$CONFIG_FILE")
           IGNORED_TESTS=$(yq '.test_matrix.unit.ignored_tests // [] | tojson(0)' "$CONFIG_FILE")
+
+          if [ "$UNIT_TEST_GROUPS" = "null" ] || [ "$UNIT_TEST_GROUPS" = "[]" ]; then
+            echo "::error::test_matrix.unit.groups must contain at least one test group"
+            exit 1
+          fi
+          echo "unit_test_groups=$UNIT_TEST_GROUPS" >> $GITHUB_OUTPUT
+          echo "unit_pytest_extra_args=$UNIT_PYTEST_EXTRA_ARGS" >> $GITHUB_OUTPUT
           echo "ignored_tests=$IGNORED_TESTS" >> $GITHUB_OUTPUT
       
   lint:
@@ -103,6 +130,10 @@ jobs:
       runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
       container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
+      setup_script: ${{ needs.checkout_and_config.outputs.setup_script }}
+      test_groups: ${{ needs.checkout_and_config.outputs.unit_test_groups }}
+      nproc_per_node: ${{ needs.checkout_and_config.outputs.nproc_per_node }}
+      pytest_extra_args: ${{ needs.checkout_and_config.outputs.unit_pytest_extra_args }}
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
 
   unit_tests_complete:
@@ -140,6 +171,8 @@ jobs:
       runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
       container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
+      setup_script: ${{ needs.checkout_and_config.outputs.setup_script }}
+      nproc_per_node: ${{ needs.checkout_and_config.outputs.nproc_per_node }}
       test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
 
   functional_tests_complete:

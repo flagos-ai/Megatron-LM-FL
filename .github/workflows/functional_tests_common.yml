@@ -6,7 +6,7 @@ on:
       platform:
         required: true
         type: string
-        description: Platform name (e.g., cuda, default)
+        description: Platform configuration name
       device:
         required: true
         type: string
@@ -23,6 +23,14 @@ on:
       container_options:
         required: true
         type: string
+      setup_script:
+        required: true
+        type: string
+        description: Repository-relative platform environment setup script
+      nproc_per_node:
+        required: true
+        type: string
+        description: Number of devices expected in the test container
       test_matrix:
         required: true
         type: string
@@ -72,101 +80,28 @@ jobs:
           fetch-depth: 0
           set-safe-directory: true
 
-      - name: Setup Python environment
+      - name: Setup platform environment
         working-directory: ${{ github.workspace }}
+        env:
+          CI_TEST_SUITE: functional
+          CI_PLATFORM: ${{ inputs.platform }}
+          CI_DEVICE: ${{ inputs.device }}
+          CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
         run: |
           set -euo pipefail
 
-          if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
-            source /opt/conda/etc/profile.d/conda.sh
-            conda activate base
+          SETUP_SCRIPT='${{ inputs.setup_script }}'
+          if [[ "$SETUP_SCRIPT" = /* || "$SETUP_SCRIPT" == *".."* ]]; then
+            echo "::error::setup_script must be a repository-relative path"
+            exit 1
           fi
-          # Ensure python3 resolves to conda python (Makefile in megatron/core/datasets uses python3)
-          CONDA_PYTHON=$(which python 2>/dev/null)
-          if [ -n "$CONDA_PYTHON" ] && [ "$CONDA_PYTHON" != "/usr/bin/python3" ]; then
-            ln -sf "$CONDA_PYTHON" /usr/local/bin/python3
-          fi
-
-          echo "PATH=$PATH" >> $GITHUB_ENV
-          echo "Python: $(which python) ($(python --version 2>&1))"
-          python -c "import torch; print('Torch:', torch.__version__)"
-
-          # Install yq (required by run_ci_test.sh via yq_common.sh)
-          if ! command -v yq &>/dev/null; then
-            apt-get update -qq 2>/dev/null || true
-            apt-get install -y -qq wget 2>/dev/null || true
-            wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
-            chmod +x /usr/local/bin/yq
-          fi
-          yq --version || echo "yq installed"
-
-          # Install envsubst (required by _run_training.sh)
-          if ! command -v envsubst &>/dev/null; then
-            echo "Installing envsubst..."
-            if apt-get update -qq && apt-get install -y -qq gettext-base; then
-              echo "envsubst installed via apt"
-            elif conda install -y -q gettext; then
-              echo "envsubst installed via conda"
-            else
-              echo "apt/conda failed, creating Python-based envsubst shim"
-              cat > /usr/local/bin/envsubst << 'ENVEOF'
-          #!/usr/bin/env python3
-          import os, sys, re
-          text = sys.stdin.read()
-          print(re.sub(r'\$\{([^}]+)\}|\$([A-Za-z_][A-Za-z_0-9]*)',
-                lambda m: os.environ.get(m.group(1) or m.group(2), m.group(0)), text), end='')
-          ENVEOF
-              chmod +x /usr/local/bin/envsubst
-            fi
-          fi
-          envsubst --version 2>/dev/null || envsubst </dev/null || echo "envsubst shim ready"
-
-          # run_ci_test.sh calls 'uv run --no-sync python/pytest ...'
-          # Translate to direct invocation when uv is not installed
-          if ! command -v uv &>/dev/null; then
-            PYTHON_BIN=$(which python 2>/dev/null || which python3 2>/dev/null || echo python3)
-            cat > /usr/local/bin/uv << SHIMEOF
-          #!/bin/bash
-          if [[ "\$1" == "run" ]]; then
-            shift
-            [[ "\$1" == "--no-sync" ]] && shift
-            if [[ "\$1" == "python" ]]; then shift; exec ${PYTHON_BIN} "\$@"; fi
-            if [[ "\$1" == "pytest" ]] && ! command -v pytest &>/dev/null; then
-              shift; exec ${PYTHON_BIN} -m pytest "\$@"
-            fi
-            exec "\$@"
-          fi
-          echo "uv shim: unsupported command: \$*" >&2; exit 1
-          SHIMEOF
-            chmod +x /usr/local/bin/uv
-          fi
-          uv --version || echo "uv shim installed"
-
-          # Build
-          pip install pybind11 --no-cache-dir
-          pip install -e . --no-deps --no-build-isolation --no-cache-dir
-        timeout-minutes: 30
-
-      - name: Setup Metax toolchain compatibility
-        if: inputs.platform == 'metax'
-        run: |
-          set -euo pipefail
-
-          CUDA_BRIDGE_BIN=/opt/maca/tools/cu-bridge/bin
-          CUCC_PATH="${CUDA_BRIDGE_BIN}/cucc"
-          NVCC_PATH="${CUDA_BRIDGE_BIN}/nvcc"
-
-          if [ ! -x "${CUCC_PATH}" ]; then
-            echo "Metax compiler bridge not found at ${CUCC_PATH}" >&2
+          if [ ! -f "$GITHUB_WORKSPACE/$SETUP_SCRIPT" ]; then
+            echo "::error::Platform setup script not found: $SETUP_SCRIPT"
             exit 1
           fi
 
-          ln -sf "${CUCC_PATH}" "${NVCC_PATH}"
-          echo "${CUDA_BRIDGE_BIN}" >> "$GITHUB_PATH"
-
-          ls -l "${CUCC_PATH}" "${NVCC_PATH}"
-          "${NVCC_PATH}" -V
-        timeout-minutes: 10
+          bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+        timeout-minutes: 30
 
       - name: Run functional tests
         id: functional_test

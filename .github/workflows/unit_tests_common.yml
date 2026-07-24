@@ -6,11 +6,11 @@ on:
       platform:
         required: true
         type: string
-        description: Platform name (e.g., cuda, default)
+        description: Platform configuration name
       device:
         required: true
         type: string
-        description: Device type (e.g., a100, a800, h100, generic)
+        description: Device type
       image:
         required: true
         type: string
@@ -23,11 +23,28 @@ on:
       container_options:
         required: true
         type: string
+      setup_script:
+        required: true
+        type: string
+        description: Repository-relative platform environment setup script
+      test_groups:
+        required: true
+        type: string
+        description: JSON array of unit test groups
+      nproc_per_node:
+        required: true
+        type: string
+        description: Number of distributed test processes
+      pytest_extra_args:
+        required: false
+        type: string
+        default: '[]'
+        description: JSON array of additional pytest arguments
       ignored_tests:
         required: false
         type: string
-        default: ''
-        description: JSON array of test files to ignore (e.g., '["tests/unit_tests/test_a.py", "tests/unit_tests/test_b.py"]')
+        default: '[]'
+        description: JSON array of test files or node IDs to ignore
 
 jobs:
   unit_test:
@@ -38,37 +55,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        test_group:
-          - name: core
-            path: "tests/unit_tests/test_*.py megatron/plugin/tests/"
-            description: "Core unit tests"
-          # - name: transformer
-          #   path: "tests/unit_tests/transformer/"
-          #   description: "Transformer tests"
-          - name: models
-            path: "tests/unit_tests/models/"
-            description: "Model tests"
-          - name: distributed
-            path: "tests/unit_tests/distributed/"
-            description: "Distributed tests"
-          - name: dist_checkpointing
-            path: "tests/unit_tests/dist_checkpointing/"
-            description: "Distributed checkpointing tests"
-          - name: tensor_parallel
-            path: "tests/unit_tests/tensor_parallel/"
-            description: "Tensor parallel tests"
-          - name: pipeline_parallel
-            path: "tests/unit_tests/pipeline_parallel/"
-            description: "Pipeline parallel tests"
-          - name: data
-            path: "tests/unit_tests/data/"
-            description: "Data tests"
-          - name: fusions
-            path: "tests/unit_tests/fusions/"
-            description: "Fusion tests"
-          - name: others
-            path: "tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/"
-            description: "Other tests (a2a_overlap, export, post_training, tokenizers, utils)"
+        test_group: ${{ fromJson(inputs.test_groups) }}
     name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
     container:
       image: ${{ inputs.image }}
@@ -84,7 +71,7 @@ jobs:
         with:
           fetch-depth: 0
           set-safe-directory: true
-          
+
       - name: Checkout Source Code (attempt 2)
         id: checkout2
         if: steps.checkout1.outcome == 'failure'
@@ -102,136 +89,42 @@ jobs:
           fetch-depth: 0
           set-safe-directory: true
 
-      - name: Setup Python environment
+      - name: Setup platform environment
         working-directory: ${{ github.workspace }}
+        env:
+          CI_TEST_SUITE: unit
+          CI_PLATFORM: ${{ inputs.platform }}
+          CI_DEVICE: ${{ inputs.device }}
+          CI_TEST_GROUP: ${{ matrix.test_group.name }}
+          CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
         run: |
           set -euo pipefail
-          PLATFORM='${{ inputs.platform }}'
-          
-          if [ -f /opt/conda/etc/profile.d/conda.sh ]; then
-            source /opt/conda/etc/profile.d/conda.sh
-            conda activate base
+
+          SETUP_SCRIPT='${{ inputs.setup_script }}'
+          if [[ "$SETUP_SCRIPT" = /* || "$SETUP_SCRIPT" == *".."* ]]; then
+            echo "::error::setup_script must be a repository-relative path"
+            exit 1
           fi
-          echo "PATH=$PATH" >> $GITHUB_ENV
-          echo "Python: $(which python) ($(python --version 2>&1))"
-
-          # Ensure curl is available (required by coverage upload action)
-          command -v curl || (apt-get update -qq && apt-get install -y --no-install-recommends curl 2>/dev/null)
-
-          # Keep all dependency installs on a protobuf version supported by wandb.
-          printf 'protobuf<7\n' > /tmp/megatron-unit-test-constraints.txt
-          export PIP_CONSTRAINT=/tmp/megatron-unit-test-constraints.txt
-
-          # Install dependence package
-          pip install torch boto3 mock pytest-mock coverage pytest-asyncio anyio wandb openai httpx nltk msgpack --no-cache-dir
-          if [ "$PLATFORM" = "metax" ]; then
-            pip install fastapi uvicorn --no-cache-dir
+          if [ ! -f "$GITHUB_WORKSPACE/$SETUP_SCRIPT" ]; then
+            echo "::error::Platform setup script not found: $SETUP_SCRIPT"
+            exit 1
           fi
 
-          # Install nvidia-resiliency-ext from source
-          if [ "$PLATFORM" != "metax" ]; then
-            git clone --branch v0.6.0-main https://github.com/NVIDIA/nvidia-resiliency-ext.git /tmp/nvidia-resiliency-ext
-            pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
-            pip install protobuf==6.33.1
-          else
-            echo "Skipping nvidia-resiliency-ext on Metax because it requires NVIDIA CUPTI."
-          fi
-
-          # Install emerging-optimizers from source. It depends on GitHub access and is optional
-          # for Metax unit tests; tests that require it already skip when the package is missing.
-          if [ "$PLATFORM" = "metax" ]; then
-            echo "Skipping optional Emerging-Optimizers on Metax."
-          else
-            pip install git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 --no-cache-dir
-          fi
-          
-          # Build
-          pip install -e . --no-deps --no-build-isolation --no-cache-dir
-          python -c 'import google.protobuf, wandb; print("protobuf:", google.protobuf.__version__, "wandb:", wandb.__version__)'
+          bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
         timeout-minutes: 30
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
         id: unit_test
         working-directory: ${{ github.workspace }}
-        run: |
-          set -euo pipefail
-
-          PLATFORM='${{ inputs.platform }}'
-          DEVICE='${{ inputs.device }}'
-          TEST_GROUP='${{ matrix.test_group.name }}'
-          TEST_PATH='${{ matrix.test_group.path }}'
-
-          echo "Running unit tests: $TEST_GROUP"
-          echo "Test path: $TEST_PATH"
-          echo "Platform: $PLATFORM"
-          echo "Device: $DEVICE"
-
-          # Set environment variables
-          export PYTHONPATH=$GITHUB_WORKSPACE:${PYTHONPATH:-}
-          export TORCHINDUCTOR_CACHE_DIR=/tmp/.torch_inductor_cache
-          export MEGATRON_TEST_PLATFORM=$PLATFORM
-          mkdir -p $TORCHINDUCTOR_CACHE_DIR
-
-          # Build ignore options from ignored_tests input
-          IGNORED_TESTS='${{ inputs.ignored_tests }}'
-          IGNORE_OPTS=""
-          FINAL_TEST_PATH="$TEST_PATH"
-          if [ -n "$IGNORED_TESTS" ] && [ "$IGNORED_TESTS" != "[]" ]; then
-            echo "Parsing ignored tests list..."
-            if echo "$TEST_PATH" | grep -q '\*'; then
-              # Glob pattern: pytest --ignore does NOT skip explicitly-listed file args.
-              # Pre-filter the expanded file list in Python to exclude ignored files directly.
-              FINAL_TEST_PATH=$(IGNORED_TESTS="$IGNORED_TESTS" TEST_PATH="$TEST_PATH" python3 -c "import glob, json, os, shlex; ignored = json.loads(os.environ['IGNORED_TESTS']); ignored_files = set(t for t in ignored if '::' not in t); files = []; [files.extend(sorted(glob.glob(path)) if glob.has_magic(path) else [path]) for path in shlex.split(os.environ['TEST_PATH'])]; print(' '.join(f for f in files if f not in ignored_files))")
-              # For glob mode, only --deselect applies (for specific test-case entries containing '::')
-              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--deselect=' + t for t in tests if '::' in t]; print(' '.join(opts))")
-            else
-              # Directory path: pytest auto-discovery respects --ignore for files/dirs
-              IGNORE_OPTS=$(echo "$IGNORED_TESTS" | python3 -c "import sys, json; tests = json.load(sys.stdin); opts = ['--ignore=' + t if '::' not in t else '--deselect=' + t for t in tests]; print(' '.join(opts))")
-            fi
-            echo "Test paths: $FINAL_TEST_PATH"
-            if [ -n "$IGNORE_OPTS" ]; then
-              echo "Ignoring tests: $IGNORE_OPTS"
-            fi
-          fi
-          if [ -z "$FINAL_TEST_PATH" ]; then
-            echo "::error::No tests selected for $TEST_GROUP from TEST_PATH='$TEST_PATH'"
-            exit 1
-          fi
-          # Calc GPU num
-          if [ "$PLATFORM" = "metax" ]; then
-            NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count() if hasattr(torch, 'cuda') and torch.cuda.is_available() else 2)")
-          else
-            NUM_GPUS=$(python3 -c "import torch; print(torch.cuda.device_count())")
-          fi
-          echo "=== Platform: ${{ inputs.platform }} | Device: ${{ inputs.device }} | GPUs: $NUM_GPUS ==="
-
-          # Coverage setup
-          COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
-          COVERAGE_TRAINING_SOURCE="$GITHUB_WORKSPACE/megatron/training"
-          COVERAGE_PLUGIN_SOURCE="$GITHUB_WORKSPACE/megatron/plugin"
-          COVERAGE_INCLUDE="megatron/training/*,megatron/plugin/*"
-          RUNNER_CMD="-m pytest"
-          MARKER_OPTS=()
-          if [ "$PLATFORM" = "cuda" ]; then
-            MARKER_OPTS=(-m "not flaky_in_dev")
-          fi
-          mkdir -p "$COVERAGE_DIR"
-          printf '[run]\nparallel = true\ndynamic_context = test_function\nsource =\n    %s\n    %s\ndata_file = %s/.coverage\n' \
-            "$COVERAGE_TRAINING_SOURCE" "$COVERAGE_PLUGIN_SOURCE" "$COVERAGE_DIR" \
-            > "$COVERAGE_DIR/.coveragerc"
-          RUNNER_CMD="-m coverage run --rcfile=$COVERAGE_DIR/.coveragerc -m pytest"
-          
-          torchrun --nproc_per_node=$NUM_GPUS $RUNNER_CMD -v $FINAL_TEST_PATH --ignore=tests/functional_tests $IGNORE_OPTS "${MARKER_OPTS[@]}" -p no:randomly
-          exit_code=$?
-
-          # Combine coverage fragments and generate JSON report
-          coverage combine --rcfile="$COVERAGE_DIR/.coveragerc" "$COVERAGE_DIR" 2>/dev/null || true
-          coverage json --rcfile="$COVERAGE_DIR/.coveragerc" \
-            --show-contexts \
-            -o "$COVERAGE_DIR/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json" --include="$COVERAGE_INCLUDE" 2>/dev/null || true
-
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
-          exit $exit_code
+        env:
+          CI_PLATFORM: ${{ inputs.platform }}
+          CI_DEVICE: ${{ inputs.device }}
+          CI_TEST_GROUP: ${{ matrix.test_group.name }}
+          CI_TEST_PATH: ${{ matrix.test_group.path }}
+          CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+          CI_IGNORED_TESTS: ${{ inputs.ignored_tests }}
+          CI_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
+        run: tests/test_utils/runners/run_ci_unit_tests.sh
         timeout-minutes: 60
 
       - name: Upload Coverage Report

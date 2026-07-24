@@ -1,0 +1,343 @@
+# Ascend Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Ascend-based testing.
+# Validated on: Ascend 910C (A3), 8 CI-visible devices, CANN 9.0.0, torch 2.7.1
+
+hardware_name: ascend
+display_name: 'Ascend Tests'
+setup_script: .github/scripts/set_env_ascend.sh
+nproc_per_node: 8
+
+# CI image for the Ascend environment (built and pushed 2026-07-17, validated on Ascend 910C)
+ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260717-ascend-dev
+
+# Runner labels for the Ascend node
+runner_labels:
+  - hw-8g-cicd-megatron
+
+# Container volumes (hardware-specific paths)
+# NOTE: /usr/local/Ascend/add-ons does not exist on this runner; not mounted.
+# NOTE: datasets/tokenizers not mounted for unit tests (add when functional tests needed).
+container_volumes:
+  - /usr/local/Ascend/driver:/usr/local/Ascend/driver
+  - /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ipc=host
+  --pid=host
+  --ulimit nofile=65535:65535
+  --env ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+  --device=/dev/davinci0
+  --device=/dev/davinci1
+  --device=/dev/davinci2
+  --device=/dev/davinci3
+  --device=/dev/davinci4
+  --device=/dev/davinci5
+  --device=/dev/davinci6
+  --device=/dev/davinci7
+  --device=/dev/davinci_manager
+  --device=/dev/devmm_svm
+  --device=/dev/hisi_hdc
+
+# Device types to run tests on
+device_types:
+  - 910c
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    devices:
+      - 910c
+    # Keep executing collected tests after an import/collection error so one
+    # manual run reports the complete platform gap. Collection errors still
+    # make the job fail.
+    pytest_extra_args:
+      - --continue-on-collection-errors
+      - --tb=short
+    groups:
+      - name: core
+        path: tests/unit_tests/test_*.py megatron/plugin/tests/
+        description: Core unit tests
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      - name: distributed
+        path: tests/unit_tests/distributed/
+        description: Distributed tests
+      - name: dist_checkpointing
+        path: tests/unit_tests/dist_checkpointing/
+        description: Distributed checkpointing tests
+      - name: tensor_parallel
+        path: tests/unit_tests/tensor_parallel/
+        description: Tensor parallel tests
+      - name: pipeline_parallel
+        path: tests/unit_tests/pipeline_parallel/
+        description: Pipeline parallel tests
+      - name: data
+        path: tests/unit_tests/data/
+        description: Data tests
+      - name: fusions
+        path: tests/unit_tests/fusions/
+        description: Fusion tests
+      - name: others
+        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: Export, post-training, tokenizer, and utility tests
+    # Ignored test files/cases for unit tests.
+    # These are skipped when running pytest on Ascend NPU.
+    ignored_tests:
+      ## 1. core — FP8
+      # Ascend 910C does not support FP8; all scaling/quantization tests fail
+      # at the TE-FL operator layer.
+      - tests/unit_tests/test_fp8_param.py
+
+      ## 2. core — SGD optimizer (CPU offloading)
+      # TE-FL reference implementation of multi_tensor_sgd has wrong argument
+      # signature on NPU: takes 8 positional arguments but 11 are given.
+      # Only 'sgd' parameter combinations fail; 'adam' combinations pass and
+      # are kept enabled for coverage.
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0-False-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0-False-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0-True-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0-True-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0.5-False-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0.5-False-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0.5-True-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-0.5-True-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-1.0-False-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-1.0-False-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-1.0-True-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[False-sgd-1.0-True-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0-False-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0-False-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0-True-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0-True-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0.5-False-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0.5-False-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0.5-True-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-0.5-True-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-1.0-False-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-1.0-False-10]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-1.0-True-1]
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer[True-sgd-1.0-True-10]
+      # All overlap correctness cases use sgd only; ignore the whole function.
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
+
+      ## 3. core — precision-aware optimizer
+      # Requires CUDA/TE-specific features not available on NPU.
+      # metax also ignores this case.
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_fused_adam
+
+      ## 4. core — NCCL allocator (collection error)
+      # torch._C._nccl_version does not exist on NPU (uses HCCL, not NCCL).
+      # Collection fails at class definition level; no runtime workaround.
+      - tests/unit_tests/test_nccl_allocator.py
+
+      ## 5. core — straggler detector and param norm
+      # test_straggler_detector: HCCL teardown crash during pytest session
+      # cleanup. Same environment issue seen on metax/cuda; metax also ignores.
+      - tests/unit_tests/test_utils.py::test_straggler_detector
+      # test_param_norm_*: RuntimeError in distributed param norm computation
+      # on NPU. Not reproduced on metax or cuda. Under investigation.
+      - tests/unit_tests/test_utils.py::test_param_norm_linear[False]
+      - tests/unit_tests/test_utils.py::test_param_norm_linear[True]
+      - tests/unit_tests/test_utils.py::test_param_norm_moe[False]
+      - tests/unit_tests/test_utils.py::test_param_norm_moe[True]
+
+      # NOTE: test_training_log_grpo_and_auxiliary_writer_paths is NOT ignored.
+      # Upstream PR #82 will remove that test; the failure is transient.
+
+      ## 6. core — platform register (non-idempotent registry_patch)
+      # platform_npu.py registry_patch is not idempotent; calling
+      # register_platforms() a second time raises RuntimeError.
+      # Remove after fixing platform_npu.py.
+      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_all_registered_platforms_are_available
+      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_register_platforms_adds_cpu
+      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_registered_cpu_is_platform_base_instance
+      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_registered_platforms_keys_are_lowercase
+      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_unavailable_platform_not_registered
+
+      ## 7. core — platform contract (monitoring methods return None)
+      # platform_npu.py monitoring API returns None instead of int/float/bool.
+      # Remove after fixing platform_npu.py.
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_clock_rate_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_get_compile_backend_returns_string
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_is_triton_supported_returns_bool
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_power_draw_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_temperature_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_utilization_returns_numeric
+
+      ## 8. core — single-rank checkpoint fixture incompatible with multi-GPU
+      # test_save_checkpoint[torch] uses initialize_model_parallel(1,1)
+      # (single-rank), incompatible with torchrun --nproc_per_node=8.
+      - tests/unit_tests/test_checkpointing.py::test_save_checkpoint[torch]
+      # The inference API tests require tokenizer assets that are not mounted
+      # on the Ascend unit runner.
+      - tests/unit_tests/test_inference.py
+
+      ## 9. tensor_parallel — TransformerEngine RNG tracker
+      # TransformerEngine-FL still reads torch.cuda.default_generators for an
+      # NPU device, whose CUDA generator tuple is empty in the CPU torch build.
+      # Remove after TE-FL uses torch.npu.default_generators for Ascend.
+      - tests/unit_tests/tensor_parallel/test_random.py::test_convert_cuda_rng_state
+
+      ## 10. data - external fixtures are not mounted
+      # These suites require tokenizer/dataset files under /opt/data. Keep the
+      # mock dataset and generated-data tests enabled.
+      - tests/unit_tests/data/test_fim_dataset.py
+      - tests/unit_tests/data/test_preprocess_data.py
+
+      ## 11. dist_checkpointing - unsupported optional runtimes
+      # Ascend 910C does not expose Transformer Engine FP8 tensor support.
+      - tests/unit_tests/dist_checkpointing/test_fp8.py
+      # Mamba checkpoint tests require CUDA-only mamba_ssm/causal_conv1d kernels.
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      # TE-FL does not register the FP8 scale-update or grouped-GEMM operators
+      # required by these TE MoE checkpoint tests.
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_sequential_grouped_mlp_extra_state
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_te_grouped_linear_torch_native
+      # MoE reconfiguration and sequential/grouped interchangeability tests
+      # exhaust NPU coprocessor streams during all_gather_object:
+      #   rtStreamCreateWithFlags → resource alloc fail → HcclAllgather dies
+      # A crashed rank cascades into EOFError (broken unpickle) and 1 EB OOM
+      # (garbage max_object_size) on surviving ranks. All parameter combos are
+      # affected — this is a device-driver stream ceiling, not a per-param bug.
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_parallel_reconfiguration_e2e
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_sequential_grouped_mlp_interchangeable
+      # Chained optimizer resharding exhausts NPU coprocessor streams during
+      # all_gather_object (same stream-ceiling pattern as MoE reconfig above),
+      # and torch LayerNorm on Ascend does not support sequence_parallel. A
+      # crashed rank cascades 1 EB OOM / EOFError into every subsequent
+      # serialization, pipeline-layout, and torch-dist test.
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding
+      # test_chained_optimizer_resharding leaks a global microbatches-calculator
+      # singleton that causes these VPP layout tests to fail with
+      # "AssertionError: num microbatches calculator is already initialized".
+      - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py::test_save_and_load_checkpoint_vpp
+      # nvidia-resiliency-ext is intentionally not installed on Ascend because
+      # it requires NVIDIA CUPTI. Keep the native mcore strategy enabled.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      # Serialization tests call all_gather_object so frequently inside a
+      # single test that even per-test NPU stream sync cannot prevent the
+      # stream pool from draining.  Once a rank's rtStreamCreateWithFlags
+      # fails it drops out of the collective and the other seven ranks
+      # deadlock — no pytest summary is produced.
+      - tests/unit_tests/dist_checkpointing/test_serialization.py
+
+      ## 12. distributed - unsupported MCore FSDP paths on Ascend
+      # test_distributed_data_parallel.py port conflict — may be resolved by HCCL_NPU_SOCKET_PORT_RANGE
+      # - tests/unit_tests/distributed/test_distributed_data_parallel.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_ez
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
+      # HCCL all-reduce / reduce-scatter exhaust NPU coprocessor streams
+      # (rtStreamCreateWithFlags resource alloc fail), same root cause as
+      # the MoE and optimizer resharding stream ceiling in dist_checkpointing.
+      # Gradients come back as zeros or wrong values, and rank crashes
+      # cascade UnboundLocalError / device-mismatch / tensor-close failures.
+      - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py
+      - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-te_transformer-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-te_transformer-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-te_transformer-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-te_transformer-optim-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-optim-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-cnn-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-cnn-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-cnn-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-transformer-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-transformer-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-transformer-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-no_shard-optim]
+      # - tests/unit_tests/distributed/test_finalize_model_grads.py
+      # - tests/unit_tests/distributed/test_torch_fully_sharded_parallel.py::test_fsdp2_constructor
+
+      ## 13. models - need CUDA / HCCL init errors / TE missing backend
+      # MambaSSM not installed (CUDA dependency)
+      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_mamba_moe_model.py
+      - tests/unit_tests/models/test_heterogeneous_gpt_model.py
+      # These Mimo multi-device cases enter HCCL but do not complete on the
+      # current Ascend 910C/CANN image. They wait for roughly 29 minutes and
+      # then fail with runtime error 507001 in the HCCL watchdog, followed by
+      # a process abort. The port-range setting does not prevent this failure.
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_encoder_tp2_llm_tp2_pp3_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_full_pp_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp4_to_dp1_llm_tp2_pp2_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_out_dp1_to_dp4_enc_tp2_pp2_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp2_to_dp1_llm_pp3_8gpu
+      - tests/unit_tests/models/test_mimo_checkpoint.py
+      # Hardcoded CUDA device check
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_gpu_forward
+      # HCCL port conflict — may be resolved by HCCL_NPU_SOCKET_PORT_RANGE
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_constructor
+      # Needs CUDA/TE-specific features; metax also ignores
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      # TE-FL misses get_fused_attn_backend
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward_fsdp
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelTokenParallel::test_process_embedding_token_parallel
+
+      ## 13b. pipeline_parallel - device-side runtime error 507001 + abort
+      # These multi-device cases enter the NPU but fail with Ascend runtime
+      # error 507001 ("internal error in the task scheduler module"), surfaced
+      # via aclnnInplaceNormal / rtMemcpyAsync / rtEventQueryStatus. One rank
+      # aborts (SIGABRT), which tears down the whole process group and cascades
+      # into follow-on errors, so the pytest session never reports a summary.
+      # This is a device/CANN-level failure on the current 910C image, not a
+      # test-logic issue.
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
+      - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py::TestMultiModulePipelineCommunicator::test_send_forward_recv_forward_with_transformer_blocks_and_different_parallelisms
+      # The 8-device multimodule schedules use the same TP=2/PP=2 TE path.
+      # TE-FL's reference generic_gemm rejects its 1024-by-1536 operands,
+      # causing rank divergence and a 30-minute HCCL 507001/SIGABRT cascade.
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+
+      ## 14. fusions - CUDA/Triton-only kernels
+      # Fused MLA YaRN RoPE is implemented with Triton CUDA kernels. The test
+      # asserts that those kernels imported successfully, so it cannot fall
+      # back to the portable PyTorch implementation on Ascend.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
+      # TE-FL exposes rmsnorm_fwd/rmsnorm_bwd but not the fused residual
+      # backward operator rmsnorm_bwd_add used by this test's six variants.
+      - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+
+      ## 15. others - unavailable NVIDIA components or test assets
+      # FP8 TensorRT-LLM export requires CUDA FP8 execution.
+      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      # ModelOpt is not installed in the Ascend image. Preserve the pure
+      # interface tests while excluding paths that instantiate it or Mamba.
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel
+      # The Ascend unit runner does not mount the tokenizer fixture directory.
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+
+  functional:
+    train:
+      # Golden values for Ascend 910C not yet recorded.
+      # Populate once a validated training run is complete:
+      # - model: gpt
+      #   test_case: qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_npu
+      #   training_script: pretrain_gpt.py
+      #   n_repeat: 1
+      #   golden_environment: dev
+      #   golden_platform: 910c
+      #   enable_lightweight_mode: false

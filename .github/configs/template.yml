@@ -2,6 +2,8 @@
 
 hardware_name: my_hardware # Change this to your hardware name
 display_name: 'My Hardware Tests' # Display name for GitHub Actions
+setup_script: .github/scripts/set_env_my_hardware.sh
+nproc_per_node: 8
 
 # Docker image for this hardware (change image tag if needed)
 ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:my-hardware-image
@@ -27,4 +29,22 @@ container_volumes:
 # Container options (hardware-specific settings)
 container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
 
-# Add your Device types and Test matrix configuration below
+# Device types to run tests on
+device_types:
+  - generic
+
+# Adding a platform does not require changing the common workflows. Implement
+# the top-level setup_script, then declare test groups and runner arguments here.
+test_matrix:
+  unit:
+    devices:
+      - generic
+    pytest_extra_args: []
+    groups:
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+    ignored_tests: []
+
+  functional:
+    train: []

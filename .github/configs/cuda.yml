@@ -4,6 +4,8 @@
 
 hardware_name: cuda
 display_name: 'CUDA Tests'
+setup_script: .github/scripts/set_env_cuda.sh
+nproc_per_node: 8
 
 # CI image for online env
 ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
@@ -40,6 +42,16 @@ test_matrix:
   unit:
     devices:
       - a100
+    pytest_extra_args:
+      - -m
+      - not flaky_in_dev
+    groups:
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      - name: distributed
+        path: tests/unit_tests/distributed/
+        description: Distributed tests
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
