@@ -110,7 +110,7 @@ def _sparse_attn_fwd_hp_kernel(
         Q_ptr + q_base + h_range[:, None] * stride_q_h + d_range[None, :] * stride_q_d,
         mask=(h_range[:, None] < H) & (d_range[None, :] < D),
         other=0.0,
-    ).to(tl.float16)  # (BLOCK_H, D) f16 for tl.dot
+    ).to(tl.bfloat16)  # (BLOCK_H, D) bf16 for tl.dot
 
     # =========================================================================
     # Online softmax state: per-head running max and sum
@@ -160,10 +160,10 @@ def _sparse_attn_fwd_hp_kernel(
             KV_ptr + kv_bases[:, None] + d_range[None, :] * stride_kv_d,
             mask=valid_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.float16)  # (BLOCK_K, D) f16
+        ).to(tl.bfloat16)  # (BLOCK_K, D) bf16
 
         # --- Score GEMM: (BLOCK_H, D) @ (D, BLOCK_K) → (BLOCK_H, BLOCK_K) ---
-        # tl.dot uses f16 inputs with f32 accumulator (WGMMA on Hopper)
+        # tl.dot uses bf16 inputs with f32 accumulator (WGMMA on Hopper)
         scores = tl.dot(Q_tile, tl.trans(K_tile))  # (BLOCK_H, BLOCK_K) f32
         scores = scores * softmax_scale
 
@@ -195,10 +195,10 @@ def _sparse_attn_fwd_hp_kernel(
             KV_ptr + kv_bases[:, None] + dv_range[None, :] * stride_kv_d,
             mask=valid_mask[:, None] & (dv_range[None, :] < DV),
             other=0.0,
-        ).to(tl.float16)  # (BLOCK_K, DV) f16
+        ).to(tl.bfloat16)  # (BLOCK_K, DV) bf16
 
         # --- Output GEMM: (BLOCK_H, BLOCK_K) @ (BLOCK_K, DV) → (BLOCK_H, DV) ---
-        acc += tl.dot(P_tile.to(tl.float16), V_tile)  # WGMMA, f32 accumulator
+        acc += tl.dot(P_tile.to(tl.bfloat16), V_tile)  # WGMMA, f32 accumulator
 
         # --- Indexer LSE tracking (first INDEXER_TOPK positions) ---
         if HAS_LSE_IDX:
@@ -423,7 +423,7 @@ def triton_sparse_attn_bwd(
 ) -> dict:
     """Sparse attention backward — PyTorch BMM fallback.
 
-    In training, the HP forward path uses _hp_bmm_backward (cuBLAS f16 BMM)
+    In training, the HP forward path uses _hp_bmm_backward (cuBLAS bf16 BMM)
     instead of this function. This entry point exists for API compatibility
     and for non-HP scenarios (testing/decoding).
 

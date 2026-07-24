@@ -30,8 +30,6 @@ from megatron.plugin.dsa_kernel.triton_sparse_attn import (
     triton_sparse_attn_backward,
 )
 from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
-    fused_mask_scatter_add,
-    fused_exp_mask,
     fused_dq,
     fused_dkv,
     sorted_scatter_add,
@@ -345,14 +343,11 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         # Di = sum(dO * O) per (query, head)
         Di = (grad_out.float() * out.float()).sum(dim=-1)  # (total_Sq, H)
 
-        # Recompute scores via cuBLAS BMM in f16 — matches HP WGMMA forward
-        # (tl.dot(Q_f16, K_f16^T) → f32 accumulator)
-        q_score = query.to(torch.float16)  # (S, H, D)
-        k_score = kv_gathered[:, :, :D].to(torch.float16)  # (S, TopK, D)
+        # Recompute scores via cuBLAS BMM in bf16 — matches HP WGMMA forward
+        # (tl.dot(Q_bf16, K_bf16^T) → f32 accumulator, training dtype is bf16)
         scores = torch.bmm(
-            q_score, k_score.transpose(1, 2)
+            query, kv_gathered[:, :, :D].transpose(1, 2)
         ).float() * softmax_scale  # (S, H, TopK) f32
-        del q_score, k_score
 
         # --- Fused dQ: eliminates P, dov, dS materialization ---
         # dQ = sum_k( exp(scores-lse)*valid * (dO@K^T - Di) * scale ) @ K
@@ -861,16 +856,18 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
 
         logger.debug(
             "FusedIndexerSparseAttnFunc.backward: sq=%d, b=%d, np=%d, "
-            "TopK=%d, d_kv=%d, bwd_path=optimized_bf16_bmm",
+            "TopK=%d, d_kv=%d, bwd_path=fused_dq_dkv",
             sq, b, np_, TopK, d_kv,
         )
 
-        # --- Optimized path: bf16 BMM + Triton fused epilogues ---
-        # Training always uses this path (shared indices, large TopK).
-        # Key savings vs legacy f32 path:
-        #   1. No f32 upcast of kv_gathered (saves 768MB alloc + bandwidth)
-        #   2. Fused exp+mask (saves 1 kernel launch + 24MB read/write)
-        #   3. Fused mask+scatter (saves 384MB read pass)
+        # --- Optimized path: bf16 BMM scores + Triton fused dQ/dKV ---
+        # Uses fused_dq and fused_dkv kernels that keep P, dov, dS in registers,
+        # eliminating ~768MB of intermediate GMEM allocations.
+        # Key savings vs previous torch.bmm path:
+        #   1. No P (S,H,TopK) materialization in GMEM
+        #   2. No dov (S,H,TopK) materialization in GMEM
+        #   3. No dS (S,H,TopK) materialization in GMEM
+        #   4. Fused mask+scatter (saves 384MB read pass)
         prof.start("bwd_prepare_gather")
         dO_flat = grad_output.reshape(total_Sq, np_, d_v)
 
@@ -883,64 +880,44 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         flat_idxs = safe_shared.reshape(-1)   # (total_Sq * TopK)
         kv_gathered = kv_flat[flat_idxs].reshape(total_Sq, TopK, d_kv)  # bf16, 384MB
 
-        kv_is_shared = (d == d_v == d_kv)
-
         # Di = sum(dO * O) per (query, head) — needed for dS
         # Use bf16 inputs, f32 reduction (accurate enough for Di)
         Di = (dO_flat.float() * out_flat.float()).sum(dim=-1)  # (total_Sq, np)
         prof.stop()
 
-        # --- BMM in bf16 (Tensor Core, f32 internal accumulation) ---
-        prof.start("bwd_scores_P")
+        # --- Recompute scores via cuBLAS BMM in bf16 (matches HP WGMMA forward) ---
+        # Forward uses tl.dot(Q_bf16, K_bf16^T) → f32 accumulator.
+        # cuBLAS bf16 BMM also does bf16×bf16→f32 accumulation internally,
+        # ensuring exp(scores_bwd - lse_fwd) is numerically consistent.
+        prof.start("bwd_scores")
         scores = torch.bmm(
             q_flat.reshape(total_Sq, np_, d),
-            kv_gathered[:, :, :d].transpose(1, 2)  # (S, D, T)
-        ).float() * ctx.softmax_scale  # bf16 bmm → bf16, then f32 cast + scale
+            kv_gathered[:, :, :d].transpose(1, 2)
+        ).float() * ctx.softmax_scale  # (S, H, TopK) f32
+        prof.stop()
 
-        # Fused exp + mask → P (single Triton kernel, replaces 3 ops)
-        P = fused_exp_mask(scores, lse, valid_shared, np_)
+        # --- Fused dQ: eliminates P, dov, dS materialization ---
+        prof.start("bwd_dQ")
+        dq = fused_dq(
+            scores, lse, Di, dO_flat, kv_gathered[:, :, :d],
+            valid_shared, ctx.softmax_scale
+        )
+        prof.stop()
+
+        # --- Fused dKV: eliminates P, dov, dS materialization ---
+        prof.start("bwd_dKV")
+        dkv_gathered = fused_dkv(
+            scores, lse, Di, dO_flat, q_flat.reshape(total_Sq, np_, d),
+            kv_gathered[:, :, :d], valid_shared, ctx.softmax_scale
+        )
         del scores
         prof.stop()
 
-        prof.start("bwd_dS")
-        # dov = dO @ V^T: bf16 bmm → f32
-        dov = torch.bmm(
-            dO_flat,
-            kv_gathered[:, :, :d_v].transpose(1, 2)
-        ).float()  # (S, np, TopK) f32
-        dS = P * (dov - Di.unsqueeze(-1)) * ctx.softmax_scale
-        del dov
-        prof.stop()
-
-        prof.start("bwd_dQ")
-        # dQ = dS @ K: cast dS to bf16 for Tensor Core, keep kv in bf16
-        dq = torch.bmm(dS.to(kv_gathered.dtype), kv_gathered[:, :, :d]).float()
-        prof.stop()
-
-        prof.start("bwd_dKV")
-        # dK = dS^T @ Q and dV = P^T @ dO
-        q_f32 = q_flat.reshape(total_Sq, np_, d).float()
-        dO_f32 = dO_flat.float()
-
-        dkv_gathered = torch.bmm(dS.transpose(1, 2), q_f32)  # (S, T, D) f32
-        del dS
-        if kv_is_shared:
-            # dV = P^T @ dO: in-place add via baddbmm (1 kernel, 0 extra alloc)
-            torch.baddbmm(dkv_gathered, P.transpose(1, 2), dO_f32, out=dkv_gathered)
-        else:
-            dv = torch.bmm(P.transpose(1, 2), dO_f32)
-            dkv_tmp = torch.zeros(total_Sq, TopK, d_kv, dtype=torch.float32, device=q_flat.device)
-            dkv_tmp[:, :, :d] = dkv_gathered
-            dkv_tmp[:, :, :d_v] += dv
-            dkv_gathered = dkv_tmp
-        del P, q_f32, dO_f32
-        prof.stop()
-
         prof.start("bwd_scatter")
-        # Fused mask + scatter_add (single Triton kernel, replaces 2 ops)
+        # Sorted scatter with local reduction (less atomic contention)
         valid_flat = valid_shared.reshape(-1)
         dkv = torch.zeros(skv * b, d_kv, dtype=torch.float32, device=q_flat.device)
-        fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv)
+        sorted_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv)
 
         grad_query = dq.to(q_flat.dtype).reshape(sq, b, np_, d)
         grad_kv_full = dkv.to(kv_flat.dtype).reshape(skv, b, -1)

@@ -294,7 +294,7 @@ def _fused_dq_kernel(
         DO_ptr + pid_q * stride_do_s + h_range[:, None] * stride_do_h + d_range[None, :] * stride_do_d,
         mask=(h_range[:, None] < H) & (d_range[None, :] < D),
         other=0.0,
-    ).to(tl.float16)  # (BLOCK_H, D) f16 for tl.dot
+    ).to(tl.bfloat16)  # (BLOCK_H, D) bf16 for tl.dot
 
     # Accumulator for dQ
     dQ_acc = tl.zeros([BLOCK_H, D], dtype=tl.float32)
@@ -322,7 +322,7 @@ def _fused_dq_kernel(
             KV_GATHERED_ptr + pid_q * stride_kv_s + k_range[:, None] * stride_kv_k + d_range[None, :] * stride_kv_d,
             mask=k_valid_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.float16)  # (BLOCK_K, D) f16
+        ).to(tl.bfloat16)  # (BLOCK_K, D) bf16
 
         # P = exp(scores - lse) * valid — in-register, never written to GMEM
         P_tile = tl.exp(scores_tile - lse_vals[:, None])  # (BLOCK_H, BLOCK_K)
@@ -338,7 +338,7 @@ def _fused_dq_kernel(
         dS_tile = P_tile * (dov_tile - di_vals[:, None]) * softmax_scale
 
         # dQ += dS @ K — WGMMA accumulation
-        dQ_acc += tl.dot(dS_tile.to(tl.float16), K_tile)  # (BLOCK_H, D) f32
+        dQ_acc += tl.dot(dS_tile.to(tl.bfloat16), K_tile)  # (BLOCK_H, D) f32
 
     # Store dQ
     tl.store(
@@ -411,7 +411,7 @@ def _fused_dkv_kernel(
         KV_GATHERED_ptr + pid_q * stride_kv_s + k_range[:, None] * stride_kv_k + d_range[None, :] * stride_kv_d,
         mask=k_valid_mask[:, None] & (d_range[None, :] < D),
         other=0.0,
-    ).to(tl.float16)  # (BLOCK_K, D) f16
+    ).to(tl.bfloat16)  # (BLOCK_K, D) bf16
 
     # Accumulator for dKV: (BLOCK_K, D) f32
     dKV_acc = tl.zeros([BLOCK_K, D], dtype=tl.float32)
@@ -443,13 +443,13 @@ def _fused_dkv_kernel(
             Q_ptr + pid_q * stride_q_s + h_range[:, None] * stride_q_h + d_range[None, :] * stride_q_d,
             mask=h_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.float16)  # (BLOCK_H, D) f16
+        ).to(tl.bfloat16)  # (BLOCK_H, D) bf16
 
         dO_tile = tl.load(
             DO_ptr + pid_q * stride_do_s + h_range[:, None] * stride_do_h + d_range[None, :] * stride_do_d,
             mask=h_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.float16)  # (BLOCK_H, D) f16
+        ).to(tl.bfloat16)  # (BLOCK_H, D) bf16
 
         # P = exp(scores - lse) * valid — in-register
         P_tile = tl.exp(scores_tile - lse_tile[:, None])  # (BLOCK_H, BLOCK_K)
@@ -465,8 +465,8 @@ def _fused_dkv_kernel(
         dS_tile = P_tile * (dov_tile - di_tile[:, None]) * softmax_scale
 
         # dKV += dS^T @ Q + P^T @ dO (combined dK + dV for shared latent)
-        dKV_acc += tl.dot(tl.trans(dS_tile.to(tl.float16)), Q_tile)   # (BLOCK_K, D)
-        dKV_acc += tl.dot(tl.trans(P_tile.to(tl.float16)), dO_tile)   # (BLOCK_K, D)
+        dKV_acc += tl.dot(tl.trans(dS_tile.to(tl.bfloat16)), Q_tile)   # (BLOCK_K, D)
+        dKV_acc += tl.dot(tl.trans(P_tile.to(tl.bfloat16)), dO_tile)   # (BLOCK_K, D)
 
     # Store dKV_gathered
     tl.store(
@@ -735,9 +735,14 @@ def sorted_scatter_add(
     src_flat = dkv_gathered.reshape(-1, d_kv).contiguous()
     BLOCK_D = triton.next_power_of_2(d_kv)
 
-    # Clamp max_run to actual max for tighter loop bound
+    # Check if any run exceeds max_run — if so, fall back to direct scatter
+    # (the kernel loop is bounded by MAX_RUN and would silently drop elements)
     actual_max_run = int(run_lengths.max().item())
-    effective_max_run = min(max_run, actual_max_run)
+    if actual_max_run > max_run:
+        fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv_out)
+        return
+
+    effective_max_run = actual_max_run
     # Round up to power of 2 for Triton constexpr
     effective_max_run = triton.next_power_of_2(effective_max_run)
 
