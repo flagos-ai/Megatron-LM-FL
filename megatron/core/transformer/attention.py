@@ -52,7 +52,7 @@ from megatron.core.utils import (
 from ..models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
 )
-from .enums import AttnMaskType, CudaGraphScope
+from .enums import AttnMaskType, CudaGraphScope, AttnBackend
 from .transformer_config import TransformerConfig
 
 try:
@@ -119,6 +119,26 @@ try:
     HAVE_FUSED_QKV_ROPE = True
 except ImportError:
     HAVE_FUSED_QKV_ROPE = False
+
+
+try:
+    from flash_sparse_attn.ops.triton.interface import (
+        flash_sparse_attn_func,
+        flash_sparse_attn_varlen_func,
+        flash_sparse_attn_with_kvcache_func,
+        flash_sparse_attn_varlen_with_kvcache_func,
+    )
+    from flash_sparse_attn.ops.triton.utils import window_sizes_heuristic
+
+
+    HAVE_FSA = True
+except ImportError as e:
+    print(f"[WARNING] flash_sparse_attn not available: {e}")
+    flash_sparse_attn_func = None
+    flash_sparse_attn_varlen_func = None
+    flash_sparse_attn_with_kvcache_func = None
+    flash_sparse_attn_varlen_with_kvcache_func = None
+    HAVE_FSA = False
 
 
 class LinearQkv(Protocol):
@@ -889,6 +909,202 @@ class Attention(MegatronModule, ABC):
                     output_total = flash_attn_with_kvcache(**flash_attn_args)
         return output_total
 
+    def _flash_sparse_attention(
+        self,
+        query: Tensor,
+        key: Tensor,
+        value: Tensor,
+        attn_mask_type: AttnMaskType,
+        packed_seq_params: Optional[PackedSeqParams] = None,
+    ) -> Tensor:
+        assert HAVE_FSA, (
+            "flash-sparse-attn is not installed. "
+            "pip install flash-sparse-attn"
+        )
+        softmax_scale = self.config.softmax_scale
+        softmax_threshold = self.config.softmax_threshold
+        is_quant = self.config.is_quant
+        is_local = self.config.is_local
+        is_autotune = self.config.is_autotune
+        is_causal = attn_mask_type in (
+            AttnMaskType.causal,
+            AttnMaskType.padding_causal,
+            AttnMaskType.causal_bottom_right,
+        )
+
+        if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
+            # varlen path: query is already [total_tokens, np, hn], no layout change needed
+            output = flash_sparse_attn_varlen_func(
+                query,
+                key,
+                value,
+                packed_seq_params.cu_seqlens_q,
+                packed_seq_params.cu_seqlens_kv,
+                packed_seq_params.max_seqlen_q,
+                packed_seq_params.max_seqlen_kv,
+                is_causal=is_causal,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
+                is_split_kv=True,
+                is_split_qo=True,
+            )
+        elif query.size(0) == 1 and not self.training:
+            query = query.squeeze(0)
+
+            output = flash_sparse_attn_with_kvcache_func(
+                query, key, value,
+                softmax_scale=softmax_scale,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
+            )
+            output = output.unsqueeze(0)
+            output = output.reshape(output.size(0), output.size(1), -1)
+        else:
+            # Megatron uses [sq, b, np, hn] (sbhd) but flash_sparse_attn expects [b, sq, np, hn] (bshd)
+            query = query.transpose(0, 1).contiguous()
+            key = key.transpose(0, 1).contiguous()
+            value = value.transpose(0, 1).contiguous()
+
+            # Get local and global head counts
+            num_q_heads = query.shape[2]
+            num_kv_heads = key.shape[2]
+            global_num_q_heads = self.config.num_attention_heads
+            global_num_kv_heads = self.config.num_query_groups
+            tp_size = get_tensor_model_parallel_world_size()
+            tp_rank = get_tensor_model_parallel_rank()
+
+            # Verify TP partitioning
+            assert global_num_q_heads % tp_size == 0, (
+                f"global num_q_heads ({global_num_q_heads}) must be divisible by tp_size ({tp_size})"
+            )
+            assert global_num_kv_heads % tp_size == 0 or global_num_kv_heads < tp_size, (
+                f"global num_kv_heads ({global_num_kv_heads}) must be divisible by tp_size ({tp_size}) "
+                f"or less than tp_size"
+            )
+            assert num_q_heads == global_num_q_heads // tp_size, (
+                f"local num_q_heads ({num_q_heads}) != global ({global_num_q_heads}) / tp_size ({tp_size})"
+            )
+            assert num_kv_heads == self.num_query_groups_per_partition, (
+                f"local num_kv_heads ({num_kv_heads}) != num_query_groups_per_partition "
+                f"({self.num_query_groups_per_partition})"
+            )
+
+            # Compute TP-aware window sizes
+            seqlen_k = key.shape[1]
+            local_window_sizes = window_sizes_heuristic(
+                seqlen_k=seqlen_k,
+                num_heads_kv=num_kv_heads,
+                device=torch.cuda.current_device(),
+                equal_bandwidth=True,
+                # window_dist=1024, # use default values
+                # window_sink=64, # use default values
+                num_heads_kv_global=global_num_kv_heads,
+                tp_rank=tp_rank,
+            )
+
+            output = flash_sparse_attn_func(
+                query,
+                key,
+                value,
+                is_causal=is_causal,
+                softmax_scale=softmax_scale,
+                query_scale=None,
+                key_scale=None,
+                value_scale=None,
+                window_sizes=local_window_sizes,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_split_kv=True,
+                is_split_qo=True,
+                pack_gqa=False,
+                is_autotune=is_autotune,
+                skip_checks=True,
+            )
+
+            # Convert output back from [b, sq, np, hn] to [sq, b, np, hn]
+            output = output.transpose(0, 1).contiguous()
+
+        output = output.reshape(output.size(0), output.size(1), -1)
+
+        return output
+
+    # def flash_sparse_decode_and_prefill(
+    #     self,
+    #     q: Tensor,
+    #     k: Tensor,
+    #     v: Tensor,
+    #     max_seqlen_q,
+    #     max_seqlen_k,
+    #     cu_seqlens_q,
+    #     cu_seqlens_k,
+    #     seqlens_k,
+    # ) -> Tensor:
+    #     """Flash-sparse-attention kernel for mixed decode and prefill (dynamic batching).
+
+    #     Mirrors flash_decode_and_prefill() but uses FSA kernels.
+    #     Note: paged KV cache (block_table) is not supported by FSA.
+    #     """
+    #     assert HAVE_FSA, (
+    #         "flash-sparse-attn is not installed. "
+    #         "pip install flash-sparse-attn"
+    #     )
+    #     assert not self.training
+
+    #     softmax_scale = self.config.softmax_scale
+    #     if softmax_scale is None:
+    #         softmax_scale = q.shape[-1] ** -0.5
+    #     softmax_threshold = self.config.softmax_threshold
+    #     is_quant = self.config.is_quant
+    #     is_local = self.config.is_local
+    #     is_autotune = self.config.is_autotune
+
+    #     if max_seqlen_q > 1:
+    #         # Prefill path: q/k/v are [total or sq, b, np, hn]
+    #         q = q.squeeze(1)  # [total, np, hn]
+    #         output_total = flash_sparse_attn_varlen_func(
+    #             q,
+    #             k,
+    #             v,
+    #             cu_seqlens_q,
+    #             cu_seqlens_k,
+    #             max_seqlen_q,
+    #             max_seqlen_k,
+    #             is_causal=True,
+    #             softmax_scale=softmax_scale,
+    #             seqused_k=seqlens_k,
+    #             softmax_threshold=softmax_threshold,
+    #             is_local=is_local,
+    #             is_quant=is_quant,
+    #             is_autotune=is_autotune,
+    #             is_split_kv=True,
+    #             is_split_qo=True,
+    #         )
+    #         output_total = output_total.unsqueeze(1)
+    #     else:
+    #         # Decode-only path: q is [b, 1, np, hn] squeezed to [b, np, hn]
+    #         # k/v are [total_k, np, hn] with cu_seqlens_k
+    #         q = q.squeeze(1)  # [b, np, hn]
+    #         output_total = flash_sparse_attn_varlen_with_kvcache_func(
+    #             q,
+    #             k,
+    #             v,
+    #             cu_seqlens_k=cu_seqlens_k,
+    #             max_seqlen_k=max_seqlen_k,
+    #             softmax_scale=softmax_scale,
+    #             seqused_k=seqlens_k,
+    #             softmax_threshold=softmax_threshold,
+    #             is_local=is_local,
+    #             is_quant=is_quant,
+    #             is_autotune=is_autotune,
+    #         )
+    #     return output_total
+
     def forward(
         self,
         hidden_states: Tensor,
@@ -1148,7 +1364,16 @@ class Attention(MegatronModule, ABC):
         # ==================================
 
         nvtx_range_push(suffix="core_attention")
-        if self.checkpoint_core_attention and self.training:
+        if self.config.attention_backend == AttnBackend.fsa:
+            print(f"Attention.py, {query.shape=}, {key.shape=}, {value.shape=}")
+            core_attn_out = self._flash_sparse_attention(
+                query,
+                key,
+                value,
+                attn_mask_type=attn_mask_type if attn_mask_type is not None else self.attn_mask_type,
+                packed_seq_params=packed_seq_params,
+            )
+        elif self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
                 query,
                 key,
@@ -1179,7 +1404,6 @@ class Attention(MegatronModule, ABC):
                 q, k, v = (query, key, value)
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
                 cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
-
                 core_attn_out = self.flash_decode_and_prefill(
                     q,
                     k,
