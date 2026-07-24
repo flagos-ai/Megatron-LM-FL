@@ -86,7 +86,6 @@ disable_unavailable_test_asset_downloads() {
 setup_unit_environment() {
   ci_activate_python_environment
   ci_ensure_curl
-  ci_configure_unit_test_constraints
   validate_ascend_torch
   install_python_config_shim
   echo "Python extension suffix: $(python3-config --extension-suffix)"

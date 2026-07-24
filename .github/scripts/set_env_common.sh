@@ -34,13 +34,6 @@ ci_activate_python_environment() {
   echo "Python: $(command -v python3) ($(python3 --version 2>&1))"
 }
 
-ci_configure_unit_test_constraints() {
-  # Keep dependency resolution on a protobuf release supported by wandb.
-  local constraints_file=/tmp/megatron-unit-test-constraints.txt
-  printf 'protobuf<7\n' > "$constraints_file"
-  ci_export_env PIP_CONSTRAINT "$constraints_file"
-}
-
 ci_ensure_curl() {
   if command -v curl >/dev/null 2>&1; then
     command -v curl

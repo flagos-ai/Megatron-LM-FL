@@ -15,7 +15,6 @@ validate_cuda_capacity() {
 setup_unit_environment() {
   ci_activate_python_environment
   ci_ensure_curl
-  ci_configure_unit_test_constraints
 
   local test_dependencies=(
     mock
