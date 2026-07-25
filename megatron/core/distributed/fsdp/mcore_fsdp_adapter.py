@@ -45,6 +45,7 @@ from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import is_te_min_version, log_single_rank
 
 ########## FlagScale Begin ##########
+from megatron.core.models.mot.transformer_layer import MoTTransformerLayer
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -131,7 +132,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
             self.fsdp_unit_modules = fsdp_unit_modules
         else:
             if self.ddp_config.data_parallel_sharding_strategy == "optim_grads_params":
-                self.fsdp_unit_modules = [TransformerLayer]
+                self.fsdp_unit_modules = [TransformerLayer, MoTTransformerLayer]
             else:
                 self.fsdp_unit_modules = []
 
