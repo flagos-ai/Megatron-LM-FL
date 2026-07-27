@@ -71,6 +71,11 @@ class TransformerConfig(ModelParallelConfig):
     mtp_use_repeated_layer: bool = False
     """Use a single MTP layer repeatedly instead of multiple separate layers."""
 
+    mtp_recompute_num_layers: Optional[int] = None
+    """Number of layers per recompute unit for MTP modules.
+    Each MTP depth has only 1 transformer layer, so only recompute_num_layers=1 is supported.
+    If None, defaults to 1 when full recompute is enabled."""
+
     mtp_hybrid_override_pattern: Optional[str] = None
     """DEPRECATED: Use unified hybrid_layer_pattern instead.
     Legacy argument for loading old checkpoints.
@@ -1631,6 +1636,19 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.recompute_modules is None:
             self.recompute_modules = ["core_attn"]
+
+        # MTP recompute_num_layers validation and defaulting
+        if self.mtp_recompute_num_layers is not None:
+            assert self.mtp_recompute_num_layers == 1, (
+                "mtp_recompute_num_layers must be 1 "
+                "(each MTP depth has only 1 transformer layer)."
+            )
+        if (
+            self.mtp_num_layers
+            and self.recompute_granularity == "full"
+            and self.mtp_recompute_num_layers is None
+        ):
+            self.mtp_recompute_num_layers = 1
 
         if self.recompute_granularity == "selective":
             if len(self.recompute_modules) > 0:

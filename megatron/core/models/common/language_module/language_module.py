@@ -204,6 +204,10 @@ class LanguageModule(MegatronModule):
                     raise RuntimeError("Trying to use a TE block when it's not present.")
             elif self.config.cross_entropy_fusion_impl == 'native':
                 loss = fused_vocab_parallel_cross_entropy(logits, labels, self.pg_collection.tp)
+        elif self.config.chunked_cross_entropy:
+            loss = tensor_parallel.vocab_parallel_cross_entropy_chunked(
+                logits, labels, chunk_size=self.config.cross_entropy_chunk_size
+            )
         else:
             loss = tensor_parallel.vocab_parallel_cross_entropy(logits, labels)
 
