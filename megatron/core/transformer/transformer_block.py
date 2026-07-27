@@ -991,7 +991,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         ):
                             setattr(
                                 layer.self_attention.core_attention,
-                                'prev_topk_indices',
+                                'current_topk_indices',
                                 _dsa_prev_topk_indices,
                             )
                         #### FlagScale End ####
