@@ -155,6 +155,10 @@ test_matrix:
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py
       - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
+      # Metax C550 TE allreduce ops cause GPU ioctl queue-block timeout and hang the job.
+      - tests/unit_tests/distributed/test_finalize_model_grads.py
+      # Metax C550 FSDP2 (TorchFullyShardedDataParallel) wrapping requires NVIDIA-specific GPU features.
+      - tests/unit_tests/distributed/test_torch_fully_sharded_parallel.py
       # Metax C500 lacks TE FP8/fused-topk features required by this MCore FSDP E2E matrix.
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_compatible_with_nd_parallel
       # test_fully_shard leaves behind corrupted NCCL state according to the test file itself and CI shows
