@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Protocol
+from typing import Any, Mapping, Optional, Protocol
 
 import torch
 
@@ -21,7 +21,10 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.observability import (
     EXPERT_WORKLOAD_SLOTS,
+    bind_dispatch_fields,
+    capture_dispatch_fields,
     combine_trace_context,
+    current_dispatch_fields,
     dispatch_trace_context,
     expert_workload,
     experts_trace_context,
@@ -426,6 +429,17 @@ class MoELayer(BaseMoELayer):
         probs, routing_map = apply_module(self.router)(hidden_states, padding_mask, input_ids)
         return probs, routing_map
 
+    def _route_for_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+    ):
+        """Route once and capture fields for the matching eager dispatch."""
+        with capture_dispatch_fields() as collector:
+            probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
+        return probs, routing_map, collector.fields()
+
     @maybe_skip_or_early_return_by_cudagraph("preprocess")
     def preprocess(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
@@ -455,10 +469,24 @@ class MoELayer(BaseMoELayer):
         """
         dispatch_gate = prepare_trace_scope("moe-dispatch")
         dispatch_context = (
-            dispatch_trace_context(self, hidden_states) if dispatch_gate is not None else None
+            dispatch_trace_context(self, hidden_states, current_dispatch_fields())
+            if dispatch_gate is not None
+            else None
         )
         with open_trace_scope(dispatch_gate, "moe-dispatch", attrs=dispatch_context):
             return self.token_dispatcher.token_dispatch(hidden_states, probs)
+
+    def _dispatch_with_fields(
+        self,
+        hidden_states: torch.Tensor,
+        probs: torch.Tensor,
+        fields: Mapping[str, Any] | None,
+    ):
+        """Dispatch with router evidence captured for this invocation."""
+        if fields is None:
+            return self.dispatch(hidden_states, probs)
+        with bind_dispatch_fields(fields):
+            return self.dispatch(hidden_states, probs)
 
     @maybe_skip_or_early_return_by_cudagraph("shared_experts_compute")
     def shared_experts_compute(self, hidden_states: torch.Tensor):
@@ -618,6 +646,7 @@ class MoELayer(BaseMoELayer):
         # MoE forward: route -> dispatch -> compute -> combine
         def custom_forward(hidden_states, intermediate_tensors=None, padding_mask=None):
             combine_postprocess_completed = False
+            dispatch_fields = None
             try:
                 if "route" in self.fwd_execution_map:
                     shared_expert_output = self.shared_experts_compute(hidden_states)
@@ -625,7 +654,9 @@ class MoELayer(BaseMoELayer):
                         self._overload_log_num_local_tokens = (
                             self._num_token_rows_from_moe_hidden_states(hidden_states)
                         )
-                    probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
+                    probs, routing_map, dispatch_fields = self._route_for_dispatch(
+                        hidden_states, padding_mask, input_ids
+                    )
                     hidden_states, probs = self.preprocess(hidden_states, probs, routing_map)
 
                     if intermediate_tensors is not None:
@@ -643,7 +674,9 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     hidden_states, probs = intermediate_tensors
 
-                dispatched_input, probs = self.dispatch(hidden_states, probs)
+                dispatched_input, probs = self._dispatch_with_fields(
+                    hidden_states, probs, dispatch_fields
+                )
                 output, mlp_bias = self.routed_experts_compute(dispatched_input, probs)
                 assert (
                     mlp_bias is None

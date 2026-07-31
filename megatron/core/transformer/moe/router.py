@@ -26,7 +26,9 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.transformer.moe.observability import (
     ROUTER_WORKLOAD_SLOTS,
     collect_router_loss_fields,
+    dispatch_fields_requested,
     observe_router_loss,
+    publish_dispatch_fields,
     router_trace_context,
     router_workload,
     set_trace_fields,
@@ -823,10 +825,11 @@ class TopKRouter(Router):
 
         router_gate = prepare_trace_scope("moe-router")
         router_context = router_trace_context(self) if router_gate is not None else None
+        dispatch_fields_enabled = dispatch_fields_requested()
         with open_trace_scope(
             router_gate, "moe-router", attrs=router_context, slots=ROUTER_WORKLOAD_SLOTS
         ) as router_scope:
-            if router_gate is None:
+            if router_gate is None and not dispatch_fields_enabled:
                 probs, routing_map = self.routing(
                     logits, padding_mask=padding_mask, input_ids=input_ids
                 )
@@ -842,7 +845,9 @@ class TopKRouter(Router):
                     pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
                 )
                 fields.update(router_loss_fields.fields())
-                set_trace_fields(router_scope, fields)
+                publish_dispatch_fields(fields)
+                if router_gate is not None:
+                    set_trace_fields(router_scope, fields)
 
         return probs, routing_map
 

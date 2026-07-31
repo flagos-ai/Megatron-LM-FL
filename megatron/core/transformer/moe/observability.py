@@ -24,6 +24,15 @@ ROUTER_WORKLOAD_SLOTS = (
     "routing_entropy",
 )
 
+DISPATCH_ROUTER_FIELDS = (
+    "dropped_tokens",
+    "drop_rate",
+    "expert_cv",
+    "top1_expert_share",
+    "aux_loss",
+    "z_loss",
+)
+
 EXPERT_WORKLOAD_SLOTS = (
     "routed_tokens",
     "expert_cv",
@@ -84,6 +93,36 @@ _ACTIVE_ROUTER_LOSS_COLLECTOR: ContextVar[_RouterLossCollector | None] = Context
 )
 
 
+class _DispatchFieldCollector:
+    """Capture one router payload for the matching dispatch invocation."""
+
+    __slots__ = ("_fields", "_publish_count")
+
+    def __init__(self) -> None:
+        self._fields: dict[str, Any] | None = None
+        self._publish_count = 0
+
+    def publish(self, fields: Mapping[str, Any]) -> None:
+        self._publish_count += 1
+        if self._publish_count == 1:
+            self._fields = {name: fields.get(name) for name in DISPATCH_ROUTER_FIELDS}
+        else:
+            self._fields = None
+
+    def fields(self) -> dict[str, Any] | None:
+        if self._publish_count != 1 or self._fields is None:
+            return None
+        return dict(self._fields)
+
+
+_ACTIVE_DISPATCH_FIELD_COLLECTOR: ContextVar[_DispatchFieldCollector | None] = ContextVar(
+    "megatron_moe_dispatch_field_collector", default=None
+)
+_ACTIVE_DISPATCH_FIELDS: ContextVar[Mapping[str, Any] | None] = ContextVar(
+    "megatron_moe_dispatch_fields", default=None
+)
+
+
 @contextmanager
 def collect_router_loss_fields() -> Iterator[_RouterLossCollector]:
     """Bind loss observations to the current accepted router invocation."""
@@ -93,6 +132,44 @@ def collect_router_loss_fields() -> Iterator[_RouterLossCollector]:
         yield collector
     finally:
         _ACTIVE_ROUTER_LOSS_COLLECTOR.reset(token)
+
+
+@contextmanager
+def capture_dispatch_fields() -> Iterator[_DispatchFieldCollector]:
+    """Capture router evidence during one route invocation."""
+    collector = _DispatchFieldCollector()
+    token = _ACTIVE_DISPATCH_FIELD_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _ACTIVE_DISPATCH_FIELD_COLLECTOR.reset(token)
+
+
+def dispatch_fields_requested() -> bool:
+    """Return whether the current route has a dispatch-field collector."""
+    return _ACTIVE_DISPATCH_FIELD_COLLECTOR.get() is not None
+
+
+def publish_dispatch_fields(fields: Mapping[str, Any]) -> None:
+    """Publish router fields to the current route invocation, when requested."""
+    collector = _ACTIVE_DISPATCH_FIELD_COLLECTOR.get()
+    if collector is not None:
+        collector.publish(fields)
+
+
+@contextmanager
+def bind_dispatch_fields(fields: Mapping[str, Any]) -> Iterator[None]:
+    """Bind captured router fields only while their matching dispatch executes."""
+    token = _ACTIVE_DISPATCH_FIELDS.set(fields)
+    try:
+        yield
+    finally:
+        _ACTIVE_DISPATCH_FIELDS.reset(token)
+
+
+def current_dispatch_fields() -> Mapping[str, Any] | None:
+    """Return router fields bound to the current dispatch invocation."""
+    return _ACTIVE_DISPATCH_FIELDS.get()
 
 
 def observe_router_loss(name: str, value: torch.Tensor, coefficient: float = 1.0) -> None:
@@ -132,7 +209,11 @@ def _moe_layer_trace_context(layer: Any) -> dict[str, Any]:
     }
 
 
-def dispatch_trace_context(layer: Any, hidden_states: torch.Tensor) -> dict[str, Any]:
+def dispatch_trace_context(
+    layer: Any,
+    hidden_states: torch.Tensor,
+    router_fields: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
     """Build topology and input-workload metadata for token dispatch."""
     context = _moe_layer_trace_context(layer)
     context.update(
@@ -141,6 +222,12 @@ def dispatch_trace_context(layer: Any, hidden_states: torch.Tensor) -> dict[str,
             "dispatcher": layer.config.moe_token_dispatcher_type,
             "num_tokens": int(hidden_states.shape[0]),
             "capacity_factor": layer.config.moe_expert_capacity_factor,
+        }
+    )
+    context.update(
+        {
+            name: router_fields.get(name) if router_fields is not None else None
+            for name in DISPATCH_ROUTER_FIELDS
         }
     )
     return context
@@ -274,15 +361,21 @@ def set_trace_fields(scope: Any, fields: Mapping[str, Any]) -> None:
 
 
 __all__ = [
+    "DISPATCH_ROUTER_FIELDS",
     "EXPERT_WORKLOAD_SLOTS",
     "ROUTER_WORKLOAD_SLOTS",
+    "bind_dispatch_fields",
+    "capture_dispatch_fields",
     "collect_router_loss_fields",
     "combine_trace_context",
+    "current_dispatch_fields",
+    "dispatch_fields_requested",
     "dispatch_trace_context",
     "ep_collective_trace_context",
     "expert_workload",
     "experts_trace_context",
     "observe_router_loss",
+    "publish_dispatch_fields",
     "router_trace_context",
     "router_workload",
     "set_trace_fields",
