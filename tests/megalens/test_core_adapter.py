@@ -107,3 +107,17 @@ def test_adapter_can_drive_decorated_core_contract() -> None:
     with trace_scope("manual", attrs={"kind": "test"}):
         pass
     assert ticks[-2:] == [("manual", "B"), ("manual", "E")]
+
+
+def test_capture_query_tolerates_unsupported_torch_compatible_backend(monkeypatch) -> None:
+    monkeypatch.setattr(core_adapter, "is_graph_capturing", lambda: False)
+    monkeypatch.setattr(core_adapter, "is_graph_warmup", lambda: False)
+
+    def unsupported() -> bool:
+        raise RuntimeError("backend does not implement capture query")
+
+    monkeypatch.setattr(core_adapter, "_CUDA_CAPTURE_QUERY", unsupported)
+    assert not core_adapter.should_suppress_core_scope()
+
+    monkeypatch.setattr(core_adapter, "_CUDA_CAPTURE_QUERY", lambda: True)
+    assert core_adapter.should_suppress_core_scope()
