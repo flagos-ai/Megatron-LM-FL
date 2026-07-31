@@ -10,6 +10,7 @@ import torch
 
 from megatron.core import parallel_state, tensor_parallel, utils
 from megatron.core.extensions.transformer_engine import HAVE_TE
+from megatron.core.observability import scoped_forward
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import (
@@ -436,6 +437,7 @@ class MoELayer(BaseMoELayer):
         )
         return hidden_states, probs
 
+    @scoped_forward("moe-dispatch")
     def dispatch(self, hidden_states: torch.Tensor, probs: torch.Tensor):
         """Dispatches tokens to assigned expert ranks via communication.
 
@@ -473,6 +475,7 @@ class MoELayer(BaseMoELayer):
 
         return shared_expert_output
 
+    @scoped_forward("moe-experts")
     @internal_api
     def routed_experts_compute(self, hidden_states: torch.Tensor, probs: torch.Tensor):
         """Computes the output of the routed experts on the dispatched tokens.
@@ -501,6 +504,7 @@ class MoELayer(BaseMoELayer):
 
         return output, mlp_bias
 
+    @scoped_forward("moe-combine")
     def combine(self, output: torch.Tensor):
         """Combines expert outputs via communication and adds shared expert output.
 
