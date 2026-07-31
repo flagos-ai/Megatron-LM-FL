@@ -174,13 +174,15 @@ def current_dispatch_fields() -> Mapping[str, Any] | None:
 
 def observe_router_loss(name: str, value: torch.Tensor, coefficient: float = 1.0) -> None:
     """Record a source-compatible base loss only for an active eager trace scope."""
+    collector = _ACTIVE_ROUTER_LOSS_COLLECTOR.get()
+    if collector is None:
+        return
+
     is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None)
     if callable(is_compiling) and is_compiling():
         return
 
-    collector = _ACTIVE_ROUTER_LOSS_COLLECTOR.get()
-    if collector is not None:
-        collector.observe(name, value, coefficient)
+    collector.observe(name, value, coefficient)
 
 
 def _ep_size(owner: Any) -> int:
