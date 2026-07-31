@@ -14,6 +14,7 @@ from megatron.core.observability import install_trace_sink, reset_trace_sink
 from megatron.core.transformer.moe.token_dispatcher import (
     MoEAllGatherTokenDispatcher,
     MoEAlltoAllTokenDispatcher,
+    MoEFlexTokenDispatcher,
 )
 from megatron.megalens.core_adapter import MegaLensTraceSink
 from megatron.megalens.trace import Tracer
@@ -111,6 +112,60 @@ def _allgather_owner(*, tp_size: int = 2, ep_size: int = 2, group_size: int = 4)
         ep_size=ep_size,
         routing_map=torch.tensor([[True, False], [False, True]]),
         local_probs=torch.ones(2, dtype=torch.bfloat16),
+    )
+
+
+class _FlexManager:
+    def __init__(self, sink: _RecordingSink, operations: list[tuple[Any, ...]]) -> None:
+        self.sink = sink
+        self.operations = operations
+        self.dispatched_probs = torch.tensor([0.25, 0.75])
+        self.dispatched_hidden = torch.tensor([[31.0]])
+        self.combined_hidden = torch.tensor([[41.0]])
+        self.error: BaseException | None = None
+
+    def dispatch(self, hidden_states, async_finish, allocate_on_comm_stream):
+        self.operations.append(
+            (
+                "dispatch",
+                tuple(self.sink.active),
+                hidden_states,
+                async_finish,
+                allocate_on_comm_stream,
+            )
+        )
+        if self.error is not None:
+            raise self.error
+        return self.dispatched_hidden
+
+    def combine(self, hidden_states, async_finish, allocate_on_comm_stream):
+        self.operations.append(
+            (
+                "combine",
+                tuple(self.sink.active),
+                hidden_states,
+                async_finish,
+                allocate_on_comm_stream,
+            )
+        )
+        if self.error is not None:
+            raise self.error
+        return self.combined_hidden
+
+
+def _flex_owner(
+    sink: _RecordingSink, operations: list[tuple[Any, ...]], *, backend: str = "deepep"
+) -> tuple[SimpleNamespace, _FlexManager]:
+    manager = _FlexManager(sink, operations)
+    return (
+        SimpleNamespace(
+            config=SimpleNamespace(moe_flex_dispatcher_backend=backend),
+            tp_ep_group=_Group(6),
+            tp_size=2,
+            ep_size=3,
+            _comm_manager=manager,
+        ),
+        manager,
     )
 
 
@@ -626,4 +681,163 @@ def test_allgather_probe_markers_and_public_signatures_remain_stable() -> None:
     assert list(inspect.signature(MoEAllGatherTokenDispatcher.token_combine).parameters) == [
         "self",
         "hidden_states",
+    ]
+
+
+def test_flex_deepep_dispatch_preserves_source_fields_and_actual_group(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations)
+    hidden_states = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
+
+    output = MoEFlexTokenDispatcher.token_dispatch(
+        owner, hidden_states, async_finish=True, allocate_on_comm_stream=False
+    )
+
+    assert output == (manager.dispatched_hidden, manager.dispatched_probs)
+    assert sink.records == [
+        {
+            "name": "ep-alltoall-dispatch",
+            "ctx": {
+                "comm_type": "ep-deepep",
+                "dispatcher": "flex",
+                "data_bytes": hidden_states.numel() * hidden_states.element_size(),
+                "group_size": 6,
+                "ep_size": 3,
+                "tp_size": 2,
+            },
+        }
+    ]
+    assert operations == [("dispatch", ("ep-alltoall-dispatch",), hidden_states, True, False)]
+
+
+def test_flex_deepep_combine_preserves_source_fields_arguments_and_return() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations)
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+
+    output = MoEFlexTokenDispatcher.token_combine(
+        owner, hidden_states, async_finish=False, allocate_on_comm_stream=True
+    )
+
+    assert output is manager.combined_hidden
+    assert sink.records == [
+        {
+            "name": "ep-alltoall-combine",
+            "ctx": {
+                "comm_type": "ep-deepep",
+                "dispatcher": "flex",
+                "data_bytes": hidden_states.numel() * hidden_states.element_size(),
+                "group_size": 6,
+                "ep_size": 3,
+                "tp_size": 2,
+            },
+        }
+    ]
+    assert operations == [("combine", ("ep-alltoall-combine",), hidden_states, False, True)]
+
+
+@pytest.mark.parametrize("gate_mode", ["null", "disabled", "suppressed"])
+def test_closed_flex_deepep_gates_skip_context_and_preserve_manager_calls(
+    monkeypatch: pytest.MonkeyPatch, gate_mode: str
+) -> None:
+    sink = _RecordingSink(enabled=gate_mode != "disabled")
+    if gate_mode != "null":
+        install_trace_sink(
+            sink, suppress_scope=(lambda: True) if gate_mode == "suppressed" else None
+        )
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations)
+    hidden_states = torch.ones((2, 3))
+    monkeypatch.setattr(
+        token_dispatcher_module,
+        "ep_collective_trace_context",
+        lambda *args, **kwargs: pytest.fail("closed Flex gate constructed context"),
+    )
+
+    dispatched = MoEFlexTokenDispatcher.token_dispatch(owner, hidden_states)
+    combined = MoEFlexTokenDispatcher.token_combine(owner, hidden_states)
+
+    assert dispatched == (manager.dispatched_hidden, manager.dispatched_probs)
+    assert combined is manager.combined_hidden
+    assert [operation[0] for operation in operations] == ["dispatch", "combine"]
+    assert all(operation[1] == () for operation in operations)
+    assert sink.records == []
+
+
+def test_flex_hybridep_remains_outside_the_deepep_source_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations, backend="hybridep")
+    hidden_states = torch.ones((2, 3))
+    monkeypatch.setattr(
+        token_dispatcher_module,
+        "ep_collective_trace_context",
+        lambda *args, **kwargs: pytest.fail("HybridEP reused the DeepEP field contract"),
+    )
+
+    dispatched = MoEFlexTokenDispatcher.token_dispatch(owner, hidden_states)
+    combined = MoEFlexTokenDispatcher.token_combine(owner, hidden_states)
+
+    assert dispatched == (manager.dispatched_hidden, manager.dispatched_probs)
+    assert combined is manager.combined_hidden
+    assert [operation[0] for operation in operations] == ["dispatch", "combine"]
+    assert sink.gate_calls == []
+    assert sink.records == []
+
+
+@pytest.mark.parametrize(
+    ("method", "event_name"),
+    [
+        (MoEFlexTokenDispatcher.token_dispatch, "ep-alltoall-dispatch"),
+        (MoEFlexTokenDispatcher.token_combine, "ep-alltoall-combine"),
+    ],
+)
+def test_flex_deepep_errors_close_scope_and_preserve_exception_identity(
+    method, event_name: str
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations)
+    error = RuntimeError("fused EP failed")
+    manager.error = error
+
+    with pytest.raises(RuntimeError) as raised:
+        method(owner, torch.ones((2, 3)))
+
+    assert raised.value is error
+    assert sink.transitions == [("B", event_name, None), ("E", event_name, RuntimeError)]
+    assert sink.active == []
+
+
+def test_flex_deepep_probe_markers_and_public_signatures_remain_stable() -> None:
+    assert (
+        getattr(MoEFlexTokenDispatcher.token_dispatch, "__megatron_trace_event__", None)
+        == "ep-alltoall-dispatch"
+    )
+    assert (
+        getattr(MoEFlexTokenDispatcher.token_combine, "__megatron_trace_event__", None)
+        == "ep-alltoall-combine"
+    )
+    assert list(inspect.signature(MoEFlexTokenDispatcher.token_dispatch).parameters) == [
+        "self",
+        "hidden_states",
+        "probs",
+        "async_finish",
+        "allocate_on_comm_stream",
+    ]
+    assert list(inspect.signature(MoEFlexTokenDispatcher.token_combine).parameters) == [
+        "self",
+        "hidden_states",
+        "async_finish",
+        "allocate_on_comm_stream",
     ]

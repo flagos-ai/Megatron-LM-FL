@@ -1534,10 +1534,30 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         Returns:
             A tuple of dispatched tokens and probabilities.
         """
-        return (
-            self._comm_manager.dispatch(hidden_states, async_finish, allocate_on_comm_stream),
-            self._comm_manager.dispatched_probs,
+
+        def _dispatch_body():
+            return (
+                self._comm_manager.dispatch(hidden_states, async_finish, allocate_on_comm_stream),
+                self._comm_manager.dispatched_probs,
+            )
+
+        if self.config.moe_flex_dispatcher_backend != "deepep":
+            return _dispatch_body()
+
+        dispatch_gate = prepare_trace_scope("ep-alltoall-dispatch")
+        dispatch_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-deepep",
+                dispatcher_name="flex",
+                group=self.tp_ep_group,
+            )
+            if dispatch_gate is not None
+            else None
         )
+        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", ctx=dispatch_context):
+            return _dispatch_body()
 
     def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor):
         """Converts dispatched tokens to a per-expert format for expert processing.
@@ -1585,7 +1605,23 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         Returns:
             Combined tokens after fused un-permutation and communication.
         """
-        return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
+        if self.config.moe_flex_dispatcher_backend != "deepep":
+            return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
+
+        combine_gate = prepare_trace_scope("ep-alltoall-combine")
+        combine_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-deepep",
+                dispatcher_name="flex",
+                group=self.tp_ep_group,
+            )
+            if combine_gate is not None
+            else None
+        )
+        with open_trace_scope(combine_gate, "ep-alltoall-combine", ctx=combine_context):
+            return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
 
     def combine_postprocess(self, hidden_states: torch.Tensor):
         """
@@ -1613,3 +1649,5 @@ setattr(
 setattr(
     MoEAllGatherTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-allgather-combine"
 )
+setattr(MoEFlexTokenDispatcher.token_dispatch, "__megatron_trace_event__", "ep-alltoall-dispatch")
+setattr(MoEFlexTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-alltoall-combine")
