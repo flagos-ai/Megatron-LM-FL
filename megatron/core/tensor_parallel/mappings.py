@@ -2,8 +2,13 @@
 
 import torch
 
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 from megatron.core.parallel_state import get_global_memory_buffer
-from megatron.core.utils import get_tensor_model_parallel_group_if_none, is_torch_min_version
+from megatron.core.utils import (
+    get_process_group_peer_ranks,
+    get_tensor_model_parallel_group_if_none,
+    is_torch_min_version,
+)
 
 from .utils import split_tensor_along_last_dim
 
@@ -25,16 +30,33 @@ cur_platform = get_platform()
 # FlagScale End
 
 
+def _tp_allreduce_context(group_size: int) -> dict[str, object]:
+    """Build TP all-reduce metadata only after the probe gate accepts it."""
+    return {
+        "group_size": group_size,
+        "op": "all_reduce",
+        "timing_phase": "collective_call",
+        "payload_role": "inplace_input_output",
+    }
+
+
 def _reduce(input_, group):
     """All-reduce the input tensor across model parallel group."""
     assert group is not None, "group should not be None"
 
     # Bypass the function if we are using only 1 GPU.
-    if group.size() == 1:
+    group_size = int(group.size())
+    if group_size == 1:
         return input_
 
     # All-reduce.
-    torch.distributed.all_reduce(input_.contiguous(), group=group)
+    gate = prepare_trace_scope("tp-allreduce")
+    ctx = _tp_allreduce_context(group_size) if gate is not None else None
+    with open_trace_scope(gate, "tp-allreduce", ctx=ctx, slots=("data_bytes", "group")) as scope:
+        if scope.get("op") == "all_reduce":
+            scope.set("data_bytes", int(input_.numel() * input_.element_size()))
+            scope.set("group", get_process_group_peer_ranks(group))
+        torch.distributed.all_reduce(input_.contiguous(), group=group)
 
     return input_
 
@@ -94,7 +116,9 @@ def _gather_along_last_dim(input_, group):
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+    output = torch.empty(
+        dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+    )  # FlagScale Add
     dist_all_gather_func(output, input_.contiguous(), group=group)
     tensor_list = output.chunk(world_size, dim=0)
     output = torch.cat(tensor_list, dim=-1).contiguous()
@@ -144,14 +168,18 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Add
         dist_all_gather_func(output, input_.contiguous(), group=group)
     else:
         dim_size[0] = sum(output_split_sizes)
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Add
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(output_tensor_list, input_, group=group)
 
@@ -184,7 +212,9 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Add
         dist_reduce_scatter_func(output, input_.contiguous(), group=group)
     else:
         rank = group.rank()

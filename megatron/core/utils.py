@@ -603,6 +603,24 @@ def get_pg_src_rank(group=None):
     return ranks[0]
 
 
+def get_process_group_peer_ranks(group):
+    """Return peer global ranks, or ``None`` when membership is unavailable.
+
+    This best-effort query is intended for optional diagnostics. Callers must
+    not use its result to control collective behavior.
+    """
+    get_group_ranks = getattr(torch.distributed, "get_process_group_ranks", None)
+    if not callable(get_group_ranks):
+        return None
+
+    try:
+        global_rank = int(torch.distributed.get_rank())
+        group_ranks = [int(rank) for rank in get_group_ranks(group)]
+    except Exception:
+        return None
+    return [rank for rank in group_ranks if rank != global_rank]
+
+
 def get_attr_wrapped_model(model, attr, allow_none=True, return_model_obj=False):
     """Get an attribute from a wrapped model.
     If return_model_obj is true, return the object that has the 'attr' attribute;
