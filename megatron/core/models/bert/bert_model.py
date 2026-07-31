@@ -14,6 +14,7 @@ from megatron.core.models.bert.pooler import Pooler
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.observability import trace_scope
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.attention import SelfAttentionSubmodules
 from megatron.core.transformer.dot_product_attention import (
@@ -350,12 +351,13 @@ class BertModel(LanguageModule):
             rotary_pos_emb = self.rotary_pos_emb(rotary_seq_len)
 
         # Run encoder.
-        hidden_states = self.encoder(
-            hidden_states=encoder_input,
-            attention_mask=extended_attention_mask,
-            inference_context=inference_context,
-            rotary_pos_emb=rotary_pos_emb,
-        )
+        with trace_scope("encoder"):
+            hidden_states = self.encoder(
+                hidden_states=encoder_input,
+                attention_mask=extended_attention_mask,
+                inference_context=inference_context,
+                rotary_pos_emb=rotary_pos_emb,
+            )
         if not self.post_process:
             return hidden_states
 
