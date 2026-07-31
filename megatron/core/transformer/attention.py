@@ -18,6 +18,7 @@ from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_with_cos_sin,
 )
+from megatron.core.observability import scoped_forward
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
     get_data_parallel_group,
@@ -889,6 +890,7 @@ class Attention(MegatronModule, ABC):
                     output_total = flash_attn_with_kvcache(**flash_attn_args)
         return output_total
 
+    @scoped_forward("attention")
     def forward(
         self,
         hidden_states: Tensor,
@@ -1308,7 +1310,9 @@ class SelfAttention(Attention):
                 )
             else:
                 tp_world_size = get_tensor_model_parallel_world_size()
-                assert tp_world_size <= 1, "TP world size must be less than 1 for qk_layernorm_hidden_dim"
+                assert (
+                    tp_world_size <= 1
+                ), "TP world size must be less than 1 for qk_layernorm_hidden_dim"
                 self.q_layernorm = submodules.q_layernorm(
                     hidden_size=self.query_projection_size,
                     config=self.config,
@@ -1328,7 +1332,9 @@ class SelfAttention(Attention):
                 )
             else:
                 tp_world_size = get_tensor_model_parallel_world_size()
-                assert tp_world_size <= 1, "TP world size must be less than 1 for qk_layernorm_hidden_dim"
+                assert (
+                    tp_world_size <= 1
+                ), "TP world size must be less than 1 for qk_layernorm_hidden_dim"
                 self.k_layernorm = submodules.k_layernorm(
                     hidden_size=self.kv_projection_size,
                     config=self.config,
