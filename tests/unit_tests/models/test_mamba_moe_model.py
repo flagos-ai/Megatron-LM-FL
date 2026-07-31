@@ -80,7 +80,7 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "deallocate_pipeline_outputs": True,
     "defer_embedding_wgrad_compute": False,
     "delay_wgrad_compute": False,
-    "dense_grouped_gemm": False,    ##### FlagScale add #####
+    "dense_grouped_gemm": False,  ##### FlagScale add #####
     "deterministic_mode": False,
     "disable_bf16_reduced_precision_matmul": False,
     "disable_parameter_transpose_cache": False,
@@ -90,6 +90,10 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "dsa_indexer_n_heads": None,
     "dsa_indexer_topk": None,
     "dsa_indexer_use_sparse_loss": False,
+    ##### FlagScale Begin #####
+    "indexer_type_rule": None,
+    "indexer_types": None,
+    ##### FlagScale End #####
     "dualpipev_pipeline_model_parallel_size": None,
     "embedding_init_method": {},
     "embedding_init_method_std": 0.014,
@@ -537,7 +541,7 @@ class TestMambaMoEModel:
 
     def setup_method(self, method):
         if torch.cuda.is_available():
-            free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+            free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
             if free_mem < 20:
                 pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
 
