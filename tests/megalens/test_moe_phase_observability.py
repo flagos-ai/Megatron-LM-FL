@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import math
 from pathlib import Path
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from typing import Any, Mapping, Sequence
 
 import pytest
@@ -108,6 +108,7 @@ class _Dispatcher:
         dispatch_error: BaseException | None = None,
         postprocess_error: BaseException | None = None,
         combine_error: BaseException | None = None,
+        combine_postprocess_error: BaseException | None = None,
     ) -> None:
         self.sink = sink
         self.events = events
@@ -118,9 +119,11 @@ class _Dispatcher:
         self.dispatch_error = dispatch_error
         self.postprocess_error = postprocess_error
         self.combine_error = combine_error
+        self.combine_postprocess_error = combine_postprocess_error
         self.dispatched_input = torch.tensor([[11.0], [12.0], [13.0], [14.0]])
         self.permuted_probs = torch.tensor([0.1, 0.2, 0.3, 0.4])
         self.combined_output = torch.tensor([[21.0], [22.0]])
+        self.postprocessed_output = torch.tensor([[41.0], [42.0]])
 
     def token_dispatch(self, hidden_states: torch.Tensor, probs: torch.Tensor):
         self.events.append(("dispatch", tuple(self.sink.active), hidden_states, probs))
@@ -143,6 +146,12 @@ class _Dispatcher:
         if self.combine_error is not None:
             raise self.combine_error
         return self.combined_output
+
+    def combine_postprocess(self, output: torch.Tensor):
+        self.events.append(("combine-postprocess", tuple(self.sink.active), output))
+        if self.combine_postprocess_error is not None:
+            raise self.combine_postprocess_error
+        return self.postprocessed_output
 
 
 class _Experts(torch.nn.Module):
@@ -273,6 +282,7 @@ def _layer_fixture(
     postprocess_error: BaseException | None = None,
     expert_error: BaseException | None = None,
     combine_error: BaseException | None = None,
+    combine_postprocess_error: BaseException | None = None,
     tokens_per_expert: torch.Tensor | None = None,
 ) -> tuple[SimpleNamespace, _Dispatcher, _Experts]:
     dispatcher = _Dispatcher(
@@ -281,6 +291,7 @@ def _layer_fixture(
         dispatch_error=dispatch_error,
         postprocess_error=postprocess_error,
         combine_error=combine_error,
+        combine_postprocess_error=combine_postprocess_error,
         tokens_per_expert=tokens_per_expert,
     )
     experts = _Experts(sink, events, error=expert_error)
@@ -290,6 +301,7 @@ def _layer_fixture(
             moe_router_topk=2,
             moe_token_dispatcher_type="alltoall",
             moe_expert_capacity_factor=1.25,
+            moe_latent_size=None,
         ),
         ep_group=[_Group(2)],
         layer_number=7,
@@ -297,6 +309,9 @@ def _layer_fixture(
         token_dispatcher=dispatcher,
         experts=experts,
     )
+    layer._combine_with_scope = MethodType(MoELayer._combine_with_scope, layer)
+    layer._finish_postprocess = MethodType(MoELayer._finish_postprocess, layer)
+    layer._combine_and_postprocess = MethodType(MoELayer._combine_and_postprocess, layer)
     return layer, dispatcher, experts
 
 
@@ -1051,6 +1066,32 @@ def test_dispatch_and_combine_emit_target_static_fields_and_preserve_results() -
     ]
 
 
+def test_sequential_combine_scope_includes_dispatcher_postprocess_only() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    layer, dispatcher, _ = _layer_fixture(sink, events)
+    output = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    shared_expert_output = torch.tensor([[1.0], [2.0]])
+
+    combined = MoELayer._combine_and_postprocess(layer, output, shared_expert_output)
+
+    assert torch.equal(combined, dispatcher.postprocessed_output + shared_expert_output)
+    assert [record["name"] for record in sink.records] == ["moe-combine"]
+    assert _event_fields(sink.records[0]) == {
+        "layer": 7,
+        "ep_size": 2,
+        "num_experts": 4,
+        "num_local_experts": 2,
+        "dispatcher": "alltoall",
+        "num_tokens": 2,
+    }
+    assert [event[:2] for event in events] == [
+        ("combine", ("moe-combine",)),
+        ("combine-postprocess", ("moe-combine",)),
+    ]
+
+
 def test_experts_emit_local_workload_around_only_the_expert_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1252,6 +1293,28 @@ def test_moe_phase_errors_close_active_scope_and_preserve_exception_identity(pha
     assert sink.active == []
 
 
+def test_combine_postprocess_error_closes_source_scope_and_preserves_exception_identity() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    error = RuntimeError("combine postprocess failed")
+    layer, _, _ = _layer_fixture(sink, events, combine_postprocess_error=error)
+
+    with pytest.raises(RuntimeError) as raised:
+        MoELayer._combine_and_postprocess(layer, torch.ones((2, 2)), None)
+
+    assert raised.value is error
+    assert [event[:2] for event in events] == [
+        ("combine", ("moe-combine",)),
+        ("combine-postprocess", ("moe-combine",)),
+    ]
+    assert sink.transitions == [
+        ("B", "moe-combine", None),
+        ("E", "moe-combine", RuntimeError),
+    ]
+    assert sink.active == []
+
+
 def test_dispatch_postprocess_error_precedes_the_expert_scope() -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
@@ -1349,7 +1412,10 @@ def test_moe_probe_markers_and_public_signatures_remain_stable() -> None:
     assert (
         getattr(MoELayer.routed_experts_compute, "__megatron_trace_event__", None) == "moe-experts"
     )
-    assert getattr(MoELayer.combine, "__megatron_trace_event__", None) == "moe-combine"
+    assert (
+        getattr(MoELayer._combine_with_scope, "__megatron_trace_event__", None) == "moe-combine"
+    )
+    assert getattr(MoELayer.combine, "__megatron_trace_event__", None) is None
     assert list(inspect.signature(TopKRouter.forward).parameters) == [
         "self",
         "input",

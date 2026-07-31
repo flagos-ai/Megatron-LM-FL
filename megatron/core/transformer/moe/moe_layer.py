@@ -531,29 +531,48 @@ class MoELayer(BaseMoELayer):
 
         return output, mlp_bias
 
+    def _combine_with_scope(self, output: torch.Tensor, *, include_postprocess: bool):
+        """Use the full source boundary for sequential calls and a short split-call boundary."""
+        combine_gate = prepare_trace_scope("moe-combine")
+        combine_context = combine_trace_context(self, output) if combine_gate is not None else None
+        with open_trace_scope(combine_gate, "moe-combine", attrs=combine_context):
+            output = self.token_dispatcher.token_combine(output)
+            if include_postprocess:
+                output = self.token_dispatcher.combine_postprocess(output)
+        return output
+
     def combine(self, output: torch.Tensor):
         """Combines expert outputs via communication and adds shared expert output.
 
         This method uses the token dispatcher to combine the outputs from different
         experts (e.g., via an All-to-All communication).
         """
-        combine_gate = prepare_trace_scope("moe-combine")
-        combine_context = combine_trace_context(self, output) if combine_gate is not None else None
-        with open_trace_scope(combine_gate, "moe-combine", attrs=combine_context):
-            output = self.token_dispatcher.token_combine(output)
-        return output
+        return self._combine_with_scope(output, include_postprocess=False)
 
-    def postprocess(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]):
-        """Project the output back from latent dimension to hidden dimension after combine
-        in latent dimension if needed. Combine expert output with shared_experts if needed."""
-
-        output = self.token_dispatcher.combine_postprocess(output)
+    def _finish_postprocess(
+        self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]
+    ):
+        """Apply target-only post-combine computation outside the source scope."""
         if self.config.moe_latent_size:
             output, _ = self.fc2_latent_proj(output)
 
         if shared_expert_output is not None:
             output = output + shared_expert_output
         return output
+
+    def _combine_and_postprocess(
+        self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]
+    ):
+        """Restore the source combine boundary for sequential target call paths."""
+        output = self._combine_with_scope(output, include_postprocess=True)
+        return self._finish_postprocess(output, shared_expert_output)
+
+    def postprocess(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]):
+        """Project the output back from latent dimension to hidden dimension after combine
+        in latent dimension if needed. Combine expert output with shared_experts if needed."""
+
+        output = self.token_dispatcher.combine_postprocess(output)
+        return self._finish_postprocess(output, shared_expert_output)
 
     def router_and_preprocess(self, hidden_states: torch.Tensor):
         """This method is a combined method of route and preprocess. Deprecated."""
@@ -598,6 +617,7 @@ class MoELayer(BaseMoELayer):
 
         # MoE forward: route -> dispatch -> compute -> combine
         def custom_forward(hidden_states, intermediate_tensors=None, padding_mask=None):
+            combine_postprocess_completed = False
             try:
                 if "route" in self.fwd_execution_map:
                     shared_expert_output = self.shared_experts_compute(hidden_states)
@@ -628,7 +648,11 @@ class MoELayer(BaseMoELayer):
                 assert (
                     mlp_bias is None
                 ), f"mlp_bias is not supported for {type(self.token_dispatcher)}"
-                output = self.combine(output)
+                if intermediate_tensors is None and "postprocess" in self.fwd_execution_map:
+                    output = self._combine_and_postprocess(output, shared_expert_output)
+                    combine_postprocess_completed = True
+                else:
+                    output = self.combine(output)
 
                 if intermediate_tensors is not None:
                     return output, mlp_bias
@@ -637,7 +661,8 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     output, shared_expert_output = intermediate_tensors
 
-                output = self.postprocess(output, shared_expert_output)
+                if not combine_postprocess_completed:
+                    output = self.postprocess(output, shared_expert_output)
 
                 if intermediate_tensors is not None:
                     return output
@@ -699,4 +724,4 @@ class MoELayer(BaseMoELayer):
 setattr(MoELayer.dispatch, "__megatron_trace_event__", "moe-dispatch")
 setattr(MoELayer.shared_experts_compute, "__megatron_trace_event__", "moe-shared-expert")
 setattr(MoELayer.routed_experts_compute, "__megatron_trace_event__", "moe-experts")
-setattr(MoELayer.combine, "__megatron_trace_event__", "moe-combine")
+setattr(MoELayer._combine_with_scope, "__megatron_trace_event__", "moe-combine")
