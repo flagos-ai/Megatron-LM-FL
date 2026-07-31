@@ -23,7 +23,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
 CONTAINER_RUN_ROOT = "/artifacts/run"
 
-_COMMON_FIELDS = ("iteration", "g_rk", "dp_rk", "pp_rk", "tp_rk")
+_COMMON_FIELDS = ("g_rk", "dp_rk", "pp_rk", "tp_rk")
 
 
 def _events(*names: str) -> tuple[manifest.EventRequirement, ...]:

@@ -115,6 +115,18 @@ def test_existing_yaml_profiles_remain_selectable(config: str, profile: str) -> 
     assert gate._profile_from_arguments(args).name == profile
 
 
+def test_raw_framework_event_requirements_use_the_enclosing_iteration() -> None:
+    required_fields = {
+        field
+        for profile in gate.PROFILES.values()
+        for requirement in profile.events
+        for field in requirement.fields
+    }
+
+    assert "iteration" not in required_fields
+    assert {"g_rk", "dp_rk", "pp_rk", "tp_rk"} <= required_fields
+
+
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
