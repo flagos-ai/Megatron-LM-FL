@@ -1,0 +1,159 @@
+# syntax=docker/dockerfile:1
+#
+# Reusable CUDA 12.8 work image for Megatron-LM-FL plus FlagScale.
+#
+# The build context is a deterministic staging directory containing two clean
+# git archives. This works with the target node's Docker 24 legacy builder and
+# does not require GitHub access or a buildx plugin:
+#
+#   MEGATRON_ROOT=/path/to/Megatron-LM-FL
+#   FLAGSCALE_ROOT=/path/to/FlagScale
+#   CONTEXT=/path/to/empty/flagos-work-context
+#   REVISION="$(git -C "${MEGATRON_ROOT}" rev-parse HEAD)"
+#   SOURCE_TREE="$(git -C "${MEGATRON_ROOT}" rev-parse HEAD^{tree})"
+#   FLAGSCALE_REVISION="$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD)"
+#   FLAGSCALE_TREE="$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})"
+#   mkdir -p "${CONTEXT}"
+#   git -C "${MEGATRON_ROOT}" archive --format=tar \
+#     --prefix=Megatron-LM-FL/ "${REVISION}" | tar -xf - -C "${CONTEXT}"
+#   git -C "${FLAGSCALE_ROOT}" archive --format=tar \
+#     --prefix=FlagScale/ "${FLAGSCALE_REVISION}" | tar -xf - -C "${CONTEXT}"
+#   docker build -f "${CONTEXT}/Megatron-LM-FL/docker/Dockerfile.work" \
+#     --build-arg SOURCE_REVISION="${REVISION}" \
+#     --build-arg SOURCE_TREE="${SOURCE_TREE}" \
+#     --build-arg FLAGSCALE_REVISION="${FLAGSCALE_REVISION}" \
+#     --build-arg FLAGSCALE_TREE="${FLAGSCALE_TREE}" \
+#     -t "caohongliang-flagos:cu128-${REVISION:0:12}" "${CONTEXT}"
+#
+# The target node currently requires privileged NVIDIA runtime injection:
+#   docker run -d --name caohongliang-flagos \
+#     --init \
+#     --privileged --runtime=nvidia --gpus all \
+#     --network host --ipc host --shm-size=64g \
+#     --ulimit memlock=-1:-1 --ulimit nofile=65535:65535 \
+#     "caohongliang-flagos:cu128-${REVISION:0:12}" sleep infinity
+#
+# Follow the FlagScale workflow inside the running container:
+#   source /root/miniconda3/etc/profile.d/conda.sh
+#   conda activate flagscale-train
+
+ARG BASE_IMAGE=harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856@sha256:69ca25569b0479a99020b2af801db89851f3417e75b4d81b6c9ad535bfa2eacb
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG SOURCE_REVISION=unknown
+ARG SOURCE_TREE=unknown
+ARG MEGATRON_CODE_PARENT=c47fc24f8f13d992c1b77477ae3b18919a36a737
+ARG FLAGSCALE_REVISION=6d775cd01d5c822f9413b9952a81652c917d273e
+ARG FLAGSCALE_TREE=198de8867fee8bce6e140d100910c7899ab84690
+
+LABEL org.opencontainers.image.title="caohongliang-flagos"
+LABEL org.opencontainers.image.description="Megatron-LM-FL and FlagScale CUDA 12.8 work environment"
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
+LABEL org.flagos.megatron.tree="${SOURCE_TREE}"
+LABEL org.flagos.megatron.code-parent="${MEGATRON_CODE_PARENT}"
+LABEL org.flagos.flagscale.revision="${FLAGSCALE_REVISION}"
+LABEL org.flagos.flagscale.tree="${FLAGSCALE_TREE}"
+
+ENV FLAGOS_ENV=/root/miniconda3/envs/flagscale-train
+ENV PROJECT_ROOT=/workspace/Megatron-LM-FL
+ENV FLAGSCALE_ROOT=/workspace/FlagScale
+ENV PATH="/root/miniconda3/envs/flagscale-train/bin:${PATH}"
+ENV PYTHONPATH="/workspace/Megatron-LM-FL"
+ENV PIP_CONSTRAINT=""
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+COPY Megatron-LM-FL/ /workspace/Megatron-LM-FL
+COPY FlagScale/ /workspace/FlagScale
+COPY Megatron-LM-FL/docker/patches/flagscale-megalens.patch /tmp/flagscale-megalens.patch
+WORKDIR /workspace/Megatron-LM-FL
+
+SHELL ["/bin/bash", "-lc"]
+
+# Preserve the base image's CUDA 12.8, PyTorch, TE, FlashAttention, and NCCL
+# packages. Only add the missing NVML binding and replace megatron-core with
+# the source snapshot. Installing the project extras or running uv sync here
+# would resolve the repository's CUDA 13 development dependencies.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        "nvidia-ml-py==13.595.45" \
+    && python -c \
+        'import packaging, pybind11, setuptools; from packaging.version import Version; assert Version(setuptools.__version__) < Version("80"); assert Version(packaging.__version__) >= Version("24.2"); print("build-tools", setuptools.__version__, pybind11.__version__, packaging.__version__)' \
+    && python -m pip uninstall -y megatron-core \
+    && MAX_JOBS=4 python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        --no-build-isolation \
+        -e "${PROJECT_ROOT}" \
+    && python -m pip check \
+    && printf '%s\n' "${SOURCE_REVISION}" > /etc/flagos-source-revision
+
+# FlagScale's runner prepends its vendored megatron.training package to
+# PYTHONPATH. Apply the reviewable compatibility diff that mirrors the
+# Megatron-LM-FL MegaLens arguments, runtime lifecycle, iteration scope, and
+# optimizer probes.
+# The baseline hashes prevent this patch from being applied to an unreviewed
+# FlagScale source revision. FlagScale is installed without cuda-train extras
+# so its MCore 0.16 pin cannot replace the validated MCore 0.17.1 source.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && if git -C "${FLAGSCALE_ROOT}" rev-parse --verify HEAD >/dev/null 2>&1; then \
+        test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD)" = "${FLAGSCALE_REVISION}" \
+        && test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})" = "${FLAGSCALE_TREE}"; \
+    fi \
+    && printf '%s  %s\n' \
+        "2ce5473b6280598d1954c575b068523d9f9facdf20a685ac08dd61822bdaa162" "/tmp/flagscale-megalens.patch" \
+        "913b47495a8e58ed4aac8d4c72cede063afbbaa79ed61ee900e90979e9441667" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "d7c73b0764c4b192cd2e5e3cc46fc2cffbdca3dc3beeef703139e8b3f9b9914e" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
+        "d3eace40ed2bbc2e24e51f801201aaaa406a3d68cbde8614981c0643169a36a2" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        | sha256sum -c - \
+    && git -C "${FLAGSCALE_ROOT}" apply --check /tmp/flagscale-megalens.patch \
+    && git -C "${FLAGSCALE_ROOT}" apply /tmp/flagscale-megalens.patch \
+    && printf '%s  %s\n' \
+        "d60ed817ea6510fce29697020dc58bdd621f59dd45fbde81507df00d07ce4d36" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "b1e4ee2eff25440bc1265438c082d53e39061c61d6e979af9828a4e7e7f5ee81" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
+        "897b74e5387fb19e7b7c48abf9faf7e4559fa377f523e6580cab60f15f2f2368" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        | sha256sum -c - \
+    && python -m py_compile \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+    && python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        --no-build-isolation \
+        -e "${FLAGSCALE_ROOT}" \
+    && python -m pip check \
+    && printf '%s\n' "${FLAGSCALE_REVISION}" > /etc/flagscale-source-revision \
+    && printf '{\n  "base_image": "%s",\n  "megatron_integration_revision": "%s",\n  "megatron_tree": "%s",\n  "megatron_code_parent": "%s",\n  "flagscale_revision": "%s",\n  "flagscale_tree": "%s",\n  "flagscale_patch_sha256": "%s"\n}\n' \
+        "${BASE_IMAGE}" \
+        "${SOURCE_REVISION}" \
+        "${SOURCE_TREE}" \
+        "${MEGATRON_CODE_PARENT}" \
+        "${FLAGSCALE_REVISION}" \
+        "${FLAGSCALE_TREE}" \
+        "2ce5473b6280598d1954c575b068523d9f9facdf20a685ac08dd61822bdaa162" \
+        > /etc/flagos-sources.json
+
+# Build stages do not receive GPUs on the target Docker daemon. Validate
+# metadata and source mapping here; validate imports that initialize TE after
+# the container starts with the NVIDIA runtime.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && python -c \
+    'import importlib.metadata as md, importlib.util, pathlib, runpy, sys; root = pathlib.Path("/workspace/Megatron-LM-FL").resolve(); modules = ("megatron.core", "megatron.megalens", "megatron.training"); origins = [pathlib.Path(importlib.util.find_spec(name).origin).resolve() for name in modules]; source_version = runpy.run_path(root / "megatron/core/package_info.py")["__version__"]; helpers = list((root / "megatron/core/datasets").glob("helpers_cpp*.so")); assert sys.executable == "/root/miniconda3/envs/flagscale-train/bin/python"; assert all(path.is_relative_to(root) for path in origins), origins; assert source_version == md.version("megatron-core"); assert len(list(md.distributions(name="megatron-core"))) == 1; assert len(helpers) == 1, helpers' \
+    && python -c \
+    'import ast, importlib.metadata as md, importlib.util, pathlib, pynvml, torch; fs = pathlib.Path("/workspace/FlagScale"); flagscale_origin = pathlib.Path(importlib.util.find_spec("flagscale").origin).resolve(); expected = {"arguments.py": {"_add_megalens_args", "_validate_megalens_args"}, "global_vars.py": {"get_megalens_runtime", "shutdown_megalens_runtime"}, "training.py": {"_owns_megalens_runtime"}}; assert flagscale_origin.is_relative_to(fs), flagscale_origin; assert md.version("flagscale") == "1.0.0"; [(_ for _ in ()).throw(AssertionError((name, required, found))) if not required <= (found := {node.name for node in ast.parse((fs / "flagscale/train/megatron/training" / name).read_text()).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}) else None for name, required in expected.items()]; assert torch.__version__ == "2.9.0+cu128"; assert torch.version.cuda == "12.8"; print("torch", torch.__version__, "cuda", torch.version.cuda, "te", md.version("transformer-engine"), "flash-attn", md.version("flash_attn"), "flagscale", md.version("flagscale"))' \
+    && python -c \
+    'import ast, pathlib; path = pathlib.Path("/workspace/FlagScale/flagscale/train/megatron/training/training.py"); tree = ast.parse(path.read_text()); imports = [node for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "megatron.core.observability" and any(alias.name == "trace_scope" for alias in node.names)]; train_step = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "train_step"); scope_nodes = [node for node in ast.walk(train_step) if isinstance(node, ast.With) and len(node.items) == 1 and isinstance((context := node.items[0].context_expr), ast.Call) and isinstance(context.func, ast.Name) and context.func.id == "trace_scope" and len(context.args) == 1 and isinstance(context.args[0], ast.Constant)]; scopes = {name: [node for node in scope_nodes if node.items[0].context_expr.args[0].value == name] for name in ("optimizer", "optimizer-postprocess")}; assert len(imports) == 1 and all(len(nodes) == 1 for nodes in scopes.values()); optimizer_body = scopes["optimizer"][0].body; assert len(optimizer_body) == 1 and isinstance(optimizer_body[0], ast.Assign); optimizer_call = optimizer_body[0].value; assert isinstance(optimizer_call, ast.Call) and isinstance(optimizer_call.func, ast.Attribute) and optimizer_call.func.attr == "step" and isinstance(optimizer_call.func.value, ast.Name) and optimizer_call.func.value.id == "optimizer" and not optimizer_call.args and not optimizer_call.keywords; postprocess = scopes["optimizer-postprocess"][0]; first = postprocess.body[0]; assert isinstance(first, ast.Assign) and isinstance(first.value, ast.Call) and isinstance(first.value.func, ast.Name) and first.value.func.id == "logical_and_across_model_parallel_group"; assert len([node for node in ast.walk(postprocess) if isinstance(node, ast.Return)]) == 2; calls = [node for node in ast.walk(train_step) if isinstance(node, ast.Call)]; timer_stop = next(call for call in calls if isinstance(call.func, ast.Attribute) and call.func.attr == "stop" and isinstance(call.func.value, ast.Call) and isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "timers" and isinstance(call.func.value.args[0], ast.Constant) and call.func.value.args[0].value == "optimizer"); clip_qk = next(call for call in calls if isinstance(call.func, ast.Name) and call.func.id == "clip_qk"); assert clip_qk.lineno < timer_stop.lineno < postprocess.lineno'
+
+CMD ["/bin/bash"]
