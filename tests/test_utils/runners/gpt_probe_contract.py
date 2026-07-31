@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""Exact model-phase contracts for the controlled GPT training profiles."""
+"""Exact trace contracts for the controlled GPT training profiles."""
 
 from __future__ import annotations
 
@@ -40,6 +40,15 @@ _EAGER_LAYER_SEQUENCE = (
     ("MLP.forward", "E"),
     ("_forward_mlp", "E"),
     ("transformer_layer", "E"),
+)
+_OPTIMIZER_PHASES = frozenset(("optimizer", "optimizer-step", "optimizer-postprocess"))
+_OPTIMIZER_SEQUENCE = (
+    ("optimizer", "B"),
+    ("optimizer-step", "B"),
+    ("optimizer-step", "E"),
+    ("optimizer", "E"),
+    ("optimizer-postprocess", "B"),
+    ("optimizer-postprocess", "E"),
 )
 
 
@@ -245,12 +254,36 @@ def _validate_eager_layers(
     ]
 
 
+def _validate_optimizer_phases(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> list[Failure]:
+    observed = tuple(
+        (event.name, event.ph)
+        for event in iteration.events
+        if event.name in _OPTIMIZER_PHASES
+    )
+    if observed == _OPTIMIZER_SEQUENCE:
+        return []
+    return [
+        _failure(
+            "trace.optimizer.sequence",
+            f"optimizer phase sequence is {observed!r}, "
+            f"expected {_OPTIMIZER_SEQUENCE!r}",
+            rank=rank,
+            iteration=int(iteration.iteration_id),
+        )
+    ]
+
+
 def _validate_gpt_model_phases(
     trace_root: Path,
     *,
     expected_pipeline_ranks: Mapping[int, int],
     postprocess_ranks: frozenset[int],
     eager_layers_by_rank: Mapping[int, int] | None = None,
+    validate_optimizer: bool = False,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -314,6 +347,8 @@ def _validate_gpt_model_phases(
                         expected_layers=eager_layers_by_rank[rank],
                     )
                 )
+            if validate_optimizer:
+                failures.extend(_validate_optimizer_phases(iteration, rank=rank))
     return tuple(failures)
 
 
@@ -334,6 +369,17 @@ def validate_gpt_pp2_model_phases(trace_root: Path) -> tuple[Failure, ...]:
         trace_root,
         expected_pipeline_ranks={0: 0, 1: 1},
         postprocess_ranks=frozenset((1,)),
+    )
+
+
+def validate_gpt_pp2_training_phases(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate PP2 GPT model and optimizer phase structure."""
+
+    return _validate_gpt_model_phases(
+        trace_root,
+        expected_pipeline_ranks={0: 0, 1: 1},
+        postprocess_ranks=frozenset((1,)),
+        validate_optimizer=True,
     )
 
 

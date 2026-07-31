@@ -47,6 +47,7 @@ _PP2_EVENTS = _events(
     "recv-backward",
     "optimizer",
     "optimizer-step",
+    "optimizer-postprocess",
 )
 _EP_COMMON_EVENTS = (
     manifest.EventRequirement(
@@ -138,7 +139,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         "pp2",
         2,
         _PP2_EVENTS,
-        gpt_probe_contract.validate_gpt_pp2_model_phases,
+        gpt_probe_contract.validate_gpt_pp2_training_phases,
     ),
     "ep2-alltoall": manifest.TraceProfile("ep2-alltoall", 2, _ep_events("alltoall")),
     "ep2-allgather": manifest.TraceProfile("ep2-allgather", 2, _ep_events("allgather")),

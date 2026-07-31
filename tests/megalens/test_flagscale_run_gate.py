@@ -58,6 +58,8 @@ def _write_gpt_phase_trace(
     pipeline_rank: int,
     include_postprocess: bool,
     eager_layers: int = 0,
+    include_optimizer: bool = False,
+    include_optimizer_postprocess: bool = True,
 ) -> None:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
@@ -110,6 +112,14 @@ def _write_gpt_phase_trace(
             event("loss", "E")
         event("decoder-postprocess", "E")
         event("forward-step", "E")
+        if include_optimizer:
+            event("optimizer", "B")
+            event("optimizer-step", "B")
+            event("optimizer-step", "E")
+            event("optimizer", "E")
+            if include_optimizer_postprocess:
+                event("optimizer-postprocess", "B")
+                event("optimizer-postprocess", "E")
         rows.append(
             {
                 "name": "iteration",
@@ -222,12 +232,14 @@ def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
         rank=0,
         pipeline_rank=0,
         include_postprocess=False,
+        include_optimizer=True,
     )
     _write_gpt_phase_trace(
         pp2_root,
         rank=1,
         pipeline_rank=1,
         include_postprocess=True,
+        include_optimizer=True,
     )
     assert gate.PROFILES["pp2"].contract(pp2_root) == ()
 
@@ -237,12 +249,14 @@ def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
         rank=0,
         pipeline_rank=0,
         include_postprocess=True,
+        include_optimizer=True,
     )
     _write_gpt_phase_trace(
         invalid_root,
         rank=1,
         pipeline_rank=1,
         include_postprocess=True,
+        include_optimizer=True,
     )
     failures = gate.PROFILES["pp2"].contract(invalid_root)
     assert failures
@@ -271,6 +285,33 @@ def test_gpt_eager_profile_rejects_an_incomplete_layer_sequence(
         "rank=0 iteration=1",
         "rank=0 iteration=2",
     ]
+
+
+def test_gpt_pp2_profile_rejects_missing_optimizer_postprocess(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "missing-optimizer-postprocess"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=False,
+        include_optimizer=True,
+        include_optimizer_postprocess=False,
+    )
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=1,
+        pipeline_rank=1,
+        include_postprocess=True,
+        include_optimizer=True,
+        include_optimizer_postprocess=False,
+    )
+
+    failures = gate.PROFILES["pp2"].contract(trace_root)
+
+    assert {failure.code for failure in failures} == {"trace.optimizer.sequence"}
+    assert len(failures) == 4
 
 
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
