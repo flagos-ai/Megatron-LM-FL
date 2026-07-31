@@ -81,6 +81,65 @@ def test_optimizer_scope_preserves_source_and_target_boundaries():
     assert timer_stop.lineno < model_parallel_postprocess.lineno
 
 
+def test_optimizer_postprocess_scope_matches_the_source_tail_boundary():
+    module = ast.parse(TRAINING.read_text(encoding="utf-8"))
+    train_step = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "train_step"
+    )
+    scopes = [
+        node
+        for node in ast.walk(train_step)
+        if isinstance(node, ast.With)
+        and len(node.items) == 1
+        and isinstance(node.items[0].context_expr, ast.Call)
+        and _call_name(node.items[0].context_expr) == "trace_scope"
+        and len(node.items[0].context_expr.args) == 1
+        and isinstance(node.items[0].context_expr.args[0], ast.Constant)
+        and node.items[0].context_expr.args[0].value == "optimizer-postprocess"
+    ]
+
+    assert len(scopes) == 1
+    scope = scopes[0]
+    assert scope.items[0].context_expr.keywords == []
+    first_statement = scope.body[0]
+    assert isinstance(first_statement, ast.Assign)
+    assert isinstance(first_statement.value, ast.Call)
+    assert _call_name(first_statement.value) == "logical_and_across_model_parallel_group"
+
+    calls = [node for node in ast.walk(train_step) if isinstance(node, ast.Call)]
+    timer_stop = next(
+        call
+        for call in calls
+        if isinstance(call.func, ast.Attribute)
+        and call.func.attr == "stop"
+        and isinstance(call.func.value, ast.Call)
+        and _call_name(call.func.value) == "timers"
+        and isinstance(call.func.value.args[0], ast.Constant)
+        and call.func.value.args[0].value == "optimizer"
+    )
+    assert timer_stop.lineno < scope.lineno
+
+    scoped_calls = [node for node in ast.walk(scope) if isinstance(node, ast.Call)]
+    assert not any(_call_name(call) == "clip_qk" for call in scoped_calls)
+    assert not any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr == "step"
+        and isinstance(call.func.value, ast.Name)
+        and call.func.value.id == "optimizer"
+        for call in scoped_calls
+    )
+    assert not any(
+        isinstance(call.func, ast.Attribute)
+        and call.func.attr in {"start", "stop"}
+        and isinstance(call.func.value, ast.Call)
+        and _call_name(call.func.value) == "timers"
+        for call in scoped_calls
+    )
+    assert len([node for node in ast.walk(scope) if isinstance(node, ast.Return)]) == 2
+
+
 def test_training_imports_dependency_light_trace_facade():
     module = ast.parse(TRAINING.read_text(encoding="utf-8"))
     imports = {

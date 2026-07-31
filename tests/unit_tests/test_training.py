@@ -1662,11 +1662,14 @@ def test_train_step_success_path_averages_losses_and_steps_scheduler(monkeypatch
             return FakeTimer(name)
 
     class FakeTraceScope:
+        def __init__(self, name):
+            self.name = name
+
         def __enter__(self):
-            calls.append(("trace-enter", "optimizer"))
+            calls.append(("trace-enter", self.name))
 
         def __exit__(self, exc_type, exc_value, traceback):
-            calls.append(("trace-exit", "optimizer", exc_type))
+            calls.append(("trace-exit", self.name, exc_type))
 
     class FakeRerunStateMachine:
         def __init__(self):
@@ -1712,10 +1715,22 @@ def test_train_step_success_path_averages_losses_and_steps_scheduler(monkeypatch
     monkeypatch.setattr(
         training,
         "trace_scope",
-        lambda name: FakeTraceScope() if name == "optimizer" else pytest.fail(name),
+        lambda name: (
+            FakeTraceScope(name)
+            if name in {"optimizer", "optimizer-postprocess"}
+            else pytest.fail(name)
+        ),
     )
-    monkeypatch.setattr(training, "logical_and_across_model_parallel_group", lambda value: value)
-    monkeypatch.setattr(training, "reduce_max_stat_across_model_parallel_group", lambda value: value)
+    monkeypatch.setattr(
+        training,
+        "logical_and_across_model_parallel_group",
+        lambda value: calls.append(("logical-and", value)) or value,
+    )
+    monkeypatch.setattr(
+        training,
+        "reduce_max_stat_across_model_parallel_group",
+        lambda value: calls.append(("reduce-max", value)) or value,
+    )
     monkeypatch.setattr(training.mpu, "is_pipeline_last_stage", lambda ignore_virtual=True: True)
 
     loss_dict, skipped, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros, max_logit = train_step(
@@ -1747,6 +1762,16 @@ def test_train_step_success_path_averages_losses_and_steps_scheduler(monkeypatch
     )
     assert calls.index(("trace-exit", "optimizer", None)) < calls.index(
         ("timer-stop", "optimizer")
+    )
+    assert calls.index(("timer-stop", "optimizer")) < calls.index(
+        ("trace-enter", "optimizer-postprocess")
+    )
+    assert calls.index(("trace-enter", "optimizer-postprocess")) < calls.index(
+        ("logical-and", True)
+    )
+    assert calls.index(("logical-and", True)) < calls.index(("scheduler-step", 8))
+    assert calls.index(("scheduler-step", 8)) < calls.index(
+        ("trace-exit", "optimizer-postprocess", None)
     )
     assert ("scheduler-step", 8) in calls
     assert ("forward-backward", 2, False) in calls
