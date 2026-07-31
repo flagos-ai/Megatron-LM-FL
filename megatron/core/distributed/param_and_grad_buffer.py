@@ -16,9 +16,10 @@ from torch.distributed import _coalescing_manager
 
 import megatron.core.nccl_allocator as nccl_allocator
 from megatron.core import parallel_state
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.rerun_state_machine import get_rerun_state_machine
-from megatron.core.utils import log_single_rank
+from megatron.core.utils import get_process_group_peer_ranks, log_single_rank
 
 from ..fp4_utils import get_nvfp4_rowwise_packed_shape, is_nvfp4tensor
 from ..fp8_utils import (
@@ -32,6 +33,26 @@ from .distributed_data_parallel_config import DistributedDataParallelConfig
 from .reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accumulation
 
 logger = logging.getLogger(__name__)
+
+
+def _dp_allreduce_context(
+    *, async_op: bool, group_size: int, group_role: str, n_buckets: int, overlap_enabled: bool
+) -> dict[str, object]:
+    """Build DP all-reduce metadata only after the probe gate accepts it."""
+    return {
+        "api_async_op": bool(async_op),
+        "async_op": bool(async_op),
+        "completion_included": False,
+        "group_size": group_size,
+        "group_role": group_role,
+        "n_buckets": n_buckets,
+        "op": "all_reduce",
+        "overlap_enabled": bool(overlap_enabled),
+        "payload_role": "gradient_bucket",
+        "stage": "main_bucket_allreduce",
+        "timing_phase": "async_dispatch" if async_op else "collective_call",
+    }
+
 
 try:
     if is_torch_min_version("1.13.0"):
@@ -186,6 +207,7 @@ class _ParamAndGradBucketGroup:
     ):
         self.buckets = buckets
         self.ddp_config = ddp_config
+        self.collective_group_size = collective_group_size
 
         # overlap_param_gather covers the layer-wise optimizer case, which sets
         # overlap_param_gather=True without use_distributed_optimizer.
@@ -345,7 +367,10 @@ class _ParamAndGradBucketGroup:
                 # fp32 when grad_reduce_in_fp32 is enabled).
                 param_dtype = bucket.params_list[0].dtype
 
-                if bucket.layerwise_param_flat_sizes is None or max(bucket.layerwise_param_flat_sizes) == 0:    ##### FalgScale add #####
+                if (
+                    bucket.layerwise_param_flat_sizes is None
+                    or max(bucket.layerwise_param_flat_sizes) == 0
+                ):  ##### FalgScale add #####
                     # All ranks have empty params for this bucket — skip.
                     bucket.layerwise_gather_list = None
                     continue
@@ -601,7 +626,43 @@ class _ParamAndGradBucketGroup:
 
         # Coalesce communication kernels across buckets in the bucket group.
         grad_reduce_handle = None
-        with stream_context, _coalescing_manager(communication_group, async_ops=async_op) as cm:
+        trace_main_allreduce = not self.ddp_config.use_distributed_optimizer or (
+            force_all_reduce and self.ddp_config.num_distributed_optimizer_instances == 1
+        )
+        grad_sync_gate = prepare_trace_scope("dp-allreduce") if trace_main_allreduce else None
+        grad_sync_context = None
+        if grad_sync_gate is not None:
+            group_role = (
+                "intra_optimizer_instance"
+                if self.ddp_config.use_distributed_optimizer
+                else "data_parallel"
+            )
+            grad_sync_context = _dp_allreduce_context(
+                async_op=async_op,
+                group_size=self.collective_group_size,
+                group_role=group_role,
+                n_buckets=len(self.buckets),
+                overlap_enabled=self.ddp_config.overlap_grad_reduce,
+            )
+        grad_sync_scope = open_trace_scope(
+            grad_sync_gate, "dp-allreduce", ctx=grad_sync_context, slots=("data_bytes", "group")
+        )
+
+        with (
+            grad_sync_scope as scope,
+            stream_context,
+            _coalescing_manager(communication_group, async_ops=async_op) as cm,
+        ):
+            if scope is not None and scope.get("op") == "all_reduce":
+                scope.set(
+                    "data_bytes",
+                    sum(
+                        int(bucket.grad_data.numel() * bucket.grad_data.element_size())
+                        for bucket in self.buckets
+                    ),
+                )
+                scope.set("group", get_process_group_peer_ranks(communication_group))
+
             for idx, bucket in enumerate(self.buckets):
                 if self.ddp_config.use_distributed_optimizer and not force_all_reduce:
                     if self.cached_grad_buffer_shard_list[idx] is None:
@@ -619,7 +680,7 @@ class _ParamAndGradBucketGroup:
                         async_op=async_op,
                     )
                 else:
-                    if torch.distributed.get_rank() == 0 and force_all_reduce:
+                    if force_all_reduce and torch.distributed.get_rank() == 0:
                         logger.info(
                             f"Performing reduction using all_reduce because {force_all_reduce=}"
                         )
