@@ -140,6 +140,7 @@ def test_mimo_profile_uses_controlled_native_training_entry() -> None:
         ),
     }
     assert config["experiment"]["runner"]["nproc_per_node"] == 2
+    assert config["train"]["system"]["trace_granularity"] == "full"
     assert config["train"]["mimo"]["use_distributed_optimizer"] is False
     assert gate._CONFIG_PROFILES[_FIXTURE.stem] == "mimo-train2"
 

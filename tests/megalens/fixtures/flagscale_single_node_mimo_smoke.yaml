@@ -33,7 +33,7 @@ train:
     hardware_monitor: false
     trace_interval: 1
     continuous_trace_iterations: 1
-    trace_granularity: base
+    trace_granularity: full
     trace_cupti_kernels: "off"
     checkpoint:
       save: null
