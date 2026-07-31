@@ -151,6 +151,11 @@ def experts_trace_context(layer: Any) -> dict[str, Any]:
     return _moe_layer_trace_context(layer)
 
 
+def shared_experts_trace_context(layer: Any) -> dict[str, Any]:
+    """Build the source-compatible shared-expert topology metadata."""
+    return {"layer": layer.layer_number, "ep_size": _ep_size(layer)}
+
+
 def combine_trace_context(layer: Any, output: torch.Tensor) -> dict[str, Any]:
     """Build topology and input-workload metadata for token combine."""
     context = _moe_layer_trace_context(layer)
@@ -261,4 +266,5 @@ __all__ = [
     "router_trace_context",
     "router_workload",
     "set_trace_fields",
+    "shared_experts_trace_context",
 ]

@@ -12,6 +12,7 @@ import pytest
 import torch
 
 import megatron.core.transformer.moe.moe_layer as moe_layer_module
+import megatron.core.transformer.moe.moe_utils as moe_utils_module
 import megatron.core.transformer.moe.router as router_module
 from megatron.core.observability import install_trace_sink, reset_trace_sink
 from megatron.core.transformer.moe.moe_layer import MoELayer
@@ -180,6 +181,27 @@ class _Experts(torch.nn.Module):
         return self.output, None
 
 
+class _SharedExperts(torch.nn.Module):
+    def __init__(
+        self,
+        sink: _RecordingSink,
+        events: list[tuple[Any, ...]],
+        *,
+        error: BaseException | None = None,
+    ) -> None:
+        super().__init__()
+        self.sink = sink
+        self.events = events
+        self.error = error
+        self.output = torch.tensor([[41.0], [42.0]])
+
+    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        self.events.append(("shared-experts", tuple(self.sink.active), hidden_states))
+        if self.error is not None:
+            raise self.error
+        return self.output
+
+
 @pytest.fixture(autouse=True)
 def _reset_sink_and_group_size(monkeypatch: pytest.MonkeyPatch):
     reset_trace_sink()
@@ -276,6 +298,31 @@ def _layer_fixture(
         experts=experts,
     )
     return layer, dispatcher, experts
+
+
+def _shared_expert_fixture(
+    sink: _RecordingSink,
+    events: list[tuple[Any, ...]],
+    *,
+    use_shared_expert: bool = True,
+    shared_expert_overlap: bool = False,
+    shared_experts_recompute: bool = False,
+    fp8: bool = False,
+    fp4: bool = False,
+    error: BaseException | None = None,
+) -> tuple[SimpleNamespace, _SharedExperts, torch.Tensor]:
+    shared_experts = _SharedExperts(sink, events, error=error)
+    hidden_states = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+    layer = SimpleNamespace(
+        config=SimpleNamespace(cuda_graph_impl="none", fp8=fp8, fp4=fp4),
+        ep_group=[_Group(2)],
+        layer_number=7,
+        use_shared_expert=use_shared_expert,
+        shared_expert_overlap=shared_expert_overlap,
+        shared_experts_recompute=shared_experts_recompute,
+        shared_experts=shared_experts,
+    )
+    return layer, shared_experts, hidden_states
 
 
 def _event_fields(record: dict[str, Any]) -> dict[str, Any]:
@@ -780,6 +827,189 @@ def test_pad_to_capacity_keeps_assignment_workload_unknown(monkeypatch: pytest.M
     assert fields["top1_expert_share"] is None
 
 
+def test_shared_expert_emits_source_fields_around_only_the_module_call() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    layer, shared_experts, hidden_states = _shared_expert_fixture(sink, events)
+
+    output = MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert output is shared_experts.output
+    assert sink.gate_calls == ["moe-shared-expert"]
+    assert sink.transitions == [("B", "moe-shared-expert", None), ("E", "moe-shared-expert", None)]
+    assert sink.records[0]["ctx"] == {"layer": 7, "ep_size": 2}
+    assert sink.records[0]["slots"] == ()
+    assert events == [("shared-experts", ("moe-shared-expert",), hidden_states)]
+
+
+@pytest.mark.parametrize("mode", ["torch", "fp8", "fp4"])
+def test_shared_expert_checkpoint_branches_keep_source_scope_and_arguments(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    layer, shared_experts, hidden_states = _shared_expert_fixture(
+        sink, events, shared_experts_recompute=True, fp8=mode == "fp8", fp4=mode == "fp4"
+    )
+    checkpoint_calls: list[tuple[Any, ...]] = []
+
+    if mode == "torch":
+
+        def checkpoint(function, distribute_saved_activations, actual_hidden_states):
+            checkpoint_calls.append(
+                ("torch", tuple(sink.active), distribute_saved_activations, actual_hidden_states)
+            )
+            return function(actual_hidden_states)
+
+        monkeypatch.setattr(moe_layer_module.tensor_parallel, "checkpoint", checkpoint)
+    else:
+        tp_group = object()
+
+        def te_checkpoint(
+            function,
+            distribute_saved_activations,
+            rng_tracker_getter,
+            actual_tp_group,
+            actual_hidden_states,
+        ):
+            checkpoint_calls.append(
+                (
+                    "te",
+                    tuple(sink.active),
+                    distribute_saved_activations,
+                    rng_tracker_getter,
+                    actual_tp_group,
+                    actual_hidden_states,
+                )
+            )
+            return function(actual_hidden_states)
+
+        monkeypatch.setattr(moe_layer_module, "te_checkpoint", te_checkpoint)
+        monkeypatch.setattr(
+            moe_layer_module.parallel_state, "get_tensor_model_parallel_group", lambda: tp_group
+        )
+
+    output = MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert output is shared_experts.output
+    assert checkpoint_calls[0][0] == ("torch" if mode == "torch" else "te")
+    assert checkpoint_calls[0][1] == ("moe-shared-expert",)
+    assert checkpoint_calls[0][2] is False
+    assert checkpoint_calls[0][-1] is hidden_states
+    assert len(checkpoint_calls) == 1
+    if mode != "torch":
+        assert (
+            checkpoint_calls[0][3] is moe_layer_module.tensor_parallel.random.get_cuda_rng_tracker
+        )
+        assert checkpoint_calls[0][4] is tp_group
+    assert events == [("shared-experts", ("moe-shared-expert",), hidden_states)]
+
+
+@pytest.mark.parametrize("use_shared_expert,shared_expert_overlap", [(False, False), (True, True)])
+def test_shared_expert_ineligible_paths_emit_nothing(
+    use_shared_expert: bool, shared_expert_overlap: bool
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    layer, _, hidden_states = _shared_expert_fixture(
+        sink,
+        events,
+        use_shared_expert=use_shared_expert,
+        shared_expert_overlap=shared_expert_overlap,
+    )
+
+    assert MoELayer.shared_experts_compute(layer, hidden_states) is None
+    assert sink.gate_calls == []
+    assert sink.records == []
+    assert events == []
+
+
+@pytest.mark.parametrize("gate_mode", ["disabled", "suppressed"])
+def test_shared_expert_closed_gate_preserves_compute_and_skips_context(
+    monkeypatch: pytest.MonkeyPatch, gate_mode: str
+) -> None:
+    sink = _RecordingSink(enabled=gate_mode != "disabled")
+    install_trace_sink(sink, suppress_scope=(lambda: True) if gate_mode == "suppressed" else None)
+    events: list[tuple[Any, ...]] = []
+    layer, shared_experts, hidden_states = _shared_expert_fixture(sink, events)
+    monkeypatch.setattr(
+        moe_layer_module,
+        "shared_experts_trace_context",
+        lambda owner: pytest.fail("closed shared-expert gate constructed context"),
+    )
+
+    output = MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert output is shared_experts.output
+    assert events == [("shared-experts", (), hidden_states)]
+    assert sink.gate_calls == ["moe-shared-expert"]
+    assert sink.records == []
+
+
+def test_shared_expert_null_sink_preserves_compute_without_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    reset_trace_sink()
+    events: list[tuple[Any, ...]] = []
+    local_sink = _RecordingSink()
+    layer, shared_experts, hidden_states = _shared_expert_fixture(local_sink, events)
+    monkeypatch.setattr(
+        moe_layer_module,
+        "shared_experts_trace_context",
+        lambda owner: pytest.fail("Null sink constructed shared-expert context"),
+    )
+
+    output = MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert output is shared_experts.output
+    assert events == [("shared-experts", (), hidden_states)]
+    assert local_sink.gate_calls == []
+    assert local_sink.records == []
+
+
+def test_shared_expert_cuda_graph_replay_uses_cached_output_without_event(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    layer, _, hidden_states = _shared_expert_fixture(sink, events)
+    cached_output = torch.tensor([[51.0]])
+    layer.config.cuda_graph_impl = "transformer_engine"
+    layer.cudagraph_tensor_store = SimpleNamespace(
+        is_empty=lambda: False, shared_expert_output=cached_output
+    )
+    monkeypatch.setattr(moe_utils_module, "is_graph_capturing", lambda: False)
+
+    output = MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert output is cached_output
+    assert sink.gate_calls == []
+    assert sink.records == []
+    assert events == []
+
+
+def test_shared_expert_error_closes_scope_and_preserves_exception_identity() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    error = RuntimeError("shared expert failed")
+    layer, _, hidden_states = _shared_expert_fixture(sink, events, error=error)
+
+    with pytest.raises(RuntimeError) as raised:
+        MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert raised.value is error
+    assert sink.transitions == [
+        ("B", "moe-shared-expert", None),
+        ("E", "moe-shared-expert", RuntimeError),
+    ]
+    assert sink.active == []
+
+
 def test_dispatch_and_combine_emit_target_static_fields_and_preserve_results() -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
@@ -1067,9 +1297,34 @@ def test_real_adapter_places_static_fields_on_begin_and_workload_on_end() -> Non
     assert ticks[1][2]["dropped_tokens"] is None
 
 
+def test_real_adapter_records_shared_expert_source_fields() -> None:
+    tracer = Tracer()
+    tracer.global_args = SimpleNamespace(trace=True, trace_mode=1, trace_granularity="full")
+    tracer.iter = 1
+    tracer._pendings = []
+    tracer._iteration_open = True
+    ticks: list[tuple[str, str, dict[str, Any]]] = []
+    tracer._tick = lambda name, phase, attrs: ticks.append((name, phase, dict(attrs)))
+    install_trace_sink(MegaLensTraceSink(tracer))
+    events: list[tuple[Any, ...]] = []
+    layer, shared_experts, hidden_states = _shared_expert_fixture(_RecordingSink(), events)
+
+    output = MoELayer.shared_experts_compute(layer, hidden_states)
+
+    assert output is shared_experts.output
+    assert ticks == [
+        ("moe-shared-expert", "B", {"layer": 7, "ep_size": 2}),
+        ("moe-shared-expert", "E", {}),
+    ]
+
+
 def test_moe_probe_markers_and_public_signatures_remain_stable() -> None:
     assert getattr(TopKRouter.forward, "__megatron_trace_event__", None) == "moe-router"
     assert getattr(MoELayer.dispatch, "__megatron_trace_event__", None) == "moe-dispatch"
+    assert (
+        getattr(MoELayer.shared_experts_compute, "__megatron_trace_event__", None)
+        == "moe-shared-expert"
+    )
     assert (
         getattr(MoELayer.routed_experts_compute, "__megatron_trace_event__", None) == "moe-experts"
     )
@@ -1084,6 +1339,10 @@ def test_moe_probe_markers_and_public_signatures_remain_stable() -> None:
         "self",
         "hidden_states",
         "probs",
+    ]
+    assert list(inspect.signature(MoELayer.shared_experts_compute).parameters) == [
+        "self",
+        "hidden_states",
     ]
     assert list(inspect.signature(MoELayer.routed_experts_compute).parameters) == [
         "self",
@@ -1101,3 +1360,23 @@ def test_moe_probe_markers_and_public_signatures_remain_stable() -> None:
         "synchronize(",
     ):
         assert forbidden not in helper_source
+
+
+def test_shared_expert_routes_use_the_canonical_method_and_exclude_dualpipev() -> None:
+    canonical_callers = {
+        "megatron/core/transformer/moe/moe_layer.py": "self.shared_experts_compute(hidden_states)",
+        "megatron/core/models/gpt/fine_grained_callables.py": (
+            "layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)"
+        ),
+        "megatron/core/transformer/transformer_layer.py": (
+            "self.mlp.shared_experts_compute(hidden_states)"
+        ),
+    }
+    for relative_path, call in canonical_callers.items():
+        source = (ROOT / relative_path).read_text()
+        assert source.count(call) == 1
+
+    dualpipev_root = ROOT / "megatron/plugin/dualpipev/fb_overlap/overlap_funcs"
+    dualpipev_sources = [path.read_text() for path in dualpipev_root.glob("*.py")]
+    assert all(".shared_experts_compute(" not in source for source in dualpipev_sources)
+    assert sum(source.count(".shared_experts(") for source in dualpipev_sources) == 3

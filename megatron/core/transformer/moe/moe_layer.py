@@ -26,6 +26,7 @@ from megatron.core.transformer.moe.observability import (
     expert_workload,
     experts_trace_context,
     set_trace_fields,
+    shared_experts_trace_context,
 )
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.token_dispatcher import (
@@ -468,22 +469,29 @@ class MoELayer(BaseMoELayer):
         """
         shared_expert_output = None
         if self.use_shared_expert and not self.shared_expert_overlap:
-            # Compute the shared expert separately when not overlapped with communication.
-            if self.shared_experts_recompute:
-                if self.config.fp8 or self.config.fp4:
-                    shared_expert_output = te_checkpoint(
-                        apply_module(self.shared_experts),
-                        False,
-                        tensor_parallel.random.get_cuda_rng_tracker,
-                        parallel_state.get_tensor_model_parallel_group(),
-                        hidden_states,
-                    )
+            shared_expert_gate = prepare_trace_scope("moe-shared-expert")
+            shared_expert_context = (
+                shared_experts_trace_context(self) if shared_expert_gate is not None else None
+            )
+            with open_trace_scope(
+                shared_expert_gate, "moe-shared-expert", ctx=shared_expert_context
+            ):
+                # Compute the shared expert separately when not overlapped with communication.
+                if self.shared_experts_recompute:
+                    if self.config.fp8 or self.config.fp4:
+                        shared_expert_output = te_checkpoint(
+                            apply_module(self.shared_experts),
+                            False,
+                            tensor_parallel.random.get_cuda_rng_tracker,
+                            parallel_state.get_tensor_model_parallel_group(),
+                            hidden_states,
+                        )
+                    else:
+                        shared_expert_output = tensor_parallel.checkpoint(
+                            apply_module(self.shared_experts), False, hidden_states
+                        )
                 else:
-                    shared_expert_output = tensor_parallel.checkpoint(
-                        apply_module(self.shared_experts), False, hidden_states
-                    )
-            else:
-                shared_expert_output = apply_module(self.shared_experts)(hidden_states)
+                    shared_expert_output = apply_module(self.shared_experts)(hidden_states)
 
         return shared_expert_output
 
@@ -689,5 +697,6 @@ class MoELayer(BaseMoELayer):
 
 
 setattr(MoELayer.dispatch, "__megatron_trace_event__", "moe-dispatch")
+setattr(MoELayer.shared_experts_compute, "__megatron_trace_event__", "moe-shared-expert")
 setattr(MoELayer.routed_experts_compute, "__megatron_trace_event__", "moe-experts")
 setattr(MoELayer.combine, "__megatron_trace_event__", "moe-combine")
