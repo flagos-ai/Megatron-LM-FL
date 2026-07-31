@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
 
+from tests.test_utils.runners import check_ring_exchange
 from tests.test_utils.runners import dp_probe_contract
 from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
@@ -910,6 +912,38 @@ def test_pp2_ring_contract_rejects_work_wait_events(tmp_path: Path) -> None:
     assert "trace.p2p.ring_completion" in {
         failure.code for failure in failures
     }
+
+
+def test_ring_exchange_preflight_reports_selected_torch_build() -> None:
+    fake_torch = SimpleNamespace(
+        __file__=__file__,
+        __version__="2.9.0+cu128",
+        distributed=SimpleNamespace(ring_exchange=lambda **kwargs: None),
+    )
+
+    available, detail = check_ring_exchange.describe_capability(fake_torch)
+
+    assert available is True
+    assert detail == (
+        f"ring_exchange=available torch=2.9.0+cu128 "
+        f"torch_path={Path(__file__).resolve()}"
+    )
+
+
+def test_ring_exchange_preflight_rejects_a_standard_torch_build() -> None:
+    fake_torch = SimpleNamespace(
+        __file__=__file__,
+        __version__="2.8.0+cpu",
+        distributed=SimpleNamespace(),
+    )
+
+    available, detail = check_ring_exchange.describe_capability(fake_torch)
+
+    assert available is False
+    assert detail == (
+        f"ring_exchange=unavailable torch=2.8.0+cpu "
+        f"torch_path={Path(__file__).resolve()}"
+    )
 
 
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
