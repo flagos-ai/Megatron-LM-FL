@@ -6,7 +6,7 @@ from __future__ import annotations
 import math
 from contextlib import contextmanager
 from contextvars import ContextVar
-from typing import Any, Iterator, Mapping
+from typing import Any, Iterator, Mapping, Sequence
 
 import torch
 
@@ -156,6 +156,25 @@ def shared_experts_trace_context(layer: Any) -> dict[str, Any]:
     return {"layer": layer.layer_number, "ep_size": _ep_size(layer)}
 
 
+def ep_collective_trace_context(
+    dispatcher: Any,
+    tensors: Sequence[torch.Tensor],
+    *,
+    comm_type: str,
+    dispatcher_name: str,
+    group: Any,
+) -> dict[str, Any]:
+    """Build the source-compatible EP communication metadata."""
+    return {
+        "comm_type": comm_type,
+        "dispatcher": dispatcher_name,
+        "data_bytes": sum(int(tensor.numel() * tensor.element_size()) for tensor in tensors),
+        "group_size": int(utils.get_pg_size(group)),
+        "ep_size": int(dispatcher.ep_size),
+        "tp_size": int(dispatcher.tp_size),
+    }
+
+
 def combine_trace_context(layer: Any, output: torch.Tensor) -> dict[str, Any]:
     """Build topology and input-workload metadata for token combine."""
     context = _moe_layer_trace_context(layer)
@@ -260,6 +279,7 @@ __all__ = [
     "collect_router_loss_fields",
     "combine_trace_context",
     "dispatch_trace_context",
+    "ep_collective_trace_context",
     "expert_workload",
     "experts_trace_context",
     "observe_router_loss",

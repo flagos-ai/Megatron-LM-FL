@@ -12,6 +12,7 @@ from megatron.core.config import is_experimental_enabled
 from megatron.core.fusions.fused_indices_converter import fused_indices_to_multihot
 from megatron.core.fusions.fused_pad_routing_map import fused_pad_routing_map
 from megatron.core.jit import jit_fuser
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 from megatron.core.tensor_parallel import (
     all_to_all,
     gather_from_sequence_parallel_region,
@@ -35,6 +36,7 @@ from megatron.core.transformer.moe.moe_utils import (
     sort_chunks_by_idxs,
     unpermute,
 )
+from megatron.core.transformer.moe.observability import ep_collective_trace_context
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -263,24 +265,37 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
     def token_dispatch(self, hidden_states, probs):
         """Gathers tokens from all TP*EP ranks using AllGather."""
 
-        # Permute the tokens across the expert parallel devices.
-        if self.tp_size > 1 or self.ep_size > 1:
-            ## local_indices calculation
-            with torch.no_grad():
-                # [num_local_tokens, num_experts] -> [num_global_tokens, num_experts], where:
-                #     num_local_tokens=(S/TP)*B, num_global_tokens=S*B*EP
-                self.routing_map = gather_from_sequence_parallel_region(
-                    self.routing_map, group=self.tp_ep_group
-                )
-
-            ## local_probs calculation
-            # max_prob: [S/TP*B, num_experts] -> global_probs: [S*B*EP, num_experts]
-            probs = gather_from_sequence_parallel_region(probs, group=self.tp_ep_group)
-            # Note that this allgather spans the communication domain of TP*EP.
-            #  [(S/TP)*B, H] -> [((S/TP)*B)*(TP*EP), H] = [S*B*EP, H]
-            hidden_states = gather_from_sequence_parallel_region(
-                hidden_states, group=self.tp_ep_group, use_global_buffer=True
+        dispatch_gate = prepare_trace_scope("ep-allgather-dispatch")
+        dispatch_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-allgather",
+                dispatcher_name="allgather",
+                group=self.tp_ep_group,
             )
+            if dispatch_gate is not None
+            else None
+        )
+        with open_trace_scope(dispatch_gate, "ep-allgather-dispatch", ctx=dispatch_context):
+            # Permute the tokens across the expert parallel devices.
+            if self.tp_size > 1 or self.ep_size > 1:
+                ## local_indices calculation
+                with torch.no_grad():
+                    # [num_local_tokens, num_experts] -> [num_global_tokens, num_experts], where:
+                    #     num_local_tokens=(S/TP)*B, num_global_tokens=S*B*EP
+                    self.routing_map = gather_from_sequence_parallel_region(
+                        self.routing_map, group=self.tp_ep_group
+                    )
+
+                ## local_probs calculation
+                # max_prob: [S/TP*B, num_experts] -> global_probs: [S*B*EP, num_experts]
+                probs = gather_from_sequence_parallel_region(probs, group=self.tp_ep_group)
+                # Note that this allgather spans the communication domain of TP*EP.
+                #  [(S/TP)*B, H] -> [((S/TP)*B)*(TP*EP), H] = [S*B*EP, H]
+                hidden_states = gather_from_sequence_parallel_region(
+                    hidden_states, group=self.tp_ep_group, use_global_buffer=True
+                )
 
         return hidden_states, probs
 
@@ -342,11 +357,24 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         originally held them. This completes the expert processing
         communication pattern and prepares tokens for final unpermutation.
         """
-        # Unpermute the tokens across ranks.
-        if self.tp_size > 1 or self.ep_size > 1:
-            hidden_states = reduce_scatter_to_sequence_parallel_region(
-                hidden_states.to(self.local_probs.dtype), group=self.tp_ep_group
-            ).to(hidden_states.dtype)
+        combine_gate = prepare_trace_scope("ep-allgather-combine")
+        combine_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-reduce-scatter",
+                dispatcher_name="allgather",
+                group=self.tp_ep_group,
+            )
+            if combine_gate is not None
+            else None
+        )
+        with open_trace_scope(combine_gate, "ep-allgather-combine", ctx=combine_context):
+            # Unpermute the tokens across ranks.
+            if self.tp_size > 1 or self.ep_size > 1:
+                hidden_states = reduce_scatter_to_sequence_parallel_region(
+                    hidden_states.to(self.local_probs.dtype), group=self.tp_ep_group
+                ).to(hidden_states.dtype)
         return hidden_states
 
     def combine_postprocess(self, hidden_states):
@@ -675,16 +703,29 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             A tuple of tokens and probabilities after All-to-All.
         """
 
-        # Perform expert parallel AlltoAll communication
-        self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
-            "before_ep_alltoall", self.tokens_per_expert
+        dispatch_gate = prepare_trace_scope("ep-alltoall-dispatch")
+        dispatch_context = (
+            ep_collective_trace_context(
+                self,
+                (permutated_local_input_tokens, permuted_probs),
+                comm_type="ep-alltoall",
+                dispatcher_name="alltoall",
+                group=self.ep_group,
+            )
+            if dispatch_gate is not None
+            else None
         )
-        global_input_tokens = all_to_all(
-            self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
-        )
-        global_probs = all_to_all(
-            self.ep_group, permuted_probs, self.output_splits, self.input_splits
-        )
+        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", ctx=dispatch_context):
+            # Perform expert parallel AlltoAll communication
+            self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
+                "before_ep_alltoall", self.tokens_per_expert
+            )
+            global_input_tokens = all_to_all(
+                self.ep_group, permutated_local_input_tokens, self.output_splits, self.input_splits
+            )
+            global_probs = all_to_all(
+                self.ep_group, permuted_probs, self.output_splits, self.input_splits
+            )
 
         return global_input_tokens, global_probs
 
@@ -821,11 +862,24 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Returns:
             Tokens after the All-to-All communication for combining.
         """
-        # Perform expert parallel AlltoAll communication
-        # hidden_states: [SEQL, H] -> [SEQL, H/TP]
-        permutated_local_input_tokens = all_to_all(
-            self.ep_group, hidden_states, self.input_splits, self.output_splits
+        combine_gate = prepare_trace_scope("ep-alltoall-combine")
+        combine_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-alltoall",
+                dispatcher_name="alltoall",
+                group=self.ep_group,
+            )
+            if combine_gate is not None
+            else None
         )
+        with open_trace_scope(combine_gate, "ep-alltoall-combine", ctx=combine_context):
+            # Perform expert parallel AlltoAll communication
+            # hidden_states: [SEQL, H] -> [SEQL, H/TP]
+            permutated_local_input_tokens = all_to_all(
+                self.ep_group, hidden_states, self.input_splits, self.output_splits
+            )
         return permutated_local_input_tokens
 
     def combine_postprocess(self, permutated_local_input_tokens):
@@ -884,7 +938,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if not self.drop_and_pad:
             if point == self.cuda_dtoh_point:
                 # Move all possible GPU tensors to CPU at self.cuda_dtoh_point.
-                on_side_stream = cur_platform.current_stream() != self.cuda_dtoh_stream  # FlagScale Add
+                on_side_stream = (
+                    cur_platform.current_stream() != self.cuda_dtoh_stream
+                )  # FlagScale Add
                 if on_side_stream:
                     # FlagScale Begin
                     self.cuda_dtoh_stream.wait_stream(cur_platform.current_stream())
@@ -1545,3 +1601,15 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             The final MoE layer output reshaped to its original dimensions.
         """
         return hidden_states.view(self.hidden_shape)
+
+
+setattr(
+    MoEAlltoAllTokenDispatcher.token_dispatch, "__megatron_trace_event__", "ep-alltoall-dispatch"
+)
+setattr(MoEAlltoAllTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-alltoall-combine")
+setattr(
+    MoEAllGatherTokenDispatcher.token_dispatch, "__megatron_trace_event__", "ep-allgather-dispatch"
+)
+setattr(
+    MoEAllGatherTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-allgather-combine"
+)
