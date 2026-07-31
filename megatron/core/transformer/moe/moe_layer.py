@@ -457,7 +457,7 @@ class MoELayer(BaseMoELayer):
         dispatch_context = (
             dispatch_trace_context(self, hidden_states) if dispatch_gate is not None else None
         )
-        with open_trace_scope(dispatch_gate, "moe-dispatch", ctx=dispatch_context):
+        with open_trace_scope(dispatch_gate, "moe-dispatch", attrs=dispatch_context):
             return self.token_dispatcher.token_dispatch(hidden_states, probs)
 
     @maybe_skip_or_early_return_by_cudagraph("shared_experts_compute")
@@ -474,7 +474,7 @@ class MoELayer(BaseMoELayer):
                 shared_experts_trace_context(self) if shared_expert_gate is not None else None
             )
             with open_trace_scope(
-                shared_expert_gate, "moe-shared-expert", ctx=shared_expert_context
+                shared_expert_gate, "moe-shared-expert", attrs=shared_expert_context
             ):
                 # Compute the shared expert separately when not overlapped with communication.
                 if self.shared_experts_recompute:
@@ -510,7 +510,7 @@ class MoELayer(BaseMoELayer):
         experts_context = experts_trace_context(self) if experts_gate is not None else None
         experts_workload = expert_workload(tokens_per_expert) if experts_gate is not None else None
         with open_trace_scope(
-            experts_gate, "moe-experts", ctx=experts_context, slots=EXPERT_WORKLOAD_SLOTS
+            experts_gate, "moe-experts", attrs=experts_context, slots=EXPERT_WORKLOAD_SLOTS
         ) as experts_scope:
             if experts_workload is not None:
                 set_trace_fields(experts_scope, experts_workload)
@@ -539,7 +539,7 @@ class MoELayer(BaseMoELayer):
         """
         combine_gate = prepare_trace_scope("moe-combine")
         combine_context = combine_trace_context(self, output) if combine_gate is not None else None
-        with open_trace_scope(combine_gate, "moe-combine", ctx=combine_context):
+        with open_trace_scope(combine_gate, "moe-combine", attrs=combine_context):
             output = self.token_dispatcher.token_combine(output)
         return output
 

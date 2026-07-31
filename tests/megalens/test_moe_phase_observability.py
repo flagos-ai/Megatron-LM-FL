@@ -326,7 +326,7 @@ def _shared_expert_fixture(
 
 
 def _event_fields(record: dict[str, Any]) -> dict[str, Any]:
-    return {**record["ctx"], **record["values"]}
+    return {**record["ctx"], **record["attrs"], **record["values"]}
 
 
 def test_router_emits_target_workload_and_uses_routing_boundary() -> None:
@@ -349,7 +349,8 @@ def test_router_emits_target_workload_and_uses_routing_boundary() -> None:
     ]
 
     record = sink.records[0]
-    assert record["ctx"] == {
+    assert record["ctx"] == {}
+    assert record["attrs"] == {
         "layer": 7,
         "num_experts": 4,
         "num_local_experts": 2,
@@ -838,7 +839,8 @@ def test_shared_expert_emits_source_fields_around_only_the_module_call() -> None
     assert output is shared_experts.output
     assert sink.gate_calls == ["moe-shared-expert"]
     assert sink.transitions == [("B", "moe-shared-expert", None), ("E", "moe-shared-expert", None)]
-    assert sink.records[0]["ctx"] == {"layer": 7, "ep_size": 2}
+    assert sink.records[0]["ctx"] == {}
+    assert sink.records[0]["attrs"] == {"layer": 7, "ep_size": 2}
     assert sink.records[0]["slots"] == ()
     assert events == [("shared-experts", ("moe-shared-expert",), hidden_states)]
 
@@ -1084,7 +1086,13 @@ def test_experts_emit_local_workload_around_only_the_expert_call(
     assert experts.output is events[3][2]
 
     record = sink.records[0]
-    assert record["ctx"] == {"layer": 7, "ep_size": 2, "num_experts": 4, "num_local_experts": 2}
+    assert record["ctx"] == {}
+    assert record["attrs"] == {
+        "layer": 7,
+        "ep_size": 2,
+        "num_experts": 4,
+        "num_local_experts": 2,
+    }
     assert record["slots"] == EXPERT_WORKLOAD_SLOTS
     assert record["values"] == {
         "routed_tokens": 4,
@@ -1260,7 +1268,7 @@ def test_dispatch_postprocess_error_precedes_the_expert_scope() -> None:
     assert sink.transitions == []
 
 
-def test_real_adapter_places_static_fields_on_begin_and_workload_on_end() -> None:
+def test_real_adapter_places_source_fields_on_end() -> None:
     tracer = Tracer()
     tracer.global_args = SimpleNamespace(trace=True, trace_mode=1, trace_granularity="full")
     tracer.iter = 1
@@ -1283,18 +1291,31 @@ def test_real_adapter_places_static_fields_on_begin_and_workload_on_end() -> Non
     TopKRouter.forward(router, input_tensor)
 
     assert [tick[:2] for tick in ticks] == [("moe-router", "B"), ("moe-router", "E")]
-    assert ticks[0][2] == {
+    assert ticks[0][2] == {}
+    assert ticks[1][2] == {
         "layer": 7,
         "num_experts": 4,
         "num_local_experts": 2,
         "ep_size": 2,
         "router_topk": 2,
+        "aux_loss": pytest.approx(1.25),
+        "z_loss": pytest.approx(0.75),
+        "num_tokens": 4,
+        "routed_tokens": 6,
+        "dropped_tokens": None,
+        "drop_rate": None,
+        "expert_cv": pytest.approx(math.sqrt(1.25) / 1.5),
+        "top1_expert_share": pytest.approx(0.5),
+        "routing_entropy": pytest.approx(
+            (
+                -(0.8 * math.log(0.8) + 0.2 * math.log(0.2))
+                - (0.6 * math.log(0.6) + 0.4 * math.log(0.4))
+                - (0.7 * math.log(0.7))
+                - (0.5 * math.log(0.5))
+            )
+            / 4
+        ),
     }
-    assert ticks[1][2]["aux_loss"] == pytest.approx(1.25)
-    assert ticks[1][2]["z_loss"] == pytest.approx(0.75)
-    assert ticks[1][2]["num_tokens"] == 4
-    assert ticks[1][2]["routed_tokens"] == 6
-    assert ticks[1][2]["dropped_tokens"] is None
 
 
 def test_real_adapter_records_shared_expert_source_fields() -> None:
@@ -1313,8 +1334,8 @@ def test_real_adapter_records_shared_expert_source_fields() -> None:
 
     assert output is shared_experts.output
     assert ticks == [
-        ("moe-shared-expert", "B", {"layer": 7, "ep_size": 2}),
-        ("moe-shared-expert", "E", {}),
+        ("moe-shared-expert", "B", {}),
+        ("moe-shared-expert", "E", {"layer": 7, "ep_size": 2}),
     ]
 
 
