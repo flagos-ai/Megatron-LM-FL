@@ -18,6 +18,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
+from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
@@ -33,6 +34,11 @@ def _events(*names: str) -> tuple[manifest.EventRequirement, ...]:
 
 
 _PP2_EVENTS = _events(
+    "forward-step",
+    "decoder",
+    "decoder-postprocess",
+    "output_layer",
+    "loss",
     "p2p-launch",
     "p2p-batch-device-sync",
     "send-forward",
@@ -111,7 +117,24 @@ def _dp_events(profile: str) -> tuple[manifest.EventRequirement, ...]:
 
 PROFILES: Mapping[str, manifest.TraceProfile] = {
     "pp1": manifest.TraceProfile("pp1", 1),
-    "pp2": manifest.TraceProfile("pp2", 2, _PP2_EVENTS),
+    "gpt-eager-full": manifest.TraceProfile(
+        "gpt-eager-full",
+        1,
+        _events(
+            "forward-step",
+            "decoder",
+            "decoder-postprocess",
+            "output_layer",
+            "loss",
+        ),
+        gpt_probe_contract.validate_gpt_pp1_model_phases,
+    ),
+    "pp2": manifest.TraceProfile(
+        "pp2",
+        2,
+        _PP2_EVENTS,
+        gpt_probe_contract.validate_gpt_pp2_model_phases,
+    ),
     "ep2-alltoall": manifest.TraceProfile("ep2-alltoall", 2, _ep_events("alltoall")),
     "ep2-allgather": manifest.TraceProfile("ep2-allgather", 2, _ep_events("allgather")),
     "ep2-fine-grained": manifest.TraceProfile(
@@ -142,6 +165,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
 
 _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
+    "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_pp2_smoke": "pp2",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",

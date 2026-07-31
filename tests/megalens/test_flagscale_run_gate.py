@@ -13,6 +13,7 @@ from tests.test_utils.runners import run_flagscale_megalens as gate
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
+    "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
@@ -48,6 +49,69 @@ def _write_rank_trace(run_dir: Path, rank: int, event: str = "forward") -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_gpt_phase_trace(
+    trace_root: Path,
+    *,
+    rank: int,
+    pipeline_rank: int,
+    include_postprocess: bool,
+) -> None:
+    trace_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    timestamp = 0
+
+    def event(name: str, phase: str) -> None:
+        nonlocal timestamp
+        timestamp += 1
+        rows.append(
+            {
+                "name": name,
+                "ph": phase,
+                "rel_ts": timestamp,
+                "dev": rank,
+                "g_rk": rank,
+                "dp_rk": 0,
+                "pp_rk": pipeline_rank,
+                "tp_rk": 0,
+            }
+        )
+
+    for iteration in (1, 2):
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "B",
+                "pad_before": 0,
+                "iteration": iteration,
+            }
+        )
+        event("forward-step", "B")
+        event("decoder", "B")
+        event("decoder", "E")
+        event("decoder-postprocess", "B")
+        if include_postprocess:
+            event("output_layer", "B")
+            event("output_layer", "E")
+            event("loss", "B")
+            event("loss", "E")
+        event("decoder-postprocess", "E")
+        event("forward-step", "E")
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "E",
+                "iteration": iteration,
+                "duration_wall": timestamp,
+            }
+        )
+
+    path = (
+        trace_root
+        / f"benchmark-global-{rank}-data-0-pipeline-{pipeline_rank}-tensor-0.json"
+    )
+    path.write_text(json.dumps(rows), encoding="utf-8")
 
 
 def _invoke(
@@ -125,6 +189,51 @@ def test_raw_framework_event_requirements_use_the_enclosing_iteration() -> None:
 
     assert "iteration" not in required_fields
     assert {"g_rk", "dp_rk", "pp_rk", "tp_rk"} <= required_fields
+
+
+def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
+    tmp_path: Path,
+) -> None:
+    pp1_root = tmp_path / "pp1"
+    _write_gpt_phase_trace(
+        pp1_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+    )
+    assert gate.PROFILES["gpt-eager-full"].contract(pp1_root) == ()
+
+    pp2_root = tmp_path / "pp2"
+    _write_gpt_phase_trace(
+        pp2_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=False,
+    )
+    _write_gpt_phase_trace(
+        pp2_root,
+        rank=1,
+        pipeline_rank=1,
+        include_postprocess=True,
+    )
+    assert gate.PROFILES["pp2"].contract(pp2_root) == ()
+
+    invalid_root = tmp_path / "invalid-pp2"
+    _write_gpt_phase_trace(
+        invalid_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+    )
+    _write_gpt_phase_trace(
+        invalid_root,
+        rank=1,
+        pipeline_rank=1,
+        include_postprocess=True,
+    )
+    failures = gate.PROFILES["pp2"].contract(invalid_root)
+    assert failures
+    assert {failure.code for failure in failures} == {"trace.gpt.count"}
 
 
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
