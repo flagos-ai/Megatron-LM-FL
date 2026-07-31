@@ -212,6 +212,25 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         ),
         dp_probe_contract.validate_dp_distopt_overlap,
     ),
+    "dp4-distopt-multi-instance-overlap": manifest.TraceProfile(
+        "dp4-distopt-multi-instance-overlap",
+        4,
+        (
+            *_dp_events("distopt"),
+            manifest.EventRequirement("dp-allreduce", _DP_FIELDS, "B"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "dp-param-sync-complete",
+                (*_COMMON_FIELDS, "operation_id", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_multi_instance_distopt_overlap,
+    ),
     "dp8-standard-ddp": manifest.TraceProfile(
         "dp8-standard-ddp", 8, _dp_events("standard-ddp")
     ),
@@ -244,6 +263,9 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_dp2_distopt_smoke": "dp2-distopt",
     "flagscale_single_node_dp2_distopt_overlap_smoke": "dp2-distopt-overlap",
+    "flagscale_single_node_dp4_distopt_multi_instance_overlap_smoke": (
+        "dp4-distopt-multi-instance-overlap"
+    ),
     "flagscale_single_node_dp8_standard_smoke": "dp8-standard-ddp",
     "flagscale_single_node_dp8_distopt_smoke": "dp8-distopt",
     "flagscale_single_node_te_cuda_graph_attn_smoke": "te-attn-cuda-graph",
@@ -303,6 +325,10 @@ def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
         if args.ep_profile == "fine-grained":
             return PROFILES["ep2-fine-grained"]
         return PROFILES[f"ep2-{args.ep_dispatcher or 'alltoall'}"]
+    if args.topology == "dp4":
+        return PROFILES[
+            f"dp4-{args.dp_profile or 'distopt-multi-instance-overlap'}"
+        ]
     if args.topology in {"dp2", "dp8"}:
         return PROFILES[f"{args.topology}-{args.dp_profile or 'standard-ddp'}"]
     return PROFILES["pp1"]
@@ -452,7 +478,9 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--profile", choices=tuple(PROFILES))
     parser.add_argument("--image", required=True)
     parser.add_argument(
-        "--topology", choices=("pp1", "pp2", "ep2", "dp2", "dp8"), default=None
+        "--topology",
+        choices=("pp1", "pp2", "ep2", "dp2", "dp4", "dp8"),
+        default=None,
     )
     parser.add_argument("--ep-dispatcher", choices=("alltoall", "allgather"))
     parser.add_argument("--ep-profile", choices=("standard", "fine-grained"))
@@ -463,6 +491,7 @@ def _parser() -> argparse.ArgumentParser:
             "standard-ddp-overlap",
             "distopt",
             "distopt-overlap",
+            "distopt-multi-instance-overlap",
         ),
     )
     parser.add_argument(

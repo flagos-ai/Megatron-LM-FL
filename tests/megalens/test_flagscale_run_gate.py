@@ -30,6 +30,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_dp2_distopt_overlap_smoke.yaml": (
         "dp2-distopt-overlap"
     ),
+    "flagscale_single_node_dp4_distopt_multi_instance_overlap_smoke.yaml": (
+        "dp4-distopt-multi-instance-overlap"
+    ),
     "flagscale_single_node_dp8_standard_smoke.yaml": "dp8-standard-ddp",
     "flagscale_single_node_dp8_distopt_smoke.yaml": "dp8-distopt",
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
@@ -417,6 +420,49 @@ def test_dp2_overlap_profiles_only_enable_the_selected_overlap_route(
 
     assert overlap == baseline
     assert gate.PROFILES[profile_name].contract is contract
+
+
+def test_dp4_multi_instance_profile_only_expands_the_dp_overlap_topology() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_dp2_distopt_overlap_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    multi_instance = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_dp4_distopt_multi_instance_overlap_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = multi_instance["experiment"]["exp_name"]
+    baseline["experiment"]["runner"]["nproc_per_node"] = 4
+    baseline["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    baseline["train"]["system"]["num_distributed_optimizer_instances"] = 2
+    baseline["train"]["model"]["global_batch_size"] = 4
+
+    assert multi_instance == baseline
+    assert (
+        gate.PROFILES["dp4-distopt-multi-instance-overlap"].contract
+        is dp_probe_contract.validate_dp_multi_instance_distopt_overlap
+    )
+
+    args = gate._parser().parse_args(
+        (
+            "--run-dir",
+            "unused",
+            "--input-config",
+            "unknown.yaml",
+            "--mode",
+            "trace-on",
+            "--image",
+            "example/flagscale:dev",
+            "--topology",
+            "dp4",
+        )
+    )
+    assert gate._profile_from_arguments(args).name == (
+        "dp4-distopt-multi-instance-overlap"
+    )
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
