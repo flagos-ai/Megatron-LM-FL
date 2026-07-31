@@ -151,6 +151,7 @@ from megatron.core.pipeline_parallel.utils import (
     is_vp_last_stage,
 )
 from megatron.core.optimizer import get_mup_config_overrides, get_standard_config_overrides
+from megatron.core.observability import trace_scope
 from megatron.training.checkpointing import load_checkpoint
 from megatron.training.checkpointing import save_checkpoint, save_grads
 from megatron.training.checkpointing import checkpoint_exists
@@ -1904,7 +1905,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+    with trace_scope('optimizer'):
+        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
     # get max attention logit for logging and run clip_qk()
     # Part of MuonClip Optimizer step
