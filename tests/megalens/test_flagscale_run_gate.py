@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import run_flagscale_megalens as gate
@@ -15,6 +16,7 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
+    "flagscale_single_node_pp2_unbatched_smoke.yaml": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_dp2_standard_smoke.yaml": "dp2-standard-ddp",
@@ -211,6 +213,28 @@ def test_raw_framework_event_requirements_use_the_enclosing_iteration() -> None:
 
     assert "iteration" not in required_fields
     assert {"g_rk", "dp_rk", "pp_rk", "tp_rk"} <= required_fields
+
+
+def test_unbatched_pp2_profile_uses_vpp_without_unsupported_p2p_cli_keys() -> None:
+    config = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_pp2_unbatched_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    system = config["train"]["system"]
+    model = config["train"]["model"]
+
+    assert system["pipeline_model_parallel_size"] == 2
+    assert system["num_layers_per_virtual_pipeline_stage"] == 1
+    assert system["microbatch_group_size_per_virtual_pipeline_stage"] == 2
+    assert {
+        "batch_p2p_comm",
+        "batch_p2p_sync",
+        "no_overlap_p2p_communication",
+    }.isdisjoint(system)
+    assert model["num_layers"] == 4
+    assert model["micro_batch_size"] == 1
+    assert model["global_batch_size"] == 2
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(

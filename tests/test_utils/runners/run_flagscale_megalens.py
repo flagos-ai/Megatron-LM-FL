@@ -49,6 +49,13 @@ _PP2_EVENTS = _events(
     "optimizer-step",
     "optimizer-postprocess",
 )
+_PP2_UNBATCHED_EVENTS = _events(
+    "p2p-launch",
+    "send-forward",
+    "recv-forward",
+    "send-backward",
+    "recv-backward",
+)
 _EP_COMMON_EVENTS = (
     manifest.EventRequirement(
         "moe-router",
@@ -141,6 +148,11 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _PP2_EVENTS,
         gpt_probe_contract.validate_gpt_pp2_training_phases,
     ),
+    "pp2-unbatched": manifest.TraceProfile(
+        "pp2-unbatched",
+        2,
+        _PP2_UNBATCHED_EVENTS,
+    ),
     "ep2-alltoall": manifest.TraceProfile("ep2-alltoall", 2, _ep_events("alltoall")),
     "ep2-allgather": manifest.TraceProfile("ep2-allgather", 2, _ep_events("allgather")),
     "ep2-fine-grained": manifest.TraceProfile(
@@ -173,6 +185,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_pp2_smoke": "pp2",
+    "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_dp2_standard_smoke": "dp2-standard-ddp",
