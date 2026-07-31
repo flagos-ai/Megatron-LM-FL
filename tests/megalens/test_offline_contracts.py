@@ -1,0 +1,339 @@
+from __future__ import annotations
+
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from megatron.megalens.data_loader import TraceDataLoader
+from megatron.megalens.trace_aggregate import (
+    Event,
+    Iteration,
+    Rank,
+    aggregate_benchmark_data,
+    benchmark_to_chrome_trace,
+    read_benchmark_file,
+    transform,
+)
+
+
+def _event(rank: Rank, iteration_id: int, suffix: str) -> Event:
+    return Event(
+        rel_ts=1_000,
+        rank=rank,
+        name=f"forward-rank-{rank.data}-iter-{iteration_id}-{suffix}",
+        ph="B",
+        attrs={
+            "g_rk": rank.global_rank if rank.global_rank is not None else rank.data,
+            "dp_rk": rank.data,
+            "pp_rk": rank.pipeline,
+            "tp_rk": rank.tensor,
+        },
+    )
+
+
+def _iteration(
+    rank: Rank, iteration_id: int | None, *, pad_before: int = 0, duration: int = 10_000
+) -> Iteration:
+    event_id = iteration_id if iteration_id is not None else -1
+    return Iteration(
+        pad_before=pad_before,
+        events=[_event(rank, event_id, "begin")],
+        duration=duration,
+        iteration_id=iteration_id,
+        ranks=(rank,),
+    )
+
+
+def _raw_iteration(rank: Rank, iteration_id: int) -> list[dict[str, object]]:
+    attrs = {
+        "g_rk": rank.global_rank if rank.global_rank is not None else rank.data,
+        "dp_rk": rank.data,
+        "pp_rk": rank.pipeline,
+        "tp_rk": rank.tensor,
+    }
+    return [
+        {"name": "iteration", "ph": "B", "pad_before": 0, "iteration": iteration_id},
+        {"name": "forward", "ph": "B", "rel_ts": 1_000, **attrs},
+        {"name": "forward", "ph": "E", "rel_ts": 5_000, **attrs},
+        {"name": "iteration", "ph": "E", "duration_wall": 10_000, "iteration": iteration_id},
+    ]
+
+
+def _write_rank_trace(directory: Path, rank: Rank, iteration_ids: list[int]) -> None:
+    rows = [row for iteration_id in iteration_ids for row in _raw_iteration(rank, iteration_id)]
+    global_prefix = f"global-{rank.global_rank}-" if rank.global_rank is not None else ""
+    path = directory / (
+        f"benchmark-{global_prefix}data-{rank.data}-pipeline-{rank.pipeline}-"
+        f"tensor-{rank.tensor}.json"
+    )
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+
+def test_aggregate_joins_ranks_by_iteration_id_and_preserves_id() -> None:
+    rank0 = Rank(data=0, pipeline=0, tensor=0)
+    rank1 = Rank(data=1, pipeline=0, tensor=0)
+    contents = [
+        [_iteration(rank0, 138), _iteration(rank0, 137, pad_before=100, duration=1_000)],
+        [_iteration(rank1, 138), _iteration(rank1, 137, pad_before=300, duration=900)],
+    ]
+
+    iterations, dp, pp, tp = aggregate_benchmark_data(contents)
+
+    assert [iteration.iteration_id for iteration in iterations] == [137, 138]
+    assert (dp, pp, tp) == (2, 1, 1)
+    assert {event.name for event in iterations[0].events} == {
+        "forward-rank-0-iter-137-begin",
+        "forward-rank-1-iter-137-begin",
+    }
+    rank1_event = next(event for event in iterations[0].events if event.rank == rank1)
+    assert rank1_event.rel_ts == 1_200
+    assert iterations[0].duration == 1_100
+
+
+@pytest.mark.parametrize(
+    ("contents", "message"),
+    [
+        (
+            [[_iteration(Rank(0, 0, 0), 137)], [_iteration(Rank(1, 0, 0), 138)]],
+            "Mismatched iteration IDs",
+        ),
+        (
+            [[_iteration(Rank(0, 0, 0), 137), _iteration(Rank(0, 0, 0), 137)]],
+            "Duplicate iteration ID 137",
+        ),
+        (
+            [[_iteration(Rank(0, 0, 0), 137)], [_iteration(Rank(1, 0, 0), None)]],
+            "present for only part",
+        ),
+    ],
+)
+def test_aggregate_rejects_ambiguous_iteration_alignment(
+    contents: list[list[Iteration]], message: str
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        aggregate_benchmark_data(contents)
+
+
+def test_aggregate_keeps_legacy_position_alignment_when_all_ids_are_absent() -> None:
+    with pytest.warns(RuntimeWarning, match="file position"):
+        iterations, _, _, _ = aggregate_benchmark_data(
+            [[_iteration(Rank(0, 0, 0), None)], [_iteration(Rank(1, 0, 0), None)]]
+        )
+
+    assert len(iterations) == 1
+    assert iterations[0].iteration_id is None
+
+
+def test_directory_loader_converts_raw_rank_traces_end_to_end(tmp_path: Path) -> None:
+    _write_rank_trace(tmp_path, Rank(0, 0, 0), [137, 138])
+    _write_rank_trace(tmp_path, Rank(1, 0, 0), [138, 137])
+
+    loader = TraceDataLoader.from_directory(tmp_path)
+
+    rank0_forward = loader.get_events_by_name("forward", rank=0, iteration=137)
+    rank1_forward = loader.get_events_by_name("forward", rank=1, iteration=137)
+    assert len(rank0_forward) == 1
+    assert len(rank1_forward) == 1
+    assert rank0_forward[0].dur == 4
+    assert rank1_forward[0].dur == 4
+    assert loader.get_ranks() == [0, 1]
+    assert loader.topology == {0: {"dp": 0, "pp": 0, "tp": 0}, 1: {"dp": 1, "pp": 0, "tp": 0}}
+
+
+def test_global_rank_shards_keep_duplicate_parallel_coordinates_distinct(tmp_path: Path) -> None:
+    rank0 = Rank(0, 0, 0, global_rank=0)
+    rank1 = Rank(0, 0, 0, global_rank=1)
+    _write_rank_trace(tmp_path, rank0, [137])
+    _write_rank_trace(tmp_path, rank1, [137])
+
+    loader = TraceDataLoader.from_directory(tmp_path)
+
+    assert loader.get_ranks() == [0, 1]
+    assert loader.topology == {0: {"dp": 0, "pp": 0, "tp": 0}, 1: {"dp": 0, "pp": 0, "tp": 0}}
+
+
+def test_empty_inner_iteration_preserves_rank_identity(tmp_path: Path) -> None:
+    for global_rank in (0, 1):
+        rank = Rank(0, 0, 0, global_rank=global_rank)
+        rows = [_raw_iteration(rank, 137)[0], _raw_iteration(rank, 137)[-1]]
+        global_prefix = f"global-{global_rank}-"
+        path = tmp_path / (f"benchmark-{global_prefix}data-0-pipeline-0-tensor-0.json")
+        path.write_text(json.dumps(rows), encoding="utf-8")
+
+    loader = TraceDataLoader.from_directory(tmp_path)
+
+    assert loader.get_ranks() == [0, 1]
+    assert len(loader.get_events_by_name("iteration", iteration=137)) == 2
+
+
+def test_directory_loader_keeps_post_transform_shard_compatibility(tmp_path: Path) -> None:
+    path = tmp_path / "benchmark-data-0-pipeline-0-tensor-0.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "name": "forward",
+                    "ph": "X",
+                    "ts": 10,
+                    "dur": 5,
+                    "pid": 0,
+                    "args": {"iteration": 137, "dp_rk": 0, "pp_rk": 0, "tp_rk": 0},
+                }
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    loader = TraceDataLoader.from_directory(tmp_path)
+
+    assert len(loader.get_events_by_name("forward", rank=0, iteration=137)) == 1
+
+
+def test_directory_loader_fails_when_no_rank_trace_exists(tmp_path: Path) -> None:
+    with pytest.raises(FileNotFoundError, match=r"No benchmark-\*\.json files"):
+        TraceDataLoader.from_directory(tmp_path)
+
+
+def test_reader_rejects_orphan_kernel_and_unclosed_iteration() -> None:
+    rank = Rank(0, 0, 0)
+    orphan_kernel = _raw_iteration(rank, 137) + [
+        {"record_type": "cuda_kernel", "name": "kernel", "iteration": 999}
+    ]
+    with pytest.raises(ValueError, match="unknown iteration ID: 999"):
+        read_benchmark_file(rank, json.dumps(orphan_kernel))
+
+    unclosed = _raw_iteration(rank, 137)[:-1]
+    with pytest.raises(ValueError, match="no matching end"):
+        read_benchmark_file(rank, json.dumps(unclosed))
+
+
+def test_reader_rejects_conflicting_iteration_and_rank_identity() -> None:
+    rank = Rank(0, 0, 0, global_rank=3)
+    mismatched_end = _raw_iteration(rank, 137)
+    mismatched_end[-1]["iteration"] = 138
+    with pytest.raises(ValueError, match="boundary IDs do not match"):
+        read_benchmark_file(rank, json.dumps(mismatched_end))
+
+    mismatched_inner = _raw_iteration(rank, 137)
+    mismatched_inner[1]["iteration"] = 999
+    with pytest.raises(ValueError, match="enclosing iteration is 137"):
+        read_benchmark_file(rank, json.dumps(mismatched_inner))
+
+    mismatched_rank = _raw_iteration(rank, 137)
+    mismatched_rank[1]["g_rk"] = 4
+    with pytest.raises(ValueError, match="shard identity requires 3"):
+        read_benchmark_file(rank, json.dumps(mismatched_rank))
+
+
+def test_canonical_iteration_overrides_event_attrs() -> None:
+    rank = Rank(0, 0, 0, global_rank=0)
+    attrs = {"g_rk": 0, "dp_rk": 0, "pp_rk": 0, "tp_rk": 0, "iteration": 999}
+    iteration = Iteration(
+        pad_before=0,
+        events=[
+            Event(1_000, rank, "forward", "B", dict(attrs)),
+            Event(5_000, rank, "forward", "E", dict(attrs)),
+        ],
+        duration=10_000,
+        iteration_id=137,
+        ranks=(rank,),
+    )
+
+    traces = benchmark_to_chrome_trace([iteration])
+    forward = next(trace for trace in traces if trace.get("name") == "forward")
+
+    assert forward["args"]["iteration"] == 137
+
+
+def test_counter_and_kernel_keep_iteration_without_metric_pollution(tmp_path: Path) -> None:
+    rank = Rank(0, 0, 0, global_rank=0)
+    rows = _raw_iteration(rank, 137)
+    rows.insert(
+        -1,
+        {
+            "name": "GPU_Metrics",
+            "ph": "C",
+            "rel_ts": 2_000,
+            "g_rk": 0,
+            "args": {"SM_Util_pct": 42.0},
+        },
+    )
+    rows.append(
+        {
+            "record_type": "cuda_kernel",
+            "name": "kernel",
+            "ph": "X",
+            "iteration": 137,
+            "g_rk": 0,
+            "dp_rk": 0,
+            "pp_rk": 0,
+            "tp_rk": 0,
+            "start_us": 2,
+            "end_us": 7,
+            "duration_us": 5,
+        }
+    )
+    path = tmp_path / "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    loader = TraceDataLoader.from_directory(tmp_path)
+
+    assert loader.counter_samples[0].iteration == 137
+    assert loader.counter_samples[0].metrics == {"SM_Util_pct": 42.0}
+    assert loader.kernel_events[0].iteration == 137
+    assert loader.kernel_events[0].duration_us == 5
+
+
+def test_transform_rejects_unbalanced_or_mismatched_spans() -> None:
+    args = {"dp_rk": 0, "pp_rk": 0, "tp_rk": 0}
+    begin = {"name": "forward", "ph": "B", "pid": 0, "ts": 1, "args": args}
+
+    with pytest.raises(ValueError, match="no matching end"):
+        transform([begin.copy()])
+
+    wrong_end = {"name": "backward", "ph": "E", "pid": 0, "ts": 2, "args": args}
+    with pytest.raises(ValueError, match="closes begin 'forward'"):
+        transform([begin.copy(), wrong_end])
+
+    early_end = {"name": "forward", "ph": "E", "pid": 0, "ts": 0, "args": args}
+    with pytest.raises(ValueError, match="precedes its begin"):
+        transform([begin.copy(), early_end])
+
+    wrong_thread = {"name": "forward", "ph": "E", "pid": 0, "tid": 1, "ts": 2, "args": args}
+    with pytest.raises(ValueError, match="pid/tid"):
+        transform([begin.copy(), wrong_thread])
+
+
+def test_trace_aggregate_import_has_no_dependency_or_logging_side_effect() -> None:
+    script = """
+import builtins
+import logging
+
+blocked = {"numpy", "pytz"}
+real_import = builtins.__import__
+
+def guarded_import(name, *args, **kwargs):
+    if name.split(".", 1)[0] in blocked:
+        raise RuntimeError(f"unexpected dependency import: {name}")
+    return real_import(name, *args, **kwargs)
+
+builtins.__import__ = guarded_import
+root_logger = logging.getLogger()
+handlers_before = tuple(root_logger.handlers)
+import megatron.megalens.trace_aggregate
+handlers_after = tuple(root_logger.handlers)
+if handlers_after != handlers_before:
+    raise RuntimeError("trace_aggregate configured the root logger during import")
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
