@@ -277,7 +277,7 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
             if dispatch_gate is not None
             else None
         )
-        with open_trace_scope(dispatch_gate, "ep-allgather-dispatch", ctx=dispatch_context):
+        with open_trace_scope(dispatch_gate, "ep-allgather-dispatch", attrs=dispatch_context):
             # Permute the tokens across the expert parallel devices.
             if self.tp_size > 1 or self.ep_size > 1:
                 ## local_indices calculation
@@ -369,7 +369,7 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
             if combine_gate is not None
             else None
         )
-        with open_trace_scope(combine_gate, "ep-allgather-combine", ctx=combine_context):
+        with open_trace_scope(combine_gate, "ep-allgather-combine", attrs=combine_context):
             # Unpermute the tokens across ranks.
             if self.tp_size > 1 or self.ep_size > 1:
                 hidden_states = reduce_scatter_to_sequence_parallel_region(
@@ -715,7 +715,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             if dispatch_gate is not None
             else None
         )
-        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", ctx=dispatch_context):
+        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", attrs=dispatch_context):
             # Perform expert parallel AlltoAll communication
             self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
                 "before_ep_alltoall", self.tokens_per_expert
@@ -874,7 +874,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             if combine_gate is not None
             else None
         )
-        with open_trace_scope(combine_gate, "ep-alltoall-combine", ctx=combine_context):
+        with open_trace_scope(combine_gate, "ep-alltoall-combine", attrs=combine_context):
             # Perform expert parallel AlltoAll communication
             # hidden_states: [SEQL, H] -> [SEQL, H/TP]
             permutated_local_input_tokens = all_to_all(
@@ -1556,7 +1556,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             if dispatch_gate is not None
             else None
         )
-        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", ctx=dispatch_context):
+        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", attrs=dispatch_context):
             return _dispatch_body()
 
     def dispatch_postprocess(self, hidden_states: torch.Tensor, probs: torch.Tensor):
@@ -1620,7 +1620,7 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
             if combine_gate is not None
             else None
         )
-        with open_trace_scope(combine_gate, "ep-alltoall-combine", ctx=combine_context):
+        with open_trace_scope(combine_gate, "ep-alltoall-combine", attrs=combine_context):
             return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
 
     def combine_postprocess(self, hidden_states: torch.Tensor):

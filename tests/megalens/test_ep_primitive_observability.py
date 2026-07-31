@@ -36,7 +36,7 @@ class _RecordingScope:
         return False
 
     def get(self, key: str) -> Any | None:
-        return self.record["ctx"].get(key)
+        return self.record.get("ctx", {}).get(key)
 
     def set(self, key: str, value: Any) -> bool:
         return False
@@ -62,7 +62,11 @@ class _RecordingSink:
         slots: Sequence[str] | None = None,
         attrs: Mapping[str, Any] | None = None,
     ) -> _RecordingScope:
-        record = {"name": name, "ctx": dict(ctx or {})}
+        record = {"name": name}
+        if ctx:
+            record["ctx"] = dict(ctx)
+        if attrs:
+            record["attrs"] = dict(attrs)
         self.records.append(record)
         return _RecordingScope(self, record)
 
@@ -197,7 +201,7 @@ def test_standard_alltoall_dispatch_preserves_source_scope_fields_and_call_order
     assert sink.records == [
         {
             "name": "ep-alltoall-dispatch",
-            "ctx": {
+            "attrs": {
                 "comm_type": "ep-alltoall",
                 "dispatcher": "alltoall",
                 "data_bytes": tokens.numel() * tokens.element_size()
@@ -240,7 +244,7 @@ def test_standard_alltoall_combine_preserves_arguments_and_ignores_legacy_async_
     )
 
     assert result is combined
-    assert sink.records[0]["ctx"] == {
+    assert sink.records[0]["attrs"] == {
         "comm_type": "ep-alltoall",
         "dispatcher": "alltoall",
         "data_bytes": hidden_states.numel() * hidden_states.element_size(),
@@ -277,7 +281,7 @@ def test_standard_alltoall_group_one_still_emits_source_event(
     result = MoEAlltoAllTokenDispatcher.token_combine(owner, hidden_states)
 
     assert result is hidden_states
-    assert sink.records[0]["ctx"]["group_size"] == 1
+    assert sink.records[0]["attrs"]["group_size"] == 1
     assert sink.transitions == [
         ("B", "ep-alltoall-combine", None),
         ("E", "ep-alltoall-combine", None),
@@ -369,9 +373,10 @@ def test_real_adapter_records_standard_alltoall_source_fields(
 
     assert output is hidden_states
     assert ticks == [
+        ("ep-alltoall-combine", "B", {}),
         (
             "ep-alltoall-combine",
-            "B",
+            "E",
             {
                 "comm_type": "ep-alltoall",
                 "dispatcher": "alltoall",
@@ -381,7 +386,6 @@ def test_real_adapter_records_standard_alltoall_source_fields(
                 "tp_size": 3,
             },
         ),
-        ("ep-alltoall-combine", "E", {}),
     ]
 
 
@@ -447,7 +451,7 @@ def test_allgather_dispatch_preserves_hidden_only_payload_and_three_call_order(
     assert sink.records == [
         {
             "name": "ep-allgather-dispatch",
-            "ctx": {
+            "attrs": {
                 "comm_type": "ep-allgather",
                 "dispatcher": "allgather",
                 "data_bytes": hidden_states.numel() * hidden_states.element_size(),
@@ -495,7 +499,7 @@ def test_allgather_combine_preserves_reduce_scatter_cast_boundary_and_source_nam
     assert sink.records == [
         {
             "name": "ep-allgather-combine",
-            "ctx": {
+            "attrs": {
                 "comm_type": "ep-reduce-scatter",
                 "dispatcher": "allgather",
                 "data_bytes": hidden_states.numel() * hidden_states.element_size(),
@@ -536,7 +540,7 @@ def test_allgather_group_one_emits_paired_source_events_without_collectives(
         "ep-allgather-dispatch",
         "ep-allgather-combine",
     ]
-    assert [record["ctx"]["group_size"] for record in sink.records] == [1, 1]
+    assert [record["attrs"]["group_size"] for record in sink.records] == [1, 1]
 
 
 @pytest.mark.parametrize("gate_mode", ["null", "disabled", "suppressed"])
@@ -648,9 +652,10 @@ def test_real_adapter_records_allgather_combine_source_fields(
 
     assert output is hidden_states
     assert ticks == [
+        ("ep-allgather-combine", "B", {}),
         (
             "ep-allgather-combine",
-            "B",
+            "E",
             {
                 "comm_type": "ep-reduce-scatter",
                 "dispatcher": "allgather",
@@ -660,7 +665,6 @@ def test_real_adapter_records_allgather_combine_source_fields(
                 "tp_size": 2,
             },
         ),
-        ("ep-allgather-combine", "E", {}),
     ]
 
 
@@ -701,7 +705,7 @@ def test_flex_deepep_dispatch_preserves_source_fields_and_actual_group(
     assert sink.records == [
         {
             "name": "ep-alltoall-dispatch",
-            "ctx": {
+            "attrs": {
                 "comm_type": "ep-deepep",
                 "dispatcher": "flex",
                 "data_bytes": hidden_states.numel() * hidden_states.element_size(),
@@ -729,7 +733,7 @@ def test_flex_deepep_combine_preserves_source_fields_arguments_and_return() -> N
     assert sink.records == [
         {
             "name": "ep-alltoall-combine",
-            "ctx": {
+            "attrs": {
                 "comm_type": "ep-deepep",
                 "dispatcher": "flex",
                 "data_bytes": hidden_states.numel() * hidden_states.element_size(),
