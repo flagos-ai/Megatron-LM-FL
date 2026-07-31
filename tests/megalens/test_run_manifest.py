@@ -85,6 +85,50 @@ def test_trace_off_reports_any_discovered_shard(tmp_path: Path) -> None:
     assert [failure.code for failure in report.failures] == ["trace.unexpected"]
 
 
+def test_profile_contract_failures_join_the_trace_report(tmp_path: Path) -> None:
+    trace_root = tmp_path / "traces"
+    _write_shard(trace_root, 0)
+    _write_shard(trace_root, 1)
+    observed_roots: list[Path] = []
+
+    def check_contract(root: Path) -> tuple[manifest.Failure, ...]:
+        observed_roots.append(root)
+        return (
+            manifest.Failure(
+                "trace.contract",
+                "the profile-specific event order is invalid",
+                "two-rank-probe",
+            ),
+        )
+
+    profile = manifest.TraceProfile(
+        _PROFILE.name,
+        _PROFILE.rank_count,
+        _PROFILE.events,
+        check_contract,
+    )
+
+    report = manifest.validate_trace(trace_root, profile, trace_enabled=True)
+
+    assert observed_roots == [trace_root]
+    assert not report.passed
+    assert [failure.code for failure in report.failures] == ["trace.contract"]
+
+
+def test_trace_off_does_not_run_the_profile_contract(tmp_path: Path) -> None:
+    profile = manifest.TraceProfile(
+        "trace-off-contract",
+        1,
+        contract=lambda root: (_ for _ in ()).throw(
+            AssertionError(f"trace-off evaluated {root}")
+        ),
+    )
+
+    report = manifest.validate_trace(tmp_path / "traces", profile, trace_enabled=False)
+
+    assert report.passed
+
+
 def test_invalid_trace_json_is_reported_without_hiding_other_shards(
     tmp_path: Path,
 ) -> None:

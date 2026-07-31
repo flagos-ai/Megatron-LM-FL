@@ -10,7 +10,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 SCHEMA_VERSION = "1.0.0"
 MANIFEST_NAME = "manifest.json"
@@ -34,6 +34,7 @@ class TraceProfile:
     name: str
     rank_count: int
     events: tuple[EventRequirement, ...] = ()
+    contract: Callable[[Path], Sequence[Failure]] | None = None
 
 
 @dataclass(frozen=True)
@@ -233,6 +234,25 @@ def validate_trace(
                         profile.name,
                     )
                 )
+
+    if profile.contract is not None and not failures:
+        try:
+            failures.extend(profile.contract(trace_root))
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+        ) as error:
+            failures.append(
+                Failure(
+                    "trace.contract_invalid",
+                    f"profile {profile.name!r} contract could not read the trace: {error}",
+                    profile.name,
+                )
+            )
 
     return ValidationReport(
         passed=not failures,
