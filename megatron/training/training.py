@@ -1916,55 +1916,65 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 
     timers('optimizer').stop()
 
-    # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
-    # so we must gather across mp ranks
-    update_successful = logical_and_across_model_parallel_group(update_successful)
-    # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
-    # so we must gather across mp ranks
-    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
-    if args.log_num_zeros_in_grad:
-        num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
+    with trace_scope('optimizer-postprocess'):
+        # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
+        # so we must gather across mp ranks
+        update_successful = logical_and_across_model_parallel_group(update_successful)
+        # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
+        # so we must gather across mp ranks
+        grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+        if args.log_num_zeros_in_grad:
+            num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
 
-    # Vision momentum.
-    if args.vision_pretraining and args.vision_pretraining_type == "dino":
-        unwrapped_model = unwrap_model(model[0])
-        unwrapped_model.update_momentum(args.curr_iteration)
+        # Vision momentum.
+        if args.vision_pretraining and args.vision_pretraining_type == "dino":
+            unwrapped_model = unwrap_model(model[0])
+            unwrapped_model.update_momentum(args.curr_iteration)
 
-    # Update learning rate.
-    if update_successful:
-        increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
-        opt_param_scheduler.step(increment=increment)
-        skipped_iter = 0
-    else:
-        skipped_iter = 1
+        # Update learning rate.
+        if update_successful:
+            increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
+            opt_param_scheduler.step(increment=increment)
+            skipped_iter = 0
+        else:
+            skipped_iter = 1
 
-    # Empty unused memory.
-    if args.empty_unused_memory_level >= 2:
-        torch.cuda.empty_cache()
+        # Empty unused memory.
+        if args.empty_unused_memory_level >= 2:
+            torch.cuda.empty_cache()
 
-    if mpu.is_pipeline_last_stage(ignore_virtual=True):
-        # Average loss across microbatches.
-        loss_reduced = {}
+        if mpu.is_pipeline_last_stage(ignore_virtual=True):
+            # Average loss across microbatches.
+            loss_reduced = {}
 
-        for key in losses_reduced[0].keys():
-            val = [x[key].view(-1) for x in losses_reduced]
-            if val[0].numel() == 2:
-                # there is one dict per microbatch. in new reporting, we average
-                # over the total number of tokens across the global batch.
-                val = torch.vstack(val).sum(dim=0)
-                torch.distributed.all_reduce(
-                    val,
-                    group=mpu.get_data_parallel_group(with_context_parallel=True)
-                )
-                loss_reduced[key] = val[0] / val[1]
-            elif val[0].numel() == 1:
-                # legacy behavior, we average over the number of microbatches
-                val = torch.cat(val).mean()
-                loss_reduced[key] = val
-            else:
-                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+            for key in losses_reduced[0].keys():
+                val = [x[key].view(-1) for x in losses_reduced]
+                if val[0].numel() == 2:
+                    # there is one dict per microbatch. in new reporting, we average
+                    # over the total number of tokens across the global batch.
+                    val = torch.vstack(val).sum(dim=0)
+                    torch.distributed.all_reduce(
+                        val, group=mpu.get_data_parallel_group(with_context_parallel=True)
+                    )
+                    loss_reduced[key] = val[0] / val[1]
+                elif val[0].numel() == 1:
+                    # legacy behavior, we average over the number of microbatches
+                    val = torch.cat(val).mean()
+                    loss_reduced[key] = val
+                else:
+                    raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
+            return (
+                loss_reduced,
+                skipped_iter,
+                should_checkpoint,
+                should_exit,
+                exit_code,
+                grad_norm,
+                num_zeros_in_grad,
+                log_max_attention_logit,
+            )
         return (
-            loss_reduced,
+            {},
             skipped_iter,
             should_checkpoint,
             should_exit,
@@ -1973,7 +1983,6 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
             num_zeros_in_grad,
             log_max_attention_logit,
         )
-    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, log_max_attention_logit
 
 
 def training_log(
