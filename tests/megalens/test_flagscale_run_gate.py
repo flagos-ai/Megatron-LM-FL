@@ -30,6 +30,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_dp2_distopt_overlap_smoke.yaml": (
         "dp2-distopt-overlap"
     ),
+    "flagscale_single_node_dp2_layerwise_overlap_smoke.yaml": (
+        "dp2-layerwise-overlap"
+    ),
     "flagscale_single_node_dp4_distopt_multi_instance_overlap_smoke.yaml": (
         "dp4-distopt-multi-instance-overlap"
     ),
@@ -463,6 +466,42 @@ def test_dp4_multi_instance_profile_only_expands_the_dp_overlap_topology() -> No
     assert gate._profile_from_arguments(args).name == (
         "dp4-distopt-multi-instance-overlap"
     )
+
+
+def test_dp2_layerwise_profile_only_selects_dist_muon_parameter_overlap() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_dp2_standard_overlap_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    layerwise = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_dp2_layerwise_overlap_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = layerwise["experiment"]["exp_name"]
+    baseline["train"]["system"]["overlap_param_gather"] = True
+    baseline["train"]["model"]["optimizer"]["optimizer"] = "dist_muon"
+
+    assert layerwise == baseline
+    system = layerwise["train"]["system"]
+    optimizer = layerwise["train"]["model"]["optimizer"]
+    assert system["use_distributed_optimizer"] is False
+    assert system["overlap_grad_reduce"] is True
+    assert system["overlap_param_gather"] is True
+    assert optimizer["optimizer"] == "dist_muon"
+    assert "muon_tp_mode" not in optimizer
+    assert "use_padded_layerwise_optimizer" not in system
+
+    profile = gate.PROFILES["dp2-layerwise-overlap"]
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == {
+        "dp-allreduce",
+        "dp-param-all-gather",
+        "dp-grad-sync-complete",
+        "dp-param-sync-complete",
+    }
+    assert profile.contract is dp_probe_contract.validate_dp_layerwise_overlap
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(

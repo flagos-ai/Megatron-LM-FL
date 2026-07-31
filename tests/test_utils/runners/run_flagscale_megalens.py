@@ -212,6 +212,25 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         ),
         dp_probe_contract.validate_dp_distopt_overlap,
     ),
+    "dp2-layerwise-overlap": manifest.TraceProfile(
+        "dp2-layerwise-overlap",
+        2,
+        (
+            *_dp_events("standard-ddp"),
+            manifest.EventRequirement("dp-param-all-gather", _DP_FIELDS, "B"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "dp-param-sync-complete",
+                (*_COMMON_FIELDS, "operation_id", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_layerwise_overlap,
+    ),
     "dp4-distopt-multi-instance-overlap": manifest.TraceProfile(
         "dp4-distopt-multi-instance-overlap",
         4,
@@ -263,6 +282,7 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_dp2_distopt_smoke": "dp2-distopt",
     "flagscale_single_node_dp2_distopt_overlap_smoke": "dp2-distopt-overlap",
+    "flagscale_single_node_dp2_layerwise_overlap_smoke": "dp2-layerwise-overlap",
     "flagscale_single_node_dp4_distopt_multi_instance_overlap_smoke": (
         "dp4-distopt-multi-instance-overlap"
     ),
@@ -491,6 +511,7 @@ def _parser() -> argparse.ArgumentParser:
             "standard-ddp-overlap",
             "distopt",
             "distopt-overlap",
+            "layerwise-overlap",
             "distopt-multi-instance-overlap",
         ),
     )
