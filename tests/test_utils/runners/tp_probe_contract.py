@@ -956,6 +956,21 @@ def validate_tp2_no_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
+def validate_tp2_local_allreduce_profile(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    validators = (
+        validate_tp2_gqa_no_sp_collective_hierarchy,
+        validate_tp2_local_allreduce_lifecycle,
+        validate_tp2_no_sp_final_grad_sync,
+    )
+    return tuple(
+        failure
+        for validator in validators
+        for failure in validator(trace_root)
+    )
+
+
 def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
     validators = (
         validate_tp2_gqa_collective_hierarchy,

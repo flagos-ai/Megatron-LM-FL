@@ -453,6 +453,22 @@ def test_tp2_no_sp_final_sync_contract_rejects_layernorm_collective(
     }
 
 
+def test_tp2_local_allreduce_profile_combines_all_three_boundaries(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_first_all_gather=False,
+            include_linear_allreduce=True,
+            include_final_grad_sync=True,
+            include_sp_sync=False,
+        )
+
+    assert tp_probe_contract.validate_tp2_local_allreduce_profile(tmp_path) == ()
+
+
 def test_tp2_sp_profile_contract_combines_all_three_boundaries(
     tmp_path: Path,
 ) -> None:

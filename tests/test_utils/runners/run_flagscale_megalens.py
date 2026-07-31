@@ -112,6 +112,14 @@ _TP_COLLECTIVE_FIELDS = (
     "data_bytes",
     "group_size",
 )
+_TP_ALLREDUCE_FIELDS = (
+    *_COMMON_FIELDS,
+    "op",
+    "data_bytes",
+    "group_size",
+    "timing_phase",
+    "payload_role",
+)
 
 
 def _ep_events(
@@ -216,6 +224,51 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         tp_probe_contract.validate_tp2_sp_profile,
+    ),
+    "tp2-local-allreduce": manifest.TraceProfile(
+        "tp2-local-allreduce",
+        2,
+        (
+            manifest.EventRequirement(
+                "tp-allreduce",
+                _TP_ALLREDUCE_FIELDS,
+                "B",
+            ),
+            *(
+                manifest.EventRequirement(
+                    name,
+                    _TP_COLLECTIVE_FIELDS,
+                    "B",
+                )
+                for name in (
+                    "tp-all-gather-last",
+                    "tp-reduce-scatter",
+                    "tp-reduce-scatter-last",
+                )
+            ),
+            manifest.EventRequirement(
+                "tp-linear-async-launch",
+                (*_COMMON_FIELDS, "operation_id", "collective_op", "launch_site"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "tp-linear-async-complete",
+                (
+                    *_COMMON_FIELDS,
+                    "operation_id",
+                    "collective_op",
+                    "completion_kind",
+                ),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "grad-sync",
+                (*_COMMON_FIELDS, "schedule", "timing_phase"),
+                "B",
+            ),
+            manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
+        ),
+        tp_probe_contract.validate_tp2_local_allreduce_profile,
     ),
     "pp2": manifest.TraceProfile(
         "pp2",
@@ -333,6 +386,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
+    "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_pp2_smoke": "pp2",
     "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",

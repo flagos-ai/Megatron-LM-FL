@@ -20,6 +20,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
+    "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
+        "tp2-local-allreduce"
+    ),
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
     "flagscale_single_node_pp2_unbatched_smoke.yaml": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
@@ -567,6 +570,40 @@ def test_tp2_sp_profile_only_selects_the_local_tp_routes() -> None:
         )
     )
     assert gate._profile_from_arguments(args).name == "tp2-sp-local"
+
+
+def test_tp2_local_allreduce_profile_only_disables_sequence_parallel() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_local_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    allreduce = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_local_allreduce_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = allreduce["experiment"]["exp_name"]
+    baseline["train"]["system"]["sequence_parallel"] = False
+
+    assert allreduce == baseline
+
+    profile = gate.PROFILES["tp2-local-allreduce"]
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == {
+        "tp-allreduce",
+        "tp-all-gather-last",
+        "tp-reduce-scatter",
+        "tp-reduce-scatter-last",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+        "grad-sync",
+        "all-grads-sync",
+    }
+    assert (
+        profile.contract
+        is tp_probe_contract.validate_tp2_local_allreduce_profile
+    )
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
