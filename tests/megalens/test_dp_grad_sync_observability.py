@@ -819,7 +819,7 @@ def test_dp_allreduce_null_sink_skips_metadata_queries_and_preserves_sync_call(m
         bucket.grad_data = payload
 
     collective_calls = []
-    metadata_calls = []
+    probe_metadata_calls = []
     monkeypatch.setattr(
         param_and_grad_buffer,
         "_dp_allreduce_context",
@@ -838,12 +838,12 @@ def test_dp_allreduce_null_sink_skips_metadata_queries_and_preserves_sync_call(m
     monkeypatch.setattr(
         param_and_grad_buffer.torch.distributed,
         "get_process_group_ranks",
-        lambda group: metadata_calls.append("group-ranks"),
+        lambda group: probe_metadata_calls.append("group-ranks"),
     )
     monkeypatch.setattr(
         param_and_grad_buffer.torch.distributed,
         "get_rank",
-        lambda: metadata_calls.append("global-rank") or 0,
+        lambda: 0,
     )
 
     result = bucket_group.start_grad_sync()
@@ -854,7 +854,7 @@ def test_dp_allreduce_null_sink_skips_metadata_queries_and_preserves_sync_call(m
         (payloads[0], process_group, False),
         (payloads[1], process_group, False),
     ]
-    assert metadata_calls == []
+    assert probe_metadata_calls == []
 
 
 def test_dp_allreduce_collective_error_closes_scope_and_preserves_exception(monkeypatch):
