@@ -47,6 +47,13 @@ def test_cpu_profile_wires_static_contract_before_cpu_tests() -> None:
         "--fixture",
         str(REPOSITORY_ROOT / "tests/megalens/fixtures/probe_scan_gate.json"),
     )
+    assert {
+        "tests/megalens/test_bert_encoder_observability.py",
+        "tests/megalens/test_gpt_loss_observability.py",
+        "tests/megalens/test_gpt_model_phase_observability.py",
+        "tests/megalens/test_transformer_layer_phase_observability.py",
+        "tests/megalens/test_dual_node_probe_profiles.py",
+    } <= set(checks[1].argv)
 
 
 def test_cpu_profile_can_wire_locked_source_and_compatibility_argument() -> None:
