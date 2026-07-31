@@ -1,5 +1,6 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
+import logging
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
@@ -553,8 +554,142 @@ def test_update_train_iters_constant_and_rampup(monkeypatch):
     assert printed[-1] == "setting training iterations to 4"
 
 
+def test_pretrain_non_gracefully_shuts_down_megalens_when_initialization_fails(monkeypatch):
+    failure = RuntimeError("initialization failed")
+    shutdown_modes = []
+
+    monkeypatch.setattr(training.ft_integration, "setup", lambda: None)
+    monkeypatch.setattr(
+        training,
+        "initialize_megatron",
+        lambda **kwargs: (_ for _ in ()).throw(failure),
+    )
+    monkeypatch.setattr(
+        training,
+        "shutdown_megalens_runtime",
+        lambda *, graceful: shutdown_modes.append(graceful),
+    )
+
+    with pytest.raises(RuntimeError, match="initialization failed") as exc_info:
+        pretrain(
+            lambda samples: None,
+            lambda: None,
+            training.ModelType.encoder_or_decoder,
+            lambda *_: None,
+        )
+
+    assert exc_info.value is failure
+    assert shutdown_modes == [False]
+
+
+def _stub_pretrain_until_train(monkeypatch, args):
+    real_tensor = torch.tensor
+
+    def cpu_tensor(*items, **kwargs):
+        kwargs.pop("device", None)
+        return real_tensor(*items, **kwargs)
+
+    class FakeTimer:
+        def start(self, barrier=False):
+            pass
+
+        def stop(self):
+            pass
+
+    class FakeTimers:
+        def __call__(self, name, log_level=None):
+            return FakeTimer()
+
+        def log(self, names, barrier=False):
+            pass
+
+    monkeypatch.setitem(training._STARTUP_TIMESTAMPS, "program_start", None)
+    monkeypatch.setitem(training._STARTUP_TIMESTAMPS, "main_entry", None)
+    monkeypatch.setitem(training._STARTUP_TIMESTAMPS, "pretrain_entry", None)
+    monkeypatch.setattr(training.torch, "tensor", cpu_tensor)
+    monkeypatch.setattr(
+        training.torch.distributed, "all_reduce", lambda tensor, op=None: None
+    )
+    monkeypatch.setattr(training.ft_integration, "setup", lambda: None)
+    monkeypatch.setattr(training, "initialize_megatron", lambda **kwargs: None)
+    monkeypatch.setattr(training, "get_args", lambda: args)
+    monkeypatch.setattr(training, "get_timers", lambda: FakeTimers())
+    monkeypatch.setattr(training, "set_jit_fusion_options", lambda: None)
+    monkeypatch.setattr(training, "set_startup_timestamps", lambda **kwargs: None)
+    monkeypatch.setattr(training, "print_rank_0", lambda message: None)
+    monkeypatch.setattr(training, "print_datetime", lambda *items, **kwargs: None)
+    monkeypatch.setattr(training.one_logger_utils, "get_timestamp_in_ms", lambda: 123)
+    monkeypatch.setattr(training.one_logger_utils, "on_pretrain_start", lambda: None)
+    monkeypatch.setattr(training.one_logger_utils, "track_config_flags", lambda *items: None)
+    monkeypatch.setattr(
+        training,
+        "setup_model_and_optimizer",
+        lambda *items, **kwargs: ([SimpleNamespace()], "optimizer", "scheduler"),
+    )
+    monkeypatch.setattr(training, "get_model_config", lambda model: SimpleNamespace())
+    monkeypatch.setattr(
+        training,
+        "build_train_valid_test_data_iterators",
+        lambda provider: ("train-iter", "valid-iter", "test-iter"),
+    )
+    monkeypatch.setattr(training, "get_one_logger", lambda: None)
+    monkeypatch.setattr(training, "get_wandb_writer", lambda: None)
+
+
+def test_pretrain_preserves_train_failure_when_megalens_teardown_fails(monkeypatch, caplog):
+    pretrain_failure = RuntimeError("train failed")
+    teardown_failure = OSError("teardown failed")
+    args = SimpleNamespace(
+        fine_grained_activation_offloading=False,
+        log_progress=False,
+        non_persistent_ckpt_type=None,
+        perform_rl_step=False,
+        virtual_pipeline_model_parallel_size=None,
+        skip_train=False,
+        iteration=0,
+        train_iters=1,
+        do_train=True,
+        do_valid=False,
+        do_test=False,
+        dataloader_type=None,
+        save=None,
+    )
+
+    _stub_pretrain_until_train(monkeypatch, args)
+    monkeypatch.setattr(
+        training,
+        "train",
+        lambda *items, **kwargs: (_ for _ in ()).throw(pretrain_failure),
+    )
+
+    def fail_shutdown(*, graceful):
+        assert graceful is False
+        raise teardown_failure
+
+    monkeypatch.setattr(training, "shutdown_megalens_runtime", fail_shutdown)
+
+    with caplog.at_level(logging.ERROR, logger=training.__name__):
+        with pytest.raises(RuntimeError, match="train failed") as exc_info:
+            pretrain(
+                lambda samples: None,
+                lambda: None,
+                training.ModelType.encoder_or_decoder,
+                lambda *_: None,
+            )
+
+    assert exc_info.value is pretrain_failure
+    diagnostics = [
+        record
+        for record in caplog.records
+        if "MegaLens non-graceful shutdown failed" in record.getMessage()
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].exc_info[1] is teardown_failure
+
+
 def test_pretrain_skip_train_runs_validation_test_and_shutdown(monkeypatch):
     calls = []
+    shutdown_modes = []
     real_tensor = torch.tensor
     args = SimpleNamespace(
         fine_grained_activation_offloading=False,
@@ -631,6 +766,11 @@ def test_pretrain_skip_train_runs_validation_test_and_shutdown(monkeypatch):
     monkeypatch.setattr(training.ft_integration, "on_checkpointing_start", lambda: calls.append("ft-ckpt-start"))
     monkeypatch.setattr(training.ft_integration, "on_checkpointing_end", lambda **kwargs: calls.append(("ft-ckpt-end", kwargs.get("is_async_finalization"))))
     monkeypatch.setattr(training.ft_integration, "shutdown", lambda: calls.append("ft-shutdown"))
+    monkeypatch.setattr(
+        training,
+        "shutdown_megalens_runtime",
+        lambda *, graceful: shutdown_modes.append(graceful),
+    )
     monkeypatch.setattr(training, "maybe_finalize_async_save", lambda **kwargs: calls.append(("finalize", kwargs)))
     monkeypatch.setattr(training, "evaluate_and_print_results", lambda *items, **kwargs: calls.append(("eval-print", items[0], kwargs["write_to_tensorboard"])))
 
@@ -650,6 +790,7 @@ def test_pretrain_skip_train_runs_validation_test_and_shutdown(monkeypatch):
     assert "wandb-finish" in calls
     assert "ft-shutdown" in calls
     assert "one-finish" in calls
+    assert shutdown_modes == [True]
 
 
 def test_pretrain_rejects_rl_inference_weight_offload_without_separate_model(monkeypatch):
