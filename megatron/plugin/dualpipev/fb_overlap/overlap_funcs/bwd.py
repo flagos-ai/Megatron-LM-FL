@@ -4,7 +4,6 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.transformer.moe.moe_utils import permute
-
 from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     async_all_to_all,
     call_attention_backward_dw,
@@ -17,6 +16,7 @@ from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     turn_experts_delay_wgrad_compute,
     turn_shared_experts_delay_wgrad_compute,
 )
+from megatron.plugin.dualpipev.observability import wait_async_all_to_all
 
 
 def transformer_layer_backward_moe(layer_output_grad, layer_graph):
@@ -34,7 +34,14 @@ def transformer_layer_backward_moe(layer_output_grad, layer_graph):
     run_graph_backward(self.unperm2_graph, layer_output_grad, keep_grad=True)
 
     _, unperm1_out_grad, bwd_unperm_a2a_handle = async_all_to_all(
-        self.unperm_a2a_graph[1].grad, self.output_splits, self.input_splits, ep_group
+        self.unperm_a2a_graph[1].grad,
+        self.output_splits,
+        self.input_splits,
+        ep_group,
+        trace_owner=self.layer,
+        pass_direction="backward",
+        logical_phase="combine",
+        payload_role="expert_output_gradient",
     )
     # overlap alltoall by shared experts backward
     if self.shared_experts_graph[0] is not None:
@@ -43,7 +50,7 @@ def transformer_layer_backward_moe(layer_output_grad, layer_graph):
         call_shared_experts_backward_dw(self)
         turn_shared_experts_delay_wgrad_compute(self, enable=False)
 
-    bwd_unperm_a2a_handle.wait()
+    wait_async_all_to_all(bwd_unperm_a2a_handle, completion_site="backward_combine_gradient_ready")
     bwd_unperm_a2a_handle = None
 
     run_graph_backward(self.unperm1_graph, unperm1_out_grad)
@@ -55,20 +62,38 @@ def transformer_layer_backward_moe(layer_output_grad, layer_graph):
     run_graph_backward(self.perm2_append_graph, keep_graph=True)
 
     _, perm1_out1_grad, bwd_perm_a2a_handle1 = async_all_to_all(
-        self.perm_a2a_graph[1].grad, self.input_splits, self.output_splits, ep_group
+        self.perm_a2a_graph[1].grad,
+        self.input_splits,
+        self.output_splits,
+        ep_group,
+        trace_owner=self.layer,
+        pass_direction="backward",
+        logical_phase="dispatch",
+        payload_role="token_hidden_states_gradient",
     )
 
     _, perm1_out2_grad, bwd_perm_a2a_handle2 = async_all_to_all(
-        self.perm_a2a_append_graph[1].grad, self.input_splits, self.output_splits, ep_group
+        self.perm_a2a_append_graph[1].grad,
+        self.input_splits,
+        self.output_splits,
+        ep_group,
+        trace_owner=self.layer,
+        pass_direction="backward",
+        logical_phase="dispatch",
+        payload_role="routing_probabilities_gradient",
     )
 
     # dw computation
     call_experts_backward_dw(self)
     turn_experts_delay_wgrad_compute(self, enable=False)
 
-    bwd_perm_a2a_handle1.wait()
+    wait_async_all_to_all(
+        bwd_perm_a2a_handle1, completion_site="backward_dispatch_hidden_gradient_ready"
+    )
     bwd_perm_a2a_handle1 = None
-    bwd_perm_a2a_handle2.wait()
+    wait_async_all_to_all(
+        bwd_perm_a2a_handle2, completion_site="backward_dispatch_probability_gradient_ready"
+    )
     bwd_perm_a2a_handle2 = None
 
     run_graph_backward(self.perm1_graph, perm1_out1_grad)

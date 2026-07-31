@@ -7,8 +7,6 @@ import torch
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.transformer.moe.moe_utils import permute
 from megatron.core.utils import make_sharded_tensor_for_checkpoint, make_viewless_tensor
-from megatron.training import get_args
-
 from megatron.plugin.dualpipev.fb_overlap.modules.attention import attention_forward
 from megatron.plugin.dualpipev.fb_overlap.modules.token_dispatcher import (
     alltoall_token_perm1,
@@ -34,8 +32,10 @@ from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     turn_experts_delay_wgrad_compute,
     turn_shared_experts_delay_wgrad_compute,
 )
-
+from megatron.plugin.dualpipev.observability import wait_async_all_to_all
 from megatron.plugin.platform import get_platform
+from megatron.training import get_args
+
 cur_platform = get_platform()
 
 
@@ -89,6 +89,10 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
             bwd_layer_graph.output_splits,
             bwd_layer_graph.input_splits,
             ep_group,
+            trace_owner=bwd_layer_graph.layer,
+            pass_direction="backward",
+            logical_phase="combine",
+            payload_role="expert_output_gradient",
         )
     else:
         unperm1_out_grad = bwd_layer_output_grad
@@ -126,7 +130,7 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
         else:
             pre_mlp_layernorm_output = fwd_layer.pre_mlp_layernorm(detached_attention_out)
 
-    bwd_unperm_a2a_handle.wait()
+    wait_async_all_to_all(bwd_unperm_a2a_handle, completion_site="backward_combine_gradient_ready")
     bwd_unperm_a2a_handle = None
     run_graph_backward(bwd_layer_graph.unperm1_graph, unperm1_out_grad)
     unperm1_out_grad.untyped_storage().resize_(0)
@@ -144,12 +148,20 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
         bwd_layer_graph.input_splits,
         bwd_layer_graph.output_splits,
         ep_group,
+        trace_owner=bwd_layer_graph.layer,
+        pass_direction="backward",
+        logical_phase="dispatch",
+        payload_role="token_hidden_states_gradient",
     )
     _, perm1_out2_grad, bwd_perm_a2a_handle2 = async_all_to_all(
         bwd_layer_graph.perm_a2a_append_graph[1].grad,
         bwd_layer_graph.input_splits,
         bwd_layer_graph.output_splits,
         ep_group,
+        trace_owner=bwd_layer_graph.layer,
+        pass_direction="backward",
+        logical_phase="dispatch",
+        payload_role="routing_probabilities_gradient",
     )
 
     with checkpoint_context:
@@ -161,9 +173,13 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
             fwd_layer.norm_ckpt2.discard_output()
             mlp_output_with_bias[0].register_hook(fwd_layer.norm_ckpt2.recompute)
 
-    bwd_perm_a2a_handle1.wait()
+    wait_async_all_to_all(
+        bwd_perm_a2a_handle1, completion_site="backward_dispatch_hidden_gradient_ready"
+    )
     bwd_perm_a2a_handle1 = None
-    bwd_perm_a2a_handle2.wait()
+    wait_async_all_to_all(
+        bwd_perm_a2a_handle2, completion_site="backward_dispatch_probability_gradient_ready"
+    )
     bwd_perm_a2a_handle2 = None
     run_graph_backward(bwd_layer_graph.perm1_graph, perm1_out1_grad)
     run_graph_backward(bwd_layer_graph.perm1_append_graph, perm1_out2_grad)
@@ -192,6 +208,10 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
             next_bwd_layer_graph.output_splits,
             next_bwd_layer_graph.input_splits,
             ep_group,
+            trace_owner=next_bwd_layer_graph.layer,
+            pass_direction="backward",
+            logical_phase="combine",
+            payload_role="expert_output_gradient",
         )
 
     with checkpoint_context:
@@ -344,6 +364,10 @@ def transformer_layer_forward_moe_backward_dense_overlapping(
             fwd_layer.mlp.token_dispatcher.output_splits,
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
+            trace_owner=fwd_layer,
+            pass_direction="forward",
+            logical_phase="dispatch",
+            payload_role="token_hidden_states",
         )
 
         _, perm1_probs_a2a, perm1_probs_a2a_handle = async_all_to_all(
@@ -351,6 +375,10 @@ def transformer_layer_forward_moe_backward_dense_overlapping(
             fwd_layer.mlp.token_dispatcher.output_splits,
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
+            trace_owner=fwd_layer,
+            pass_direction="forward",
+            logical_phase="dispatch",
+            payload_role="routing_probabilities",
         )
 
     turn_dense_mlp_delay_wgrad_compute(bwd_layer_graph, enable=True)
@@ -359,9 +387,13 @@ def transformer_layer_forward_moe_backward_dense_overlapping(
     )  # keep for dw
     run_graph_backward(bwd_layer_graph.pre_mlp_layernorm_graph, keep_graph=True)
 
-    perm1_local_input_tokens_a2a_handle.wait()
+    wait_async_all_to_all(
+        perm1_local_input_tokens_a2a_handle, completion_site="forward_dispatch_hidden_ready"
+    )
     perm1_local_input_tokens_a2a_handle = None
-    perm1_probs_a2a_handle.wait()
+    wait_async_all_to_all(
+        perm1_probs_a2a_handle, completion_site="forward_dispatch_probabilities_ready"
+    )
     perm1_probs_a2a_handle = None
     perm1_local_input_tokens.untyped_storage().resize_(0)
     perm1_probs.untyped_storage().resize_(0)
@@ -403,6 +435,10 @@ def transformer_layer_forward_moe_backward_dense_overlapping(
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.output_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
+            trace_owner=fwd_layer,
+            pass_direction="forward",
+            logical_phase="combine",
+            payload_role="expert_output",
         )
 
         # Shared Experts Forward.
@@ -422,7 +458,9 @@ def transformer_layer_forward_moe_backward_dense_overlapping(
             next_bwd_layer_graph.unperm2_graph, bwd_layer_graph.layer_input.grad, keep_graph=True
         )
 
-    unperm1_hidden_states_a2a_handle.wait()
+    wait_async_all_to_all(
+        unperm1_hidden_states_a2a_handle, completion_site="forward_combine_output_ready"
+    )
     unperm1_hidden_states_a2a_handle = None
     unperm1_hidden_states.untyped_storage().resize_(0)
 
@@ -433,6 +471,10 @@ def transformer_layer_forward_moe_backward_dense_overlapping(
             next_bwd_layer_graph.output_splits,
             next_bwd_layer_graph.input_splits,
             ep_group,
+            trace_owner=next_bwd_layer_graph.layer,
+            pass_direction="backward",
+            logical_phase="combine",
+            payload_role="expert_output_gradient",
         )
 
     with checkpoint_context:
@@ -639,6 +681,10 @@ def transformer_layer_forward_dense_backward_dense_overlapping(
             next_bwd_layer_graph.output_splits,
             next_bwd_layer_graph.input_splits,
             ep_group,
+            trace_owner=next_bwd_layer_graph.layer,
+            pass_direction="backward",
+            logical_phase="combine",
+            payload_role="expert_output_gradient",
         )
 
     # handle bwd p2p communication
@@ -743,6 +789,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             bwd_layer_graph.output_splits,
             bwd_layer_graph.input_splits,
             ep_group,
+            trace_owner=bwd_layer_graph.layer,
+            pass_direction="backward",
+            logical_phase="combine",
+            payload_role="expert_output_gradient",
         )
     else:
         unperm1_out_grad = bwd_layer_output_grad
@@ -795,6 +845,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             fwd_layer.mlp.token_dispatcher.ep_group,
             event=last_comm_handle,
             stream=cur_platform.current_stream(),
+            trace_owner=fwd_layer,
+            pass_direction="forward",
+            logical_phase="dispatch",
+            payload_role="routing_probabilities",
         )
         last_comm_handle_2 = perm1_probs_a2a_handle
 
@@ -804,6 +858,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             fwd_layer.mlp.token_dispatcher.input_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
             stream=cur_platform.current_stream(),
+            trace_owner=fwd_layer,
+            pass_direction="forward",
+            logical_phase="dispatch",
+            payload_role="token_hidden_states",
         )
         last_comm_handle_1 = perm1_local_input_tokens_a2a_handle
 
@@ -817,7 +875,7 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             assert not recomp_norm, "not support recompute norm"
             fwd_layer.norm_ckpt2.discard_output()
 
-    bwd_unperm_a2a_handle.wait()
+    wait_async_all_to_all(bwd_unperm_a2a_handle, completion_site="backward_combine_gradient_ready")
     bwd_unperm_a2a_handle = None
     run_graph_backward(bwd_layer_graph.unperm1_graph, unperm1_out_grad)
     unperm1_out_grad.untyped_storage().resize_(0)
@@ -826,9 +884,13 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
     run_graph_backward(bwd_layer_graph.perm2_graph, keep_graph=True)  # keep for dw
     run_graph_backward(bwd_layer_graph.perm2_append_graph, keep_graph=True)
 
-    perm1_local_input_tokens_a2a_handle.wait()
+    wait_async_all_to_all(
+        perm1_local_input_tokens_a2a_handle, completion_site="forward_dispatch_hidden_ready"
+    )
     perm1_local_input_tokens_a2a_handle = None
-    perm1_probs_a2a_handle.wait()
+    wait_async_all_to_all(
+        perm1_probs_a2a_handle, completion_site="forward_dispatch_probabilities_ready"
+    )
     perm1_probs_a2a_handle = None
     perm1_local_input_tokens.untyped_storage().resize_(0)
     perm1_probs.untyped_storage().resize_(0)
@@ -839,6 +901,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         bwd_layer_graph.output_splits,
         ep_group,
         stream=cur_platform.current_stream(),
+        trace_owner=bwd_layer_graph.layer,
+        pass_direction="backward",
+        logical_phase="dispatch",
+        payload_role="routing_probabilities_gradient",
     )
     last_comm_handle_2 = bwd_perm_a2a_handle2
     _, perm1_out1_grad, bwd_perm_a2a_handle1 = async_all_to_all(
@@ -847,6 +913,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         bwd_layer_graph.output_splits,
         ep_group,
         stream=cur_platform.current_stream(),
+        trace_owner=bwd_layer_graph.layer,
+        pass_direction="backward",
+        logical_phase="dispatch",
+        payload_role="token_hidden_states_gradient",
     )
     last_comm_handle_1 = bwd_perm_a2a_handle1
 
@@ -887,9 +957,13 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         )
         expert_output.untyped_storage().resize_(0)
 
-        bwd_perm_a2a_handle1.wait()
+        wait_async_all_to_all(
+            bwd_perm_a2a_handle1, completion_site="backward_dispatch_hidden_gradient_ready"
+        )
         bwd_perm_a2a_handle1 = None
-        bwd_perm_a2a_handle2.wait()
+        wait_async_all_to_all(
+            bwd_perm_a2a_handle2, completion_site="backward_dispatch_probability_gradient_ready"
+        )
         bwd_perm_a2a_handle2 = None
 
     turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=True)
@@ -905,6 +979,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             fwd_layer.mlp.token_dispatcher.output_splits,
             fwd_layer.mlp.token_dispatcher.ep_group,
             stream=cur_platform.current_stream(),
+            trace_owner=fwd_layer,
+            pass_direction="forward",
+            logical_phase="combine",
+            payload_role="expert_output",
         )
 
     run_graph_backward(bwd_layer_graph.perm1_graph, perm1_out1_grad)
@@ -922,7 +1000,9 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             next_bwd_layer_graph.unperm2_graph, bwd_layer_graph.layer_input.grad, keep_graph=True
         )
 
-    unperm1_hidden_states_a2a_handle.wait()
+    wait_async_all_to_all(
+        unperm1_hidden_states_a2a_handle, completion_site="forward_combine_output_ready"
+    )
     unperm1_hidden_states_a2a_handle = None
     unperm1_hidden_states.untyped_storage().resize_(0)
 
@@ -933,6 +1013,10 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
             next_bwd_layer_graph.output_splits,
             next_bwd_layer_graph.input_splits,
             ep_group,
+            trace_owner=next_bwd_layer_graph.layer,
+            pass_direction="backward",
+            logical_phase="combine",
+            payload_role="expert_output_gradient",
         )
 
     with checkpoint_context:
