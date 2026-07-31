@@ -57,6 +57,7 @@ def _write_gpt_phase_trace(
     rank: int,
     pipeline_rank: int,
     include_postprocess: bool,
+    eager_layers: int = 0,
 ) -> None:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
@@ -89,6 +90,17 @@ def _write_gpt_phase_trace(
         )
         event("forward-step", "B")
         event("decoder", "B")
+        for _ in range(eager_layers):
+            event("transformer_layer", "B")
+            event("_forward_attention", "B")
+            event("attention", "B")
+            event("attention", "E")
+            event("_forward_attention", "E")
+            event("_forward_mlp", "B")
+            event("MLP.forward", "B")
+            event("MLP.forward", "E")
+            event("_forward_mlp", "E")
+            event("transformer_layer", "E")
         event("decoder", "E")
         event("decoder-postprocess", "B")
         if include_postprocess:
@@ -200,6 +212,7 @@ def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
         rank=0,
         pipeline_rank=0,
         include_postprocess=True,
+        eager_layers=2,
     )
     assert gate.PROFILES["gpt-eager-full"].contract(pp1_root) == ()
 
@@ -234,6 +247,30 @@ def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
     failures = gate.PROFILES["pp2"].contract(invalid_root)
     assert failures
     assert {failure.code for failure in failures} == {"trace.gpt.count"}
+
+
+def test_gpt_eager_profile_rejects_an_incomplete_layer_sequence(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "incomplete-eager"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=1,
+    )
+
+    failures = gate.PROFILES["gpt-eager-full"].contract(trace_root)
+
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.eager_layers",
+        "trace.gpt.eager_layers",
+    ]
+    assert [failure.evidence for failure in failures] == [
+        "rank=0 iteration=1",
+        "rank=0 iteration=2",
+    ]
 
 
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(

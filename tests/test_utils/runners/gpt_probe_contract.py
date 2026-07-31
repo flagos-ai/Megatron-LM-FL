@@ -19,6 +19,28 @@ from tests.test_utils.runners.megalens_run_manifest import Failure
 _MODEL_PHASES = frozenset(
     ("forward-step", "decoder", "decoder-postprocess", "output_layer", "loss")
 )
+_EAGER_TREE_PHASES = frozenset(
+    (
+        "decoder",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+    )
+)
+_EAGER_LAYER_SEQUENCE = (
+    ("transformer_layer", "B"),
+    ("_forward_attention", "B"),
+    ("attention", "B"),
+    ("attention", "E"),
+    ("_forward_attention", "E"),
+    ("_forward_mlp", "B"),
+    ("MLP.forward", "B"),
+    ("MLP.forward", "E"),
+    ("_forward_mlp", "E"),
+    ("transformer_layer", "E"),
+)
 
 
 @dataclass(frozen=True)
@@ -196,11 +218,39 @@ def _validate_iteration(
     return failures
 
 
+def _validate_eager_layers(
+    iteration: Iteration,
+    *,
+    rank: int,
+    expected_layers: int,
+) -> list[Failure]:
+    observed = tuple(
+        (event.name, event.ph)
+        for event in iteration.events
+        if event.name in _EAGER_TREE_PHASES
+    )
+    expected = (("decoder", "B"),) + _EAGER_LAYER_SEQUENCE * expected_layers + (
+        ("decoder", "E"),
+    )
+    if observed == expected:
+        return []
+    return [
+        _failure(
+            "trace.gpt.eager_layers",
+            f"eager Transformer sequence has {len(observed)} records, "
+            f"expected {len(expected)} records for {expected_layers} layers",
+            rank=rank,
+            iteration=int(iteration.iteration_id),
+        )
+    ]
+
+
 def _validate_gpt_model_phases(
     trace_root: Path,
     *,
     expected_pipeline_ranks: Mapping[int, int],
     postprocess_ranks: frozenset[int],
+    eager_layers_by_rank: Mapping[int, int] | None = None,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -256,6 +306,14 @@ def _validate_gpt_model_phases(
                     },
                 )
             )
+            if eager_layers_by_rank is not None and rank in eager_layers_by_rank:
+                failures.extend(
+                    _validate_eager_layers(
+                        iteration,
+                        rank=rank,
+                        expected_layers=eager_layers_by_rank[rank],
+                    )
+                )
     return tuple(failures)
 
 
@@ -276,4 +334,15 @@ def validate_gpt_pp2_model_phases(trace_root: Path) -> tuple[Failure, ...]:
         trace_root,
         expected_pipeline_ranks={0: 0, 1: 1},
         postprocess_ranks=frozenset((1,)),
+    )
+
+
+def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate GPT model phases and two local eager Transformer layers."""
+
+    return _validate_gpt_model_phases(
+        trace_root,
+        expected_pipeline_ranks={0: 0},
+        postprocess_ranks=frozenset((0,)),
+        eager_layers_by_rank={0: 2},
     )
