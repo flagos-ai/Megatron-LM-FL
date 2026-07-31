@@ -15,9 +15,7 @@ from types import SimpleNamespace
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 _REPOSITORY_ROOT_TEXT = str(_REPOSITORY_ROOT)
-sys.path[:] = [
-    entry for entry in sys.path if entry != _REPOSITORY_ROOT_TEXT
-]
+sys.path[:] = [entry for entry in sys.path if entry != _REPOSITORY_ROOT_TEXT]
 sys.path.insert(0, _REPOSITORY_ROOT_TEXT)
 
 import torch
@@ -49,9 +47,7 @@ def _runtime_args(system) -> SimpleNamespace:
         trace_mode=int(system.get("trace_mode", 1)),
         trace_dir=str(system.trace_dir),
         trace_interval=int(system.get("trace_interval", 1)),
-        continuous_trace_iterations=int(
-            system.get("continuous_trace_iterations", 1)
-        ),
+        continuous_trace_iterations=int(system.get("continuous_trace_iterations", 1)),
         trace_granularity=str(system.get("trace_granularity", "base")),
         trace_cupti_kernels=str(system.get("trace_cupti_kernels", "off")),
         trace_gather_to_rank0=False,
@@ -77,11 +73,7 @@ def _grid_size(grid: Mapping[str, int]) -> int:
     return grid["tp"] * grid["pp"] * grid["dp"]
 
 
-def _module_role(
-    rank: int,
-    encoder_grid: Mapping[str, int],
-    llm_grid: Mapping[str, int],
-) -> str:
+def _module_role(rank: int, encoder_grid: Mapping[str, int], llm_grid: Mapping[str, int]) -> str:
     encoder_offset = encoder_grid["grid_offset"]
     if encoder_offset <= rank < encoder_offset + _grid_size(encoder_grid):
         return "encoder"
@@ -99,9 +91,8 @@ def _losses_are_finite(losses: Sequence[object]) -> bool:
         if isinstance(value, torch.Tensor):
             if not bool(torch.isfinite(value).all().item()):
                 return False
-        elif (
-            not isinstance(value, (int, float))
-            or not bool(torch.isfinite(torch.tensor(value)).item())
+        elif not isinstance(value, (int, float)) or not bool(
+            torch.isfinite(torch.tensor(value)).item()
         ):
             return False
     return True
@@ -121,25 +112,14 @@ def _assert_nested_equal(expected, observed, path: str) -> None:
     if isinstance(expected, (list, tuple)):
         if not isinstance(observed, type(expected)) or len(expected) != len(observed):
             raise AssertionError(f"checkpoint sequence differs at {path}")
-        for index, (expected_item, observed_item) in enumerate(
-            zip(expected, observed)
-        ):
-            _assert_nested_equal(
-                expected_item,
-                observed_item,
-                f"{path}[{index}]",
-            )
+        for index, (expected_item, observed_item) in enumerate(zip(expected, observed)):
+            _assert_nested_equal(expected_item, observed_item, f"{path}[{index}]")
         return
     if expected != observed:
         raise AssertionError(f"checkpoint value differs at {path}")
 
 
-def _checkpoint_round_trip(
-    run_dir: Path,
-    *,
-    state: MimoTrainingState,
-    mimo,
-) -> dict[str, object]:
+def _checkpoint_round_trip(run_dir: Path, *, state: MimoTrainingState, mimo) -> dict[str, object]:
     checkpoint_root = run_dir / "checkpoints" / "iteration-1"
     model_checkpoint = checkpoint_root / "model"
     optimizer_checkpoint = checkpoint_root / "optimizer"
@@ -149,21 +129,15 @@ def _checkpoint_round_trip(
     dist.barrier()
 
     expected_parameters = {
-        name: parameter.detach().clone()
-        for name, parameter in state.model.named_parameters()
+        name: parameter.detach().clone() for name, parameter in state.model.named_parameters()
     }
     expected_optimizer = copy.deepcopy(state.optimizer.state_dict())
 
     save(state.model.sharded_state_dict(), str(model_checkpoint))
     optimizer_state = state.optimizer.sharded_state_dict(
-        state.model.sharded_state_dict(),
-        is_loading=False,
+        state.model.sharded_state_dict(), is_loading=False
     )
-    save(
-        optimizer_state,
-        str(optimizer_checkpoint),
-        validate_access_integrity=False,
-    )
+    save(optimizer_state, str(optimizer_checkpoint), validate_access_integrity=False)
     dist.barrier()
 
     restored_model, _, _, _, _ = get_mimo_model(
@@ -176,34 +150,25 @@ def _checkpoint_round_trip(
         seq_len=int(mimo.seq_length),
         use_distributed_optimizer=bool(mimo.use_distributed_optimizer),
     )
-    restored_optimizer = get_mimo_optimizer(
-        restored_model,
-        copy.deepcopy(state.optimizer_config),
-    )
+    restored_optimizer = get_mimo_optimizer(restored_model, copy.deepcopy(state.optimizer_config))
 
     model_template = restored_model.sharded_state_dict()
     loaded_model, missing, unexpected = load(
-        model_template,
-        str(model_checkpoint),
-        strict=StrictHandling.RETURN_ALL,
+        model_template, str(model_checkpoint), strict=StrictHandling.RETURN_ALL
     )
     real_missing = [key for key in missing if "_extra_state" not in key]
     real_unexpected = [key for key in unexpected if "_extra_state" not in key]
     if real_missing or real_unexpected:
         raise AssertionError(
-            "checkpoint model keys differ: "
-            f"missing={real_missing}, unexpected={real_unexpected}"
+            "checkpoint model keys differ: " f"missing={real_missing}, unexpected={real_unexpected}"
         )
     restored_model.load_state_dict(loaded_model)
 
     optimizer_template = restored_optimizer.sharded_state_dict(
-        restored_model.sharded_state_dict(),
-        is_loading=True,
+        restored_model.sharded_state_dict(), is_loading=True
     )
     loaded_optimizer = load(
-        optimizer_template,
-        str(optimizer_checkpoint),
-        validate_access_integrity=False,
+        optimizer_template, str(optimizer_checkpoint), validate_access_integrity=False
     )
     restored_optimizer.load_state_dict(loaded_optimizer)
 
@@ -212,20 +177,12 @@ def _checkpoint_round_trip(
         raise AssertionError("checkpoint model parameter names differ after reload")
     for name, expected in expected_parameters.items():
         if not torch.equal(expected, observed_parameters[name]):
-            raise AssertionError(
-                f"checkpoint model parameter {name!r} differs after reload"
-            )
-    _assert_nested_equal(
-        expected_optimizer,
-        restored_optimizer.state_dict(),
-        "optimizer",
-    )
+            raise AssertionError(f"checkpoint model parameter {name!r} differs after reload")
+    _assert_nested_equal(expected_optimizer, restored_optimizer.state_dict(), "optimizer")
     dist.barrier()
 
     return {
-        "checkpoint_file_count": sum(
-            path.is_file() for path in checkpoint_root.rglob("*")
-        ),
+        "checkpoint_file_count": sum(path.is_file() for path in checkpoint_root.rglob("*")),
         "checkpoint_format": "torch_dist",
         "checkpoint_model_reloaded": True,
         "checkpoint_optimizer_reloaded": True,
@@ -235,10 +192,7 @@ def _checkpoint_round_trip(
 
 def _write_result(run_dir: Path, rank: int, payload: Mapping[str, object]) -> None:
     path = run_dir / f"training-result-rank-{rank}.json"
-    path.write_text(
-        json.dumps(payload, indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -287,11 +241,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             iteration_context=iteration,
             return_run_state=True,
         )
-        checkpoint = _checkpoint_round_trip(
-            run_dir,
-            state=state,
-            mimo=mimo,
-        )
+        checkpoint = _checkpoint_round_trip(run_dir, state=state, mimo=mimo)
         result_payload = {
             "backward_completed": True,
             **checkpoint,

@@ -43,10 +43,7 @@ def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
     return by_rank
 
 
-def _event_span(
-    events: Sequence[Event],
-    name: str,
-) -> tuple[Event, Event] | None:
+def _event_span(events: Sequence[Event], name: str) -> tuple[Event, Event] | None:
     matching = [event for event in events if event.name == name]
     if len(matching) != 2 or tuple(event.ph for event in matching) != ("B", "E"):
         return None
@@ -82,9 +79,7 @@ def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
             )
             continue
         bridge_ends = [
-            event.rel_ts
-            for event in events
-            if event.name in _BRIDGE_EVENTS and event.ph == "E"
+            event.rel_ts for event in events if event.name in _BRIDGE_EVENTS and event.ph == "E"
         ]
         if not bridge_ends:
             failures.append(
@@ -105,10 +100,7 @@ def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
     return tuple(failures)
 
 
-def validate_mimo_training_run(
-    run_root: Path,
-    trace_enabled: bool,
-) -> tuple[Failure, ...]:
+def validate_mimo_training_run(run_root: Path, trace_enabled: bool) -> tuple[Failure, ...]:
     """Validate real F/B, optimizer update, and checkpoint reload on two ranks."""
 
     failures: list[Failure] = []
@@ -201,10 +193,7 @@ def validate_mimo_training_run(
                 )
             )
         checkpoint_file_count = payload.get("checkpoint_file_count")
-        if (
-            not isinstance(checkpoint_file_count, int)
-            or checkpoint_file_count <= 0
-        ):
+        if not isinstance(checkpoint_file_count, int) or checkpoint_file_count <= 0:
             failures.append(
                 _failure(
                     "run.mimo.checkpoint_files",

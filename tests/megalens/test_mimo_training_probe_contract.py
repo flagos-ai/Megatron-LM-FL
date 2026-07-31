@@ -9,11 +9,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import mimo_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
 
-_FIXTURE = (
-    Path(__file__).resolve().parent
-    / "fixtures"
-    / "flagscale_single_node_mimo_smoke.yaml"
-)
+_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "flagscale_single_node_mimo_smoke.yaml"
 
 
 def _write_results(run_root: Path, *, trace_enabled: bool) -> None:
@@ -45,8 +41,7 @@ def _write_results(run_root: Path, *, trace_enabled: bool) -> None:
             "world_size": 2,
         }
         (run_root / f"training-result-rank-{rank}.json").write_text(
-            json.dumps(payload),
-            encoding="utf-8",
+            json.dumps(payload), encoding="utf-8"
         )
 
 
@@ -129,18 +124,8 @@ def _write_trace(trace_root: Path, *, optimizer_before_bridge: bool = False) -> 
             event(name, "E")
         if not optimizer_before_bridge:
             optimizer()
-        rows.append(
-            {
-                "name": "iteration",
-                "ph": "E",
-                "iteration": 1,
-                "duration_wall": timestamp,
-            }
-        )
-        path = (
-            trace_root
-            / f"benchmark-global-{rank}-data-0-pipeline-0-tensor-0.json"
-        )
+        rows.append({"name": "iteration", "ph": "E", "iteration": 1, "duration_wall": timestamp})
+        path = trace_root / f"benchmark-global-{rank}-data-0-pipeline-0-tensor-0.json"
         path.write_text(json.dumps(rows), encoding="utf-8")
 
 
@@ -151,8 +136,7 @@ def test_mimo_profile_uses_controlled_native_training_entry() -> None:
         "type": "train",
         "backend": "native",
         "entrypoint": (
-            "/workspace/Megatron-LM-FL/"
-            "tests/test_utils/runners/run_mimo_training.py"
+            "/workspace/Megatron-LM-FL/" "tests/test_utils/runners/run_mimo_training.py"
         ),
     }
     assert config["experiment"]["runner"]["nproc_per_node"] == 2
@@ -160,9 +144,7 @@ def test_mimo_profile_uses_controlled_native_training_entry() -> None:
     assert gate._CONFIG_PROFILES[_FIXTURE.stem] == "mimo-train2"
 
 
-def test_mimo_run_contract_accepts_real_update_and_checkpoint_reload(
-    tmp_path: Path,
-) -> None:
+def test_mimo_run_contract_accepts_real_update_and_checkpoint_reload(tmp_path: Path) -> None:
     _write_results(tmp_path, trace_enabled=True)
 
     assert mimo_probe_contract.validate_mimo_training_run(tmp_path, True) == ()
@@ -172,18 +154,12 @@ def test_mimo_trace_contract_accepts_bridge_then_optimizer(tmp_path: Path) -> No
     trace_root = tmp_path / "traces"
     _write_trace(trace_root)
 
-    report = manifest.validate_trace(
-        trace_root,
-        gate.PROFILES["mimo-train2"],
-        trace_enabled=True,
-    )
+    report = manifest.validate_trace(trace_root, gate.PROFILES["mimo-train2"], trace_enabled=True)
 
     assert report.passed
 
 
-def test_mimo_trace_contract_rejects_optimizer_before_bridge(
-    tmp_path: Path,
-) -> None:
+def test_mimo_trace_contract_rejects_optimizer_before_bridge(tmp_path: Path) -> None:
     trace_root = tmp_path / "traces"
     _write_trace(trace_root, optimizer_before_bridge=True)
 
