@@ -6,6 +6,7 @@ from typing import Optional, Union
 import torch
 
 from megatron.core.jit import jit_fuser
+from megatron.core.observability import scoped_forward
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import (
     MoEAuxLossAutoScaler,
@@ -100,9 +101,13 @@ class Router(ABC, MegatronModule):
         """
         if self.weight.device.type == 'cpu':
             # move weights to GPU
-            self.weight.data = self.weight.data.to(device=cur_platform.current_device())  # FlagScale Add
+            self.weight.data = self.weight.data.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Add
         if self.bias is not None and self.bias.device.type == 'cpu':
-            self.bias.data = self.bias.data.to(device=cur_platform.current_device())  # FlagScale Add
+            self.bias.data = self.bias.data.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Add
 
         # Convert to specified datatype for routing computation if enabled
         router_dtype = input.dtype
@@ -241,7 +246,9 @@ class TopKRouter(Router):
             )
             self.register_buffer(
                 'ga_steps',
-                torch.tensor(0, dtype=torch.float32, device=cur_platform.current_device()),  # FlagScale Add
+                torch.tensor(
+                    0, dtype=torch.float32, device=cur_platform.current_device()
+                ),  # FlagScale Add
                 persistent=False,
             )
         else:
@@ -768,6 +775,7 @@ class TopKRouter(Router):
             self.global_tokens_per_expert.zero_()
             self.ga_steps.zero_()
 
+    @scoped_forward("moe-router")
     def forward(
         self,
         input: torch.Tensor,
