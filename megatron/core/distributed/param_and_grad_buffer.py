@@ -964,8 +964,8 @@ class _ParamAndGradBucketGroup:
             )
 
         with (
-            stream_context,
             grad_sync_scope as scope,
+            stream_context,
             _coalescing_manager(communication_group, async_ops=async_op) as cm,
         ):
             if grad_sync_gate is not None:
@@ -1036,8 +1036,8 @@ class _ParamAndGradBucketGroup:
             )
             # Create a new coalescing manager for the inter-instance all-reduce.
             with (
-                stream_context,
                 inter_instance_scope as inter_scope,
+                stream_context,
                 _coalescing_manager(
                     self.inter_distributed_optimizer_instance_group, async_ops=async_op
                 ) as cm,

@@ -725,9 +725,10 @@ def test_dp_grad_sync_completion_records_multi_instance_stream_join(monkeypatch)
     }
 
 
-def test_dp_multi_instance_collective_scopes_use_communication_stream(monkeypatch):
+def test_dp_multi_instance_dispatch_scopes_use_caller_stream(monkeypatch):
     stream_state = {"current": "compute"}
     scope_streams = []
+    collective_streams = []
 
     class _StreamScope:
         def __init__(self, name, ctx):
@@ -790,12 +791,16 @@ def test_dp_multi_instance_collective_scopes_use_communication_stream(monkeypatc
     monkeypatch.setattr(
         param_and_grad_buffer,
         "dist_reduce_scatter_func",
-        lambda output, input_, *, op, group, async_op: None,
+        lambda output, input_, *, op, group, async_op: collective_streams.append(
+            ("reduce-scatter", stream_state["current"])
+        ),
     )
     monkeypatch.setattr(
         param_and_grad_buffer.torch.distributed,
         "all_reduce",
-        lambda tensor, *, op, group, async_op: None,
+        lambda tensor, *, op, group, async_op: collective_streams.append(
+            ("allreduce", stream_state["current"])
+        ),
     )
     monkeypatch.setattr(
         param_and_grad_buffer.torch.distributed, "get_process_group_ranks", lambda group: [0, 1]
@@ -805,10 +810,16 @@ def test_dp_multi_instance_collective_scopes_use_communication_stream(monkeypatc
     bucket_group.start_grad_sync()
 
     assert scope_streams == [
-        ("dp-reduce-scatter", "enter", communication_stream),
-        ("dp-reduce-scatter", "exit", communication_stream),
-        ("dp-allreduce", "enter", communication_stream),
-        ("dp-allreduce", "exit", communication_stream),
+        ("dp-reduce-scatter", "enter", "compute"),
+        ("dp-reduce-scatter", "exit", "compute"),
+        ("dp-allreduce", "enter", "compute"),
+        ("dp-allreduce", "exit", "compute"),
+    ]
+    assert collective_streams == [
+        ("reduce-scatter", communication_stream),
+        ("reduce-scatter", communication_stream),
+        ("allreduce", communication_stream),
+        ("allreduce", communication_stream),
     ]
 
 
