@@ -72,6 +72,14 @@ _LINEAR_MATCH_FIELDS = (
     "launch_site",
     "payload_role",
 )
+_FINAL_SYNC_EVENTS = frozenset(
+    (
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+        "embedding-grads-allreduce",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -519,6 +527,165 @@ def _validate_linear_lifecycle(
     return failures, set(launched)
 
 
+def _validate_final_grad_sync(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[list[Failure], int | None]:
+    iteration_id = int(iteration.iteration_id)
+    spans, failures = _pair_spans(iteration, _FINAL_SYNC_EVENTS, rank=rank)
+    expected_counts = {
+        "grad-sync": 1,
+        "all-grads-sync": 1,
+        "sp-layernorm-allreduce": 1,
+        "embedding-grads-allreduce": 0,
+    }
+    for name, expected in expected_counts.items():
+        observed = len(spans.get(name, ()))
+        if observed != expected:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_count",
+                    f"event {name!r} has {observed} span(s), expected {expected}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    grad_spans = spans.get("grad-sync", ())
+    all_grads_spans = spans.get("all-grads-sync", ())
+    layernorm_spans = spans.get("sp-layernorm-allreduce", ())
+    grad = grad_spans[0] if len(grad_spans) == 1 else None
+    all_grads = all_grads_spans[0] if len(all_grads_spans) == 1 else None
+    layernorm = layernorm_spans[0] if len(layernorm_spans) == 1 else None
+    if grad is not None:
+        failures.extend(
+            _field_failures(
+                grad.begin,
+                {
+                    "schedule": "no-pipelining",
+                    "timing_phase": "framework_phase",
+                },
+                code="trace.tp.final_sync_field",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        repeated = {"schedule", "timing_phase"} & grad.end.attrs.keys()
+        if repeated:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    f"grad-sync repeats begin fields on end: {sorted(repeated)}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    if grad is not None:
+        for child in (all_grads, layernorm):
+            if child is not None and child.parent_begin_position != grad.begin_position:
+                failures.append(
+                    _failure(
+                        "trace.tp.final_sync_parent",
+                        f"event {child.begin.name!r} is not a direct child of grad-sync",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+    if (
+        all_grads is not None
+        and layernorm is not None
+        and all_grads.end_position >= layernorm.begin_position
+    ):
+        failures.append(
+            _failure(
+                "trace.tp.final_sync_order",
+                "sp-layernorm-allreduce does not follow all-grads-sync",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    data_bytes: int | None = None
+    if layernorm is not None:
+        failures.extend(
+            _field_failures(
+                layernorm.begin,
+                {
+                    "group_size": 2,
+                    "reduce_op": "SUM",
+                    "grad_bucket": "sum",
+                },
+                code="trace.tp.final_sync_field",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        observed_bytes = layernorm.begin.attrs.get("data_bytes")
+        if (
+            not isinstance(observed_bytes, int)
+            or isinstance(observed_bytes, bool)
+            or observed_bytes <= 0
+        ):
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    f"sp-layernorm-allreduce has invalid data_bytes={observed_bytes!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        else:
+            data_bytes = observed_bytes
+        if "group" in layernorm.begin.attrs:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "sp-layernorm-allreduce records peer group on begin",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        if layernorm.end.attrs.get("group") != [1 - rank]:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    f"sp-layernorm-allreduce has peer group="
+                    f"{layernorm.end.attrs.get('group')!r}, expected {[1 - rank]!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        repeated = {
+            "data_bytes",
+            "group_size",
+            "reduce_op",
+            "grad_bucket",
+            "timing_phase",
+        } & layernorm.end.attrs.keys()
+        if repeated:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "sp-layernorm-allreduce repeats begin fields on end: "
+                    f"{sorted(repeated)}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        if "timing_phase" in layernorm.begin.attrs:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "sp-layernorm-allreduce records an unsupported timing_phase",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    return failures, data_bytes
+
+
 def validate_tp2_gqa_collective_hierarchy(
     trace_root: Path,
 ) -> tuple[Failure, ...]:
@@ -606,4 +773,51 @@ def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
                     )
                 )
             rank_operation_ids.update(operation_ids)
+    return tuple(failures)
+
+
+def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    if tuple(sorted(by_rank)) != (0, 1):
+        failures.append(
+            Failure(
+                "trace.tp.final_sync_ranks",
+                f"TP2 final-sync contract expects ranks [0, 1], "
+                f"observed {sorted(by_rank)}",
+                "tp2-local-sp",
+            )
+        )
+
+    bytes_by_iteration: dict[int, dict[int, int]] = defaultdict(dict)
+    for rank in (0, 1):
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.tp.final_sync_iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        for iteration in iterations:
+            iteration_failures, data_bytes = _validate_final_grad_sync(
+                iteration,
+                rank=rank,
+            )
+            failures.extend(iteration_failures)
+            if data_bytes is not None:
+                bytes_by_iteration[int(iteration.iteration_id)][rank] = data_bytes
+
+    for iteration, rank_bytes in sorted(bytes_by_iteration.items()):
+        if set(rank_bytes) == {0, 1} and len(set(rank_bytes.values())) != 1:
+            failures.append(
+                Failure(
+                    "trace.tp.final_sync_field",
+                    f"iteration {iteration} has unequal SP payload bytes {rank_bytes}",
+                    f"iteration={iteration}",
+                )
+            )
     return tuple(failures)
