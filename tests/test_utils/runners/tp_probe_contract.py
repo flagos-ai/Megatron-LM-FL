@@ -22,6 +22,56 @@ _COLLECTIVE_SPECS = {
     "tp-reduce-scatter": {"op": "reduce-scatter", "dim": "first"},
     "tp-reduce-scatter-last": {"op": "reduce-scatter", "dim": "last"},
 }
+_LINEAR_EVENTS = frozenset(
+    ("tp-linear-async-launch", "tp-linear-async-complete")
+)
+_LINEAR_ROUTE_SPECS = {
+    "all-gather": {
+        "dim": "first",
+        "launch_site": "linear_backward_wgrad_input_all_gather",
+        "payload_role": "weight_gradient_input",
+        "completion_site": "linear_backward_wgrad_input_ready",
+        "wait_role": "dependency",
+    },
+    "reduce-scatter": {
+        "dim": "first",
+        "launch_site": "linear_backward_dgrad_reduce_scatter",
+        "payload_role": "input_gradient",
+        "completion_site": "linear_backward_dgrad_reduce_scatter_return",
+        "wait_role": "return",
+    },
+}
+_LINEAR_LAUNCH_FIELDS = {
+    "operation_id_scope": "rank_local",
+    "execution_route": "local_linear_direct_async",
+    "pass_direction": "backward",
+    "async_op": True,
+    "completion_included": False,
+    "timing_phase": "launch_attempt",
+}
+_LINEAR_COMPLETION_FIELDS = {
+    "operation_id_scope": "rank_local",
+    "execution_route": "local_linear_direct_async",
+    "pass_direction": "backward",
+    "completion_guarantee": "current_stream_after_wait",
+    "completion_included": True,
+    "completion_kind": "work_wait",
+    "duration_attribution": "per_request",
+    "global_device_completion_guaranteed": False,
+    "host_blocking_guaranteed": False,
+    "launch_observed": True,
+    "op": "wait",
+    "terminal": True,
+    "timing_phase": "stream_dependency",
+}
+_LINEAR_MATCH_FIELDS = (
+    "collective_op",
+    "data_bytes",
+    "group_size",
+    "dim",
+    "launch_site",
+    "payload_role",
+)
 
 
 @dataclass(frozen=True)
@@ -46,6 +96,27 @@ def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
 
 def _failure(code: str, message: str, *, rank: int, iteration: int) -> Failure:
     return Failure(code, message, f"rank={rank} iteration={iteration}")
+
+
+def _field_failures(
+    event: Event,
+    expected: Mapping[str, object],
+    *,
+    code: str,
+    rank: int,
+    iteration: int,
+) -> list[Failure]:
+    return [
+        _failure(
+            code,
+            f"event {event.name!r} has {field}="
+            f"{event.attrs.get(field, '<missing>')!r}, expected {value!r}",
+            rank=rank,
+            iteration=iteration,
+        )
+        for field, value in expected.items()
+        if event.attrs.get(field, "<missing>") != value
+    ]
 
 
 def _pair_spans(
@@ -251,6 +322,203 @@ def _validate_collective_hierarchy(
     return failures
 
 
+def _validate_linear_lifecycle(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[list[Failure], set[str]]:
+    iteration_id = int(iteration.iteration_id)
+    spans, failures = _pair_spans(iteration, _LINEAR_EVENTS, rank=rank)
+    launches = spans.get("tp-linear-async-launch", ())
+    completions = spans.get("tp-linear-async-complete", ())
+    if not launches or len(launches) != len(completions):
+        failures.append(
+            _failure(
+                "trace.tp_linear.event_count",
+                f"linear launch/completion spans={len(launches)}/{len(completions)}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    launched: dict[str, _Span] = {}
+    observed_routes: set[str] = set()
+    for span in launches:
+        begin = span.begin
+        operation_id = begin.attrs.get("operation_id")
+        route = begin.attrs.get("collective_op")
+        failures.extend(
+            _field_failures(
+                begin,
+                _LINEAR_LAUNCH_FIELDS,
+                code="trace.tp_linear.field",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        if route not in _LINEAR_ROUTE_SPECS:
+            failures.append(
+                _failure(
+                    "trace.tp_linear.route",
+                    f"SP profile observed unsupported route {route!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        else:
+            observed_routes.add(str(route))
+            route_fields = {
+                field: value
+                for field, value in _LINEAR_ROUTE_SPECS[str(route)].items()
+                if field not in {"completion_site", "wait_role"}
+            }
+            failures.extend(
+                _field_failures(
+                    begin,
+                    route_fields,
+                    code="trace.tp_linear.field",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        data_bytes = begin.attrs.get("data_bytes")
+        if (
+            not isinstance(data_bytes, int)
+            or isinstance(data_bytes, bool)
+            or data_bytes <= 0
+        ):
+            failures.append(
+                _failure(
+                    "trace.tp_linear.field",
+                    f"linear launch has invalid data_bytes={data_bytes!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        if begin.attrs.get("group_size") != 2:
+            failures.append(
+                _failure(
+                    "trace.tp_linear.field",
+                    f"linear launch has group_size={begin.attrs.get('group_size')!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        if (
+            not isinstance(operation_id, str)
+            or not operation_id.startswith("tp-linear:")
+            or operation_id in launched
+        ):
+            failures.append(
+                _failure(
+                    "trace.tp_linear.operation_id",
+                    f"invalid or duplicate operation_id={operation_id!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        else:
+            launched[operation_id] = span
+        failures.extend(
+            _field_failures(
+                span.end,
+                {"api_returned": True, "error_type": None},
+                code="trace.tp_linear.completion",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    if observed_routes != set(_LINEAR_ROUTE_SPECS):
+        failures.append(
+            _failure(
+                "trace.tp_linear.route",
+                f"SP profile routes are {sorted(observed_routes)}, "
+                f"expected {sorted(_LINEAR_ROUTE_SPECS)}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    completed: set[str] = set()
+    for span in completions:
+        begin = span.begin
+        operation_id = begin.attrs.get("operation_id")
+        route = begin.attrs.get("collective_op")
+        failures.extend(
+            _field_failures(
+                begin,
+                _LINEAR_COMPLETION_FIELDS,
+                code="trace.tp_linear.field",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        if route in _LINEAR_ROUTE_SPECS:
+            route_spec = _LINEAR_ROUTE_SPECS[str(route)]
+            failures.extend(
+                _field_failures(
+                    begin,
+                    {
+                        "dim": route_spec["dim"],
+                        "launch_site": route_spec["launch_site"],
+                        "payload_role": route_spec["payload_role"],
+                        "completion_site": route_spec["completion_site"],
+                        "wait_role": route_spec["wait_role"],
+                    },
+                    code="trace.tp_linear.field",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        launch = launched.get(operation_id) if isinstance(operation_id, str) else None
+        if (
+            launch is None
+            or operation_id in completed
+            or launch.end_position >= span.begin_position
+        ):
+            failures.append(
+                _failure(
+                    "trace.tp_linear.operation_id",
+                    f"completion cannot pair operation_id={operation_id!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        else:
+            for field in _LINEAR_MATCH_FIELDS:
+                if launch.begin.attrs.get(field) != begin.attrs.get(field):
+                    failures.append(
+                        _failure(
+                            "trace.tp_linear.field",
+                            f"operation_id={operation_id!r} disagrees on {field}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+            completed.add(operation_id)
+        failures.extend(
+            _field_failures(
+                span.end,
+                {"completed": True, "error_type": None},
+                code="trace.tp_linear.completion",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    if completed != set(launched):
+        failures.append(
+            _failure(
+                "trace.tp_linear.operation_id",
+                "linear launch and completion operation IDs differ",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return failures, set(launched)
+
+
 def validate_tp2_gqa_collective_hierarchy(
     trace_root: Path,
 ) -> tuple[Failure, ...]:
@@ -293,4 +561,49 @@ def validate_tp2_gqa_collective_hierarchy(
                     )
                 )
             failures.extend(_validate_collective_hierarchy(iteration, rank=rank))
+    return tuple(failures)
+
+
+def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    if tuple(sorted(by_rank)) != (0, 1):
+        failures.append(
+            Failure(
+                "trace.tp_linear.ranks",
+                f"TP2 linear contract expects ranks [0, 1], observed {sorted(by_rank)}",
+                "tp2-local-sp",
+            )
+        )
+
+    for rank in (0, 1):
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.tp_linear.iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        rank_operation_ids: set[str] = set()
+        for iteration in iterations:
+            iteration_failures, operation_ids = _validate_linear_lifecycle(
+                iteration,
+                rank=rank,
+            )
+            failures.extend(iteration_failures)
+            duplicates = rank_operation_ids & operation_ids
+            if duplicates:
+                failures.append(
+                    _failure(
+                        "trace.tp_linear.operation_id",
+                        f"operation IDs repeat across iterations: {sorted(duplicates)}",
+                        rank=rank,
+                        iteration=int(iteration.iteration_id),
+                    )
+                )
+            rank_operation_ids.update(operation_ids)
     return tuple(failures)

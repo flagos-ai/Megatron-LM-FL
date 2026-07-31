@@ -14,6 +14,9 @@ def _write_collective_trace(
     rank: int,
     omit_nested_reduce_scatter: bool = False,
     cross_all_gather_scopes: bool = False,
+    include_linear_lifecycle: bool = False,
+    include_linear_allreduce: bool = False,
+    mismatched_linear_completion: bool = False,
 ) -> None:
     rows: list[dict[str, object]] = []
     timestamp = 0
@@ -37,6 +40,70 @@ def _write_collective_trace(
     def collective(name: str, *, op: str, dim: str) -> None:
         event(name, "B", op=op, dim=dim, data_bytes=32768, group_size=2)
         event(name, "E", group=[1 - rank])
+
+    def linear_lifecycle(
+        *,
+        operation_id: str,
+        collective_op: str,
+        launch_site: str,
+        payload_role: str,
+        completion_site: str,
+        wait_role: str,
+        dim: str | None = "first",
+        mismatch_completion: bool = False,
+    ) -> None:
+        route = {
+            "operation_id": operation_id,
+            "operation_id_scope": "rank_local",
+            "execution_route": "local_linear_direct_async",
+            "collective_op": collective_op,
+            "data_bytes": 32768,
+            "group_size": 2,
+            "launch_site": launch_site,
+            "pass_direction": "backward",
+            "payload_role": payload_role,
+        }
+        if dim is not None:
+            route["dim"] = dim
+        event(
+            "tp-linear-async-launch",
+            "B",
+            **route,
+            async_op=True,
+            completion_included=False,
+            timing_phase="launch_attempt",
+        )
+        event(
+            "tp-linear-async-launch",
+            "E",
+            api_returned=True,
+            error_type=None,
+        )
+        if mismatch_completion:
+            route["operation_id"] = f"{operation_id}:unknown"
+        event(
+            "tp-linear-async-complete",
+            "B",
+            **route,
+            completion_guarantee="current_stream_after_wait",
+            completion_included=True,
+            completion_kind="work_wait",
+            completion_site=completion_site,
+            duration_attribution="per_request",
+            global_device_completion_guaranteed=False,
+            host_blocking_guaranteed=False,
+            launch_observed=True,
+            op="wait",
+            terminal=True,
+            timing_phase="stream_dependency",
+            wait_role=wait_role,
+        )
+        event(
+            "tp-linear-async-complete",
+            "E",
+            completed=True,
+            error_type=None,
+        )
 
     for iteration in (1, 2):
         rows.append(
@@ -81,6 +148,36 @@ def _write_collective_trace(
         if not omit_nested_reduce_scatter:
             collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
         event("tp-reduce-scatter-last", "E", group=[1 - rank])
+        if include_linear_lifecycle:
+            linear_lifecycle(
+                operation_id=f"tp-linear:{rank}:{iteration}:all-gather",
+                collective_op="all-gather",
+                launch_site="linear_backward_wgrad_input_all_gather",
+                payload_role="weight_gradient_input",
+                completion_site="linear_backward_wgrad_input_ready",
+                wait_role="dependency",
+            )
+            linear_lifecycle(
+                operation_id=f"tp-linear:{rank}:{iteration}:reduce-scatter",
+                collective_op="reduce-scatter",
+                launch_site="linear_backward_dgrad_reduce_scatter",
+                payload_role="input_gradient",
+                completion_site="linear_backward_dgrad_reduce_scatter_return",
+                wait_role="return",
+                mismatch_completion=mismatched_linear_completion
+                and rank == 0
+                and iteration == 1,
+            )
+            if include_linear_allreduce:
+                linear_lifecycle(
+                    operation_id=f"tp-linear:{rank}:{iteration}:all-reduce",
+                    collective_op="all-reduce",
+                    launch_site="linear_backward_dgrad_all_reduce",
+                    payload_role="input_gradient",
+                    completion_site="linear_backward_dgrad_all_reduce_return",
+                    wait_role="return",
+                    dim=None,
+                )
         rows.append(
             {
                 "name": "iteration",
@@ -130,3 +227,48 @@ def test_tp2_collective_contract_rejects_crossed_scopes(tmp_path: Path) -> None:
     failures = tp_probe_contract.validate_tp2_gqa_collective_hierarchy(tmp_path)
 
     assert "trace.tp.nesting" in {failure.code for failure in failures}
+
+
+def test_tp2_sp_linear_contract_accepts_all_gather_and_reduce_scatter(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+        )
+
+    assert tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path) == ()
+
+
+def test_tp2_sp_linear_contract_rejects_unknown_completion_identity(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            mismatched_linear_completion=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path)
+
+    assert "trace.tp_linear.operation_id" in {
+        failure.code for failure in failures
+    }
+
+
+def test_tp2_sp_linear_contract_rejects_allreduce_route(tmp_path: Path) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_linear_allreduce=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path)
+
+    assert "trace.tp_linear.route" in {failure.code for failure in failures}
