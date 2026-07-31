@@ -81,6 +81,7 @@ def _profile_checks(
             "tests/megalens/test_event_catalog.py",
             "tests/megalens/test_nested_aggregation.py",
             "tests/megalens/test_dp_lifecycle.py",
+            "tests/megalens/test_dp_probe_contract.py",
             "tests/megalens/test_dp_analyzer.py",
             "tests/megalens/test_tp_analyzer.py",
             "tests/megalens/test_pp_analyzer.py",
