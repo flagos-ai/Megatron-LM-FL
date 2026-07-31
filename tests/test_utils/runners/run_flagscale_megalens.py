@@ -22,6 +22,7 @@ from tests.test_utils.runners import dp_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
+from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
 
@@ -488,6 +489,16 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         bridge_probe_contract.validate_multimodule_bridge_fanout_trace,
         bridge_probe_contract.validate_multimodule_bridge_fanout_run,
     ),
+    "mimo-train2": manifest.TraceProfile(
+        "mimo-train2",
+        2,
+        (
+            *_BRIDGE_EVENTS,
+            manifest.EventRequirement("optimizer-step", _COMMON_FIELDS, "B"),
+        ),
+        mimo_probe_contract.validate_mimo_training_trace,
+        mimo_probe_contract.validate_mimo_training_run,
+    ),
 }
 
 _CONFIG_PROFILES = {
@@ -524,6 +535,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_multimodule_bridge_fanout": (
         "multimodule-bridge8-fanout"
     ),
+    "flagscale_single_node_mimo_smoke": "mimo-train2",
 }
 
 
