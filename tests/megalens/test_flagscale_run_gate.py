@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.test_utils.runners import dp_probe_contract
 from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import p2p_probe_contract
@@ -22,6 +23,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_dp2_standard_smoke.yaml": "dp2-standard-ddp",
+    "flagscale_single_node_dp2_standard_overlap_smoke.yaml": (
+        "dp2-standard-ddp-overlap"
+    ),
     "flagscale_single_node_dp2_distopt_smoke.yaml": "dp2-distopt",
     "flagscale_single_node_dp8_standard_smoke.yaml": "dp8-standard-ddp",
     "flagscale_single_node_dp8_distopt_smoke.yaml": "dp8-distopt",
@@ -371,6 +375,28 @@ def test_unbatched_pp2_profile_uses_vpp_without_unsupported_p2p_cli_keys() -> No
     assert model["num_layers"] == 4
     assert model["micro_batch_size"] == 1
     assert model["global_batch_size"] == 2
+
+
+def test_dp2_standard_overlap_profile_only_enables_gradient_overlap() -> None:
+    baseline = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_dp2_standard_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    overlap = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_dp2_standard_overlap_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = overlap["experiment"]["exp_name"]
+    baseline["train"]["system"]["overlap_grad_reduce"] = True
+
+    assert overlap == baseline
+    assert (
+        gate.PROFILES["dp2-standard-ddp-overlap"].contract
+        is dp_probe_contract.validate_dp_standard_overlap
+    )
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(

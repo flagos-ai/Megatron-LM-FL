@@ -17,6 +17,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
+from tests.test_utils.runners import dp_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
@@ -179,6 +180,19 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "dp2-standard-ddp": manifest.TraceProfile(
         "dp2-standard-ddp", 2, _dp_events("standard-ddp")
     ),
+    "dp2-standard-ddp-overlap": manifest.TraceProfile(
+        "dp2-standard-ddp-overlap",
+        2,
+        (
+            *_dp_events("standard-ddp"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_standard_overlap,
+    ),
     "dp2-distopt": manifest.TraceProfile("dp2-distopt", 2, _dp_events("distopt")),
     "dp8-standard-ddp": manifest.TraceProfile(
         "dp8-standard-ddp", 8, _dp_events("standard-ddp")
@@ -207,6 +221,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_dp2_standard_smoke": "dp2-standard-ddp",
+    "flagscale_single_node_dp2_standard_overlap_smoke": (
+        "dp2-standard-ddp-overlap"
+    ),
     "flagscale_single_node_dp2_distopt_smoke": "dp2-distopt",
     "flagscale_single_node_dp8_standard_smoke": "dp8-standard-ddp",
     "flagscale_single_node_dp8_distopt_smoke": "dp8-distopt",
@@ -420,7 +437,10 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ep-dispatcher", choices=("alltoall", "allgather"))
     parser.add_argument("--ep-profile", choices=("standard", "fine-grained"))
-    parser.add_argument("--dp-profile", choices=("standard-ddp", "distopt"))
+    parser.add_argument(
+        "--dp-profile",
+        choices=("standard-ddp", "standard-ddp-overlap", "distopt"),
+    )
     parser.add_argument(
         "--cuda-graph-profile",
         choices=("transformer-engine-attn", "transformer-engine-moe-router"),
