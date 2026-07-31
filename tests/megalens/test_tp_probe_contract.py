@@ -12,6 +12,11 @@ def _write_collective_trace(
     trace_root: Path,
     *,
     rank: int,
+    pipeline_rank: int = 0,
+    tensor_rank: int | None = None,
+    tp_peer_rank: int | None = None,
+    embedding_peer_rank: int | None = None,
+    grad_sync_schedule: str = "no-pipelining",
     omit_nested_reduce_scatter: bool = False,
     cross_all_gather_scopes: bool = False,
     include_first_all_gather: bool = True,
@@ -25,6 +30,11 @@ def _write_collective_trace(
 ) -> None:
     rows: list[dict[str, object]] = []
     timestamp = 0
+    tensor_rank = rank if tensor_rank is None else tensor_rank
+    tp_peer_rank = 1 - rank if tp_peer_rank is None else tp_peer_rank
+    embedding_peer_rank = (
+        1 - rank if embedding_peer_rank is None else embedding_peer_rank
+    )
 
     def event(name: str, phase: str, **attrs: object) -> None:
         nonlocal timestamp
@@ -36,15 +46,15 @@ def _write_collective_trace(
                 "rel_ts": timestamp,
                 "g_rk": rank,
                 "dp_rk": 0,
-                "pp_rk": 0,
-                "tp_rk": rank,
+                "pp_rk": pipeline_rank,
+                "tp_rk": tensor_rank,
                 **attrs,
             }
         )
 
     def collective(name: str, *, op: str, dim: str) -> None:
         event(name, "B", op=op, dim=dim, data_bytes=32768, group_size=2)
-        event(name, "E", group=[1 - rank])
+        event(name, "E", group=[tp_peer_rank])
 
     def linear_lifecycle(
         *,
@@ -119,7 +129,7 @@ def _write_collective_trace(
             reduce_op="SUM",
             grad_bucket="sum",
         )
-        event("sp-layernorm-allreduce", "E", group=[1 - rank])
+        event("sp-layernorm-allreduce", "E", group=[tp_peer_rank])
 
     for iteration in (1, 2):
         rows.append(
@@ -147,8 +157,8 @@ def _write_collective_trace(
                 data_bytes=32768,
                 group_size=2,
             )
-            event("tp-all-gather-first", "E", group=[1 - rank])
-            event("tp-all-gather-last", "E", group=[1 - rank])
+            event("tp-all-gather-first", "E", group=[tp_peer_rank])
+            event("tp-all-gather-last", "E", group=[tp_peer_rank])
         else:
             if include_first_all_gather:
                 collective("tp-all-gather-first", op="all-gather", dim="first")
@@ -164,7 +174,7 @@ def _write_collective_trace(
         )
         if not omit_nested_reduce_scatter:
             collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
-        event("tp-reduce-scatter-last", "E", group=[1 - rank])
+        event("tp-reduce-scatter-last", "E", group=[tp_peer_rank])
         if include_linear_lifecycle:
             linear_lifecycle(
                 operation_id=f"tp-linear:{rank}:{iteration}:all-gather",
@@ -199,7 +209,7 @@ def _write_collective_trace(
             event(
                 "grad-sync",
                 "B",
-                schedule="no-pipelining",
+                schedule=grad_sync_schedule,
                 timing_phase="framework_phase",
             )
             event("all-grads-sync", "B")
@@ -219,7 +229,7 @@ def _write_collective_trace(
                 event(
                     "embedding-grads-allreduce",
                     "E",
-                    group=[1 - rank],
+                    group=[embedding_peer_rank],
                 )
             event("grad-sync", "E")
         rows.append(
@@ -232,7 +242,10 @@ def _write_collective_trace(
         )
 
     trace_root.mkdir(parents=True, exist_ok=True)
-    path = trace_root / f"benchmark-global-{rank}-data-0-pipeline-0-tensor-{rank}.json"
+    path = trace_root / (
+        f"benchmark-global-{rank}-data-0-"
+        f"pipeline-{pipeline_rank}-tensor-{tensor_rank}.json"
+    )
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
@@ -447,6 +460,81 @@ def test_tp2_no_sp_final_sync_contract_rejects_layernorm_collective(
         )
 
     failures = tp_probe_contract.validate_tp2_no_sp_final_grad_sync(tmp_path)
+
+    assert "trace.tp.final_sync_count" in {
+        failure.code for failure in failures
+    }
+
+
+def test_tp2_pp2_embedding_final_sync_contract_accepts_two_parallel_axes(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        pipeline_rank, tensor_rank = divmod(rank, 2)
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            pipeline_rank=pipeline_rank,
+            tensor_rank=tensor_rank,
+            tp_peer_rank=rank ^ 1,
+            embedding_peer_rank=rank ^ 2,
+            grad_sync_schedule="non-interleaved-1f1b",
+            include_final_grad_sync=True,
+            include_embedding_sync=True,
+        )
+
+    assert (
+        tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync(tmp_path)
+        == ()
+    )
+
+
+def test_tp2_pp2_embedding_final_sync_contract_rejects_wrong_pp_peer(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        pipeline_rank, tensor_rank = divmod(rank, 2)
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            pipeline_rank=pipeline_rank,
+            tensor_rank=tensor_rank,
+            tp_peer_rank=rank ^ 1,
+            embedding_peer_rank=3 if rank == 0 else rank ^ 2,
+            grad_sync_schedule="non-interleaved-1f1b",
+            include_final_grad_sync=True,
+            include_embedding_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync(
+        tmp_path
+    )
+
+    assert "trace.tp.final_sync_field" in {
+        failure.code for failure in failures
+    }
+
+
+def test_tp2_pp2_embedding_final_sync_contract_requires_each_rank(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        pipeline_rank, tensor_rank = divmod(rank, 2)
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            pipeline_rank=pipeline_rank,
+            tensor_rank=tensor_rank,
+            tp_peer_rank=rank ^ 1,
+            embedding_peer_rank=rank ^ 2,
+            grad_sync_schedule="non-interleaved-1f1b",
+            include_final_grad_sync=True,
+            include_embedding_sync=rank != 0,
+        )
+
+    failures = tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync(
+        tmp_path
+    )
 
     assert "trace.tp.final_sync_count" in {
         failure.code for failure in failures

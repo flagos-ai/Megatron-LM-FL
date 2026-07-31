@@ -583,14 +583,16 @@ def _validate_final_grad_sync(
     rank: int,
     schedule: str,
     expect_sp_layernorm: bool,
-) -> tuple[list[Failure], int | None]:
+    tp_peer: int,
+    embedding_peer: int | None,
+) -> tuple[list[Failure], int | None, int | None]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _FINAL_SYNC_EVENTS, rank=rank)
     expected_counts = {
         "grad-sync": 1,
         "all-grads-sync": 1,
         "sp-layernorm-allreduce": int(expect_sp_layernorm),
-        "embedding-grads-allreduce": 0,
+        "embedding-grads-allreduce": int(embedding_peer is not None),
     }
     for name, expected in expected_counts.items():
         observed = len(spans.get(name, ()))
@@ -607,9 +609,11 @@ def _validate_final_grad_sync(
     grad_spans = spans.get("grad-sync", ())
     all_grads_spans = spans.get("all-grads-sync", ())
     layernorm_spans = spans.get("sp-layernorm-allreduce", ())
+    embedding_spans = spans.get("embedding-grads-allreduce", ())
     grad = grad_spans[0] if len(grad_spans) == 1 else None
     all_grads = all_grads_spans[0] if len(all_grads_spans) == 1 else None
     layernorm = layernorm_spans[0] if len(layernorm_spans) == 1 else None
+    embedding = embedding_spans[0] if len(embedding_spans) == 1 else None
     if grad is not None:
         failures.extend(
             _field_failures(
@@ -635,7 +639,7 @@ def _validate_final_grad_sync(
             )
 
     if grad is not None:
-        for child in (all_grads, layernorm):
+        for child in (all_grads, layernorm, embedding):
             if child is not None and child.parent_begin_position != grad.begin_position:
                 failures.append(
                     _failure(
@@ -645,19 +649,20 @@ def _validate_final_grad_sync(
                         iteration=iteration_id,
                     )
                 )
-    if (
-        all_grads is not None
-        and layernorm is not None
-        and all_grads.end_position >= layernorm.begin_position
-    ):
-        failures.append(
-            _failure(
-                "trace.tp.final_sync_order",
-                "sp-layernorm-allreduce does not follow all-grads-sync",
-                rank=rank,
-                iteration=iteration_id,
+    ordered_children = tuple(
+        child for child in (all_grads, layernorm, embedding) if child is not None
+    )
+    for previous, current in zip(ordered_children, ordered_children[1:]):
+        if previous.end_position >= current.begin_position:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_order",
+                    f"event {current.begin.name!r} does not follow "
+                    f"{previous.begin.name!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
             )
-        )
 
     data_bytes: int | None = None
     if layernorm is not None:
@@ -699,12 +704,12 @@ def _validate_final_grad_sync(
                     iteration=iteration_id,
                 )
             )
-        if layernorm.end.attrs.get("group") != [1 - rank]:
+        if layernorm.end.attrs.get("group") != [tp_peer]:
             failures.append(
                 _failure(
                     "trace.tp.final_sync_field",
                     f"sp-layernorm-allreduce has peer group="
-                    f"{layernorm.end.attrs.get('group')!r}, expected {[1 - rank]!r}",
+                    f"{layernorm.end.attrs.get('group')!r}, expected {[tp_peer]!r}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -735,7 +740,87 @@ def _validate_final_grad_sync(
                     iteration=iteration_id,
                 )
             )
-    return failures, data_bytes
+    embedding_bytes: int | None = None
+    if embedding is not None:
+        failures.extend(
+            _field_failures(
+                embedding.begin,
+                {
+                    "group_size": 2,
+                    "embedding_kind": "word",
+                },
+                code="trace.tp.final_sync_field",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        observed_bytes = embedding.begin.attrs.get("data_bytes")
+        if (
+            not isinstance(observed_bytes, int)
+            or isinstance(observed_bytes, bool)
+            or observed_bytes <= 0
+        ):
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "embedding-grads-allreduce has invalid "
+                    f"data_bytes={observed_bytes!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        else:
+            embedding_bytes = observed_bytes
+        unsupported_begin = {
+            "group",
+            "reduce_op",
+            "grad_bucket",
+            "timing_phase",
+            "operation_id",
+        } & embedding.begin.attrs.keys()
+        if unsupported_begin:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "embedding-grads-allreduce has unsupported begin fields: "
+                    f"{sorted(unsupported_begin)}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        if embedding_peer is not None and embedding.end.attrs.get("group") != [
+            embedding_peer
+        ]:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "embedding-grads-allreduce has peer group="
+                    f"{embedding.end.attrs.get('group')!r}, "
+                    f"expected {[embedding_peer]!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        repeated = {
+            "data_bytes",
+            "group_size",
+            "embedding_kind",
+            "reduce_op",
+            "grad_bucket",
+            "timing_phase",
+            "operation_id",
+        } & embedding.end.attrs.keys()
+        if repeated:
+            failures.append(
+                _failure(
+                    "trace.tp.final_sync_field",
+                    "embedding-grads-allreduce repeats begin fields on end: "
+                    f"{sorted(repeated)}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    return failures, data_bytes, embedding_bytes
 
 
 def _validate_tp2_gqa_collective_hierarchy(
@@ -916,11 +1001,13 @@ def _validate_tp2_final_grad_sync(
                 )
             )
         for iteration in iterations:
-            iteration_failures, data_bytes = _validate_final_grad_sync(
+            iteration_failures, data_bytes, _ = _validate_final_grad_sync(
                 iteration,
                 rank=rank,
                 schedule=schedule,
                 expect_sp_layernorm=expect_sp_layernorm,
+                tp_peer=1 - rank,
+                embedding_peer=None,
             )
             failures.extend(iteration_failures)
             if data_bytes is not None:
@@ -954,6 +1041,129 @@ def validate_tp2_no_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
         expect_sp_layernorm=False,
         profile_name="tp2-local-allreduce",
     )
+
+
+def validate_tp2_pp2_embedding_final_grad_sync(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    expected_ranks = (0, 1, 2, 3)
+    if tuple(sorted(by_rank)) != expected_ranks:
+        failures.append(
+            Failure(
+                "trace.tp.final_sync_ranks",
+                "TP2xPP2 embedding contract expects ranks [0, 1, 2, 3], "
+                f"observed {sorted(by_rank)}",
+                "tp2-pp2-embedding",
+            )
+        )
+
+    rank_coordinates: dict[int, tuple[int, int]] = {}
+    for rank in expected_ranks:
+        iterations = by_rank.get(rank, ())
+        coordinates = {
+            (event.rank.data, event.rank.pipeline, event.rank.tensor)
+            for iteration in iterations
+            for event in iteration.events
+        }
+        coordinate = next(iter(coordinates)) if len(coordinates) == 1 else None
+        if (
+            coordinate is not None
+            and coordinate[0] == 0
+            and coordinate[1] in (0, 1)
+            and coordinate[2] in (0, 1)
+        ):
+            _, pipeline_rank, tensor_rank = coordinate
+            rank_coordinates[rank] = (int(pipeline_rank), int(tensor_rank))
+        else:
+            failures.append(
+                Failure(
+                    "trace.tp.final_sync_coordinates",
+                    f"rank {rank} has invalid coordinates {sorted(map(str, coordinates))}",
+                    f"rank={rank}",
+                )
+            )
+
+    coordinate_to_rank = {
+        coordinate: rank for rank, coordinate in rank_coordinates.items()
+    }
+    expected_coordinates = {
+        (pipeline, tensor)
+        for pipeline in (0, 1)
+        for tensor in (0, 1)
+    }
+    if set(coordinate_to_rank) != expected_coordinates:
+        failures.append(
+            Failure(
+                "trace.tp.final_sync_coordinates",
+                "TP2xPP2 coordinates are "
+                f"{sorted(coordinate_to_rank)}, expected {sorted(expected_coordinates)}",
+                "tp2-pp2-embedding",
+            )
+        )
+
+    sp_bytes: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
+    embedding_bytes: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
+    for rank in expected_ranks:
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.tp.final_sync_iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        coordinate = rank_coordinates.get(rank)
+        if coordinate is None:
+            continue
+        pipeline_rank, tensor_rank = coordinate
+        tp_peer = coordinate_to_rank.get((pipeline_rank, 1 - tensor_rank))
+        embedding_peer = coordinate_to_rank.get((1 - pipeline_rank, tensor_rank))
+        if tp_peer is None or embedding_peer is None:
+            continue
+        for iteration in iterations:
+            iteration_id = int(iteration.iteration_id)
+            iteration_failures, sp_payload, embedding_payload = (
+                _validate_final_grad_sync(
+                    iteration,
+                    rank=rank,
+                    schedule="non-interleaved-1f1b",
+                    expect_sp_layernorm=True,
+                    tp_peer=tp_peer,
+                    embedding_peer=embedding_peer,
+                )
+            )
+            failures.extend(iteration_failures)
+            if sp_payload is not None:
+                sp_bytes[(iteration_id, pipeline_rank)][rank] = sp_payload
+            if embedding_payload is not None:
+                embedding_bytes[(iteration_id, tensor_rank)][rank] = embedding_payload
+
+    for (iteration, pipeline_rank), rank_bytes in sorted(sp_bytes.items()):
+        if len(rank_bytes) == 2 and len(set(rank_bytes.values())) != 1:
+            failures.append(
+                Failure(
+                    "trace.tp.final_sync_field",
+                    f"iteration {iteration} PP rank {pipeline_rank} has unequal "
+                    f"SP payload bytes {rank_bytes}",
+                    f"iteration={iteration} pp_rank={pipeline_rank}",
+                )
+            )
+    for (iteration, tensor_rank), rank_bytes in sorted(embedding_bytes.items()):
+        if len(rank_bytes) == 2 and len(set(rank_bytes.values())) != 1:
+            failures.append(
+                Failure(
+                    "trace.tp.final_sync_field",
+                    f"iteration {iteration} TP rank {tensor_rank} has unequal "
+                    f"embedding payload bytes {rank_bytes}",
+                    f"iteration={iteration} tp_rank={tensor_rank}",
+                )
+            )
+    return tuple(failures)
 
 
 def validate_tp2_local_allreduce_profile(
