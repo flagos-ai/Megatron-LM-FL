@@ -435,7 +435,8 @@ class DataIterator:
         input_ids = torch.cat([image_tokens, text_tokens], dim=1)
 
         labels = input_ids.clone()
-        labels[input_ids == self.image_token_id] = -100
+        # Megatron masks loss outside cross entropy; labels must remain valid vocabulary IDs.
+        labels[input_ids == self.image_token_id] = 0
 
         loss_mask = torch.ones(
             self.micro_batch_size, self.seq_length, device='cuda', dtype=torch.float32
@@ -617,7 +618,7 @@ def run_mimo_1f1b_test(
             if output is None:
                 return torch.tensor(0.0, device='cuda', requires_grad=True), {'loss_reduced': 0.0}
 
-            loss = output.float().sum()
+            loss = torch.sum(output.float().view(-1) * loss_mask.float().view(-1))
             return loss, {'loss_reduced': loss}
 
         batch = next(data_iterator) if data_iterator is not None else {'input_ids': None}
