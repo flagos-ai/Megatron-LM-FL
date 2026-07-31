@@ -1661,6 +1661,13 @@ def test_train_step_success_path_averages_losses_and_steps_scheduler(monkeypatch
             calls.append(("timer", name, log_level))
             return FakeTimer(name)
 
+    class FakeTraceScope:
+        def __enter__(self):
+            calls.append(("trace-enter", "optimizer"))
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            calls.append(("trace-exit", "optimizer", exc_type))
+
     class FakeRerunStateMachine:
         def __init__(self):
             self.runs = 0
@@ -1702,6 +1709,11 @@ def test_train_step_success_path_averages_losses_and_steps_scheduler(monkeypatch
     monkeypatch.setattr(training, "get_rerun_state_machine", lambda: FakeRerunStateMachine())
     monkeypatch.setattr(training, "get_num_microbatches", lambda: 2)
     monkeypatch.setattr(training, "has_nvidia_modelopt", False)
+    monkeypatch.setattr(
+        training,
+        "trace_scope",
+        lambda name: FakeTraceScope() if name == "optimizer" else pytest.fail(name),
+    )
     monkeypatch.setattr(training, "logical_and_across_model_parallel_group", lambda value: value)
     monkeypatch.setattr(training, "reduce_max_stat_across_model_parallel_group", lambda value: value)
     monkeypatch.setattr(training.mpu, "is_pipeline_last_stage", lambda ignore_virtual=True: True)
@@ -1728,6 +1740,14 @@ def test_train_step_success_path_averages_losses_and_steps_scheduler(monkeypatch
     assert "zero-grad-buffer" in calls
     assert "optimizer-zero-grad" in calls
     assert "optimizer-step" in calls
+    assert calls.index(("trace-enter", "optimizer")) < calls.index("optimizer-step")
+    assert calls.index("optimizer-step") < calls.index(("trace-exit", "optimizer", None))
+    assert calls.index(("timer-start", "optimizer", False)) < calls.index(
+        ("trace-enter", "optimizer")
+    )
+    assert calls.index(("trace-exit", "optimizer", None)) < calls.index(
+        ("timer-stop", "optimizer")
+    )
     assert ("scheduler-step", 8) in calls
     assert ("forward-backward", 2, False) in calls
 
