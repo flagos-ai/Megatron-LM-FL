@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""Execute the two-rank MultiModule schedule under one optional MegaLens iteration."""
+"""Execute a controlled MultiModule schedule under one optional MegaLens iteration."""
 
 from __future__ import annotations
 
@@ -67,12 +67,64 @@ def _losses_are_finite(losses: Sequence[object]) -> bool:
     )
 
 
+def _grid_config(grid, *, name: str | None = None) -> dict[str, object]:
+    config: dict[str, object] = {
+        "tp": int(grid["tp"]),
+        "pp": int(grid["pp"]),
+        "dp": int(grid["dp"]),
+        "grid_offset": int(grid["grid_offset"]),
+    }
+    if name is not None:
+        config["name"] = name
+    return config
+
+
+def _bridge_grids(bridge) -> tuple[list[dict[str, object]], dict[str, object]]:
+    encoder_grid = bridge.get("encoder_grid")
+    llm_grid = bridge.get("llm_grid")
+    if encoder_grid is None:
+        encoder_grid = {
+            "tp": 1,
+            "pp": 1,
+            "dp": 1,
+            "grid_offset": 0,
+        }
+    if llm_grid is None:
+        llm_grid = {
+            "tp": 1,
+            "pp": 1,
+            "dp": 1,
+            "grid_offset": 1,
+        }
+    return [_grid_config(encoder_grid, name="encoder")], _grid_config(llm_grid)
+
+
+def _grid_size(grid: dict[str, object]) -> int:
+    return int(grid["tp"]) * int(grid["pp"]) * int(grid["dp"])
+
+
+def _module_role(
+    rank: int,
+    encoder_configs: Sequence[dict[str, object]],
+    llm_config: dict[str, object],
+) -> str:
+    for encoder_config in encoder_configs:
+        offset = int(encoder_config["grid_offset"])
+        if offset <= rank < offset + _grid_size(encoder_config):
+            return "encoder"
+    llm_offset = int(llm_config["grid_offset"])
+    if llm_offset <= rank < llm_offset + _grid_size(llm_config):
+        return "llm"
+    raise ValueError(f"rank {rank} is outside the configured Bridge grids")
+
+
 def _result_payload(
     *,
     rank: int,
     world_size: int,
     losses: Sequence[object],
     run_state: dict[str, object],
+    module_role: str,
     trace_enabled: bool,
 ) -> dict[str, object]:
     return {
@@ -84,7 +136,7 @@ def _result_payload(
         "gradient_norm": run_state["gradient_norm"],
         "loss_count": len(losses),
         "loss_finite": _losses_are_finite(losses),
-        "module_role": "encoder" if rank == 0 else "llm",
+        "module_role": module_role,
         "optimizer_step": "not_run",
         "trace_enabled": trace_enabled,
         "world_size": world_size,
@@ -109,6 +161,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     config = OmegaConf.load(args.config_file)
     system = config.train.system
     bridge = config.train.bridge
+    encoder_configs, llm_config = _bridge_grids(bridge)
     run_dir = Path(os.environ["MEGALENS_GATE_CONTAINER_RUN_DIR"])
     runtime_args = _runtime_args(system)
     runtime = None
@@ -119,12 +172,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     rank = dist.get_rank()
     world_size = dist.get_world_size()
     try:
+        configured_world_size = sum(
+            _grid_size(grid) for grid in (*encoder_configs, llm_config)
+        )
+        if configured_world_size != world_size:
+            raise ValueError(
+                "configured Bridge grids contain "
+                f"{configured_world_size} ranks, but the distributed world has "
+                f"{world_size}"
+            )
         if runtime_args.trace:
             runtime = MegaLensRuntime(runtime_args)
         iteration = runtime.iteration(1) if runtime is not None else nullcontext()
         losses, run_state = run_multimodule_schedule_test(
-            [{"name": "encoder", "tp": 1, "pp": 1, "dp": 1, "grid_offset": 0}],
-            {"tp": 1, "pp": 1, "dp": 1, "grid_offset": 1},
+            encoder_configs,
+            llm_config,
             hidden_size=int(bridge.hidden_size),
             seq_length=int(bridge.seq_length),
             micro_batch_size=int(bridge.micro_batch_size),
@@ -137,6 +199,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             world_size=world_size,
             losses=losses,
             run_state=run_state,
+            module_role=_module_role(rank, encoder_configs, llm_config),
             trace_enabled=runtime_args.trace,
         )
         completed = True

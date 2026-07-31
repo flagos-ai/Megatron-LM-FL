@@ -133,6 +133,46 @@ _BRIDGE_DIRECTION_FIELDS = (
     "dest_module",
     "transport_api",
 )
+_BRIDGE_EVENTS = (
+    manifest.EventRequirement(
+        "bridge-p2p-launch",
+        (
+            *_COMMON_FIELDS,
+            "batch_id",
+            "message_kind",
+            "operation_count",
+            "operations",
+            "src_module",
+            "dest_module",
+            "transport_api",
+        ),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "bridge-grid-broadcast",
+        (
+            *_COMMON_FIELDS,
+            "collective_role",
+            "grid_side",
+            "message_kind",
+            "pipeline_direction",
+            "source_rank",
+            "src_module",
+            "dest_module",
+            "transport_api",
+        ),
+        "B",
+    ),
+    *(
+        manifest.EventRequirement(name, _BRIDGE_DIRECTION_FIELDS, "B")
+        for name in (
+            "bridge-send-forward",
+            "bridge-recv-forward",
+            "bridge-send-backward",
+            "bridge-recv-backward",
+        )
+    ),
+)
 
 
 def _ep_events(
@@ -430,48 +470,23 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "multimodule-bridge2": manifest.TraceProfile(
         "multimodule-bridge2",
         2,
-        (
-            manifest.EventRequirement(
-                "bridge-p2p-launch",
-                (
-                    *_COMMON_FIELDS,
-                    "batch_id",
-                    "message_kind",
-                    "operation_count",
-                    "operations",
-                    "src_module",
-                    "dest_module",
-                    "transport_api",
-                ),
-                "B",
-            ),
-            manifest.EventRequirement(
-                "bridge-grid-broadcast",
-                (
-                    *_COMMON_FIELDS,
-                    "collective_role",
-                    "grid_side",
-                    "message_kind",
-                    "pipeline_direction",
-                    "source_rank",
-                    "src_module",
-                    "dest_module",
-                    "transport_api",
-                ),
-                "B",
-            ),
-            *(
-                manifest.EventRequirement(name, _BRIDGE_DIRECTION_FIELDS, "B")
-                for name in (
-                    "bridge-send-forward",
-                    "bridge-recv-forward",
-                    "bridge-send-backward",
-                    "bridge-recv-backward",
-                )
-            ),
-        ),
+        _BRIDGE_EVENTS,
         bridge_probe_contract.validate_multimodule_bridge_trace,
         bridge_probe_contract.validate_multimodule_bridge_run,
+    ),
+    "multimodule-bridge8-fanin": manifest.TraceProfile(
+        "multimodule-bridge8-fanin",
+        8,
+        _BRIDGE_EVENTS,
+        bridge_probe_contract.validate_multimodule_bridge_fanin_trace,
+        bridge_probe_contract.validate_multimodule_bridge_fanin_run,
+    ),
+    "multimodule-bridge8-fanout": manifest.TraceProfile(
+        "multimodule-bridge8-fanout",
+        8,
+        _BRIDGE_EVENTS,
+        bridge_probe_contract.validate_multimodule_bridge_fanout_trace,
+        bridge_probe_contract.validate_multimodule_bridge_fanout_run,
     ),
 }
 
@@ -503,6 +518,12 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_bert_smoke": "bert-encoder",
     "flagscale_single_node_multimodule_bridge_smoke": "multimodule-bridge2",
+    "flagscale_single_node_multimodule_bridge_fanin": (
+        "multimodule-bridge8-fanin"
+    ),
+    "flagscale_single_node_multimodule_bridge_fanout": (
+        "multimodule-bridge8-fanout"
+    ),
 }
 
 

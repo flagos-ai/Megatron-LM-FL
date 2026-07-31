@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import math
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
@@ -37,6 +38,63 @@ _DIRECTION_TO_EVENT = {
 }
 _SHAPE_BYTES = 3 * 8
 _PAYLOAD_BYTES = 64 * 2 * 512 * 2
+
+
+@dataclass(frozen=True)
+class _BridgeRankPlan:
+    role: str
+    peers: tuple[int, ...]
+    payload_bytes: int
+
+
+@dataclass(frozen=True)
+class _BridgeBroadcastPlan:
+    pipeline_direction: str
+    grid_side: str
+    collective_role: str
+    source_rank: int
+    payload_bytes: int
+
+
+@dataclass(frozen=True)
+class _AsymmetricBridgeTopology:
+    name: str
+    loss_ranks: frozenset[int]
+    bridge_ranks: Mapping[int, _BridgeRankPlan]
+    broadcast_ranks: Mapping[int, _BridgeBroadcastPlan]
+
+
+_FANIN_TOPOLOGY = _AsymmetricBridgeTopology(
+    name="multimodule-bridge8-fanin",
+    loss_ranks=frozenset((6, 7)),
+    bridge_ranks={
+        1: _BridgeRankPlan("sender", (4,), _PAYLOAD_BYTES * 2),
+        3: _BridgeRankPlan("sender", (4,), _PAYLOAD_BYTES * 2),
+        4: _BridgeRankPlan("receiver", (1, 3), _PAYLOAD_BYTES * 2),
+    },
+    broadcast_ranks={
+        1: _BridgeBroadcastPlan("backward", "src", "source", 1, _PAYLOAD_BYTES * 2),
+        3: _BridgeBroadcastPlan("backward", "src", "source", 3, _PAYLOAD_BYTES * 2),
+        4: _BridgeBroadcastPlan("forward", "dest", "source", 4, _PAYLOAD_BYTES * 4),
+        5: _BridgeBroadcastPlan("forward", "dest", "participant", 4, _PAYLOAD_BYTES * 4),
+    },
+)
+
+_FANOUT_TOPOLOGY = _AsymmetricBridgeTopology(
+    name="multimodule-bridge8-fanout",
+    loss_ranks=frozenset((5, 7)),
+    bridge_ranks={
+        3: _BridgeRankPlan("sender", (4, 6), _PAYLOAD_BYTES),
+        4: _BridgeRankPlan("receiver", (3,), _PAYLOAD_BYTES),
+        6: _BridgeRankPlan("receiver", (3,), _PAYLOAD_BYTES),
+    },
+    broadcast_ranks={
+        2: _BridgeBroadcastPlan("backward", "src", "participant", 3, _PAYLOAD_BYTES * 2),
+        3: _BridgeBroadcastPlan("backward", "src", "source", 3, _PAYLOAD_BYTES * 2),
+        4: _BridgeBroadcastPlan("forward", "dest", "source", 4, _PAYLOAD_BYTES),
+        6: _BridgeBroadcastPlan("forward", "dest", "source", 6, _PAYLOAD_BYTES),
+    },
+)
 
 
 def _failure(code: str, message: str, evidence: str) -> Failure:
@@ -816,3 +874,733 @@ def validate_multimodule_bridge_trace(trace_root: Path) -> tuple[Failure, ...]:
         for iteration in iterations:
             failures.extend(_validate_iteration(iteration, rank=rank))
     return tuple(failures)
+
+
+def _validate_asymmetric_bridge_run(
+    run_root: Path,
+    trace_enabled: bool,
+    topology: _AsymmetricBridgeTopology,
+) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    for rank in range(8):
+        path = run_root / f"training-result-rank-{rank}.json"
+        if not path.is_file():
+            failures.append(
+                _failure(
+                    "run.bridge.result_missing",
+                    f"rank {rank} did not write a training result",
+                    str(path),
+                )
+            )
+            continue
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        expected = {
+            "backward_completed": True,
+            "completed": True,
+            "global_rank": rank,
+            "gradient_finite": True,
+            "loss_finite": True,
+            "module_role": "encoder" if rank < 4 else "llm",
+            "optimizer_step": "not_run",
+            "trace_enabled": trace_enabled,
+            "world_size": 8,
+        }
+        for field, value in expected.items():
+            if payload.get(field) != value:
+                failures.append(
+                    _failure(
+                        "run.bridge.result",
+                        (
+                            f"rank {rank} has {field}={payload.get(field)!r}, "
+                            f"expected {value!r}"
+                        ),
+                        str(path),
+                    )
+                )
+        gradient_count = payload.get("gradient_count")
+        gradient_norm = payload.get("gradient_norm")
+        if (
+            not isinstance(gradient_count, int)
+            or gradient_count <= 0
+            or not isinstance(gradient_norm, (int, float))
+            or not math.isfinite(gradient_norm)
+            or gradient_norm <= 0
+        ):
+            failures.append(
+                _failure(
+                    "run.bridge.gradient",
+                    f"rank {rank} has invalid gradient terminal state",
+                    str(path),
+                )
+            )
+        expected_loss_count = 4 if rank in topology.loss_ranks else 0
+        if payload.get("loss_count") != expected_loss_count:
+            failures.append(
+                _failure(
+                    "run.bridge.loss",
+                    (
+                        f"rank {rank} has loss_count={payload.get('loss_count')!r}, "
+                        f"expected {expected_loss_count}"
+                    ),
+                    str(path),
+                )
+            )
+    return tuple(failures)
+
+
+def _expected_asymmetric_launches(
+    plan: _BridgeRankPlan,
+) -> list[tuple[str, tuple[tuple[str, int], ...]]]:
+    if plan.role == "sender":
+        forward = "bridge-send-forward"
+        backward = "bridge-recv-backward"
+        payload_pair = (forward, backward)
+    else:
+        forward = "bridge-recv-forward"
+        backward = "bridge-send-backward"
+        payload_pair = (backward, forward)
+
+    forward_operations = tuple((forward, peer) for peer in plan.peers)
+    backward_operations = tuple((backward, peer) for peer in plan.peers)
+    payload_operations = tuple(
+        (event_name, peer)
+        for peer in plan.peers
+        for event_name in payload_pair
+    )
+    launches = [
+        ("shape", forward_operations),
+        ("shape", forward_operations),
+    ]
+    for _ in range(2):
+        launches.extend(
+            (
+                ("shape", forward_operations + backward_operations),
+                ("payload", payload_operations),
+            )
+        )
+    launches.extend(
+        (
+            ("shape", backward_operations),
+            ("shape", backward_operations),
+        )
+    )
+    return launches
+
+
+def _expected_blocking_routes(
+    plan: _BridgeRankPlan,
+) -> Counter[tuple[str, int, int]]:
+    if plan.role == "sender":
+        names = ("bridge-send-forward", "bridge-recv-backward")
+    else:
+        names = ("bridge-recv-forward", "bridge-send-backward")
+    return Counter(
+        (event_name, peer, plan.payload_bytes)
+        for _ in range(2)
+        for event_name in names
+        for peer in plan.peers
+    )
+
+
+def _validate_asymmetric_launches(
+    iteration: Iteration,
+    *,
+    rank: int,
+    topology: _AsymmetricBridgeTopology,
+) -> tuple[
+    list[Failure],
+    dict[str, tuple[str, str, int, int, str]],
+    list[list[str]],
+    list[tuple[int | float, int | float | None]],
+]:
+    iteration_id = int(iteration.iteration_id)
+    failures: list[Failure] = []
+    plan = topology.bridge_ranks.get(rank)
+    expected_launches = _expected_asymmetric_launches(plan) if plan else []
+    begins = _events(iteration, "bridge-p2p-launch")
+    ends = _events(iteration, "bridge-p2p-launch", "E")
+    if len(begins) != len(expected_launches) or len(ends) != len(expected_launches):
+        failures.append(
+            _failure(
+                "trace.bridge.launch_count",
+                (
+                    f"rank {rank} has {len(begins)} launch begins and "
+                    f"{len(ends)} launch ends, expected {len(expected_launches)}"
+                ),
+                f"{topology.name} iteration={iteration_id}",
+            )
+        )
+    launch_phases = [
+        event.ph
+        for event in iteration.events
+        if event.name == "bridge-p2p-launch"
+    ]
+    if launch_phases != ["B", "E"] * len(expected_launches):
+        failures.append(
+            _failure(
+                "trace.bridge.launch_scope",
+                f"rank {rank} has an invalid launch B/E sequence",
+                f"{topology.name} iteration={iteration_id}",
+            )
+        )
+
+    launched: dict[str, tuple[str, str, int, int, str]] = {}
+    launch_operation_ids: list[list[str]] = []
+    batch_ids: set[str] = set()
+    for launch, (message_kind, expected_operations) in zip(
+        begins, expected_launches
+    ):
+        attrs = launch.attrs
+        batch_id = attrs.get("batch_id")
+        operations = attrs.get("operations")
+        if (
+            attrs.get("transport_api") != "batch_isend_irecv"
+            or attrs.get("completion_mode") != "internal_wait"
+            or attrs.get("src_module") != "encoder"
+            or attrs.get("dest_module") != "llm"
+            or attrs.get("message_kind") != message_kind
+            or not isinstance(batch_id, str)
+            or not batch_id
+            or batch_id in batch_ids
+            or not isinstance(operations, list)
+            or attrs.get("operation_count") != len(operations)
+            or len(operations) != len(expected_operations)
+        ):
+            failures.append(
+                _failure(
+                    "trace.bridge.launch",
+                    "bridge-p2p-launch has an invalid operation list or route",
+                    f"rank={rank} iteration={iteration_id}",
+                )
+            )
+            launch_operation_ids.append([])
+            continue
+        batch_ids.add(batch_id)
+        operation_ids: list[str] = []
+        for index, (operation, (event_name, peer_rank)) in enumerate(
+            zip(operations, expected_operations)
+        ):
+            if not isinstance(operation, Mapping):
+                failures.append(
+                    _failure(
+                        "trace.bridge.operation",
+                        f"{batch_id} contains a non-mapping operation",
+                        f"rank={rank} iteration={iteration_id}",
+                    )
+                )
+                continue
+            direction, pipeline_direction = {
+                "bridge-send-forward": ("send", "forward"),
+                "bridge-recv-forward": ("recv", "forward"),
+                "bridge-send-backward": ("send", "backward"),
+                "bridge-recv-backward": ("recv", "backward"),
+            }[event_name]
+            operation_id = operation.get("operation_id")
+            expected_bytes = (
+                _SHAPE_BYTES if message_kind == "shape" else plan.payload_bytes
+            )
+            if (
+                operation_id != f"{batch_id}:{index}"
+                or operation_id in launched
+                or operation.get("request_id") != operation_id
+                or operation.get("backend") != "nccl"
+                or operation.get("transport_api") != "batch_isend_irecv"
+                or operation.get("completion_mode") != "internal_wait"
+                or operation.get("direction") != direction
+                or operation.get("pipeline_direction") != pipeline_direction
+                or operation.get("peer_rank") != peer_rank
+                or operation.get("message_kind") != message_kind
+                or operation.get("data_bytes") != expected_bytes
+            ):
+                failures.append(
+                    _failure(
+                        "trace.bridge.operation",
+                        f"{batch_id} contains an invalid operation {operation!r}",
+                        f"rank={rank} iteration={iteration_id}",
+                    )
+                )
+                continue
+            failures.extend(
+                _check_semantic_role(
+                    operation,
+                    rank=rank,
+                    iteration=iteration_id,
+                    event_name="bridge-p2p-launch operation",
+                )
+            )
+            launched[operation_id] = (
+                batch_id,
+                event_name,
+                peer_rank,
+                expected_bytes,
+                message_kind,
+            )
+            operation_ids.append(operation_id)
+        launch_operation_ids.append(operation_ids)
+    launch_windows = [
+        (
+            ends[index].rel_ts,
+            begins[index + 1].rel_ts if index + 1 < len(begins) else None,
+        )
+        for index in range(min(len(begins), len(ends)))
+    ]
+    return failures, launched, launch_operation_ids, launch_windows
+
+
+def _validate_asymmetric_directions(
+    iteration: Iteration,
+    *,
+    rank: int,
+    topology: _AsymmetricBridgeTopology,
+    launched: Mapping[str, tuple[str, str, int, int, str]],
+    launch_operation_ids: Sequence[Sequence[str]],
+    launch_windows: Sequence[tuple[int | float, int | float | None]],
+) -> list[Failure]:
+    iteration_id = int(iteration.iteration_id)
+    failures: list[Failure] = []
+    failures.extend(
+        _validate_scope_completions(
+            iteration,
+            rank=rank,
+            event_names=tuple(_DIRECTIONAL_EVENTS),
+        )
+    )
+    plan = topology.bridge_ranks.get(rank)
+    expected_blocking = (
+        _expected_blocking_routes(plan) if plan else Counter()
+    )
+    observed_blocking: Counter[tuple[str, int, int]] = Counter()
+    completion_counts: Counter[str] = Counter()
+    completion_order: list[str] = []
+    completion_scopes: dict[str, tuple[int | float, int | float]] = {}
+    for event_name in _DIRECTIONAL_EVENTS:
+        begins = _events(iteration, event_name)
+        ends = _events(iteration, event_name, "E")
+        for begin, end in zip(begins, ends):
+            operation_id = begin.attrs.get("operation_id")
+            if (
+                begin.attrs.get("transport_api") == "batch_isend_irecv"
+                and isinstance(operation_id, str)
+            ):
+                completion_scopes[operation_id] = (begin.rel_ts, end.rel_ts)
+
+    for event in (
+        event
+        for event in iteration.events
+        if event.name in _DIRECTIONAL_EVENTS and event.ph == "B"
+    ):
+        attrs = event.attrs
+        expected_event_name = _DIRECTION_TO_EVENT.get(
+            (attrs.get("direction"), attrs.get("pipeline_direction"))
+        )
+        if (
+            event.name != expected_event_name
+            or attrs.get("src_module") != "encoder"
+            or attrs.get("dest_module") != "llm"
+            or attrs.get("backend") != "nccl"
+        ):
+            failures.append(
+                _failure(
+                    "trace.bridge.route",
+                    f"{event.name} has an invalid module or direction route",
+                    f"rank={rank} iteration={iteration_id}",
+                )
+            )
+        failures.extend(
+            _check_semantic_role(
+                attrs,
+                rank=rank,
+                iteration=iteration_id,
+                event_name=event.name,
+            )
+        )
+        transport = attrs.get("transport_api")
+        if transport == "send_recv":
+            route = (
+                event.name,
+                attrs.get("peer_rank"),
+                attrs.get("data_bytes"),
+            )
+            observed_blocking[route] += 1
+            if (
+                attrs.get("message_kind") != "payload"
+                or attrs.get("completion_kind") != "inline_api_return"
+            ):
+                failures.append(
+                    _failure(
+                        "trace.bridge.completion",
+                        f"{event.name} blocking completion is invalid",
+                        f"rank={rank} iteration={iteration_id}",
+                    )
+                )
+            continue
+        if transport != "batch_isend_irecv":
+            failures.append(
+                _failure(
+                    "trace.bridge.transport",
+                    f"{event.name} has unsupported transport {transport!r}",
+                    f"rank={rank} iteration={iteration_id}",
+                )
+            )
+            continue
+        operation_id = attrs.get("operation_id")
+        expected = launched.get(operation_id)
+        observed = (
+            attrs.get("batch_id"),
+            event.name,
+            attrs.get("peer_rank"),
+            attrs.get("data_bytes"),
+            attrs.get("message_kind"),
+        )
+        if (
+            expected is None
+            or expected != observed
+            or attrs.get("request_id") != operation_id
+            or attrs.get("completion_kind") != "work_wait"
+        ):
+            failures.append(
+                _failure(
+                    "trace.bridge.identity",
+                    f"{event.name} cannot be paired with launch operation {operation_id!r}",
+                    f"rank={rank} iteration={iteration_id}",
+                )
+            )
+        if isinstance(operation_id, str):
+            completion_counts[operation_id] += 1
+            completion_order.append(operation_id)
+
+    if observed_blocking != expected_blocking:
+        failures.append(
+            _failure(
+                "trace.bridge.blocking_route",
+                (
+                    f"rank {rank} has blocking routes "
+                    f"{dict(observed_blocking)}, expected {dict(expected_blocking)}"
+                ),
+                f"{topology.name} iteration={iteration_id}",
+            )
+        )
+
+    expected_completion_order: list[str] = []
+    for index, operation_ids in enumerate(launch_operation_ids):
+        counts = [completion_counts[operation_id] for operation_id in operation_ids]
+        if len(operation_ids) == 1:
+            valid = counts == [1]
+        else:
+            valid = bool(operation_ids) and (
+                all(count == 1 for count in counts)
+                or all(count == 0 for count in counts)
+            )
+        if not valid:
+            failures.append(
+                _failure(
+                    "trace.bridge.identity",
+                    "Bridge launch has an invalid positional/coalesced completion set",
+                    f"rank={rank} iteration={iteration_id}",
+                )
+            )
+        if counts and all(count == 1 for count in counts):
+            expected_completion_order.extend(operation_ids)
+            if index < len(launch_windows):
+                launch_end, next_launch_begin = launch_windows[index]
+                for operation_id in operation_ids:
+                    completion_scope = completion_scopes.get(operation_id)
+                    if completion_scope is None:
+                        continue
+                    completion_begin, completion_end = completion_scope
+                    if completion_begin <= launch_end or (
+                        next_launch_begin is not None
+                        and completion_end >= next_launch_begin
+                    ):
+                        failures.append(
+                            _failure(
+                                "trace.bridge.launch_scope",
+                                (
+                                    "Bridge Work.wait is outside the interval "
+                                    "after its launch and before the next launch"
+                                ),
+                                f"rank={rank} iteration={iteration_id}",
+                            )
+                        )
+    if completion_order != expected_completion_order:
+        failures.append(
+            _failure(
+                "trace.bridge.completion_order",
+                f"rank {rank} Work.wait records do not follow launch position order",
+                f"iteration={iteration_id}",
+            )
+        )
+    return failures
+
+
+def _validate_asymmetric_broadcasts(
+    iteration: Iteration,
+    *,
+    rank: int,
+    topology: _AsymmetricBridgeTopology,
+) -> list[Failure]:
+    iteration_id = int(iteration.iteration_id)
+    failures = _validate_scope_completions(
+        iteration,
+        rank=rank,
+        event_names=("bridge-grid-broadcast",),
+    )
+    plan = topology.broadcast_ranks.get(rank)
+    broadcasts = _events(iteration, "bridge-grid-broadcast")
+    expected_count = 8 if plan else 0
+    if len(broadcasts) != expected_count:
+        failures.append(
+            _failure(
+                "trace.bridge.broadcast_count",
+                (
+                    f"rank {rank} has {len(broadcasts)} broadcast begin records, "
+                    f"expected {expected_count}"
+                ),
+                f"{topology.name} iteration={iteration_id}",
+            )
+        )
+    if plan is None:
+        return failures
+    kinds = [event.attrs.get("message_kind") for event in broadcasts]
+    if kinds != ["shape", "payload"] * 4:
+        failures.append(
+            _failure(
+                "trace.bridge.broadcast_order",
+                f"rank {rank} has broadcast order {kinds}",
+                f"iteration={iteration_id}",
+            )
+        )
+    for event in broadcasts:
+        attrs = event.attrs
+        failures.extend(
+            _check_semantic_role(
+                attrs,
+                rank=rank,
+                iteration=iteration_id,
+                event_name=event.name,
+            )
+        )
+        expected_bytes = (
+            _SHAPE_BYTES
+            if attrs.get("message_kind") == "shape"
+            else plan.payload_bytes
+        )
+        if (
+            attrs.get("pipeline_direction") != plan.pipeline_direction
+            or attrs.get("grid_side") != plan.grid_side
+            or attrs.get("collective_role") != plan.collective_role
+            or attrs.get("source_rank") != plan.source_rank
+            or attrs.get("src_module") != "encoder"
+            or attrs.get("dest_module") != "llm"
+            or attrs.get("transport_api") != "broadcast"
+            or attrs.get("backend") != "nccl"
+            or attrs.get("completion_kind") != "inline_api_return"
+            or attrs.get("data_bytes") != expected_bytes
+        ):
+            failures.append(
+                _failure(
+                    "trace.bridge.broadcast",
+                    f"rank {rank} has an invalid broadcast route or payload",
+                    f"iteration={iteration_id}",
+                )
+            )
+    return failures
+
+
+def _expected_asymmetric_major_sequence(
+    bridge_plan: _BridgeRankPlan | None,
+    broadcast_plan: _BridgeBroadcastPlan | None,
+) -> list[tuple[str, str, int | None]]:
+    sequence: list[tuple[str, str, int | None]] = []
+
+    def launch(message_kind: str) -> None:
+        sequence.append(("bridge-p2p-launch", message_kind, None))
+
+    def blocking(event_name: str) -> None:
+        assert bridge_plan is not None
+        sequence.extend(
+            (event_name, "payload", peer) for peer in bridge_plan.peers
+        )
+
+    def broadcast_pair() -> None:
+        sequence.extend(
+            (
+                ("bridge-grid-broadcast", "shape", None),
+                ("bridge-grid-broadcast", "payload", None),
+            )
+        )
+
+    if bridge_plan is None:
+        if broadcast_plan is not None:
+            for _ in range(4):
+                broadcast_pair()
+        return sequence
+
+    if bridge_plan.role == "sender":
+        for _ in range(2):
+            launch("shape")
+            blocking("bridge-send-forward")
+        for _ in range(2):
+            launch("shape")
+            launch("payload")
+            broadcast_pair()
+        for _ in range(2):
+            launch("shape")
+            blocking("bridge-recv-backward")
+            broadcast_pair()
+    else:
+        for _ in range(2):
+            launch("shape")
+            blocking("bridge-recv-forward")
+            broadcast_pair()
+        for _ in range(2):
+            launch("shape")
+            launch("payload")
+            broadcast_pair()
+        for _ in range(2):
+            launch("shape")
+            blocking("bridge-send-backward")
+    return sequence
+
+
+def _validate_asymmetric_major_sequence(
+    iteration: Iteration,
+    *,
+    rank: int,
+    topology: _AsymmetricBridgeTopology,
+) -> list[Failure]:
+    observed: list[tuple[str, str, int | None]] = []
+    for event in iteration.events:
+        if event.ph != "B":
+            continue
+        if event.name == "bridge-p2p-launch":
+            observed.append(
+                (event.name, str(event.attrs.get("message_kind")), None)
+            )
+        elif (
+            event.name in _DIRECTIONAL_EVENTS
+            and event.attrs.get("transport_api") == "send_recv"
+        ):
+            observed.append(
+                (
+                    event.name,
+                    str(event.attrs.get("message_kind")),
+                    event.attrs.get("peer_rank"),
+                )
+            )
+        elif event.name == "bridge-grid-broadcast":
+            observed.append(
+                (event.name, str(event.attrs.get("message_kind")), None)
+            )
+    expected = _expected_asymmetric_major_sequence(
+        topology.bridge_ranks.get(rank),
+        topology.broadcast_ranks.get(rank),
+    )
+    if observed == expected:
+        return []
+    return [
+        _failure(
+            "trace.bridge.schedule_order",
+            f"rank {rank} has an invalid PP2 Bridge lifecycle order",
+            f"{topology.name} iteration={iteration.iteration_id}",
+        )
+    ]
+
+
+def _validate_asymmetric_bridge_trace(
+    trace_root: Path,
+    topology: _AsymmetricBridgeTopology,
+) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    if tuple(sorted(by_rank)) != tuple(range(8)):
+        failures.append(
+            _failure(
+                "trace.bridge.ranks",
+                f"Bridge profile expects ranks 0..7, observed {sorted(by_rank)}",
+                topology.name,
+            )
+        )
+    for rank in range(8):
+        iterations = by_rank.get(rank, ())
+        if tuple(iteration.iteration_id for iteration in iterations) != (1,):
+            failures.append(
+                _failure(
+                    "trace.bridge.iterations",
+                    f"rank {rank} does not contain exactly iteration 1",
+                    f"{topology.name} rank={rank}",
+                )
+            )
+        for iteration in iterations:
+            (
+                launch_failures,
+                launched,
+                launch_operation_ids,
+                launch_windows,
+            ) = (
+                _validate_asymmetric_launches(
+                    iteration,
+                    rank=rank,
+                    topology=topology,
+                )
+            )
+            failures.extend(launch_failures)
+            failures.extend(
+                _validate_asymmetric_directions(
+                    iteration,
+                    rank=rank,
+                    topology=topology,
+                    launched=launched,
+                    launch_operation_ids=launch_operation_ids,
+                    launch_windows=launch_windows,
+                )
+            )
+            failures.extend(
+                _validate_asymmetric_broadcasts(
+                    iteration,
+                    rank=rank,
+                    topology=topology,
+                )
+            )
+            failures.extend(
+                _validate_asymmetric_major_sequence(
+                    iteration,
+                    rank=rank,
+                    topology=topology,
+                )
+            )
+    return tuple(failures)
+
+
+def validate_multimodule_bridge_fanin_run(
+    run_root: Path,
+    trace_enabled: bool,
+) -> tuple[Failure, ...]:
+    return _validate_asymmetric_bridge_run(
+        run_root,
+        trace_enabled,
+        _FANIN_TOPOLOGY,
+    )
+
+
+def validate_multimodule_bridge_fanout_run(
+    run_root: Path,
+    trace_enabled: bool,
+) -> tuple[Failure, ...]:
+    return _validate_asymmetric_bridge_run(
+        run_root,
+        trace_enabled,
+        _FANOUT_TOPOLOGY,
+    )
+
+
+def validate_multimodule_bridge_fanin_trace(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    return _validate_asymmetric_bridge_trace(trace_root, _FANIN_TOPOLOGY)
+
+
+def validate_multimodule_bridge_fanout_trace(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    return _validate_asymmetric_bridge_trace(trace_root, _FANOUT_TOPOLOGY)

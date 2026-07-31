@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tests.test_utils.runners import bridge_probe_contract
@@ -16,6 +17,18 @@ _FIXTURE = (
     / "fixtures"
     / "flagscale_single_node_multimodule_bridge_smoke.yaml"
 )
+_ASYMMETRIC_FIXTURES = {
+    "multimodule-bridge8-fanin": (
+        Path(__file__).parent
+        / "fixtures"
+        / "flagscale_single_node_multimodule_bridge_fanin.yaml"
+    ),
+    "multimodule-bridge8-fanout": (
+        Path(__file__).parent
+        / "fixtures"
+        / "flagscale_single_node_multimodule_bridge_fanout.yaml"
+    ),
+}
 
 
 def _semantic_fields(message_kind: str, pipeline_direction: str) -> dict[str, str]:
@@ -298,6 +311,276 @@ def _write_run_results(
         )
 
 
+def _write_asymmetric_run_results(
+    run_root: Path,
+    *,
+    topology,
+    trace_enabled: bool = True,
+) -> None:
+    run_root.mkdir(parents=True, exist_ok=True)
+    for rank in range(8):
+        payload = {
+            "backward_completed": True,
+            "completed": True,
+            "global_rank": rank,
+            "gradient_count": 4,
+            "gradient_finite": True,
+            "gradient_norm": 1.0,
+            "loss_count": 4 if rank in topology.loss_ranks else 0,
+            "loss_finite": True,
+            "module_role": "encoder" if rank < 4 else "llm",
+            "optimizer_step": "not_run",
+            "trace_enabled": trace_enabled,
+            "world_size": 8,
+        }
+        (run_root / f"training-result-rank-{rank}.json").write_text(
+            json.dumps(payload),
+            encoding="utf-8",
+        )
+
+
+def _write_asymmetric_trace(
+    trace_root: Path,
+    *,
+    topology,
+    wrong_peer: bool = False,
+    coalesced_multi_operation: bool = False,
+    delayed_launch_end: bool = False,
+) -> None:
+    trace_root.mkdir(parents=True, exist_ok=True)
+    event_routes = {
+        event_name: route
+        for route, event_name in bridge_probe_contract._DIRECTION_TO_EVENT.items()
+    }
+    wrong_peer_used = False
+
+    for rank in range(8):
+        rows: list[dict[str, object]] = [
+            {"name": "iteration", "ph": "B", "iteration": 1, "pad_before": 0}
+        ]
+        timestamp = 0
+
+        def event(name: str, phase: str, **attrs: object) -> None:
+            nonlocal timestamp
+            timestamp += 1
+            rows.append(
+                {
+                    "name": name,
+                    "ph": phase,
+                    "rel_ts": timestamp,
+                    "dev": rank,
+                    "g_rk": rank,
+                    "dp_rk": 0,
+                    "pp_rk": 0,
+                    "tp_rk": 0,
+                    **attrs,
+                }
+            )
+
+        def finish(name: str) -> None:
+            event(name, "E", completed=True, error_type=None)
+
+        broadcast_plan = topology.broadcast_ranks.get(rank)
+        rank_plan = topology.bridge_ranks.get(rank)
+        delayed_launch_used = False
+
+        def add_launch(
+            launch_index: int,
+            message_kind: str,
+            expected_operations,
+        ) -> None:
+            nonlocal delayed_launch_used
+            nonlocal wrong_peer_used
+
+            batch_id = f"bridge-p2p:{rank}:{launch_index}"
+            operations = []
+            for operation_index, (event_name, peer_rank) in enumerate(
+                expected_operations
+            ):
+                direction, pipeline_direction = event_routes[event_name]
+                operation_id = f"{batch_id}:{operation_index}"
+                operation_peer = peer_rank
+                if wrong_peer and not wrong_peer_used:
+                    operation_peer = 7
+                    wrong_peer_used = True
+                operations.append(
+                    {
+                        "backend": "nccl",
+                        "comm_type": "p2p",
+                        "completion_mode": "internal_wait",
+                        "data_bytes": (
+                            bridge_probe_contract._SHAPE_BYTES
+                            if message_kind == "shape"
+                            else rank_plan.payload_bytes
+                        ),
+                        "direction": direction,
+                        "message_kind": message_kind,
+                        "operation_id": operation_id,
+                        "peer_rank": operation_peer,
+                        "pipeline_direction": pipeline_direction,
+                        "request_id": operation_id,
+                        "transport_api": "batch_isend_irecv",
+                        **_semantic_fields(
+                            message_kind,
+                            pipeline_direction,
+                        ),
+                    }
+                )
+            event(
+                "bridge-p2p-launch",
+                "B",
+                batch_id=batch_id,
+                communicator_kind="bridge",
+                completion_mode="internal_wait",
+                dest_module="llm",
+                message_kind=message_kind,
+                operation_count=len(operations),
+                operations=operations,
+                src_module="encoder",
+                transport_api="batch_isend_irecv",
+            )
+            delay_end = delayed_launch_end and not delayed_launch_used
+            if not delay_end:
+                event("bridge-p2p-launch", "E")
+            if not (
+                coalesced_multi_operation and len(operations) > 1
+            ):
+                for operation, (event_name, _peer_rank) in zip(
+                    operations, expected_operations
+                ):
+                    event(
+                        event_name,
+                        "B",
+                        backend="nccl",
+                        batch_id=batch_id,
+                        communicator_kind="bridge",
+                        completion_kind="work_wait",
+                        data_bytes=operation["data_bytes"],
+                        direction=operation["direction"],
+                        message_kind=message_kind,
+                        operation_id=operation["operation_id"],
+                        peer_rank=operation["peer_rank"],
+                        pipeline_direction=operation["pipeline_direction"],
+                        request_id=operation["operation_id"],
+                        src_module="encoder",
+                        dest_module="llm",
+                        transport_api="batch_isend_irecv",
+                        **_semantic_fields(
+                            message_kind,
+                            str(operation["pipeline_direction"]),
+                        ),
+                    )
+                    finish(event_name)
+            if delay_end:
+                event("bridge-p2p-launch", "E")
+                delayed_launch_used = True
+
+        def add_blocking(event_name: str) -> None:
+            direction, pipeline_direction = event_routes[event_name]
+            for peer_rank in rank_plan.peers:
+                event(
+                    event_name,
+                    "B",
+                    backend="nccl",
+                    communicator_kind="bridge",
+                    completion_kind="inline_api_return",
+                    data_bytes=rank_plan.payload_bytes,
+                    direction=direction,
+                    message_kind="payload",
+                    peer_rank=peer_rank,
+                    pipeline_direction=pipeline_direction,
+                    src_module="encoder",
+                    dest_module="llm",
+                    transport_api="send_recv",
+                    **_semantic_fields("payload", pipeline_direction),
+                )
+                finish(event_name)
+
+        def add_broadcast_pair() -> None:
+            for message_kind in ("shape", "payload"):
+                event(
+                    "bridge-grid-broadcast",
+                    "B",
+                    backend="nccl",
+                    collective_role=broadcast_plan.collective_role,
+                    communicator_kind="bridge",
+                    completion_kind="inline_api_return",
+                    data_bytes=(
+                        bridge_probe_contract._SHAPE_BYTES
+                        if message_kind == "shape"
+                        else broadcast_plan.payload_bytes
+                    ),
+                    dest_module="llm",
+                    grid_side=broadcast_plan.grid_side,
+                    message_kind=message_kind,
+                    pipeline_direction=broadcast_plan.pipeline_direction,
+                    source_rank=broadcast_plan.source_rank,
+                    src_module="encoder",
+                    transport_api="broadcast",
+                    **_semantic_fields(
+                        message_kind,
+                        broadcast_plan.pipeline_direction,
+                    ),
+                )
+                finish("bridge-grid-broadcast")
+
+        if rank_plan is not None:
+            launches = iter(
+                enumerate(
+                    bridge_probe_contract._expected_asymmetric_launches(
+                        rank_plan
+                    ),
+                    start=1,
+                )
+            )
+
+            def next_launch() -> None:
+                launch_index, (message_kind, operations) = next(launches)
+                add_launch(launch_index, message_kind, operations)
+
+            if rank_plan.role == "sender":
+                for _ in range(2):
+                    next_launch()
+                    add_blocking("bridge-send-forward")
+                for _ in range(2):
+                    next_launch()
+                    next_launch()
+                    add_broadcast_pair()
+                for _ in range(2):
+                    next_launch()
+                    add_blocking("bridge-recv-backward")
+                    add_broadcast_pair()
+            else:
+                for _ in range(2):
+                    next_launch()
+                    add_blocking("bridge-recv-forward")
+                    add_broadcast_pair()
+                for _ in range(2):
+                    next_launch()
+                    next_launch()
+                    add_broadcast_pair()
+                for _ in range(2):
+                    next_launch()
+                    add_blocking("bridge-send-backward")
+        elif broadcast_plan is not None:
+            for _ in range(4):
+                add_broadcast_pair()
+
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "E",
+                "iteration": 1,
+                "duration_wall": timestamp,
+            }
+        )
+        path = (
+            trace_root
+            / f"benchmark-global-{rank}-data-0-pipeline-0-tensor-0.json"
+        )
+        path.write_text(json.dumps(rows), encoding="utf-8")
+
+
 def test_multimodule_bridge_profile_uses_flagscale_native_entry() -> None:
     config = yaml.safe_load(_FIXTURE.read_text(encoding="utf-8"))
 
@@ -317,6 +600,275 @@ def test_multimodule_bridge_profile_uses_flagscale_native_entry() -> None:
         "num_microbatches": 4,
     }
     assert gate._CONFIG_PROFILES[_FIXTURE.stem] == "multimodule-bridge2"
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "encoder_grid", "llm_grid"),
+    (
+        (
+            "multimodule-bridge8-fanin",
+            {"tp": 1, "pp": 2, "dp": 2, "grid_offset": 0},
+            {"tp": 2, "pp": 2, "dp": 1, "grid_offset": 4},
+        ),
+        (
+            "multimodule-bridge8-fanout",
+            {"tp": 2, "pp": 2, "dp": 1, "grid_offset": 0},
+            {"tp": 1, "pp": 2, "dp": 2, "grid_offset": 4},
+        ),
+    ),
+)
+def test_asymmetric_bridge_profiles_use_eight_rank_native_entries(
+    profile_name: str,
+    encoder_grid: dict[str, int],
+    llm_grid: dict[str, int],
+) -> None:
+    fixture = _ASYMMETRIC_FIXTURES[profile_name]
+    config = yaml.safe_load(fixture.read_text(encoding="utf-8"))
+
+    assert config["experiment"]["task"] == {
+        "type": "train",
+        "backend": "native",
+        "entrypoint": (
+            "/workspace/Megatron-LM-FL/"
+            "tests/test_utils/runners/run_multimodule_bridge.py"
+        ),
+    }
+    assert config["experiment"]["runner"]["nproc_per_node"] == 8
+    assert config["train"]["bridge"] == {
+        "hidden_size": 512,
+        "seq_length": 64,
+        "micro_batch_size": 4,
+        "num_microbatches": 4,
+        "encoder_grid": encoder_grid,
+        "llm_grid": llm_grid,
+    }
+    assert gate._CONFIG_PROFILES[fixture.stem] == profile_name
+    assert gate.PROFILES[profile_name].rank_count == 8
+
+
+def test_asymmetric_bridge_launch_plans_lock_pp2_lifecycle() -> None:
+    sender = bridge_probe_contract._BridgeRankPlan(
+        "sender",
+        (4, 6),
+        131072,
+    )
+    receiver = bridge_probe_contract._BridgeRankPlan(
+        "receiver",
+        (1, 3),
+        262144,
+    )
+
+    assert bridge_probe_contract._expected_asymmetric_launches(sender) == [
+        (
+            "shape",
+            (("bridge-send-forward", 4), ("bridge-send-forward", 6)),
+        ),
+        (
+            "shape",
+            (("bridge-send-forward", 4), ("bridge-send-forward", 6)),
+        ),
+        (
+            "shape",
+            (
+                ("bridge-send-forward", 4),
+                ("bridge-send-forward", 6),
+                ("bridge-recv-backward", 4),
+                ("bridge-recv-backward", 6),
+            ),
+        ),
+        (
+            "payload",
+            (
+                ("bridge-send-forward", 4),
+                ("bridge-recv-backward", 4),
+                ("bridge-send-forward", 6),
+                ("bridge-recv-backward", 6),
+            ),
+        ),
+        (
+            "shape",
+            (
+                ("bridge-send-forward", 4),
+                ("bridge-send-forward", 6),
+                ("bridge-recv-backward", 4),
+                ("bridge-recv-backward", 6),
+            ),
+        ),
+        (
+            "payload",
+            (
+                ("bridge-send-forward", 4),
+                ("bridge-recv-backward", 4),
+                ("bridge-send-forward", 6),
+                ("bridge-recv-backward", 6),
+            ),
+        ),
+        (
+            "shape",
+            (("bridge-recv-backward", 4), ("bridge-recv-backward", 6)),
+        ),
+        (
+            "shape",
+            (("bridge-recv-backward", 4), ("bridge-recv-backward", 6)),
+        ),
+    ]
+    assert bridge_probe_contract._expected_asymmetric_launches(receiver) == [
+        (
+            "shape",
+            (("bridge-recv-forward", 1), ("bridge-recv-forward", 3)),
+        ),
+        (
+            "shape",
+            (("bridge-recv-forward", 1), ("bridge-recv-forward", 3)),
+        ),
+        (
+            "shape",
+            (
+                ("bridge-recv-forward", 1),
+                ("bridge-recv-forward", 3),
+                ("bridge-send-backward", 1),
+                ("bridge-send-backward", 3),
+            ),
+        ),
+        (
+            "payload",
+            (
+                ("bridge-send-backward", 1),
+                ("bridge-recv-forward", 1),
+                ("bridge-send-backward", 3),
+                ("bridge-recv-forward", 3),
+            ),
+        ),
+        (
+            "shape",
+            (
+                ("bridge-recv-forward", 1),
+                ("bridge-recv-forward", 3),
+                ("bridge-send-backward", 1),
+                ("bridge-send-backward", 3),
+            ),
+        ),
+        (
+            "payload",
+            (
+                ("bridge-send-backward", 1),
+                ("bridge-recv-forward", 1),
+                ("bridge-send-backward", 3),
+                ("bridge-recv-forward", 3),
+            ),
+        ),
+        (
+            "shape",
+            (("bridge-send-backward", 1), ("bridge-send-backward", 3)),
+        ),
+        (
+            "shape",
+            (("bridge-send-backward", 1), ("bridge-send-backward", 3)),
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("profile_name", "topology"),
+    (
+        (
+            "multimodule-bridge8-fanin",
+            bridge_probe_contract._FANIN_TOPOLOGY,
+        ),
+        (
+            "multimodule-bridge8-fanout",
+            bridge_probe_contract._FANOUT_TOPOLOGY,
+        ),
+    ),
+)
+def test_asymmetric_bridge_trace_and_run_contracts_accept_valid_evidence(
+    tmp_path: Path,
+    profile_name: str,
+    topology,
+) -> None:
+    _write_asymmetric_trace(tmp_path / "traces", topology=topology)
+    _write_asymmetric_run_results(tmp_path, topology=topology)
+
+    profile = gate.PROFILES[profile_name]
+    report = manifest.validate_trace(
+        tmp_path / "traces",
+        profile,
+        trace_enabled=True,
+    )
+    report = manifest.validate_run_artifacts(
+        tmp_path,
+        profile,
+        report,
+        trace_enabled=True,
+    )
+
+    assert report.passed
+
+
+@pytest.mark.parametrize(
+    "topology",
+    (
+        bridge_probe_contract._FANIN_TOPOLOGY,
+        bridge_probe_contract._FANOUT_TOPOLOGY,
+    ),
+)
+def test_asymmetric_bridge_trace_rejects_wrong_peer(
+    tmp_path: Path,
+    topology,
+) -> None:
+    _write_asymmetric_trace(tmp_path, topology=topology, wrong_peer=True)
+
+    failures = bridge_probe_contract._validate_asymmetric_bridge_trace(
+        tmp_path,
+        topology,
+    )
+
+    assert "trace.bridge.operation" in {
+        failure.code for failure in failures
+    }
+
+
+@pytest.mark.parametrize(
+    "topology",
+    (
+        bridge_probe_contract._FANIN_TOPOLOGY,
+        bridge_probe_contract._FANOUT_TOPOLOGY,
+    ),
+)
+def test_asymmetric_bridge_trace_accepts_coalesced_multi_operation_work(
+    tmp_path: Path,
+    topology,
+) -> None:
+    _write_asymmetric_trace(
+        tmp_path,
+        topology=topology,
+        coalesced_multi_operation=True,
+    )
+
+    failures = bridge_probe_contract._validate_asymmetric_bridge_trace(
+        tmp_path,
+        topology,
+    )
+
+    assert not failures
+
+
+def test_asymmetric_bridge_trace_rejects_wait_before_launch_end(
+    tmp_path: Path,
+) -> None:
+    _write_asymmetric_trace(
+        tmp_path,
+        topology=bridge_probe_contract._FANIN_TOPOLOGY,
+        delayed_launch_end=True,
+    )
+
+    failures = bridge_probe_contract.validate_multimodule_bridge_fanin_trace(
+        tmp_path
+    )
+
+    assert "trace.bridge.launch_scope" in {
+        failure.code for failure in failures
+    }
 
 
 def test_multimodule_bridge_trace_and_run_contracts_accept_valid_evidence(

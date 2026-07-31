@@ -54,6 +54,12 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_multimodule_bridge_smoke.yaml": (
         "multimodule-bridge2"
     ),
+    "flagscale_single_node_multimodule_bridge_fanin.yaml": (
+        "multimodule-bridge8-fanin"
+    ),
+    "flagscale_single_node_multimodule_bridge_fanout.yaml": (
+        "multimodule-bridge8-fanout"
+    ),
 }
 
 
