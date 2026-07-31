@@ -8,6 +8,7 @@ import warnings
 from contextlib import nullcontext
 from enum import Enum
 from functools import partial
+from itertools import count
 from typing import Dict, List, Optional, Tuple
 
 import torch
@@ -34,19 +35,36 @@ from .reduce_scatter_with_fp32_accumulation import reduce_scatter_with_fp32_accu
 
 logger = logging.getLogger(__name__)
 
+_DP_OPERATION_SEQUENCE = count(1)
+
+
+def _next_dp_operation_id(kind: str) -> str:
+    """Return a rank-local identity for an accepted DP communication probe."""
+    return f"dp:{kind}:{next(_DP_OPERATION_SEQUENCE)}"
+
 
 def _dp_allreduce_context(
-    *, async_op: bool, group_size: int, group_role: str, n_buckets: int, overlap_enabled: bool
+    *,
+    async_op: bool,
+    data_bytes: int,
+    group_size: int,
+    group_role: str,
+    n_buckets: int,
+    operation_id: str,
+    overlap_enabled: bool,
 ) -> dict[str, object]:
     """Build DP all-reduce metadata only after the probe gate accepts it."""
     return {
         "api_async_op": bool(async_op),
         "async_op": bool(async_op),
         "completion_included": False,
+        "data_bytes": data_bytes,
         "group_size": group_size,
         "group_role": group_role,
         "n_buckets": n_buckets,
         "op": "all_reduce",
+        "operation_id": operation_id,
+        "operation_id_scope": "rank_local",
         "overlap_enabled": bool(overlap_enabled),
         "payload_role": "gradient_bucket",
         "stage": "main_bucket_allreduce",
@@ -55,17 +73,26 @@ def _dp_allreduce_context(
 
 
 def _dp_reduce_scatter_context(
-    *, async_op: bool, group_size: int, n_buckets: int, overlap_enabled: bool
+    *,
+    async_op: bool,
+    data_bytes: int,
+    group_size: int,
+    n_buckets: int,
+    operation_id: str,
+    overlap_enabled: bool,
 ) -> dict[str, object]:
     """Build DistOpt reduce-scatter metadata only after the probe gate accepts it."""
     return {
         "api_async_op": bool(async_op),
         "async_op": bool(async_op),
         "completion_included": False,
+        "data_bytes": data_bytes,
         "group_size": group_size,
         "group_role": "intra_optimizer_instance",
         "n_buckets": n_buckets,
         "op": "reduce_scatter",
+        "operation_id": operation_id,
+        "operation_id_scope": "rank_local",
         "overlap_enabled": bool(overlap_enabled),
         "payload_role": "gradient_bucket",
         "stage": "intra_instance_reduce_scatter",
@@ -74,17 +101,25 @@ def _dp_reduce_scatter_context(
 
 
 def _dp_inter_instance_allreduce_context(
-    *, group_size: int, n_buckets: int, overlap_enabled: bool
+    *,
+    data_bytes: int,
+    group_size: int,
+    n_buckets: int,
+    operation_id: str,
+    overlap_enabled: bool,
 ) -> dict[str, object]:
     """Build inter-DistOpt all-reduce metadata only after the probe gate accepts it."""
     return {
         "api_async_op": False,
         "async_op": False,
         "completion_included": False,
+        "data_bytes": data_bytes,
         "group_size": group_size,
         "group_role": "inter_optimizer_instance",
         "n_buckets": n_buckets,
         "op": "all_reduce",
+        "operation_id": operation_id,
+        "operation_id_scope": "rank_local",
         "overlap_enabled": bool(overlap_enabled),
         "payload_role": "gradient_shard",
         "stage": "inter_instance_shard_allreduce",
@@ -118,6 +153,7 @@ def _dp_param_allgather_context(
     data_bytes: int,
     group_size: int,
     n_buckets: int,
+    operation_id: str,
     overlap_enabled: bool,
     use_distributed_optimizer: bool,
 ) -> dict[str, object]:
@@ -132,11 +168,68 @@ def _dp_param_allgather_context(
         "group_role": "intra_optimizer_instance",
         "n_buckets": n_buckets,
         "op": "all_gather",
+        "operation_id": operation_id,
+        "operation_id_scope": "rank_local",
         "optimizer_kind": optimizer_kind,
         "overlap_enabled": bool(overlap_enabled),
         "payload_role": "parameter_bucket",
         "stage": f"{optimizer_kind}_optimizer_param_allgather",
         "timing_phase": "async_dispatch" if async_op else "collective_call",
+    }
+
+
+def _dp_param_sync_completion_context(
+    *, completion_site: str, operation_id: Optional[str]
+) -> dict[str, object]:
+    """Build parameter-sync stream-dependency metadata after its gate accepts it."""
+    return {
+        "completion_included": True,
+        "completion_guarantee": "current_stream_after_wait",
+        "completion_kind": "work_wait",
+        "completion_site": completion_site,
+        "host_blocking_guaranteed": False,
+        "launch_observed": operation_id is not None,
+        "op": "wait",
+        "operation_count": int(operation_id is not None),
+        "operation_id": operation_id,
+        "operation_ids": [operation_id] if operation_id is not None else [],
+        "operation_id_scope": "rank_local",
+        "stage": "parameter_allgather_completion",
+        "timing_phase": "stream_dependency",
+    }
+
+
+def _dp_grad_sync_completion_context(
+    *,
+    completion_kind: str,
+    completion_site: str,
+    force_all_reduce: bool,
+    num_distributed_optimizer_instances: int,
+    operations: Tuple[Dict[str, str], ...],
+    use_distributed_optimizer: bool,
+) -> dict[str, object]:
+    """Build gradient-sync completion metadata after its gate accepts it."""
+    operation_ids = [operation["operation_id"] for operation in operations]
+    is_stream_join = completion_kind == "stream_join"
+    return {
+        "completion_included": True,
+        "completion_guarantee": (
+            "current_stream_after_join" if is_stream_join else "current_stream_after_wait"
+        ),
+        "completion_kind": completion_kind,
+        "completion_site": completion_site,
+        "force_all_reduce": bool(force_all_reduce),
+        "launch_observed": bool(operations),
+        "num_distributed_optimizer_instances": num_distributed_optimizer_instances,
+        "host_blocking_guaranteed": False,
+        "op": "wait_stream" if is_stream_join else "wait",
+        "operation_count": len(operation_ids),
+        "operation_ids": operation_ids,
+        "operation_id_scope": "rank_local",
+        "operations": [dict(operation) for operation in operations],
+        "stage": "gradient_collective_completion",
+        "timing_phase": "stream_dependency",
+        "use_distributed_optimizer": bool(use_distributed_optimizer),
     }
 
 
@@ -409,6 +502,63 @@ class _ParamAndGradBucketGroup:
                     fatal=False,
                 )
 
+    def _wait_param_gather_handle(self, *, completion_site: str) -> None:
+        """Wait for a pending parameter gather and expose its completion boundary."""
+        handle = self.param_gather_handle
+        assert handle is not None
+        completion_gate = prepare_trace_scope("dp-param-sync-complete")
+        completion_context = None
+        if completion_gate is not None:
+            completion_context = _dp_param_sync_completion_context(
+                completion_site=completion_site,
+                operation_id=getattr(self, "_param_gather_trace_operation_id", None),
+            )
+        completion_scope = open_trace_scope(
+            completion_gate,
+            "dp-param-sync-complete",
+            ctx=completion_context,
+            slots=("completed", "error_type"),
+        )
+        wait_completed = False
+        try:
+            with completion_scope as completion:
+                try:
+                    handle.wait()
+                except BaseException as wait_error:
+                    completion.set("completed", False)
+                    completion.set("error_type", type(wait_error).__name__)
+                    raise
+                completion.set("completed", True)
+                wait_completed = True
+        finally:
+            if wait_completed:
+                self.param_gather_handle = None
+                self._param_gather_trace_operation_id = None
+
+    def _grad_sync_completion_scope(
+        self, *, completion_kind: str, completion_site: str, force_all_reduce: bool
+    ):
+        """Open one completion event for all gradient collectives joined at this boundary."""
+        completion_gate = prepare_trace_scope("dp-grad-sync-complete")
+        completion_context = None
+        if completion_gate is not None:
+            completion_context = _dp_grad_sync_completion_context(
+                completion_kind=completion_kind,
+                completion_site=completion_site,
+                force_all_reduce=force_all_reduce,
+                num_distributed_optimizer_instances=(
+                    self.ddp_config.num_distributed_optimizer_instances
+                ),
+                operations=getattr(self, "_grad_sync_trace_operations", ()),
+                use_distributed_optimizer=self.ddp_config.use_distributed_optimizer,
+            )
+        return open_trace_scope(
+            completion_gate,
+            "dp-grad-sync-complete",
+            ctx=completion_context,
+            slots=("completed", "error_type"),
+        )
+
     def start_param_sync(self, force_sync: bool = False):
         """
         Initiates all necessary param all-gathers for this bucket.
@@ -427,8 +577,7 @@ class _ParamAndGradBucketGroup:
 
         if force_sync:
             if self.param_gather_handle is not None:
-                self.param_gather_handle.wait()
-                self.param_gather_handle = None
+                self._wait_param_gather_handle(completion_site="force_sync")
                 return
         else:
             assert self.param_gather_handle is None
@@ -436,16 +585,19 @@ class _ParamAndGradBucketGroup:
         async_op = self.ddp_config.overlap_param_gather and not force_sync
         param_gather_gate = prepare_trace_scope("dp-param-all-gather")
         param_gather_context = None
+        param_gather_operation_id = None
         if param_gather_gate is not None:
             param_gather_data_bytes = _dp_param_allgather_data_bytes(
                 self.buckets, use_distributed_optimizer=self.ddp_config.use_distributed_optimizer
             )
             if self.ddp_config.use_distributed_optimizer or param_gather_data_bytes > 0:
+                param_gather_operation_id = _next_dp_operation_id("param-all-gather")
                 param_gather_context = _dp_param_allgather_context(
                     async_op=async_op,
                     data_bytes=param_gather_data_bytes,
                     group_size=self.intra_distributed_optimizer_instance_size,
                     n_buckets=len(self.buckets),
+                    operation_id=param_gather_operation_id,
                     overlap_enabled=self.ddp_config.overlap_param_gather,
                     use_distributed_optimizer=self.ddp_config.use_distributed_optimizer,
                 )
@@ -578,6 +730,8 @@ class _ParamAndGradBucketGroup:
                 # (async_op=False) is used, `cm` is not None. Manually set to None for
                 # consistency with prior code.
                 self.param_gather_handle = None
+        if async_op and param_gather_operation_id is not None:
+            self._param_gather_trace_operation_id = param_gather_operation_id
         self.param_gather_dispatched = True
 
     def finish_param_sync(self, skip_next_bucket_dispatch: bool = False):
@@ -603,8 +757,7 @@ class _ParamAndGradBucketGroup:
             self.start_param_sync()
 
         if self.param_gather_handle is not None:
-            self.param_gather_handle.wait()
-            self.param_gather_handle = None
+            self._wait_param_gather_handle(completion_site="finish_param_sync")
             # Dispatch next bucket's asynchronous param AG only if it has not been dispatched yet.
             if self.next_param_gather_bucket_group is not None and not skip_next_bucket_dispatch:
                 if self.next_param_gather_bucket_group.param_gather_dispatched:
@@ -745,26 +898,46 @@ class _ParamAndGradBucketGroup:
 
         # Coalesce communication kernels across buckets in the bucket group.
         grad_reduce_handle = None
+        grad_trace_operations = []
         grad_sync_context = None
-        if self.ddp_config.use_distributed_optimizer and not force_all_reduce:
-            grad_sync_gate = prepare_trace_scope("dp-reduce-scatter")
+        use_reduce_scatter = self.ddp_config.use_distributed_optimizer and not force_all_reduce
+        grad_event_name = "dp-reduce-scatter" if use_reduce_scatter else "dp-allreduce"
+        grad_sync_gate = prepare_trace_scope(grad_event_name)
+        grad_data_bytes = (
+            sum(
+                int(bucket.grad_data.numel() * bucket.grad_data.element_size())
+                for bucket in self.buckets
+            )
+            if grad_sync_gate is not None
+            else 0
+        )
+        if use_reduce_scatter:
             if grad_sync_gate is not None:
+                grad_operation_id = _next_dp_operation_id("reduce-scatter")
                 grad_sync_context = _dp_reduce_scatter_context(
                     async_op=async_op,
+                    data_bytes=grad_data_bytes,
                     group_size=self.collective_group_size,
                     n_buckets=len(self.buckets),
+                    operation_id=grad_operation_id,
                     overlap_enabled=self.ddp_config.overlap_grad_reduce,
+                )
+                grad_trace_operations.append(
+                    {
+                        "event_name": "dp-reduce-scatter",
+                        "operation_id": grad_operation_id,
+                        "stage": "intra_instance_reduce_scatter",
+                    }
                 )
             grad_sync_scope = open_trace_scope(
                 grad_sync_gate,
                 "dp-reduce-scatter",
                 ctx=grad_sync_context,
-                slots=("data_bytes", "group"),
+                slots=("group",),
             )
         else:
-            trace_main_allreduce = not self.ddp_config.use_distributed_optimizer or force_all_reduce
-            grad_sync_gate = prepare_trace_scope("dp-allreduce") if trace_main_allreduce else None
             if grad_sync_gate is not None:
+                grad_operation_id = _next_dp_operation_id("allreduce")
                 group_role = (
                     "intra_optimizer_instance"
                     if self.ddp_config.use_distributed_optimizer
@@ -772,28 +945,30 @@ class _ParamAndGradBucketGroup:
                 )
                 grad_sync_context = _dp_allreduce_context(
                     async_op=async_op,
+                    data_bytes=grad_data_bytes,
                     group_size=self.collective_group_size,
                     group_role=group_role,
                     n_buckets=len(self.buckets),
+                    operation_id=grad_operation_id,
                     overlap_enabled=self.ddp_config.overlap_grad_reduce,
                 )
+                grad_trace_operations.append(
+                    {
+                        "event_name": "dp-allreduce",
+                        "operation_id": grad_operation_id,
+                        "stage": "main_bucket_allreduce",
+                    }
+                )
             grad_sync_scope = open_trace_scope(
-                grad_sync_gate, "dp-allreduce", ctx=grad_sync_context, slots=("data_bytes", "group")
+                grad_sync_gate, "dp-allreduce", ctx=grad_sync_context, slots=("group",)
             )
 
         with (
-            grad_sync_scope as scope,
             stream_context,
+            grad_sync_scope as scope,
             _coalescing_manager(communication_group, async_ops=async_op) as cm,
         ):
             if grad_sync_gate is not None:
-                scope.set(
-                    "data_bytes",
-                    sum(
-                        int(bucket.grad_data.numel() * bucket.grad_data.element_size())
-                        for bucket in self.buckets
-                    ),
-                )
                 scope.set("group", get_process_group_peer_ranks(communication_group))
 
             for idx, bucket in enumerate(self.buckets):
@@ -813,7 +988,7 @@ class _ParamAndGradBucketGroup:
                         async_op=async_op,
                     )
                 else:
-                    if force_all_reduce and torch.distributed.get_rank() == 0:
+                    if torch.distributed.get_rank() == 0 and force_all_reduce:
                         logger.info(
                             f"Performing reduction using all_reduce because {force_all_reduce=}"
                         )
@@ -830,37 +1005,44 @@ class _ParamAndGradBucketGroup:
             inter_instance_gate = prepare_trace_scope("dp-allreduce")
             inter_instance_context = None
             if inter_instance_gate is not None:
+                inter_operation_id = _next_dp_operation_id("inter-instance-allreduce")
+                inter_data_bytes = sum(
+                    int(
+                        bucket.grad_data.numel()
+                        // self.intra_distributed_optimizer_instance_size
+                        * bucket.grad_data.element_size()
+                    )
+                    for bucket in self.buckets
+                )
                 inter_instance_context = _dp_inter_instance_allreduce_context(
+                    data_bytes=inter_data_bytes,
                     group_size=self.ddp_config.num_distributed_optimizer_instances,
                     n_buckets=len(self.buckets),
+                    operation_id=inter_operation_id,
                     overlap_enabled=self.ddp_config.overlap_grad_reduce,
+                )
+                grad_trace_operations.append(
+                    {
+                        "event_name": "dp-allreduce",
+                        "operation_id": inter_operation_id,
+                        "stage": "inter_instance_shard_allreduce",
+                    }
                 )
             inter_instance_scope = open_trace_scope(
                 inter_instance_gate,
                 "dp-allreduce",
                 ctx=inter_instance_context,
-                slots=("data_bytes", "group"),
+                slots=("group",),
             )
             # Create a new coalescing manager for the inter-instance all-reduce.
             with (
-                inter_instance_scope as inter_scope,
                 stream_context,
+                inter_instance_scope as inter_scope,
                 _coalescing_manager(
                     self.inter_distributed_optimizer_instance_group, async_ops=async_op
                 ) as cm,
             ):
                 if inter_instance_gate is not None:
-                    inter_scope.set(
-                        "data_bytes",
-                        sum(
-                            int(
-                                bucket.grad_data.numel()
-                                // self.intra_distributed_optimizer_instance_size
-                                * bucket.grad_data.element_size()
-                            )
-                            for bucket in self.buckets
-                        ),
-                    )
                     inter_scope.set(
                         "group",
                         get_process_group_peer_ranks(
@@ -901,6 +1083,8 @@ class _ParamAndGradBucketGroup:
             # maintain consistency with prior code, we need to manually set communication handle to
             # None.
             self.grad_reduce_handle = None
+        if self.ddp_config.overlap_grad_reduce and grad_trace_operations:
+            self._grad_sync_trace_operations = tuple(grad_trace_operations)
 
     def finish_grad_sync(self, force_all_reduce: Optional[bool] = False):
         """
@@ -925,7 +1109,27 @@ class _ParamAndGradBucketGroup:
         # When using multiple DistOpt instances, we don't need to sync here as we launch
         # communications on a separate communication stream.
         if self.ddp_config.num_distributed_optimizer_instances > 1:
-            cur_platform.current_stream().wait_stream(self.communication_stream)  # FlagScale Add
+            completion_scope = self._grad_sync_completion_scope(
+                completion_kind="stream_join",
+                completion_site="finish_grad_sync",
+                force_all_reduce=bool(force_all_reduce),
+            )
+            join_completed = False
+            try:
+                with completion_scope as completion:
+                    try:
+                        cur_platform.current_stream().wait_stream(
+                            self.communication_stream
+                        )  # FlagScale Add
+                    except BaseException as wait_error:
+                        completion.set("completed", False)
+                        completion.set("error_type", type(wait_error).__name__)
+                        raise
+                    completion.set("completed", True)
+                    join_completed = True
+            finally:
+                if join_completed:
+                    self._grad_sync_trace_operations = ()
             self._copy_back_extra_main_grads()
             return
         assert self.grad_reduce_handle is not None, (
@@ -933,8 +1137,26 @@ class _ParamAndGradBucketGroup:
             f"({len(self.per_param_grad_ready_counts)}/{len(self.params)} "
             "params have grad available)"
         )
-        self.grad_reduce_handle.wait()
-        self.grad_reduce_handle = None
+        completion_scope = self._grad_sync_completion_scope(
+            completion_kind="work_wait",
+            completion_site="finish_grad_sync",
+            force_all_reduce=bool(force_all_reduce),
+        )
+        wait_completed = False
+        try:
+            with completion_scope as completion:
+                try:
+                    self.grad_reduce_handle.wait()
+                except BaseException as wait_error:
+                    completion.set("completed", False)
+                    completion.set("error_type", type(wait_error).__name__)
+                    raise
+                completion.set("completed", True)
+                wait_completed = True
+        finally:
+            if wait_completed:
+                self.grad_reduce_handle = None
+                self._grad_sync_trace_operations = ()
         self._copy_back_extra_main_grads()
 
     def free_overlap_buffers(self):
@@ -946,8 +1168,7 @@ class _ParamAndGradBucketGroup:
         the persistent checkpoint worker process.
         """
         if self.param_gather_handle is not None:
-            self.param_gather_handle.wait()
-            self.param_gather_handle = None
+            self._wait_param_gather_handle(completion_site="free_overlap_buffers")
         for bucket in self.buckets:
             bucket.layerwise_gather_list = None
             bucket._layerwise_src_buffer = None
