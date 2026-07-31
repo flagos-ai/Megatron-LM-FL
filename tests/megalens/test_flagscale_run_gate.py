@@ -23,6 +23,7 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
+    "flagscale_single_node_tp2_pp2_embedding_smoke.yaml": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
     "flagscale_single_node_pp2_unbatched_smoke.yaml": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
@@ -603,6 +604,39 @@ def test_tp2_local_allreduce_profile_only_disables_sequence_parallel() -> None:
     assert (
         profile.contract
         is tp_probe_contract.validate_tp2_local_allreduce_profile
+    )
+
+
+def test_tp2_pp2_embedding_profile_only_adds_pp_and_shared_weights() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_local_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    embedding = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_pp2_embedding_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = embedding["experiment"]["exp_name"]
+    baseline["experiment"]["runner"]["nproc_per_node"] = 4
+    baseline["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    baseline["train"]["system"]["pipeline_model_parallel_size"] = 2
+    baseline["train"]["model"]["untie_embeddings_and_output_weights"] = False
+
+    assert embedding == baseline
+
+    profile = gate.PROFILES["tp2-pp2-embedding"]
+    assert profile.rank_count == 4
+    assert {requirement.name for requirement in profile.events} == {
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+        "embedding-grads-allreduce",
+    }
+    assert (
+        profile.contract
+        is tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync
     )
 
 

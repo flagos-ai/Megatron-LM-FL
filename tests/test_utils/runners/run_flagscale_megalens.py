@@ -270,6 +270,40 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         ),
         tp_probe_contract.validate_tp2_local_allreduce_profile,
     ),
+    "tp2-pp2-embedding": manifest.TraceProfile(
+        "tp2-pp2-embedding",
+        4,
+        (
+            manifest.EventRequirement(
+                "grad-sync",
+                (*_COMMON_FIELDS, "schedule", "timing_phase"),
+                "B",
+            ),
+            manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
+            manifest.EventRequirement(
+                "sp-layernorm-allreduce",
+                (
+                    *_COMMON_FIELDS,
+                    "data_bytes",
+                    "group_size",
+                    "reduce_op",
+                    "grad_bucket",
+                ),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "embedding-grads-allreduce",
+                (
+                    *_COMMON_FIELDS,
+                    "data_bytes",
+                    "group_size",
+                    "embedding_kind",
+                ),
+                "B",
+            ),
+        ),
+        tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync,
+    ),
     "pp2": manifest.TraceProfile(
         "pp2",
         2,
@@ -387,6 +421,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
+    "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",
     "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
