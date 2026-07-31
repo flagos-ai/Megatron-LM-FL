@@ -53,6 +53,24 @@ _DISTOPT_DISPATCHES = {
         "stage": "distributed_optimizer_param_allgather",
     },
 }
+_MULTI_DISTOPT_DISPATCHES = {
+    "dp-reduce-scatter": {
+        **_DISTOPT_DISPATCHES["dp-reduce-scatter"],
+        "api_async_op": False,
+        "async_op": False,
+        "timing_phase": "collective_call",
+    },
+    "dp-allreduce": {
+        "api_async_op": False,
+        "async_op": False,
+        "op": "all_reduce",
+        "group_role": "inter_optimizer_instance",
+        "payload_role": "gradient_shard",
+        "stage": "inter_instance_shard_allreduce",
+        "timing_phase": "collective_call",
+    },
+    "dp-param-all-gather": _DISTOPT_DISPATCHES["dp-param-all-gather"],
+}
 _ALL_ROUTE_EVENTS = frozenset(
     (
         *_STANDARD_DISPATCHES,
@@ -108,23 +126,32 @@ def _validate_rank(
     events: list[tuple[int, Event]],
     dispatch_specs: Mapping[str, Mapping[str, Any]],
     *,
-    distopt: bool,
+    use_distributed_optimizer: bool,
+    num_instances: int,
     rank: int,
 ) -> list[Failure]:
+    gradient_dispatches = frozenset(dispatch_specs) - frozenset(("dp-param-all-gather",))
+    stream_join = num_instances > 1
     completion_specs = {
         "dp-grad-sync-complete": {
-            "allowed": frozenset(("dp-reduce-scatter",) if distopt else ("dp-allreduce",)),
+            "allowed": gradient_dispatches,
             "fields": {
+                "completion_guarantee": (
+                    "current_stream_after_join"
+                    if stream_join
+                    else "current_stream_after_wait"
+                ),
+                "completion_kind": "stream_join" if stream_join else "work_wait",
                 "completion_site": "finish_grad_sync",
                 "force_all_reduce": False,
-                "num_distributed_optimizer_instances": 1,
-                "op": "wait",
+                "num_distributed_optimizer_instances": num_instances,
+                "op": "wait_stream" if stream_join else "wait",
                 "stage": "gradient_collective_completion",
-                "use_distributed_optimizer": distopt,
+                "use_distributed_optimizer": use_distributed_optimizer,
             },
         }
     }
-    if distopt:
+    if "dp-param-all-gather" in dispatch_specs:
         completion_specs["dp-param-sync-complete"] = {
             "allowed": frozenset(("dp-param-all-gather",)),
             "fields": {
@@ -259,6 +286,25 @@ def _validate_rank(
                     )
                 )
             completed.add(operation_id)
+        if event.name == "dp-grad-sync-complete" and stream_join:
+            observed_routes = {
+                (row.get("event_name"), row.get("stage"))
+                for row in descriptors
+                if isinstance(row, Mapping)
+            }
+            expected_routes = {
+                ("dp-reduce-scatter", "intra_instance_reduce_scatter"),
+                ("dp-allreduce", "inter_instance_shard_allreduce"),
+            }
+            if not expected_routes <= observed_routes:
+                failures.append(
+                    _failure(
+                        "trace.dp.completion",
+                        "stream join does not cover both multi-instance stages",
+                        rank,
+                        iteration,
+                    )
+                )
 
     if completed != set(launches):
         failures.append(
@@ -275,18 +321,44 @@ def _validate(
     trace_root: Path,
     dispatch_specs: Mapping[str, Mapping[str, Any]],
     *,
-    distopt: bool,
+    use_distributed_optimizer: bool,
+    num_instances: int = 1,
 ) -> tuple[Failure, ...]:
     return tuple(
         failure
         for rank, events in _load_rank_events(trace_root).items()
-        for failure in _validate_rank(events, dispatch_specs, distopt=distopt, rank=rank)
+        for failure in _validate_rank(
+            events,
+            dispatch_specs,
+            use_distributed_optimizer=use_distributed_optimizer,
+            num_instances=num_instances,
+            rank=rank,
+        )
     )
 
 
 def validate_dp_standard_overlap(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate(trace_root, _STANDARD_DISPATCHES, distopt=False)
+    return _validate(
+        trace_root,
+        _STANDARD_DISPATCHES,
+        use_distributed_optimizer=False,
+    )
 
 
 def validate_dp_distopt_overlap(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate(trace_root, _DISTOPT_DISPATCHES, distopt=True)
+    return _validate(
+        trace_root,
+        _DISTOPT_DISPATCHES,
+        use_distributed_optimizer=True,
+    )
+
+
+def validate_dp_multi_instance_distopt_overlap(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    return _validate(
+        trace_root,
+        _MULTI_DISTOPT_DISPATCHES,
+        use_distributed_optimizer=True,
+        num_instances=2,
+    )
