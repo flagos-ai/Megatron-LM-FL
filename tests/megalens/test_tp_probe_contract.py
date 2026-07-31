@@ -19,6 +19,7 @@ def _write_collective_trace(
     include_linear_allreduce: bool = False,
     mismatched_linear_completion: bool = False,
     include_final_grad_sync: bool = False,
+    include_sp_sync: bool = True,
     include_embedding_sync: bool = False,
     nest_sp_in_all_grads: bool = False,
 ) -> None:
@@ -202,10 +203,10 @@ def _write_collective_trace(
                 timing_phase="framework_phase",
             )
             event("all-grads-sync", "B")
-            if nest_sp_in_all_grads:
+            if include_sp_sync and nest_sp_in_all_grads:
                 sp_layernorm_sync()
             event("all-grads-sync", "E")
-            if not nest_sp_in_all_grads:
+            if include_sp_sync and not nest_sp_in_all_grads:
                 sp_layernorm_sync()
             if include_embedding_sync:
                 event(
@@ -417,6 +418,37 @@ def test_tp2_sp_final_sync_contract_rejects_layernorm_inside_all_grads(
     failures = tp_probe_contract.validate_tp2_sp_final_grad_sync(tmp_path)
 
     assert "trace.tp.final_sync_parent" in {
+        failure.code for failure in failures
+    }
+
+
+def test_tp2_no_sp_final_sync_contract_accepts_dp_finish_only(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_final_grad_sync=True,
+            include_sp_sync=False,
+        )
+
+    assert tp_probe_contract.validate_tp2_no_sp_final_grad_sync(tmp_path) == ()
+
+
+def test_tp2_no_sp_final_sync_contract_rejects_layernorm_collective(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_final_grad_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_no_sp_final_grad_sync(tmp_path)
+
+    assert "trace.tp.final_sync_count" in {
         failure.code for failure in failures
     }
 

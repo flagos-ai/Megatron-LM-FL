@@ -581,13 +581,15 @@ def _validate_final_grad_sync(
     iteration: Iteration,
     *,
     rank: int,
+    schedule: str,
+    expect_sp_layernorm: bool,
 ) -> tuple[list[Failure], int | None]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _FINAL_SYNC_EVENTS, rank=rank)
     expected_counts = {
         "grad-sync": 1,
         "all-grads-sync": 1,
-        "sp-layernorm-allreduce": 1,
+        "sp-layernorm-allreduce": int(expect_sp_layernorm),
         "embedding-grads-allreduce": 0,
     }
     for name, expected in expected_counts.items():
@@ -613,7 +615,7 @@ def _validate_final_grad_sync(
             _field_failures(
                 grad.begin,
                 {
-                    "schedule": "no-pipelining",
+                    "schedule": schedule,
                     "timing_phase": "framework_phase",
                 },
                 code="trace.tp.final_sync_field",
@@ -881,7 +883,13 @@ def validate_tp2_local_allreduce_lifecycle(trace_root: Path) -> tuple[Failure, .
     )
 
 
-def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
+def _validate_tp2_final_grad_sync(
+    trace_root: Path,
+    *,
+    schedule: str,
+    expect_sp_layernorm: bool,
+    profile_name: str,
+) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
     if tuple(sorted(by_rank)) != (0, 1):
@@ -890,7 +898,7 @@ def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
                 "trace.tp.final_sync_ranks",
                 f"TP2 final-sync contract expects ranks [0, 1], "
                 f"observed {sorted(by_rank)}",
-                "tp2-local-sp",
+                profile_name,
             )
         )
 
@@ -911,6 +919,8 @@ def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
             iteration_failures, data_bytes = _validate_final_grad_sync(
                 iteration,
                 rank=rank,
+                schedule=schedule,
+                expect_sp_layernorm=expect_sp_layernorm,
             )
             failures.extend(iteration_failures)
             if data_bytes is not None:
@@ -926,6 +936,24 @@ def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
                 )
             )
     return tuple(failures)
+
+
+def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
+    return _validate_tp2_final_grad_sync(
+        trace_root,
+        schedule="no-pipelining",
+        expect_sp_layernorm=True,
+        profile_name="tp2-local-sp",
+    )
+
+
+def validate_tp2_no_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
+    return _validate_tp2_final_grad_sync(
+        trace_root,
+        schedule="no-pipelining",
+        expect_sp_layernorm=False,
+        profile_name="tp2-local-allreduce",
+    )
 
 
 def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
