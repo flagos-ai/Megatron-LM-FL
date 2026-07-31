@@ -54,6 +54,92 @@ def _dp_allreduce_context(
     }
 
 
+def _dp_reduce_scatter_context(
+    *, async_op: bool, group_size: int, n_buckets: int, overlap_enabled: bool
+) -> dict[str, object]:
+    """Build DistOpt reduce-scatter metadata only after the probe gate accepts it."""
+    return {
+        "api_async_op": bool(async_op),
+        "async_op": bool(async_op),
+        "completion_included": False,
+        "group_size": group_size,
+        "group_role": "intra_optimizer_instance",
+        "n_buckets": n_buckets,
+        "op": "reduce_scatter",
+        "overlap_enabled": bool(overlap_enabled),
+        "payload_role": "gradient_bucket",
+        "stage": "intra_instance_reduce_scatter",
+        "timing_phase": "async_dispatch" if async_op else "collective_call",
+    }
+
+
+def _dp_inter_instance_allreduce_context(
+    *, group_size: int, n_buckets: int, overlap_enabled: bool
+) -> dict[str, object]:
+    """Build inter-DistOpt all-reduce metadata only after the probe gate accepts it."""
+    return {
+        "api_async_op": False,
+        "async_op": False,
+        "completion_included": False,
+        "group_size": group_size,
+        "group_role": "inter_optimizer_instance",
+        "n_buckets": n_buckets,
+        "op": "all_reduce",
+        "overlap_enabled": bool(overlap_enabled),
+        "payload_role": "gradient_shard",
+        "stage": "inter_instance_shard_allreduce",
+        "timing_phase": "collective_call",
+    }
+
+
+def _dp_param_allgather_data_bytes(
+    buckets: List["_ParamAndGradBucket"], *, use_distributed_optimizer: bool
+) -> int:
+    """Return receive-buffer bytes for the accepted parameter all-gather probe."""
+    if use_distributed_optimizer:
+        return sum(
+            int(bucket.param_data.numel() * bucket.param_data.element_size())
+            for bucket in buckets
+            if bucket.param_data is not None
+        )
+
+    data_bytes = 0
+    for bucket in buckets:
+        flat_sizes = bucket.layerwise_param_flat_sizes
+        if not flat_sizes:
+            continue
+        data_bytes += int(sum(flat_sizes) * bucket.params_list[0].element_size())
+    return data_bytes
+
+
+def _dp_param_allgather_context(
+    *,
+    async_op: bool,
+    data_bytes: int,
+    group_size: int,
+    n_buckets: int,
+    overlap_enabled: bool,
+    use_distributed_optimizer: bool,
+) -> dict[str, object]:
+    """Build parameter all-gather metadata only after the probe gate accepts it."""
+    optimizer_kind = "distributed" if use_distributed_optimizer else "layerwise"
+    return {
+        "api_async_op": bool(async_op),
+        "async_op": bool(async_op),
+        "completion_included": False,
+        "data_bytes": data_bytes,
+        "group_size": group_size,
+        "group_role": "intra_optimizer_instance",
+        "n_buckets": n_buckets,
+        "op": "all_gather",
+        "optimizer_kind": optimizer_kind,
+        "overlap_enabled": bool(overlap_enabled),
+        "payload_role": "parameter_bucket",
+        "stage": f"{optimizer_kind}_optimizer_param_allgather",
+        "timing_phase": "async_dispatch" if async_op else "collective_call",
+    }
+
+
 try:
     if is_torch_min_version("1.13.0"):
         dist_all_gather_func = torch.distributed.all_gather_into_tensor
@@ -348,6 +434,26 @@ class _ParamAndGradBucketGroup:
             assert self.param_gather_handle is None
 
         async_op = self.ddp_config.overlap_param_gather and not force_sync
+        param_gather_gate = prepare_trace_scope("dp-param-all-gather")
+        param_gather_context = None
+        if param_gather_gate is not None:
+            param_gather_data_bytes = _dp_param_allgather_data_bytes(
+                self.buckets, use_distributed_optimizer=self.ddp_config.use_distributed_optimizer
+            )
+            if self.ddp_config.use_distributed_optimizer or param_gather_data_bytes > 0:
+                param_gather_context = _dp_param_allgather_context(
+                    async_op=async_op,
+                    data_bytes=param_gather_data_bytes,
+                    group_size=self.intra_distributed_optimizer_instance_size,
+                    n_buckets=len(self.buckets),
+                    overlap_enabled=self.ddp_config.overlap_param_gather,
+                    use_distributed_optimizer=self.ddp_config.use_distributed_optimizer,
+                )
+            else:
+                param_gather_gate = None
+        param_gather_scope = open_trace_scope(
+            param_gather_gate, "dp-param-all-gather", ctx=param_gather_context, slots=("group",)
+        )
 
         if not self.ddp_config.use_distributed_optimizer:
             # Layer-wise optimizer path: use all_gather for variable-size
@@ -362,56 +468,59 @@ class _ParamAndGradBucketGroup:
             local_rank = self.intra_distributed_optimizer_instance_rank
             group = self.intra_distributed_optimizer_instance_group
             layerwise_work_handles = []
-            for bucket in self.buckets:
-                # Use param dtype (e.g., bf16), NOT grad dtype (which may be
-                # fp32 when grad_reduce_in_fp32 is enabled).
-                param_dtype = bucket.params_list[0].dtype
+            with param_gather_scope as param_scope:
+                if param_gather_gate is not None:
+                    param_scope.set("group", get_process_group_peer_ranks(group))
+                for bucket in self.buckets:
+                    # Use param dtype (e.g., bf16), NOT grad dtype (which may be
+                    # fp32 when grad_reduce_in_fp32 is enabled).
+                    param_dtype = bucket.params_list[0].dtype
 
-                if (
-                    bucket.layerwise_param_flat_sizes is None
-                    or max(bucket.layerwise_param_flat_sizes) == 0
-                ):  ##### FalgScale add #####
-                    # All ranks have empty params for this bucket — skip.
-                    bucket.layerwise_gather_list = None
-                    continue
+                    if (
+                        bucket.layerwise_param_flat_sizes is None
+                        or max(bucket.layerwise_param_flat_sizes) == 0
+                    ):  ##### FalgScale add #####
+                        # All ranks have empty params for this bucket — skip.
+                        bucket.layerwise_gather_list = None
+                        continue
 
-                # Flatten local params.  Detach from the autograd graph because
-                # start_param_sync can be called during the forward pass (where
-                # autograd is active) and all_gather will write into gather_list
-                # entries in-place.
-                local_size = bucket.layerwise_param_flat_sizes[local_rank]
-                if local_size > 0:
-                    flat_local_params = _flatten_dense_tensors(
-                        bucket.layerwise_params_list[local_rank]
-                    ).detach()
-                else:
-                    flat_local_params = torch.empty(
-                        0, device=bucket.grad_data.device, dtype=param_dtype
-                    )
-                # Keep flat_local_params alive until the async operation completes.
-                bucket._layerwise_src_buffer = flat_local_params
-
-                # Allocate per-rank receive buffers with actual sizes (no padding).
-                # Reuse flat_local_params for local_rank's slot to avoid an extra allocation.
-                gather_list = []
-                for i in range(dp_size):
-                    if i == local_rank:
-                        gather_list.append(flat_local_params)
+                    # Flatten local params.  Detach from the autograd graph because
+                    # start_param_sync can be called during the forward pass (where
+                    # autograd is active) and all_gather will write into gather_list
+                    # entries in-place.
+                    local_size = bucket.layerwise_param_flat_sizes[local_rank]
+                    if local_size > 0:
+                        flat_local_params = _flatten_dense_tensors(
+                            bucket.layerwise_params_list[local_rank]
+                        ).detach()
                     else:
-                        gather_list.append(
-                            torch.empty(
-                                bucket.layerwise_param_flat_sizes[i],
-                                device=flat_local_params.device,
-                                dtype=flat_local_params.dtype,
-                            )
+                        flat_local_params = torch.empty(
+                            0, device=bucket.grad_data.device, dtype=param_dtype
                         )
-                bucket.layerwise_gather_list = gather_list
+                    # Keep flat_local_params alive until the async operation completes.
+                    bucket._layerwise_src_buffer = flat_local_params
 
-                work = torch.distributed.all_gather(
-                    gather_list, flat_local_params, group=group, async_op=async_op
-                )
-                if async_op and work is not None:
-                    layerwise_work_handles.append(work)
+                    # Allocate per-rank receive buffers with actual sizes (no padding).
+                    # Reuse flat_local_params for local_rank's slot to avoid an extra allocation.
+                    gather_list = []
+                    for i in range(dp_size):
+                        if i == local_rank:
+                            gather_list.append(flat_local_params)
+                        else:
+                            gather_list.append(
+                                torch.empty(
+                                    bucket.layerwise_param_flat_sizes[i],
+                                    device=flat_local_params.device,
+                                    dtype=flat_local_params.dtype,
+                                )
+                            )
+                    bucket.layerwise_gather_list = gather_list
+
+                    work = torch.distributed.all_gather(
+                        gather_list, flat_local_params, group=group, async_op=async_op
+                    )
+                    if async_op and work is not None:
+                        layerwise_work_handles.append(work)
 
             if async_op:
                 self.param_gather_handle = _LayerwiseAllGatherHandle(layerwise_work_handles)
@@ -435,9 +544,19 @@ class _ParamAndGradBucketGroup:
             # Standard distributed optimizer path: use _coalescing_manager.
             # all_gather_into_tensor writes directly into a contiguous output buffer and
             # does not need a copy-back step, so coalescing works correctly.
-            with _coalescing_manager(
-                self.intra_distributed_optimizer_instance_group, async_ops=async_op
-            ) as cm:
+            with (
+                param_gather_scope as param_scope,
+                _coalescing_manager(
+                    self.intra_distributed_optimizer_instance_group, async_ops=async_op
+                ) as cm,
+            ):
+                if param_gather_gate is not None:
+                    param_scope.set(
+                        "group",
+                        get_process_group_peer_ranks(
+                            self.intra_distributed_optimizer_instance_group
+                        ),
+                    )
                 for idx, bucket in enumerate(self.buckets):
                     if self.cached_param_buffer_shard_list[idx] is None:
                         self.cached_param_buffer_shard_list[idx] = shard_buffer(
@@ -626,34 +745,48 @@ class _ParamAndGradBucketGroup:
 
         # Coalesce communication kernels across buckets in the bucket group.
         grad_reduce_handle = None
-        trace_main_allreduce = not self.ddp_config.use_distributed_optimizer or (
-            force_all_reduce and self.ddp_config.num_distributed_optimizer_instances == 1
-        )
-        grad_sync_gate = prepare_trace_scope("dp-allreduce") if trace_main_allreduce else None
         grad_sync_context = None
-        if grad_sync_gate is not None:
-            group_role = (
-                "intra_optimizer_instance"
-                if self.ddp_config.use_distributed_optimizer
-                else "data_parallel"
+        if self.ddp_config.use_distributed_optimizer and not force_all_reduce:
+            grad_sync_gate = prepare_trace_scope("dp-reduce-scatter")
+            if grad_sync_gate is not None:
+                grad_sync_context = _dp_reduce_scatter_context(
+                    async_op=async_op,
+                    group_size=self.collective_group_size,
+                    n_buckets=len(self.buckets),
+                    overlap_enabled=self.ddp_config.overlap_grad_reduce,
+                )
+            grad_sync_scope = open_trace_scope(
+                grad_sync_gate,
+                "dp-reduce-scatter",
+                ctx=grad_sync_context,
+                slots=("data_bytes", "group"),
             )
-            grad_sync_context = _dp_allreduce_context(
-                async_op=async_op,
-                group_size=self.collective_group_size,
-                group_role=group_role,
-                n_buckets=len(self.buckets),
-                overlap_enabled=self.ddp_config.overlap_grad_reduce,
+        else:
+            trace_main_allreduce = not self.ddp_config.use_distributed_optimizer or force_all_reduce
+            grad_sync_gate = prepare_trace_scope("dp-allreduce") if trace_main_allreduce else None
+            if grad_sync_gate is not None:
+                group_role = (
+                    "intra_optimizer_instance"
+                    if self.ddp_config.use_distributed_optimizer
+                    else "data_parallel"
+                )
+                grad_sync_context = _dp_allreduce_context(
+                    async_op=async_op,
+                    group_size=self.collective_group_size,
+                    group_role=group_role,
+                    n_buckets=len(self.buckets),
+                    overlap_enabled=self.ddp_config.overlap_grad_reduce,
+                )
+            grad_sync_scope = open_trace_scope(
+                grad_sync_gate, "dp-allreduce", ctx=grad_sync_context, slots=("data_bytes", "group")
             )
-        grad_sync_scope = open_trace_scope(
-            grad_sync_gate, "dp-allreduce", ctx=grad_sync_context, slots=("data_bytes", "group")
-        )
 
         with (
             grad_sync_scope as scope,
             stream_context,
             _coalescing_manager(communication_group, async_ops=async_op) as cm,
         ):
-            if scope is not None and scope.get("op") == "all_reduce":
+            if grad_sync_gate is not None:
                 scope.set(
                     "data_bytes",
                     sum(
@@ -694,13 +827,46 @@ class _ParamAndGradBucketGroup:
             and self.ddp_config.num_distributed_optimizer_instances > 1
         ):
             assert self.inter_distributed_optimizer_instance_group is not None
+            inter_instance_gate = prepare_trace_scope("dp-allreduce")
+            inter_instance_context = None
+            if inter_instance_gate is not None:
+                inter_instance_context = _dp_inter_instance_allreduce_context(
+                    group_size=self.ddp_config.num_distributed_optimizer_instances,
+                    n_buckets=len(self.buckets),
+                    overlap_enabled=self.ddp_config.overlap_grad_reduce,
+                )
+            inter_instance_scope = open_trace_scope(
+                inter_instance_gate,
+                "dp-allreduce",
+                ctx=inter_instance_context,
+                slots=("data_bytes", "group"),
+            )
             # Create a new coalescing manager for the inter-instance all-reduce.
             with (
+                inter_instance_scope as inter_scope,
                 stream_context,
                 _coalescing_manager(
                     self.inter_distributed_optimizer_instance_group, async_ops=async_op
                 ) as cm,
             ):
+                if inter_instance_gate is not None:
+                    inter_scope.set(
+                        "data_bytes",
+                        sum(
+                            int(
+                                bucket.grad_data.numel()
+                                // self.intra_distributed_optimizer_instance_size
+                                * bucket.grad_data.element_size()
+                            )
+                            for bucket in self.buckets
+                        ),
+                    )
+                    inter_scope.set(
+                        "group",
+                        get_process_group_peer_ranks(
+                            self.inter_distributed_optimizer_instance_group
+                        ),
+                    )
                 for idx, bucket in enumerate(self.buckets):
                     if self.cached_grad_buffer_shard_list[idx] is None:
                         self.cached_grad_buffer_shard_list[idx] = shard_buffer(
