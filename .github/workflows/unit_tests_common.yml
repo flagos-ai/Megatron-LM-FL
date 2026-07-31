@@ -42,6 +42,9 @@ jobs:
           - name: core
             path: "tests/unit_tests/test_*.py megatron/plugin/tests/"
             description: "Core unit tests"
+          - name: megalens
+            path: "tests/megalens/"
+            description: "MegaLens observability and data-contract tests"
           # - name: transformer
           #   path: "tests/unit_tests/transformer/"
           #   description: "Transformer tests"
