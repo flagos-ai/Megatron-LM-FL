@@ -1,7 +1,12 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
+import ast
+import inspect
+import textwrap
+
 import pytest
 
+from megatron.plugin.dualpipev import dualpipev_schedules
 from megatron.plugin.dualpipev.dualpipev_schedules import generate_dualpipev_schedule
 
 
@@ -199,3 +204,36 @@ class TestDualpipevSchedule:
             )
         except (AssertionError, ValueError):
             pass  # Expected behavior
+
+
+def test_dualpipev_routes_all_p2p_waits_through_helper():
+    source = textwrap.dedent(
+        inspect.getsource(
+            dualpipev_schedules.forward_backward_pipelining_with_dualpipev
+        )
+    )
+    tree = ast.parse(source)
+    routed_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "wait_p2p_request"
+    ]
+    direct_wait_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "wait"
+    ]
+
+    assert len(routed_calls) == 44
+    assert direct_wait_calls == []
+    assert all(
+        len(call.args) == 2
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "p2p_communicator"
+        and not call.keywords
+        for call in routed_calls
+    )
