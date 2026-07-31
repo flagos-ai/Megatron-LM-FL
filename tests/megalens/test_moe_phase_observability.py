@@ -18,7 +18,9 @@ from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.observability import (
     EXPERT_WORKLOAD_SLOTS,
     ROUTER_WORKLOAD_SLOTS,
+    collect_router_loss_fields,
     expert_workload,
+    observe_router_loss,
     router_trace_context,
     router_workload,
 )
@@ -191,6 +193,8 @@ def _router_fixture(
     events: list[tuple[Any, ...]],
     *,
     routing_error: BaseException | None = None,
+    loss_observations: Sequence[tuple[str, torch.Tensor]] = (),
+    losses_require_grad: bool = False,
 ) -> tuple[SimpleNamespace, torch.Tensor, torch.Tensor, torch.Tensor]:
     input_tensor = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3)
     logits = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
@@ -212,6 +216,9 @@ def _router_fixture(
 
     def routing(actual_logits: torch.Tensor, *, padding_mask=None, input_ids=None):
         events.append(("routing", tuple(sink.active), actual_logits, padding_mask, input_ids))
+        if not losses_require_grad or torch.is_grad_enabled():
+            for name, value in loss_observations:
+                observe_router_loss(name, value)
         if routing_error is not None:
             raise routing_error
         return probs, routing_map
@@ -319,6 +326,394 @@ def test_router_emits_target_workload_and_uses_routing_boundary() -> None:
         - (0.5 * math.log(0.5))
     ) / 4
     assert fields["routing_entropy"] == pytest.approx(expected_entropy)
+
+
+@pytest.mark.parametrize(
+    "aux_name", ["load_balancing_loss", "seq_load_balancing_loss", "global_load_balancing_loss"]
+)
+def test_router_emits_one_normalized_aux_subtype_and_z_loss(aux_name: str) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    router, input_tensor, probs, routing_map = _router_fixture(
+        sink, [], loss_observations=[(aux_name, torch.tensor(1.25)), ("z_loss", torch.tensor(0.75))]
+    )
+
+    actual_probs, actual_map = TopKRouter.forward(router, input_tensor)
+
+    assert actual_probs is probs
+    assert actual_map is routing_map
+    fields = _event_fields(sink.records[0])
+    assert fields["aux_loss"] == pytest.approx(1.25)
+    assert fields["z_loss"] == pytest.approx(0.75)
+
+
+def test_multiple_aux_subtypes_fail_closed_without_hiding_z_loss() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    router, input_tensor, _, _ = _router_fixture(
+        sink,
+        [],
+        loss_observations=[
+            ("load_balancing_loss", torch.tensor(1.0)),
+            ("seq_load_balancing_loss", torch.tensor(2.0)),
+            ("z_loss", torch.tensor(3.0)),
+        ],
+    )
+
+    TopKRouter.forward(router, input_tensor)
+
+    fields = _event_fields(sink.records[0])
+    assert fields["aux_loss"] is None
+    assert fields["z_loss"] == pytest.approx(3.0)
+
+
+def test_loss_scalarization_is_deferred_and_nonfinite_values_fail_closed() -> None:
+    class _ObservedScalar:
+        def __init__(self, value: float) -> None:
+            self.value = value
+            self.detach_calls = 0
+            self.item_calls = 0
+
+        def detach(self):
+            self.detach_calls += 1
+            return self
+
+        def __truediv__(self, coefficient: float):
+            return self
+
+        def item(self) -> float:
+            self.item_calls += 1
+            return self.value
+
+    first = _ObservedScalar(1.0)
+    second = _ObservedScalar(2.0)
+    with collect_router_loss_fields() as ambiguous:
+        observe_router_loss("load_balancing_loss", first)  # type: ignore[arg-type]
+        observe_router_loss("seq_load_balancing_loss", second)  # type: ignore[arg-type]
+
+    assert ambiguous.fields() == {"aux_loss": None, "z_loss": None}
+    assert (first.detach_calls, first.item_calls) == (1, 0)
+    assert (second.detach_calls, second.item_calls) == (1, 0)
+
+    with collect_router_loss_fields() as invalid:
+        observe_router_loss("load_balancing_loss", torch.tensor(float("nan")))
+        observe_router_loss("z_loss", torch.tensor(float("inf")))
+    assert invalid.fields() == {"aux_loss": None, "z_loss": None}
+
+    with collect_router_loss_fields() as nonscalar:
+        observe_router_loss("load_balancing_loss", torch.tensor([1.0, 2.0]))
+    assert nonscalar.fields() == {"aux_loss": None, "z_loss": None}
+
+
+def test_router_loss_collection_is_nested_and_exception_safe() -> None:
+    with collect_router_loss_fields() as outer:
+        observe_router_loss("load_balancing_loss", torch.tensor(1.0))
+        with collect_router_loss_fields() as inner:
+            observe_router_loss("global_load_balancing_loss", torch.tensor(2.0))
+            observe_router_loss("z_loss", torch.tensor(3.0))
+        observe_router_loss("z_loss", torch.tensor(4.0))
+
+    assert inner.fields() == {"aux_loss": 2.0, "z_loss": 3.0}
+    assert outer.fields() == {"aux_loss": 1.0, "z_loss": 4.0}
+
+    error = RuntimeError("loss collection failed")
+    with pytest.raises(RuntimeError) as raised:
+        with collect_router_loss_fields():
+            observe_router_loss("load_balancing_loss", torch.tensor(5.0))
+            raise error
+    assert raised.value is error
+
+    # The failed collector was reset; an observation outside a scope is ignored.
+    observe_router_loss("z_loss", torch.tensor(6.0))
+    with collect_router_loss_fields() as fresh:
+        pass
+    assert fresh.fields() == {"aux_loss": None, "z_loss": None}
+
+
+def test_routing_exception_discards_loss_without_scalar_sync() -> None:
+    class _DeferredLoss:
+        def __init__(self) -> None:
+            self.item_calls = 0
+
+        def detach(self):
+            return self
+
+        def __truediv__(self, coefficient: float):
+            return self
+
+        def item(self) -> float:
+            self.item_calls += 1
+            return 1.0
+
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    error = RuntimeError("routing failed after loss")
+    loss = _DeferredLoss()
+    router, input_tensor, _, _ = _router_fixture(
+        sink,
+        [],
+        routing_error=error,
+        loss_observations=[("load_balancing_loss", loss)],  # type: ignore[list-item]
+    )
+
+    with pytest.raises(RuntimeError) as raised:
+        TopKRouter.forward(router, input_tensor)
+
+    assert raised.value is error
+    assert loss.item_calls == 0
+    assert sink.records[0]["values"]["aux_loss"] is None
+    assert sink.active == []
+
+
+@pytest.mark.parametrize(
+    "aux_name", ["load_balancing_loss", "seq_load_balancing_loss", "global_load_balancing_loss"]
+)
+def test_aux_tracker_and_mtp_training_scaling_remain_unchanged(
+    monkeypatch: pytest.MonkeyPatch, aux_name: str
+) -> None:
+    tracker_calls: list[tuple[Any, ...]] = []
+    attached_losses: list[torch.Tensor] = []
+
+    def save_tracker(*args: Any, **kwargs: Any) -> None:
+        tracker_calls.append((*args, kwargs))
+
+    def attach(activation: torch.Tensor, loss: torch.Tensor) -> torch.Tensor:
+        attached_losses.append(loss)
+        return activation
+
+    monkeypatch.setattr(router_module, "save_to_aux_losses_tracker", save_tracker)
+    monkeypatch.setattr(router_module.MoEAuxLossAutoScaler, "apply", staticmethod(attach))
+
+    group = object()
+    owner = SimpleNamespace(
+        is_mtp_layer=True,
+        config=SimpleNamespace(mtp_use_repeated_layer=True, mtp_num_layers=4, num_layers=8),
+        layer_number=2,
+        calculate_per_token_loss=True,
+    )
+    activation = torch.ones((2, 3))
+    coefficient = 0.2
+    coefficient_scaled_loss = torch.tensor(0.8)
+
+    with collect_router_loss_fields() as collector:
+        result = TopKRouter.attach_and_log_load_balancing_loss(
+            owner,
+            activation,
+            coefficient,
+            coefficient_scaled_loss,
+            aux_name,
+            group,
+            valid_token_count=torch.tensor(3),
+        )
+
+    assert result is activation
+    assert len(tracker_calls) == 1
+    tracker_name, tracker_value, layer_number, num_layers, tracker_kwargs = tracker_calls[0]
+    assert tracker_name == aux_name
+    torch.testing.assert_close(tracker_value, torch.tensor(1.0))
+    assert layer_number == 10
+    assert num_layers == 12
+    assert tracker_kwargs == {"reduce_group": group, "reduce_group_has_dp": False}
+    torch.testing.assert_close(attached_losses[0], torch.tensor(0.6))
+    # Source-compatible observation happens at each _apply_* producer before
+    # this target-specific repeated-MTP scaling point.
+    assert collector.fields() == {"aux_loss": None, "z_loss": None}
+
+
+@pytest.mark.parametrize("aux_kind", ["aux_loss", "seq_aux_loss", "global_aux_loss"])
+def test_aux_producers_emit_source_base_before_target_mtp_scaling(
+    monkeypatch: pytest.MonkeyPatch, aux_kind: str
+) -> None:
+    coefficient = 0.2
+    base_loss = 5.0
+    seq_length = 2
+    batch_size = 2
+    attached: list[tuple[Any, ...]] = []
+
+    def loss_func(**kwargs: Any) -> torch.Tensor:
+        multiplier = batch_size if aux_kind == "seq_aux_loss" else 1
+        return torch.tensor(coefficient * base_loss * multiplier)
+
+    def attach(
+        activation: torch.Tensor,
+        actual_coefficient: float,
+        loss: torch.Tensor,
+        name: str,
+        group: Any,
+        **kwargs: Any,
+    ) -> torch.Tensor:
+        attached.append((activation, actual_coefficient, loss, name, group, kwargs))
+        return activation
+
+    monkeypatch.setattr(router_module, "switch_load_balancing_loss_func", loss_func)
+    monkeypatch.setattr(
+        router_module,
+        "get_tokens_per_expert_and_token_count",
+        lambda **kwargs: (torch.tensor([1.0, 1.0]), torch.tensor(2.0), torch.tensor(4.0)),
+    )
+
+    tp_cp_group = _Group(2)
+    tp_dp_cp_group = _Group(4)
+    owner = SimpleNamespace(
+        get_aux_loss_coeff=lambda name: coefficient if name == aux_kind else 0.0,
+        tp_cp_group=tp_cp_group,
+        tp_dp_cp_group=tp_dp_cp_group,
+        topk=2,
+        config=SimpleNamespace(num_moe_experts=4, moe_router_fusion=False),
+        attach_and_log_load_balancing_loss=attach,
+        global_tokens_per_expert=torch.zeros(2),
+        ga_steps=torch.tensor(0.0),
+    )
+    probs = torch.ones((4, 4))
+    scores = torch.ones((4, 4))
+    routing_map = torch.ones((4, 4), dtype=torch.bool)
+
+    with collect_router_loss_fields() as collector:
+        if aux_kind == "aux_loss":
+            result = TopKRouter._apply_aux_loss(owner, probs, scores, routing_map)
+        elif aux_kind == "seq_aux_loss":
+            result = TopKRouter._apply_seq_aux_loss(
+                owner, probs, scores, routing_map, seq_length, batch_size
+            )
+        else:
+            result = TopKRouter._apply_global_aux_loss(owner, probs, scores, routing_map)
+
+    assert result is probs
+    assert collector.fields() == {"aux_loss": pytest.approx(base_loss), "z_loss": None}
+    assert len(attached) == 1
+    assert attached[0][0] is probs
+    assert attached[0][1] == coefficient
+    torch.testing.assert_close(attached[0][2], torch.tensor(coefficient * base_loss))
+
+
+def test_z_loss_observation_uses_source_base_and_preserves_existing_mtp_scaling(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tracker_calls: list[tuple[Any, ...]] = []
+    attached_losses: list[torch.Tensor] = []
+    z_loss_calls: list[tuple[torch.Tensor, float, torch.Tensor | None]] = []
+
+    def z_loss_func(
+        logits: torch.Tensor, coefficient: float, padding_mask: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        z_loss_calls.append((logits, coefficient, padding_mask))
+        return torch.tensor(0.8)
+
+    def save_tracker(*args: Any, **kwargs: Any) -> None:
+        tracker_calls.append((*args, kwargs))
+
+    def attach(logits: torch.Tensor, loss: torch.Tensor) -> torch.Tensor:
+        attached_losses.append(loss)
+        return logits
+
+    monkeypatch.setattr(router_module, "z_loss_func", z_loss_func)
+    monkeypatch.setattr(router_module, "save_to_aux_losses_tracker", save_tracker)
+    monkeypatch.setattr(router_module.MoEAuxLossAutoScaler, "apply", staticmethod(attach))
+
+    owner = SimpleNamespace(
+        config=SimpleNamespace(
+            moe_z_loss_coeff=0.4, mtp_use_repeated_layer=True, mtp_num_layers=4, num_layers=8
+        ),
+        training=True,
+        tp_cp_group=_Group(2),
+        calculate_per_token_loss=True,
+        is_mtp_layer=True,
+        layer_number=2,
+    )
+    logits = torch.ones((3, 4))
+    padding_mask = torch.tensor([False, True, False])
+
+    with collect_router_loss_fields() as collector:
+        result = TopKRouter.apply_z_loss(owner, logits, padding_mask=padding_mask)
+
+    assert result is logits
+    assert len(z_loss_calls) == 1
+    assert z_loss_calls[0][0] is logits
+    assert z_loss_calls[0][1] == pytest.approx(0.2)
+    assert z_loss_calls[0][2] is padding_mask
+    # Existing target training semantics attach the token-scaled loss before
+    # repeated-MTP tracker normalization. The probe keeps the source base.
+    torch.testing.assert_close(attached_losses[0], torch.tensor(1.6))
+    tracker_name, tracker_value, layer_number, num_layers, tracker_kwargs = tracker_calls[0]
+    assert tracker_name == "z_loss"
+    torch.testing.assert_close(tracker_value, torch.tensor(1.0))
+    assert layer_number == 10
+    assert num_layers == 12
+    assert tracker_kwargs == {}
+    assert collector.fields() == {"aux_loss": None, "z_loss": pytest.approx(4.0)}
+
+
+def test_disabled_z_loss_paths_and_trace_off_skip_scalar_materialization(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logits = torch.ones((2, 2))
+    owner = SimpleNamespace(config=SimpleNamespace(moe_z_loss_coeff=0.1), training=False)
+
+    def fail_z_loss(*args: Any, **kwargs: Any):
+        pytest.fail("disabled z-loss path performed loss computation")
+
+    monkeypatch.setattr(router_module, "z_loss_func", fail_z_loss)
+    with collect_router_loss_fields() as eval_collector:
+        assert TopKRouter.apply_z_loss(owner, logits) is logits
+
+    owner.training = True
+    with torch.no_grad(), collect_router_loss_fields() as no_grad_collector:
+        assert TopKRouter.apply_z_loss(owner, logits) is logits
+
+    assert eval_collector.fields() == {"aux_loss": None, "z_loss": None}
+    assert no_grad_collector.fields() == {"aux_loss": None, "z_loss": None}
+
+    class _NoMaterialize:
+        def detach(self):
+            pytest.fail("trace-off observation materialized a scalar")
+
+    observe_router_loss("load_balancing_loss", _NoMaterialize())  # type: ignore[arg-type]
+
+    with collect_router_loss_fields() as compiler_collector:
+        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+        observe_router_loss("z_loss", _NoMaterialize())  # type: ignore[arg-type]
+    assert compiler_collector.fields() == {"aux_loss": None, "z_loss": None}
+
+
+def test_enabled_disabled_enabled_router_calls_do_not_reuse_loss_values() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    observations = [("load_balancing_loss", torch.tensor(1.5))]
+    router, input_tensor, _, _ = _router_fixture(sink, [], loss_observations=observations)
+
+    TopKRouter.forward(router, input_tensor)
+    observations.clear()
+    TopKRouter.forward(router, input_tensor)
+    observations.append(("load_balancing_loss", torch.tensor(2.5)))
+    TopKRouter.forward(router, input_tensor)
+
+    assert len(sink.records) == 3
+    assert [_event_fields(record)["aux_loss"] for record in sink.records] == [1.5, None, 2.5]
+    assert [_event_fields(record)["z_loss"] for record in sink.records] == [None, None, None]
+
+
+def test_checkpoint_style_no_grad_then_recompute_uses_per_invocation_loss() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    router, input_tensor, _, _ = _router_fixture(
+        sink,
+        [],
+        loss_observations=[
+            ("load_balancing_loss", torch.tensor(1.5)),
+            ("z_loss", torch.tensor(0.5)),
+        ],
+        losses_require_grad=True,
+    )
+
+    with torch.no_grad():
+        TopKRouter.forward(router, input_tensor)
+    TopKRouter.forward(router, input_tensor)
+
+    assert len(sink.records) == 2
+    assert _event_fields(sink.records[0])["aux_loss"] is None
+    assert _event_fields(sink.records[0])["z_loss"] is None
+    assert _event_fields(sink.records[1])["aux_loss"] == pytest.approx(1.5)
+    assert _event_fields(sink.records[1])["z_loss"] == pytest.approx(0.5)
 
 
 @pytest.mark.parametrize("group_container", ["direct", "list"])
@@ -537,7 +932,19 @@ def test_closed_gate_skips_all_moe_metadata_and_workload(
     sink = _RecordingSink(enabled=gate_mode != "disabled")
     install_trace_sink(sink, suppress_scope=(lambda: True) if gate_mode == "suppressed" else None)
     events: list[tuple[Any, ...]] = []
-    router, input_tensor, probs, routing_map = _router_fixture(sink, events)
+
+    class _NoMaterialize:
+        def detach(self):
+            pytest.fail("closed gate detached a loss tensor")
+
+    router, input_tensor, probs, routing_map = _router_fixture(
+        sink,
+        events,
+        loss_observations=[
+            ("load_balancing_loss", _NoMaterialize()),  # type: ignore[list-item]
+            ("z_loss", _NoMaterialize()),  # type: ignore[list-item]
+        ],
+    )
     layer, dispatcher, _ = _layer_fixture(sink, events)
 
     def fail(*args: Any, **kwargs: Any):
@@ -545,6 +952,7 @@ def test_closed_gate_skips_all_moe_metadata_and_workload(
 
     for name in ("router_trace_context", "router_workload"):
         monkeypatch.setattr(router_module, name, fail)
+    monkeypatch.setattr(router_module, "collect_router_loss_fields", fail)
     for name in (
         "dispatch_trace_context",
         "experts_trace_context",
@@ -633,7 +1041,14 @@ def test_real_adapter_places_static_fields_on_begin_and_workload_on_end() -> Non
     install_trace_sink(MegaLensTraceSink(tracer))
     sink = _RecordingSink()
     events: list[tuple[Any, ...]] = []
-    router, input_tensor, _, _ = _router_fixture(sink, events)
+    router, input_tensor, _, _ = _router_fixture(
+        sink,
+        events,
+        loss_observations=[
+            ("load_balancing_loss", torch.tensor(1.25)),
+            ("z_loss", torch.tensor(0.75)),
+        ],
+    )
 
     TopKRouter.forward(router, input_tensor)
 
@@ -645,8 +1060,8 @@ def test_real_adapter_places_static_fields_on_begin_and_workload_on_end() -> Non
         "ep_size": 2,
         "router_topk": 2,
     }
-    assert ticks[1][2]["aux_loss"] is None
-    assert ticks[1][2]["z_loss"] is None
+    assert ticks[1][2]["aux_loss"] == pytest.approx(1.25)
+    assert ticks[1][2]["z_loss"] == pytest.approx(0.75)
     assert ticks[1][2]["num_tokens"] == 4
     assert ticks[1][2]["routed_tokens"] == 6
     assert ticks[1][2]["dropped_tokens"] is None

@@ -25,6 +25,8 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.observability import (
     ROUTER_WORKLOAD_SLOTS,
+    collect_router_loss_fields,
+    observe_router_loss,
     router_trace_context,
     router_workload,
     set_trace_fields,
@@ -362,6 +364,7 @@ class TopKRouter(Router):
             moe_aux_loss_coeff=aux_loss_coeff,
             fused=self.config.moe_router_fusion,
         )
+        observe_router_loss("load_balancing_loss", aux_loss, aux_loss_coeff)
         probs = self.attach_and_log_load_balancing_loss(
             probs,
             aux_loss_coeff,
@@ -417,6 +420,7 @@ class TopKRouter(Router):
             / bsz
         )
 
+        observe_router_loss("seq_load_balancing_loss", aux_loss, seq_aux_loss_coeff)
         probs = self.attach_and_log_load_balancing_loss(
             probs,
             seq_aux_loss_coeff,
@@ -462,6 +466,7 @@ class TopKRouter(Router):
             moe_aux_loss_coeff=global_aux_loss_coeff,
             fused=self.config.moe_router_fusion,
         )
+        observe_router_loss("global_load_balancing_loss", global_aux_loss, global_aux_loss_coeff)
         probs = self.attach_and_log_load_balancing_loss(
             probs,
             global_aux_loss_coeff,
@@ -561,6 +566,7 @@ class TopKRouter(Router):
             # Skip Z loss calculations when using torch.no_grad() or checkpointing.
             moe_z_loss_coeff = self.config.moe_z_loss_coeff / self.tp_cp_group.size()
             z_loss = z_loss_func(logits, moe_z_loss_coeff, padding_mask=padding_mask)
+            observe_router_loss("z_loss", z_loss, moe_z_loss_coeff)
             if self.calculate_per_token_loss:
                 # The expected final scaling for z_loss gradients is
                 # 1/(num_micro_batches * dp_size).
@@ -820,19 +826,23 @@ class TopKRouter(Router):
         with open_trace_scope(
             router_gate, "moe-router", ctx=router_context, slots=ROUTER_WORKLOAD_SLOTS
         ) as router_scope:
-            probs, routing_map = self.routing(
-                logits, padding_mask=padding_mask, input_ids=input_ids
-            )
-            if router_gate is not None:
-                set_trace_fields(
-                    router_scope,
-                    router_workload(
-                        probs,
-                        routing_map,
-                        capacity_factor=self.config.moe_expert_capacity_factor,
-                        pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
-                    ),
+            if router_gate is None:
+                probs, routing_map = self.routing(
+                    logits, padding_mask=padding_mask, input_ids=input_ids
                 )
+            else:
+                with collect_router_loss_fields() as router_loss_fields:
+                    probs, routing_map = self.routing(
+                        logits, padding_mask=padding_mask, input_ids=input_ids
+                    )
+                fields = router_workload(
+                    probs,
+                    routing_map,
+                    capacity_factor=self.config.moe_expert_capacity_factor,
+                    pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+                )
+                fields.update(router_loss_fields.fields())
+                set_trace_fields(router_scope, fields)
 
         return probs, routing_map
 

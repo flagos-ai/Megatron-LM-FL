@@ -3,7 +3,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping
+import math
+from contextlib import contextmanager
+from contextvars import ContextVar
+from typing import Any, Iterator, Mapping
 
 import torch
 
@@ -28,6 +31,79 @@ EXPERT_WORKLOAD_SLOTS = (
     "expert_max_over_mean",
     "tokens_per_expert",
 )
+
+_AUX_LOSS_NAMES = frozenset(
+    {"load_balancing_loss", "seq_load_balancing_loss", "global_load_balancing_loss"}
+)
+
+
+class _RouterLossCollector:
+    """Invocation-local normalized loss observations for one router scope."""
+
+    __slots__ = ("_aux_loss_values", "_z_loss_values")
+
+    def __init__(self) -> None:
+        self._aux_loss_values: list[torch.Tensor | None] = []
+        self._z_loss_values: list[torch.Tensor | None] = []
+
+    @staticmethod
+    def _detach_normalized(value: torch.Tensor, coefficient: float) -> torch.Tensor | None:
+        try:
+            return value.detach() / coefficient
+        except Exception:
+            return None
+
+    @staticmethod
+    def _to_scalar(value: torch.Tensor | None) -> float | None:
+        if value is None:
+            return None
+        try:
+            scalar = float(value.item())
+        except Exception:
+            return None
+        return scalar if math.isfinite(scalar) else None
+
+    def observe(self, name: str, value: torch.Tensor, coefficient: float) -> None:
+        if name in _AUX_LOSS_NAMES:
+            self._aux_loss_values.append(self._detach_normalized(value, coefficient))
+        elif name == "z_loss":
+            self._z_loss_values.append(self._detach_normalized(value, coefficient))
+
+    def fields(self) -> dict[str, float | None]:
+        # The source schema has one aux_loss slot. Multiple enabled target
+        # subtypes cannot be represented without silently choosing one.
+        aux_loss = (
+            self._to_scalar(self._aux_loss_values[0]) if len(self._aux_loss_values) == 1 else None
+        )
+        z_loss = self._to_scalar(self._z_loss_values[0]) if len(self._z_loss_values) == 1 else None
+        return {"aux_loss": aux_loss, "z_loss": z_loss}
+
+
+_ACTIVE_ROUTER_LOSS_COLLECTOR: ContextVar[_RouterLossCollector | None] = ContextVar(
+    "megatron_moe_router_loss_collector", default=None
+)
+
+
+@contextmanager
+def collect_router_loss_fields() -> Iterator[_RouterLossCollector]:
+    """Bind loss observations to the current accepted router invocation."""
+    collector = _RouterLossCollector()
+    token = _ACTIVE_ROUTER_LOSS_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _ACTIVE_ROUTER_LOSS_COLLECTOR.reset(token)
+
+
+def observe_router_loss(name: str, value: torch.Tensor, coefficient: float = 1.0) -> None:
+    """Record a source-compatible base loss only for an active eager trace scope."""
+    is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None)
+    if callable(is_compiling) and is_compiling():
+        return
+
+    collector = _ACTIVE_ROUTER_LOSS_COLLECTOR.get()
+    if collector is not None:
+        collector.observe(name, value, coefficient)
 
 
 def _ep_size(owner: Any) -> int:
@@ -176,10 +252,12 @@ def set_trace_fields(scope: Any, fields: Mapping[str, Any]) -> None:
 __all__ = [
     "EXPERT_WORKLOAD_SLOTS",
     "ROUTER_WORKLOAD_SLOTS",
+    "collect_router_loss_fields",
     "combine_trace_context",
     "dispatch_trace_context",
     "expert_workload",
     "experts_trace_context",
+    "observe_router_loss",
     "router_trace_context",
     "router_workload",
     "set_trace_fields",
