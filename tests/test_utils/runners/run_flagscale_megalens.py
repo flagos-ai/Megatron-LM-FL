@@ -17,6 +17,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
+from tests.test_utils.runners import bridge_probe_contract  # noqa: E402
 from tests.test_utils.runners import dp_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
@@ -119,6 +120,18 @@ _TP_ALLREDUCE_FIELDS = (
     "group_size",
     "timing_phase",
     "payload_role",
+)
+_BRIDGE_DIRECTION_FIELDS = (
+    *_COMMON_FIELDS,
+    "communicator_kind",
+    "data_bytes",
+    "direction",
+    "message_kind",
+    "peer_rank",
+    "pipeline_direction",
+    "src_module",
+    "dest_module",
+    "transport_api",
 )
 
 
@@ -414,6 +427,52 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         ),
     ),
     "bert-encoder": manifest.TraceProfile("bert-encoder", 1, _events("encoder")),
+    "multimodule-bridge2": manifest.TraceProfile(
+        "multimodule-bridge2",
+        2,
+        (
+            manifest.EventRequirement(
+                "bridge-p2p-launch",
+                (
+                    *_COMMON_FIELDS,
+                    "batch_id",
+                    "message_kind",
+                    "operation_count",
+                    "operations",
+                    "src_module",
+                    "dest_module",
+                    "transport_api",
+                ),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "bridge-grid-broadcast",
+                (
+                    *_COMMON_FIELDS,
+                    "collective_role",
+                    "grid_side",
+                    "message_kind",
+                    "pipeline_direction",
+                    "source_rank",
+                    "src_module",
+                    "dest_module",
+                    "transport_api",
+                ),
+                "B",
+            ),
+            *(
+                manifest.EventRequirement(name, _BRIDGE_DIRECTION_FIELDS, "B")
+                for name in (
+                    "bridge-send-forward",
+                    "bridge-recv-forward",
+                    "bridge-send-backward",
+                    "bridge-recv-backward",
+                )
+            ),
+        ),
+        bridge_probe_contract.validate_multimodule_bridge_trace,
+        bridge_probe_contract.validate_multimodule_bridge_run,
+    ),
 }
 
 _CONFIG_PROFILES = {
@@ -443,6 +502,7 @@ _CONFIG_PROFILES = {
         "te-moe-router-cuda-graph"
     ),
     "flagscale_single_node_bert_smoke": "bert-encoder",
+    "flagscale_single_node_multimodule_bridge_smoke": "multimodule-bridge2",
 }
 
 
@@ -767,6 +827,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     report = manifest.validate_trace(
         run_dir / "traces",
         profile,
+        trace_enabled=args.mode == "trace-on",
+    )
+    report = manifest.validate_run_artifacts(
+        run_dir,
+        profile,
+        report,
         trace_enabled=args.mode == "trace-on",
     )
     payload = manifest.build_manifest(

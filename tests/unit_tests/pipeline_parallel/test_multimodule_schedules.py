@@ -2,7 +2,7 @@
 
 """Tests for multimodule pipeline schedules with heterogeneous parallelism."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import Dict, Optional
 
 import pytest
@@ -355,7 +355,14 @@ class DataIterator:
 
 
 def run_multimodule_schedule_test(
-    encoder_configs, llm_config, hidden_size, seq_length, micro_batch_size, num_microbatches
+    encoder_configs,
+    llm_config,
+    hidden_size,
+    seq_length,
+    micro_batch_size,
+    num_microbatches,
+    iteration_context=None,
+    return_run_state=False,
 ):
     """Run multimodule schedule test with given configuration.
 
@@ -442,17 +449,18 @@ def run_multimodule_schedule_test(
         return model_output, loss_func
 
     # Run schedule
-    losses = schedule.forward_backward_pipelining_without_interleaving(
-        forward_step_func=step_func,
-        data_iterator=data_iterator,
-        model=[model],
-        num_microbatches=num_microbatches,
-        seq_length=seq_length,
-        micro_batch_size=micro_batch_size,
-        forward_only=False,
-        p2p_communicator=communicator,
-        pg_collection=pg_collection,
-    )
+    with nullcontext() if iteration_context is None else iteration_context:
+        losses = schedule.forward_backward_pipelining_without_interleaving(
+            forward_step_func=step_func,
+            data_iterator=data_iterator,
+            model=[model],
+            num_microbatches=num_microbatches,
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
+            forward_only=False,
+            p2p_communicator=communicator,
+            pg_collection=pg_collection,
+        )
 
     # Verify results on last LLM stage
     if model.is_rank_in_grid(model.llm_grid):
@@ -460,6 +468,49 @@ def run_multimodule_schedule_test(
             assert len(losses) > 0, "Expected losses on last LLM stage"
 
     Utils.destroy_model_parallel()
+    if return_run_state:
+        gradients = []
+        seen_parameters = set()
+        for module, grid, _pg in model.modules_and_grids:
+            if module is None or not model.is_rank_in_grid(grid):
+                continue
+            for parameter in module.parameters():
+                parameter_id = id(parameter)
+                if parameter_id in seen_parameters:
+                    continue
+                seen_parameters.add(parameter_id)
+                gradient = getattr(parameter, "main_grad", None)
+                if gradient is None:
+                    gradient = parameter.grad
+                if gradient is not None:
+                    gradients.append(gradient.detach())
+
+        if gradients:
+            squared_norm = torch.zeros(
+                (), device=gradients[0].device, dtype=torch.float32
+            )
+            gradients_finite = torch.ones(
+                (), device=gradients[0].device, dtype=torch.bool
+            )
+            for gradient in gradients:
+                gradient_float = gradient.float()
+                squared_norm.add_(gradient_float.pow(2).sum())
+                gradients_finite.logical_and_(torch.isfinite(gradient).all())
+            squared_norm_value, finite_value = torch.stack(
+                (squared_norm, gradients_finite.to(torch.float32))
+            ).tolist()
+            gradient_norm = float(squared_norm_value) ** 0.5
+            gradient_finite = bool(finite_value)
+        else:
+            gradient_norm = 0.0
+            gradient_finite = True
+
+        run_state = {
+            "gradient_count": len(gradients),
+            "gradient_finite": gradient_finite,
+            "gradient_norm": gradient_norm,
+        }
+        return losses, run_state
     return losses
 
 

@@ -35,6 +35,7 @@ class TraceProfile:
     rank_count: int
     events: tuple[EventRequirement, ...] = ()
     contract: Callable[[Path], Sequence[Failure]] | None = None
+    run_contract: Callable[[Path, bool], Sequence[Failure]] | None = None
 
 
 @dataclass(frozen=True)
@@ -261,6 +262,45 @@ def validate_trace(
         ranks=ranks,
         event_counts=dict(event_counts),
         total_records=len(all_records),
+    )
+
+
+def validate_run_artifacts(
+    run_root: Path,
+    profile: TraceProfile,
+    report: ValidationReport,
+    *,
+    trace_enabled: bool,
+) -> ValidationReport:
+    """Add profile-specific run artifacts to a trace validation report."""
+
+    if profile.run_contract is None:
+        return report
+    failures = list(report.failures)
+    try:
+        failures.extend(profile.run_contract(run_root, trace_enabled))
+    except (
+        OSError,
+        UnicodeError,
+        json.JSONDecodeError,
+        KeyError,
+        TypeError,
+        ValueError,
+    ) as error:
+        failures.append(
+            Failure(
+                "run.contract_invalid",
+                f"profile {profile.name!r} run contract could not read artifacts: {error}",
+                profile.name,
+            )
+        )
+    return ValidationReport(
+        passed=not failures,
+        failures=tuple(failures),
+        shards=report.shards,
+        ranks=report.ranks,
+        event_counts=report.event_counts,
+        total_records=report.total_records,
     )
 
 
