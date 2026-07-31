@@ -17,6 +17,7 @@ from megatron.core.models.common.embeddings.rotary_pos_embedding import (
     RotaryEmbedding,
 )
 from megatron.core.models.common.language_module.language_module import LanguageModule
+from megatron.core.observability import trace_scope
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
     FineGrainedActivationOffloadingInterface as off_interface,
@@ -732,7 +733,8 @@ class GPTModel(LanguageModule):
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
 
-        loss = self.compute_language_model_loss(labels, logits)
+        with trace_scope("loss"):
+            loss = self.compute_language_model_loss(labels, logits)
 
         return loss
 
