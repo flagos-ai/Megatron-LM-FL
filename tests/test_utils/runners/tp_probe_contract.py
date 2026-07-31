@@ -22,6 +22,14 @@ _COLLECTIVE_SPECS = {
     "tp-reduce-scatter": {"op": "reduce-scatter", "dim": "first"},
     "tp-reduce-scatter-last": {"op": "reduce-scatter", "dim": "last"},
 }
+_SP_GQA_COLLECTIVES = frozenset(_COLLECTIVE_SPECS)
+_NO_SP_GQA_COLLECTIVES = frozenset(
+    (
+        "tp-all-gather-last",
+        "tp-reduce-scatter",
+        "tp-reduce-scatter-last",
+    )
+)
 _LINEAR_EVENTS = frozenset(
     ("tp-linear-async-launch", "tp-linear-async-complete")
 )
@@ -275,10 +283,12 @@ def _validate_collective_hierarchy(
     iteration: Iteration,
     *,
     rank: int,
+    required_names: frozenset[str],
+    forbidden_names: frozenset[str] = frozenset(),
 ) -> list[Failure]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _COLLECTIVE_SPECS, rank=rank)
-    for name in _COLLECTIVE_SPECS:
+    for name in required_names:
         if not spans.get(name):
             failures.append(
                 _failure(
@@ -288,6 +298,17 @@ def _validate_collective_hierarchy(
                     iteration=iteration_id,
                 )
             )
+    for name in forbidden_names:
+        if spans.get(name):
+            failures.append(
+                _failure(
+                    "trace.tp.collective_count",
+                    f"event {name!r} must be absent from this profile",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    for name in _COLLECTIVE_SPECS:
         for span in spans.get(name, ()):
             failures.extend(
                 _validate_collective_span(
@@ -715,8 +736,12 @@ def _validate_final_grad_sync(
     return failures, data_bytes
 
 
-def validate_tp2_gqa_collective_hierarchy(
+def _validate_tp2_gqa_collective_hierarchy(
     trace_root: Path,
+    *,
+    required_names: frozenset[str],
+    forbidden_names: frozenset[str],
+    profile_name: str,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -725,7 +750,7 @@ def validate_tp2_gqa_collective_hierarchy(
             Failure(
                 "trace.tp.ranks",
                 f"TP2 contract expects ranks [0, 1], observed {sorted(by_rank)}",
-                "tp2-local",
+                profile_name,
             )
         )
 
@@ -756,8 +781,37 @@ def validate_tp2_gqa_collective_hierarchy(
                         iteration=int(iteration.iteration_id),
                     )
                 )
-            failures.extend(_validate_collective_hierarchy(iteration, rank=rank))
+            failures.extend(
+                _validate_collective_hierarchy(
+                    iteration,
+                    rank=rank,
+                    required_names=required_names,
+                    forbidden_names=forbidden_names,
+                )
+            )
     return tuple(failures)
+
+
+def validate_tp2_gqa_collective_hierarchy(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    return _validate_tp2_gqa_collective_hierarchy(
+        trace_root,
+        required_names=_SP_GQA_COLLECTIVES,
+        forbidden_names=frozenset(),
+        profile_name="tp2-gqa-sp",
+    )
+
+
+def validate_tp2_gqa_no_sp_collective_hierarchy(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    return _validate_tp2_gqa_collective_hierarchy(
+        trace_root,
+        required_names=_NO_SP_GQA_COLLECTIVES,
+        forbidden_names=frozenset(("tp-all-gather-first",)),
+        profile_name="tp2-gqa-no-sp",
+    )
 
 
 def _validate_tp2_linear_lifecycle(

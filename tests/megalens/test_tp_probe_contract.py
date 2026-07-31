@@ -14,6 +14,7 @@ def _write_collective_trace(
     rank: int,
     omit_nested_reduce_scatter: bool = False,
     cross_all_gather_scopes: bool = False,
+    include_first_all_gather: bool = True,
     include_linear_lifecycle: bool = False,
     include_linear_allreduce: bool = False,
     mismatched_linear_completion: bool = False,
@@ -148,8 +149,9 @@ def _write_collective_trace(
             event("tp-all-gather-first", "E", group=[1 - rank])
             event("tp-all-gather-last", "E", group=[1 - rank])
         else:
-            collective("tp-all-gather-first", op="all-gather", dim="first")
-            collective("tp-all-gather-first", op="all-gather", dim="first")
+            if include_first_all_gather:
+                collective("tp-all-gather-first", op="all-gather", dim="first")
+                collective("tp-all-gather-first", op="all-gather", dim="first")
             collective("tp-all-gather-last", op="all-gather", dim="last")
         event(
             "tp-reduce-scatter-last",
@@ -268,6 +270,37 @@ def test_tp2_collective_contract_rejects_crossed_scopes(tmp_path: Path) -> None:
     failures = tp_probe_contract.validate_tp2_gqa_collective_hierarchy(tmp_path)
 
     assert "trace.tp.nesting" in {failure.code for failure in failures}
+
+
+def test_tp2_no_sp_collective_contract_accepts_gqa_last_dimension(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_first_all_gather=False,
+        )
+
+    assert (
+        tp_probe_contract.validate_tp2_gqa_no_sp_collective_hierarchy(tmp_path)
+        == ()
+    )
+
+
+def test_tp2_no_sp_collective_contract_rejects_first_all_gather(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(tmp_path, rank=rank)
+
+    failures = tp_probe_contract.validate_tp2_gqa_no_sp_collective_hierarchy(
+        tmp_path
+    )
+
+    assert "trace.tp.collective_count" in {
+        failure.code for failure in failures
+    }
 
 
 def test_tp2_sp_linear_contract_accepts_all_gather_and_reduce_scatter(
