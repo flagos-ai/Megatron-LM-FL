@@ -2929,97 +2929,115 @@ def train(
     # Run training iterations till done.
     buffered_rollouts = None
     while iteration < args.train_iters:
-        if (args.profile 
-            and (len(args.profile_ranks) == 0 or
-                 torch.distributed.get_rank() in args.profile_ranks)):
-            if args.use_pytorch_profiler:
-                prof.step()
-            elif iteration == args.profile_step_start:
-                torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStart())
-                nsys_nvtx_context = torch.autograd.profiler.emit_nvtx(record_shapes=True)
-                nsys_nvtx_context.__enter__()
-
-        ft_integration.on_checkpointing_start()
-        maybe_finalize_async_save(blocking=False)
-        ft_integration.on_checkpointing_end(is_async_finalization=True)
-        # Update the timeout for all process groups after initialization
-        # We update the timeout after the first successful iteration,
-        # which takes longer than others usually
-        if args.distributed_timeout_seconds_after_init is not None and iteration == start_iteration+1:
-            # TODO: some dynamic timeout setting is required
-            # based on the iteration time considering interval-based steps (e.g. eval, checkpoint)
-            # e.g. timeout for normal iterations vs timeout for iterations with checkpoint
-            # this timeout is triggered when there's no collective communication
-            # for the duration of timeout
-            update_pg_timeout(timedelta(seconds=args.distributed_timeout_seconds_after_init))
-        # Update number of microbatches first without consistency check to decide if a
-        # checkpoint should be saved. If the number of microbatches is different
-        # from the previous iteration, save a checkpoint. Then run consistency check
-        # to make sure training configuration is still valid.
-        # Standard microbatch update (sequence packing overrides this in rl_utils.py)
-        update_num_microbatches(args.consumed_train_samples, consistency_check=False, verbose=True)
-        # Skip automatic checkpoint on microbatch changes when sequence packing is active
-        # as it intentionally reconfigures microbatches
-        if get_num_microbatches() != num_microbatches and iteration != 0:
-            if args.rl_use_sequence_packing:
-                print_rank_0(
-                    f"[Sequence Packing] Skipping automatic checkpoint at iteration {iteration} "
-                    f"(microbatch change: {num_microbatches} -> {get_num_microbatches()})"
-                )
-            else:
-                assert get_num_microbatches() > num_microbatches, (
-                    f"Number of microbatches should be increasing due to batch size rampup; "
-                    f"instead going from {num_microbatches} to {get_num_microbatches()}"
-                )
-                if args.save is not None:
-                    save_checkpoint_and_time(
-                        iteration,
-                        model,
-                        optimizer,
-                        opt_param_scheduler,
-                        num_floating_point_operations_so_far,
-                        checkpointing_context,
-                        train_data_iterator=train_data_iterator,
-                    )
-        num_microbatches = get_num_microbatches()
-        update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
-
-        # Capture CUDA Graphs.
-        if (
-            args.cuda_graph_impl == "transformer_engine"
-            and not cuda_graph_helper.capture_finished()
-            and iteration - start_iteration == args.cuda_graph_warmup_steps
-        ):
-            if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
-                disable_forward_pre_hook(model, param_sync=False)
-            cuda_graph_helper.create_cudagraphs()
-            if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
-                enable_forward_pre_hook(model)
-                cuda_graph_helper.cuda_graph_set_manual_hooks()
-
-        # Completely skip iteration if needed.
-        if (iteration + 1) in args.iterations_to_skip:
-            # Dummy train_step to fast forward train_data_iterator.
-            dummy_train_step(train_data_iterator)
-            if iteration == start_iteration:
-                start_iteration = iteration + 1
-            iteration += 1
-            batch_size = (
-                mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
-            )
-            args.consumed_train_samples += batch_size
-            args.skipped_train_samples += batch_size
-            continue
-
-        megalens_iteration = (
-            get_megalens_runtime().iteration(
+        skip_iteration = (iteration + 1) in args.iterations_to_skip
+        trace_iteration = getattr(args, 'trace', False) and not skip_iteration
+        if trace_iteration:
+            megalens_runtime = get_megalens_runtime()
+            if not megalens_runtime.tracer.is_mode0():
+                # Align mode-1 iteration starts across the default WORLD process group.
+                torch.distributed.barrier()
+            megalens_iteration = megalens_runtime.iteration(
                 iteration + 1,
                 enable_hw_monitor=getattr(args, 'hardware_monitor', False),
             )
-            if getattr(args, 'trace', False)
-            else nullcontext()
-        )
+        else:
+            megalens_iteration = nullcontext()
         with megalens_iteration:
+            if (
+                args.profile
+                and (
+                    len(args.profile_ranks) == 0
+                    or torch.distributed.get_rank() in args.profile_ranks
+                )
+            ):
+                if args.use_pytorch_profiler:
+                    prof.step()
+                elif iteration == args.profile_step_start:
+                    torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStart())
+                    nsys_nvtx_context = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+                    nsys_nvtx_context.__enter__()
+
+            ft_integration.on_checkpointing_start()
+            maybe_finalize_async_save(blocking=False)
+            ft_integration.on_checkpointing_end(is_async_finalization=True)
+            # Update the timeout for all process groups after initialization
+            # We update the timeout after the first successful iteration,
+            # which takes longer than others usually
+            if (
+                args.distributed_timeout_seconds_after_init is not None
+                and iteration == start_iteration + 1
+            ):
+                # TODO: some dynamic timeout setting is required
+                # based on the iteration time considering interval-based steps (e.g. eval, checkpoint)
+                # e.g. timeout for normal iterations vs timeout for iterations with checkpoint
+                # this timeout is triggered when there's no collective communication
+                # for the duration of timeout
+                update_pg_timeout(timedelta(seconds=args.distributed_timeout_seconds_after_init))
+            # Update number of microbatches first without consistency check to decide if a
+            # checkpoint should be saved. If the number of microbatches is different
+            # from the previous iteration, save a checkpoint. Then run consistency check
+            # to make sure training configuration is still valid.
+            # Standard microbatch update (sequence packing overrides this in rl_utils.py)
+            update_num_microbatches(
+                args.consumed_train_samples, consistency_check=False, verbose=True
+            )
+            # Skip automatic checkpoint on microbatch changes when sequence packing is active
+            # as it intentionally reconfigures microbatches
+            if get_num_microbatches() != num_microbatches and iteration != 0:
+                if args.rl_use_sequence_packing:
+                    print_rank_0(
+                        f"[Sequence Packing] Skipping automatic checkpoint at iteration {iteration} "
+                        f"(microbatch change: {num_microbatches} -> {get_num_microbatches()})"
+                    )
+                else:
+                    assert get_num_microbatches() > num_microbatches, (
+                        f"Number of microbatches should be increasing due to batch size rampup; "
+                        f"instead going from {num_microbatches} to {get_num_microbatches()}"
+                    )
+                    if args.save is not None:
+                        save_checkpoint_and_time(
+                            iteration,
+                            model,
+                            optimizer,
+                            opt_param_scheduler,
+                            num_floating_point_operations_so_far,
+                            checkpointing_context,
+                            train_data_iterator=train_data_iterator,
+                        )
+            num_microbatches = get_num_microbatches()
+            update_num_microbatches(
+                args.consumed_train_samples, consistency_check=True, verbose=True
+            )
+
+            # Capture CUDA Graphs.
+            if (
+                args.cuda_graph_impl == "transformer_engine"
+                and not cuda_graph_helper.capture_finished()
+                and iteration - start_iteration == args.cuda_graph_warmup_steps
+            ):
+                if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
+                    disable_forward_pre_hook(model, param_sync=False)
+                cuda_graph_helper.create_cudagraphs()
+                if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
+                    enable_forward_pre_hook(model)
+                    cuda_graph_helper.cuda_graph_set_manual_hooks()
+
+            # Completely skip iteration if needed.
+            if skip_iteration:
+                # Dummy train_step to fast forward train_data_iterator.
+                dummy_train_step(train_data_iterator)
+                if iteration == start_iteration:
+                    start_iteration = iteration + 1
+                iteration += 1
+                batch_size = (
+                    mpu.get_data_parallel_world_size()
+                    * args.micro_batch_size
+                    * get_num_microbatches()
+                )
+                args.consumed_train_samples += batch_size
+                args.skipped_train_samples += batch_size
+                continue
+
             args.curr_iteration = iteration
             # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
             # It is similar to a PPO epoch.
@@ -3068,45 +3086,45 @@ def train(
                     forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
                 )
                 ft_integration.on_training_step_end()
-        if should_checkpoint:
-            save_checkpoint_and_time(
-                iteration,
-                model,
-                optimizer,
-                opt_param_scheduler,
-                num_floating_point_operations_so_far,
-                checkpointing_context,
-                train_data_iterator=train_data_iterator,
-            )
-        if should_exit:
-            break
+            if should_checkpoint:
+                save_checkpoint_and_time(
+                    iteration,
+                    model,
+                    optimizer,
+                    opt_param_scheduler,
+                    num_floating_point_operations_so_far,
+                    checkpointing_context,
+                    train_data_iterator=train_data_iterator,
+                )
+            if should_exit:
+                break
 
-        # Enable forward pre-hooks after first set of forward and backward passes.
-        # When running in fp16, skip all NaN iterations until steady-state loss scaling value
-        # is reached.
-        if iteration == start_iteration:
-            if skipped_iter:
-                # Only enable forward pre-hook after a training step has successfully run. Relevant
-                # for fp16 codepath where first XX iterations are skipped until steady-state loss
-                # scale value is reached.
-                start_iteration = iteration + 1
-            else:
-                # Enable forward pre-hook after training step has successfully run. All subsequent
-                # forward passes will use the forward pre-hook / `param_sync_func` in
-                # `forward_backward_func`.
-                if should_disable_forward_pre_hook(args):
-                    enable_forward_pre_hook(model)
-                    config.param_sync_func = param_sync_func
-                    pre_hook_enabled = True
-                    # Set the manual hooks here since it's not set right after the capturing.
-                    if (
-                        args.cuda_graph_impl == "transformer_engine"
-                        and args.cuda_graph_warmup_steps == 0
-                    ):
-                        assert (
-                            cuda_graph_helper.capture_finished()
-                        ), "CUDA Graph capture should have been finished."
-                        cuda_graph_helper.cuda_graph_set_manual_hooks()
+            # Enable forward pre-hooks after first set of forward and backward passes.
+            # When running in fp16, skip all NaN iterations until steady-state loss scaling value
+            # is reached.
+            if iteration == start_iteration:
+                if skipped_iter:
+                    # Only enable forward pre-hook after a training step has successfully run. Relevant
+                    # for fp16 codepath where first XX iterations are skipped until steady-state loss
+                    # scale value is reached.
+                    start_iteration = iteration + 1
+                else:
+                    # Enable forward pre-hook after training step has successfully run. All subsequent
+                    # forward passes will use the forward pre-hook / `param_sync_func` in
+                    # `forward_backward_func`.
+                    if should_disable_forward_pre_hook(args):
+                        enable_forward_pre_hook(model)
+                        config.param_sync_func = param_sync_func
+                        pre_hook_enabled = True
+                        # Set the manual hooks here since it's not set right after the capturing.
+                        if (
+                            args.cuda_graph_impl == "transformer_engine"
+                            and args.cuda_graph_warmup_steps == 0
+                        ):
+                            assert (
+                                cuda_graph_helper.capture_finished()
+                            ), "CUDA Graph capture should have been finished."
+                            cuda_graph_helper.cuda_graph_set_manual_hooks()
 
         iteration += 1
 
