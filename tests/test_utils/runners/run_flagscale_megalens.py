@@ -17,6 +17,7 @@ _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
+from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
@@ -136,6 +137,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             manifest.EventRequirement("ep-alltoall-combine", _EP_ROUTE_FIELDS, "E"),
         ),
     ),
+    "bert-encoder": manifest.TraceProfile("bert-encoder", 1, _events("encoder")),
 }
 
 _CONFIG_PROFILES = {
@@ -151,6 +153,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_te_cuda_graph_moe_router_smoke": (
         "te-moe-router-cuda-graph"
     ),
+    "flagscale_single_node_bert_smoke": "bert-encoder",
 }
 
 
@@ -191,6 +194,8 @@ def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
         if configured == "ep2-alltoall" and args.ep_dispatcher == "allgather":
             configured = "ep2-allgather"
         return PROFILES[configured]
+    if args.model_profile == "bert-encoder":
+        return PROFILES["bert-encoder"]
     if args.cuda_graph_profile == "transformer-engine-attn":
         return PROFILES["te-attn-cuda-graph"]
     if args.cuda_graph_profile == "transformer-engine-moe-router":
@@ -337,6 +342,8 @@ def _copy_inputs(
     inputs.mkdir()
     destination = inputs / source.name
     shutil.copyfile(source, destination)
+    if profile.name == "bert-encoder":
+        generate_bert_smoke_inputs.generate_inputs(inputs)
     return destination
 
 
@@ -357,6 +364,7 @@ def _parser() -> argparse.ArgumentParser:
         "--cuda-graph-profile",
         choices=("transformer-engine-attn", "transformer-engine-moe-router"),
     )
+    parser.add_argument("--model-profile", choices=("bert-encoder",))
     parser.add_argument(
         "--megatron-source-root",
         type=Path,

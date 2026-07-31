@@ -24,6 +24,7 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_te_cuda_graph_moe_router_smoke.yaml": (
         "te-moe-router-cuda-graph"
     ),
+    "flagscale_single_node_bert_smoke.yaml": "bert-encoder",
 }
 
 
