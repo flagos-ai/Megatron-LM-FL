@@ -6,7 +6,7 @@ from typing import Optional, Union
 import torch
 
 from megatron.core.jit import jit_fuser
-from megatron.core.observability import scoped_forward
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import (
     MoEAuxLossAutoScaler,
@@ -22,6 +22,12 @@ from megatron.core.transformer.moe.moe_utils import (
     switch_load_balancing_loss_func,
     topk_routing_with_score_function,
     z_loss_func,
+)
+from megatron.core.transformer.moe.observability import (
+    ROUTER_WORKLOAD_SLOTS,
+    router_trace_context,
+    router_workload,
+    set_trace_fields,
 )
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -57,6 +63,7 @@ class Router(ABC, MegatronModule):
         self.moe_aux_loss_func = None
         self.layer_number = layer_number
         self.is_mtp_layer = is_mtp_layer
+        self.ep_group = pg_collection.ep
         self.tp_group = pg_collection.tp
         self.cp_group = pg_collection.cp
         self.tp_cp_group = pg_collection.tp_cp
@@ -775,7 +782,6 @@ class TopKRouter(Router):
             self.global_tokens_per_expert.zero_()
             self.ga_steps.zero_()
 
-    @scoped_forward("moe-router")
     def forward(
         self,
         input: torch.Tensor,
@@ -809,7 +815,24 @@ class TopKRouter(Router):
                 logits, self.config.moe_router_force_biased, self.layer_number
             )
 
-        probs, routing_map = self.routing(logits, padding_mask=padding_mask, input_ids=input_ids)
+        router_gate = prepare_trace_scope("moe-router")
+        router_context = router_trace_context(self) if router_gate is not None else None
+        with open_trace_scope(
+            router_gate, "moe-router", ctx=router_context, slots=ROUTER_WORKLOAD_SLOTS
+        ) as router_scope:
+            probs, routing_map = self.routing(
+                logits, padding_mask=padding_mask, input_ids=input_ids
+            )
+            if router_gate is not None:
+                set_trace_fields(
+                    router_scope,
+                    router_workload(
+                        probs,
+                        routing_map,
+                        capacity_factor=self.config.moe_expert_capacity_factor,
+                        pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+                    ),
+                )
 
         return probs, routing_map
 
@@ -822,6 +845,9 @@ class TopKRouter(Router):
         """Save the state dict of the router."""
         self._maintain_float32_expert_bias()  # switch to float32 before saving
         return super()._save_to_state_dict(*args, **kwargs)
+
+
+setattr(TopKRouter.forward, "__megatron_trace_event__", "moe-router")
 
 
 class InferenceTopKRouter(TopKRouter):
