@@ -8,7 +8,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
+from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -62,12 +64,13 @@ def _write_gpt_phase_trace(
     eager_layers: int = 0,
     include_optimizer: bool = False,
     include_optimizer_postprocess: bool = True,
+    p2p_route: str | None = None,
 ) -> None:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
     timestamp = 0
 
-    def event(name: str, phase: str) -> None:
+    def event(name: str, phase: str, **attrs: object) -> None:
         nonlocal timestamp
         timestamp += 1
         rows.append(
@@ -80,8 +83,140 @@ def _write_gpt_phase_trace(
                 "dp_rk": 0,
                 "pp_rk": pipeline_rank,
                 "tp_rk": 0,
+                **attrs,
             }
         )
+
+    def p2p_events(iteration: int) -> None:
+        if p2p_route is None:
+            return
+        if p2p_route not in {"batch", "unbatched"}:
+            raise ValueError(f"unknown P2P route: {p2p_route}")
+
+        transport_api = (
+            "batch_isend_irecv" if p2p_route == "batch" else "isend_irecv"
+        )
+        launch_pairing = "backend_dependent" if p2p_route == "batch" else "key"
+        completion_pairing = "position" if p2p_route == "batch" else "key"
+        if p2p_route == "batch":
+            launch_groups = (
+                ("internal_wait", (("send-forward", "send_next"),)),
+                ("internal_wait", (("recv-backward", "recv_next"),)),
+            )
+            if rank == 1:
+                launch_groups = (
+                    ("internal_wait", (("recv-forward", "recv_prev"),)),
+                    ("internal_wait", (("send-backward", "send_prev"),)),
+                )
+        else:
+            backward_mode = "internal_wait" if rank == 0 else "external_wait"
+            launch_groups = (
+                (
+                    "internal_wait",
+                    (
+                        ("recv-forward", "recv_prev"),
+                        ("send-forward", "send_next"),
+                    ),
+                ),
+                (
+                    backward_mode,
+                    (
+                        ("send-backward", "send_prev"),
+                        ("recv-backward", "recv_next"),
+                    ),
+                ),
+            )
+
+        for index, (completion_mode, directional_events) in enumerate(launch_groups):
+            batch_id = f"p2p:{iteration}:{index}"
+            operations = []
+            for event_name, key in directional_events:
+                direction, pipeline_direction = event_name.split("-", 1)
+                operation_id = f"{batch_id}:{key}"
+                operations.append(
+                    {
+                        "operation_id": operation_id,
+                        "request_id": operation_id,
+                        "direction": direction,
+                        "pipeline_direction": pipeline_direction,
+                        "peer_rank": 1 - rank,
+                        "data_bytes": 32768,
+                        "microbatch": None,
+                        "comm_type": "p2p",
+                        "backend": "nccl",
+                        "transport_api": transport_api,
+                        "completion_mode": completion_mode,
+                    }
+                )
+            event(
+                "p2p-launch",
+                "B",
+                batch_id=batch_id,
+                comm_type="p2p-launch",
+                backend="nccl",
+                backends=["nccl"],
+                backend_complete=True,
+                transport_api=transport_api,
+                request_pairing=launch_pairing,
+                completion_mode=completion_mode,
+                completion_included=False,
+                operation_count=len(operations),
+                operations=operations,
+            )
+            event("p2p-launch", "E")
+            completion_site = (
+                "communicate_internal_wait"
+                if completion_mode == "internal_wait"
+                else "exposed_request_wait"
+            )
+            for operation in operations:
+                event_name = (
+                    f"{operation['direction']}-{operation['pipeline_direction']}"
+                )
+                operation_id = operation["operation_id"]
+                event(
+                    event_name,
+                    "B",
+                    **operation,
+                    batch_id=batch_id,
+                    request_pairing=completion_pairing,
+                    completion_site=completion_site,
+                    completion_included=True,
+                    completion_kind="work_wait",
+                    operation_count=1,
+                    operation_ids=[operation_id],
+                )
+                event(event_name, "E", completed=True, error_type=None)
+            if p2p_route == "batch":
+                operation_ids = [
+                    operation["operation_id"] for operation in operations
+                ]
+                event(
+                    "p2p-batch-device-sync",
+                    "B",
+                    batch_id=batch_id,
+                    comm_type="p2p",
+                    backend="nccl",
+                    backends=["nccl"],
+                    backend_complete=True,
+                    transport_api=transport_api,
+                    request_pairing="position",
+                    completion_site="batch_p2p_sync_workaround",
+                    completion_included=True,
+                    completion_kind="device_synchronize",
+                    operation_count=len(operations),
+                    operation_ids=operation_ids,
+                    operations=operations,
+                    physical_request_count=len(operations),
+                )
+                event(
+                    "p2p-batch-device-sync",
+                    "E",
+                    completed=True,
+                    device_completion_guaranteed=True,
+                    error_type=None,
+                    host_blocking_guaranteed=True,
+                )
 
     for iteration in (1, 2):
         rows.append(
@@ -114,6 +249,7 @@ def _write_gpt_phase_trace(
             event("loss", "E")
         event("decoder-postprocess", "E")
         event("forward-step", "E")
+        p2p_events(iteration)
         if include_optimizer:
             event("optimizer", "B")
             event("optimizer-step", "B")
@@ -265,7 +401,7 @@ def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
         include_postprocess=True,
         include_optimizer=True,
     )
-    assert gate.PROFILES["pp2"].contract(pp2_root) == ()
+    assert gpt_probe_contract.validate_gpt_pp2_training_phases(pp2_root) == ()
 
     invalid_root = tmp_path / "invalid-pp2"
     _write_gpt_phase_trace(
@@ -282,7 +418,7 @@ def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
         include_postprocess=True,
         include_optimizer=True,
     )
-    failures = gate.PROFILES["pp2"].contract(invalid_root)
+    failures = gpt_probe_contract.validate_gpt_pp2_training_phases(invalid_root)
     assert failures
     assert {failure.code for failure in failures} == {"trace.gpt.count"}
 
@@ -332,10 +468,70 @@ def test_gpt_pp2_profile_rejects_missing_optimizer_postprocess(
         include_optimizer_postprocess=False,
     )
 
-    failures = gate.PROFILES["pp2"].contract(trace_root)
+    failures = gpt_probe_contract.validate_gpt_pp2_training_phases(trace_root)
 
     assert {failure.code for failure in failures} == {"trace.optimizer.sequence"}
     assert len(failures) == 4
+
+
+def test_pp2_batched_profile_accepts_internal_wait_route(tmp_path: Path) -> None:
+    trace_root = tmp_path / "pp2-batched"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            include_optimizer=True,
+            p2p_route="batch",
+        )
+
+    assert gate.PROFILES["pp2"].contract(trace_root) == ()
+
+
+def test_pp2_unbatched_profile_accepts_mixed_wait_route(tmp_path: Path) -> None:
+    trace_root = tmp_path / "pp2-unbatched"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=False,
+        p2p_route="unbatched",
+    )
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=1,
+        pipeline_rank=1,
+        include_postprocess=True,
+        p2p_route="unbatched",
+    )
+
+    assert gate.PROFILES["pp2-unbatched"].contract(trace_root) == ()
+
+
+def test_pp2_unbatched_contract_rejects_batched_route(tmp_path: Path) -> None:
+    trace_root = tmp_path / "wrong-pp2-route"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=False,
+        p2p_route="batch",
+    )
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=1,
+        pipeline_rank=1,
+        include_postprocess=True,
+        p2p_route="batch",
+    )
+
+    failures = p2p_probe_contract.validate_pp2_unbatched_route(trace_root)
+
+    codes = {failure.code for failure in failures}
+    assert "trace.p2p.field" in codes
+    assert "trace.p2p.sync_count" in codes
+    assert "trace.p2p.external_wait" in codes
 
 
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(

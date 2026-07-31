@@ -11,7 +11,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 _REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 if str(_REPOSITORY_ROOT) not in sys.path:
@@ -20,6 +20,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
+from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
 CONTAINER_RUN_ROOT = "/artifacts/run"
@@ -31,6 +32,19 @@ def _events(*names: str) -> tuple[manifest.EventRequirement, ...]:
     return tuple(
         manifest.EventRequirement(name=name, fields=_COMMON_FIELDS) for name in names
     )
+
+
+def _contracts(
+    *checks: Callable[[Path], Sequence[manifest.Failure]],
+) -> Callable[[Path], tuple[manifest.Failure, ...]]:
+    def validate(trace_root: Path) -> tuple[manifest.Failure, ...]:
+        return tuple(
+            failure
+            for check in checks
+            for failure in check(trace_root)
+        )
+
+    return validate
 
 
 _PP2_EVENTS = _events(
@@ -146,12 +160,16 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         "pp2",
         2,
         _PP2_EVENTS,
-        gpt_probe_contract.validate_gpt_pp2_training_phases,
+        _contracts(
+            gpt_probe_contract.validate_gpt_pp2_training_phases,
+            p2p_probe_contract.validate_pp2_batched_route,
+        ),
     ),
     "pp2-unbatched": manifest.TraceProfile(
         "pp2-unbatched",
         2,
         _PP2_UNBATCHED_EVENTS,
+        p2p_probe_contract.validate_pp2_unbatched_route,
     ),
     "ep2-alltoall": manifest.TraceProfile("ep2-alltoall", 2, _ep_events("alltoall")),
     "ep2-allgather": manifest.TraceProfile("ep2-allgather", 2, _ep_events("allgather")),
