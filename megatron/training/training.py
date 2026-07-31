@@ -245,6 +245,8 @@ from .global_vars import (
     get_one_logger,
     get_tokenizer,
     get_energy_monitor,
+    get_megalens_runtime,
+    shutdown_megalens_runtime,
 )
 from . import one_logger_utils
 from .dgrad_logging import enable_dgrad_logging, disable_dgrad_logging, save_dgrads
@@ -816,6 +818,28 @@ def preprocess_common_state_dict(common_state_dict):
     return preprocessed_common_state_dict
 
 
+def _owns_megalens_runtime(pretrain_func):
+    """Ensure failures across the pretrain lifecycle close MegaLens."""
+
+    @functools.wraps(pretrain_func)
+    def wrapped(*args, **kwargs):
+        try:
+            result = pretrain_func(*args, **kwargs)
+        except BaseException:
+            try:
+                shutdown_megalens_runtime(graceful=False)
+            except BaseException:
+                logging.getLogger(__name__).exception(
+                    "MegaLens non-graceful shutdown failed while handling a pretrain failure"
+                )
+            raise
+        shutdown_megalens_runtime(graceful=True)
+        return result
+
+    return wrapped
+
+
+@_owns_megalens_runtime
 def pretrain(
     train_valid_test_dataset_provider,
     model_provider,
@@ -2976,54 +3000,63 @@ def train(
             args.skipped_train_samples += batch_size
             continue
 
-        args.curr_iteration = iteration
-        # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
-        # It is similar to a PPO epoch.
-
-        if args.perform_rl_step:
-            if optimizer is None:
-                # Release stale CUDA cached memory before inference.
-                torch.cuda.empty_cache()
-            with torch.no_grad():
-                train_data_iterator = rl_utils.get_grpo_data_iterator(
-                    model, inference_model, optimizer, iteration, ref_state_dict,
-                    grpo_iterations=args.grpo_iterations,
-                    grpo_prompts_per_step=args.grpo_prompts_per_step,
-                    grpo_group_size=args.grpo_group_size,
-                    global_batch_size=args.global_batch_size,
-                    sequence_packing=args.rl_use_sequence_packing,
-                    buffered_rollouts=buffered_rollouts,
-                    is_correction=args.rl_inference_logprobs_is_correction,
-                )
-                # Buffered rollouts are used as a state container for setups when
-                # we use previously-generated data for an update.
-                buffered_rollouts = train_data_iterator
-
-        if args.skip_train:
-            # RL inference-only mode: skip gradient updates, just collect rollouts.
-            loss_dict = {}
-            skipped_iter = 0
-            should_checkpoint = False
-            should_exit = False
-            exit_code = 0
-            grad_norm = 0.0
-            num_zeros_in_grad = 0
-            max_attention_logit = None
-        else:
-            ft_integration.on_training_step_start()
-            (
-                loss_dict,
-                skipped_iter,
-                should_checkpoint,
-                should_exit,
-                exit_code,
-                grad_norm,
-                num_zeros_in_grad,
-                max_attention_logit,
-            ) = train_step(
-                forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
+        megalens_iteration = (
+            get_megalens_runtime().iteration(
+                iteration + 1,
+                enable_hw_monitor=getattr(args, 'hardware_monitor', False),
             )
-            ft_integration.on_training_step_end()
+            if getattr(args, 'trace', False)
+            else nullcontext()
+        )
+        with megalens_iteration:
+            args.curr_iteration = iteration
+            # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
+            # It is similar to a PPO epoch.
+
+            if args.perform_rl_step:
+                if optimizer is None:
+                    # Release stale CUDA cached memory before inference.
+                    torch.cuda.empty_cache()
+                with torch.no_grad():
+                    train_data_iterator = rl_utils.get_grpo_data_iterator(
+                        model, inference_model, optimizer, iteration, ref_state_dict,
+                        grpo_iterations=args.grpo_iterations,
+                        grpo_prompts_per_step=args.grpo_prompts_per_step,
+                        grpo_group_size=args.grpo_group_size,
+                        global_batch_size=args.global_batch_size,
+                        sequence_packing=args.rl_use_sequence_packing,
+                        buffered_rollouts=buffered_rollouts,
+                        is_correction=args.rl_inference_logprobs_is_correction,
+                    )
+                    # Buffered rollouts are used as a state container for setups when
+                    # we use previously-generated data for an update.
+                    buffered_rollouts = train_data_iterator
+
+            if args.skip_train:
+                # RL inference-only mode: skip gradient updates, just collect rollouts.
+                loss_dict = {}
+                skipped_iter = 0
+                should_checkpoint = False
+                should_exit = False
+                exit_code = 0
+                grad_norm = 0.0
+                num_zeros_in_grad = 0
+                max_attention_logit = None
+            else:
+                ft_integration.on_training_step_start()
+                (
+                    loss_dict,
+                    skipped_iter,
+                    should_checkpoint,
+                    should_exit,
+                    exit_code,
+                    grad_norm,
+                    num_zeros_in_grad,
+                    max_attention_logit,
+                ) = train_step(
+                    forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
+                )
+                ft_integration.on_training_step_end()
         if should_checkpoint:
             save_checkpoint_and_time(
                 iteration,
