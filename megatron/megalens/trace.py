@@ -1250,14 +1250,12 @@ class Tracer:
 
         # Each rank constructs its own filename and payload (file naming is
         # rank-aware in both modes, so the on-disk layout is identical).
-        dp_rank = parallel_state.get_data_parallel_rank()
-        pp_rank = parallel_state.get_pipeline_model_parallel_rank()
-        tp_rank = parallel_state.get_tensor_model_parallel_rank()
-        global_rank = (
-            torch.distributed.get_rank()
-            if torch.distributed.is_available() and torch.distributed.is_initialized()
-            else 0
-        )
+        if not self._mode0_rank_cache_valid:
+            self._cache_ranks()
+        dp_rank = self._cached_dp_rank
+        pp_rank = self._cached_pp_rank
+        tp_rank = self._cached_tp_rank
+        global_rank = self._cached_global_rank
         if self.is_mode0():
             filename = _trace_filename(
                 global_rank=global_rank,

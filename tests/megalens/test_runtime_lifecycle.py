@@ -603,6 +603,42 @@ def test_rank_cache_survives_missing_cuda_device_query(monkeypatch) -> None:
     tracer.shutdown(graceful=False)
 
 
+def test_trace_log_uses_cached_fallback_without_model_parallel(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from megatron.megalens import trace as trace_module
+
+    def _missing_parallel_state() -> int:
+        raise RuntimeError("model parallel is not initialized")
+
+    monkeypatch.setattr(
+        trace_module.parallel_state, "get_data_parallel_rank", _missing_parallel_state
+    )
+    monkeypatch.setattr(
+        trace_module.parallel_state,
+        "get_pipeline_model_parallel_rank",
+        _missing_parallel_state,
+    )
+    monkeypatch.setattr(
+        trace_module.parallel_state,
+        "get_tensor_model_parallel_rank",
+        _missing_parallel_state,
+    )
+    monkeypatch.setattr(trace_module.torch.distributed, "get_rank", lambda: 3)
+
+    tracer = Tracer()
+    tracer.configure(_args(trace_dir=str(tmp_path)))
+    tracer.iter = 1
+    tracer._records = [{"name": "iteration", "ph": "B", "iteration": 1}]
+
+    tracer.log()
+    tracer.shutdown(graceful=True)
+
+    output = tmp_path / "benchmark-global-3-data-0-pipeline-0-tensor-0.json"
+    assert output.exists()
+    assert '"iteration": 1' in output.read_text(encoding="utf-8")
+
+
 def test_trace_shard_filename_is_unique_by_global_rank() -> None:
     rank0 = _trace_filename(global_rank=0, dp_rank=0, pp_rank=0, tp_rank=0, mode0=False)
     rank1 = _trace_filename(global_rank=1, dp_rank=0, pp_rank=0, tp_rank=0, mode0=False)
