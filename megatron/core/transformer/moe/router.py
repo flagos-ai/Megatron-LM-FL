@@ -824,7 +824,7 @@ class TopKRouter(Router):
         router_gate = prepare_trace_scope("moe-router")
         router_context = router_trace_context(self) if router_gate is not None else None
         with open_trace_scope(
-            router_gate, "moe-router", ctx=router_context, slots=ROUTER_WORKLOAD_SLOTS
+            router_gate, "moe-router", attrs=router_context, slots=ROUTER_WORKLOAD_SLOTS
         ) as router_scope:
             if router_gate is None:
                 probs, routing_map = self.routing(
