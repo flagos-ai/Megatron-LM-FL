@@ -181,6 +181,10 @@
         "all-grads-sync",
         "attention",
         "backward-step",
+        "bridge-recv-backward",
+        "bridge-recv-forward",
+        "bridge-send-backward",
+        "bridge-send-forward",
         "combined-forward-backward-step",
         "decoder",
         "decoder-postprocess",
@@ -248,6 +252,10 @@
       "target_only": [
         "all-grads-sync",
         "backward-step",
+        "bridge-recv-backward",
+        "bridge-recv-forward",
+        "bridge-send-backward",
+        "bridge-send-forward",
         "combined-forward-backward-step",
         "dp-grad-sync-complete",
         "dp-param-sync-complete",
@@ -276,6 +284,10 @@
     }
   },
   "declared_target_only_events": [
+    "bridge-recv-backward",
+    "bridge-recv-forward",
+    "bridge-send-backward",
+    "bridge-send-forward",
     "combined-forward-backward-step",
     "dp-grad-sync-complete",
     "dp-param-sync-complete",

@@ -106,6 +106,7 @@ def _profile_checks(
             "tests/megalens/test_dualpipev_schedule_observability.py",
             "tests/megalens/test_dualpipev_a2a_observability.py",
             "tests/megalens/test_p2p_observability.py",
+            "tests/megalens/test_bridge_observability.py",
             "tests/megalens/test_gate_runner.py",
         ),
         timeout=timeout,

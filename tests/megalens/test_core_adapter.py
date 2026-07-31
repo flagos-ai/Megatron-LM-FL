@@ -82,6 +82,10 @@ def test_adapter_respects_tracer_window_and_granularity() -> None:
     assert sink.is_enabled("p2p-launch")
     assert sink.is_enabled("p2p-batch-complete")
     assert sink.is_enabled("p2p-batch-device-sync")
+    assert sink.is_enabled("bridge-send-forward")
+    assert sink.is_enabled("bridge-recv-forward")
+    assert sink.is_enabled("bridge-send-backward")
+    assert sink.is_enabled("bridge-recv-backward")
     assert not sink.is_enabled("attention")
 
 

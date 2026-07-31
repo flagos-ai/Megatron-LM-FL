@@ -292,6 +292,50 @@ def test_trace_graph_keeps_source_x_filter_fifo_pairing_and_no_backtracking() ->
     assert event_for(first_send).launch_event is graph.p2p_launch_events[0]
 
 
+def test_bridge_events_do_not_enter_standard_atomic_p2p_analysis() -> None:
+    standard_send = _span(
+        "send-forward", 100, 10, rank=0, peer_rank=1, data_bytes=1_000_000
+    )
+    standard_recv = _span(
+        "recv-forward", 200, 400, rank=1, peer_rank=0, data_bytes=1_000_000
+    )
+    bridge_send = _span(
+        "bridge-send-forward", 300, 20, rank=0, peer_rank=1, data_bytes=2_000_000
+    )
+    bridge_recv = _span(
+        "bridge-recv-forward", 350, 40, rank=1, peer_rank=0, data_bytes=2_000_000
+    )
+    graph = TraceGraph(
+        [
+            _span("p2p-launch", 80, 10, rank=0),
+            standard_send,
+            standard_recv,
+            bridge_send,
+            bridge_recv,
+        ]
+    )
+
+    bridge_events = [
+        event for event in graph.comm_events if event.name.startswith("bridge-")
+    ]
+    assert len(bridge_events) == 2
+    assert all(not event.is_atomic_send for event in bridge_events)
+    assert all(not event.is_atomic_recv for event in bridge_events)
+    assert all(event.paired_event is None for event in bridge_events)
+    assert all(event.launch_event is None for event in bridge_events)
+
+    rows = p2p_comm_analysis(
+        graph,
+        100.0,
+        _MemoryLogger(),  # type: ignore[arg-type]
+    )
+
+    assert len(rows) == 1
+    assert rows[0]["event"] == "recv-forward"
+    assert rows[0]["sender_rank"] == 0
+    assert "Analysis_Diagnosis" not in bridge_recv["args"]
+
+
 def test_pure_compute_duration_subtracts_union_of_tp_intervals() -> None:
     forward = _span("forward-step", 0, 200)
     graph = TraceGraph([forward, _span("tp-allreduce", 20, 80), _span("reduce-scatter", 80, 70)])

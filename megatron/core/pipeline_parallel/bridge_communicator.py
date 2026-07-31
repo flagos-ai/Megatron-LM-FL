@@ -3,18 +3,165 @@
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 
 from megatron.core.hyper_comm_grid import HyperCommGrid
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
 ########## FlagScale End ##########
+
+
+def _bridge_payload_context(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    peer_rank: int,
+    *,
+    direction: str,
+    pipeline_direction: str,
+) -> dict[str, Any]:
+    return {
+        "backend": str(dist.get_backend()),
+        "comm_type": "p2p",
+        "communicator_kind": "bridge",
+        "completion_guarantee": "api_return_observed",
+        "completion_included": True,
+        "completion_kind": "inline_api_return",
+        "completion_mode": "inline",
+        "data_bytes": int(tensor.numel() * tensor.element_size()),
+        "device_completion_guaranteed": False,
+        "direction": direction,
+        "duration_attribution": "per_operation",
+        "operation_count": 1,
+        "payload_role": "activation" if pipeline_direction == "forward" else "gradient",
+        "peer_rank": peer_rank,
+        "pipeline_direction": pipeline_direction,
+        "request_id": None,
+        "request_pairing": "none",
+        "src_module": communicator.src_module_name,
+        "dest_module": communicator.dest_module_name,
+        "timing_phase": "inline_api_call",
+        "transport_api": "send_recv",
+    }
+
+
+def _run_bridge_payload(
+    scope: Any,
+    tensor: torch.Tensor,
+    peer_rank: int,
+    *,
+    direction: str,
+):
+    with scope as observation:
+        try:
+            if direction == "send":
+                result = dist.send(tensor, dst=peer_rank)
+            else:
+                result = dist.recv(tensor, src=peer_rank)
+        except BaseException as transport_error:
+            observation.set("completed", False)
+            observation.set("error_type", type(transport_error).__name__)
+            raise
+        observation.set("completed", True)
+        return result
+
+
+def _bridge_send_forward(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    peer_rank: int,
+):
+    gate = prepare_trace_scope("bridge-send-forward")
+    if gate is None:
+        return dist.send(tensor, dst=peer_rank)
+    scope = open_trace_scope(
+        gate,
+        "bridge-send-forward",
+        ctx=_bridge_payload_context(
+            communicator,
+            tensor,
+            peer_rank,
+            direction="send",
+            pipeline_direction="forward",
+        ),
+        slots=("completed", "error_type"),
+    )
+    return _run_bridge_payload(scope, tensor, peer_rank, direction="send")
+
+
+def _bridge_recv_forward(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    peer_rank: int,
+):
+    gate = prepare_trace_scope("bridge-recv-forward")
+    if gate is None:
+        return dist.recv(tensor, src=peer_rank)
+    scope = open_trace_scope(
+        gate,
+        "bridge-recv-forward",
+        ctx=_bridge_payload_context(
+            communicator,
+            tensor,
+            peer_rank,
+            direction="recv",
+            pipeline_direction="forward",
+        ),
+        slots=("completed", "error_type"),
+    )
+    return _run_bridge_payload(scope, tensor, peer_rank, direction="recv")
+
+
+def _bridge_send_backward(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    peer_rank: int,
+):
+    gate = prepare_trace_scope("bridge-send-backward")
+    if gate is None:
+        return dist.send(tensor, dst=peer_rank)
+    scope = open_trace_scope(
+        gate,
+        "bridge-send-backward",
+        ctx=_bridge_payload_context(
+            communicator,
+            tensor,
+            peer_rank,
+            direction="send",
+            pipeline_direction="backward",
+        ),
+        slots=("completed", "error_type"),
+    )
+    return _run_bridge_payload(scope, tensor, peer_rank, direction="send")
+
+
+def _bridge_recv_backward(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    peer_rank: int,
+):
+    gate = prepare_trace_scope("bridge-recv-backward")
+    if gate is None:
+        return dist.recv(tensor, src=peer_rank)
+    scope = open_trace_scope(
+        gate,
+        "bridge-recv-backward",
+        ctx=_bridge_payload_context(
+            communicator,
+            tensor,
+            peer_rank,
+            direction="recv",
+            pipeline_direction="backward",
+        ),
+        slots=("completed", "error_type"),
+    )
+    return _run_bridge_payload(scope, tensor, peer_rank, direction="recv")
 
 
 class CommRole(Enum):
@@ -362,7 +509,7 @@ class BridgeCommunicator:
                         f"[Bridge Comunicator] [send_forward] Rank {self.current_rank} "
                         f"send to rank {dest_rank}"
                     )
-                    dist.send(tensor_split, dst=dest_rank)
+                    _bridge_send_forward(self, tensor_split, dest_rank)
 
     def recv_forward(self) -> torch.Tensor:
         """Receive forward activation tensor.
@@ -405,7 +552,7 @@ class BridgeCommunicator:
                     dtype=self.comm_dtype,
                     requires_grad=True,
                 )
-                dist.recv(tensor_to_recv, src=src_rank)
+                _bridge_recv_forward(self, tensor_to_recv, src_rank)
                 logging.debug(
                     f"[Bridge Communicator] [receive_forward] Rank {self.current_rank} "
                     f"received tensor from src rank {src_rank} "
@@ -495,7 +642,7 @@ class BridgeCommunicator:
                         f"sending gradient to src rank {src_rank} "
                         f"shape {tensor_split.shape} sum {tensor_split.sum()}"
                     )
-                    dist.send(tensor_split, dst=src_rank)
+                    _bridge_send_backward(self, tensor_split, src_rank)
 
     def recv_backward(self) -> torch.Tensor:
         """Receive backward gradient tensor.
@@ -534,7 +681,7 @@ class BridgeCommunicator:
                 grad_tensor = torch.empty(
                     grad_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Add
                 )
-                dist.recv(grad_tensor, src=dest_rank)
+                _bridge_recv_backward(self, grad_tensor, dest_rank)
                 logging.debug(
                     f"[Bridge Communicator] [receive_backward] Rank {self.current_rank} "
                     f"received gradient from dest rank {dest_rank} "
