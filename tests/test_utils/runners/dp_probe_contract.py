@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""DP overlap lifecycle contracts for the controlled DP2 profiles."""
+"""DP overlap lifecycle contracts for the controlled DP overlap profiles."""
 
 from __future__ import annotations
 
@@ -51,6 +51,14 @@ _DISTOPT_DISPATCHES = {
         "optimizer_kind": "distributed",
         "payload_role": "parameter_bucket",
         "stage": "distributed_optimizer_param_allgather",
+    },
+}
+_LAYERWISE_DISPATCHES = {
+    "dp-allreduce": _STANDARD_DISPATCHES["dp-allreduce"],
+    "dp-param-all-gather": {
+        **_DISTOPT_DISPATCHES["dp-param-all-gather"],
+        "optimizer_kind": "layerwise",
+        "stage": "layerwise_optimizer_param_allgather",
     },
 }
 _MULTI_DISTOPT_DISPATCHES = {
@@ -350,6 +358,14 @@ def validate_dp_distopt_overlap(trace_root: Path) -> tuple[Failure, ...]:
         trace_root,
         _DISTOPT_DISPATCHES,
         use_distributed_optimizer=True,
+    )
+
+
+def validate_dp_layerwise_overlap(trace_root: Path) -> tuple[Failure, ...]:
+    return _validate(
+        trace_root,
+        _LAYERWISE_DISPATCHES,
+        use_distributed_optimizer=False,
     )
 
 

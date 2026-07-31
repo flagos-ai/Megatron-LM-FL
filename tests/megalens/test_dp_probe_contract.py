@@ -15,6 +15,7 @@ def _write_trace(
     *,
     rank: int,
     distopt: bool,
+    layerwise: bool = False,
     multi_instance: bool = False,
     duplicate_id: bool = False,
     omit_param_completion: bool = False,
@@ -128,6 +129,16 @@ def _write_trace(
                 "stage": "main_bucket_allreduce",
             }
         )
+        if layerwise:
+            dispatch(
+                "dp-param-all-gather",
+                param_id,
+                op="all_gather",
+                group_role="intra_optimizer_instance",
+                optimizer_kind="layerwise",
+                payload_role="parameter_bucket",
+                stage="layerwise_optimizer_param_allgather",
+            )
     rows.append(
         {
             "name": "iteration",
@@ -162,7 +173,7 @@ def _write_trace(
         use_distributed_optimizer=distopt,
     )
     event("dp-grad-sync-complete", "E", completed=True, error_type=None)
-    if distopt and not omit_param_completion:
+    if (distopt or layerwise) and not omit_param_completion:
         event(
             "dp-param-sync-complete",
             "B",
@@ -196,12 +207,20 @@ def _write_trace(
 
 
 @pytest.mark.parametrize(
-    ("distopt", "multi_instance", "rank_count", "validator"),
+    ("distopt", "layerwise", "multi_instance", "rank_count", "validator"),
     (
-        (False, False, 2, dp_probe_contract.validate_dp_standard_overlap),
-        (True, False, 2, dp_probe_contract.validate_dp_distopt_overlap),
+        (False, False, False, 2, dp_probe_contract.validate_dp_standard_overlap),
+        (True, False, False, 2, dp_probe_contract.validate_dp_distopt_overlap),
+        (
+            False,
+            True,
+            False,
+            2,
+            dp_probe_contract.validate_dp_layerwise_overlap,
+        ),
         (
             True,
+            False,
             True,
             4,
             dp_probe_contract.validate_dp_multi_instance_distopt_overlap,
@@ -211,6 +230,7 @@ def _write_trace(
 def test_dp_overlap_contract_accepts_cross_iteration_lifecycle(
     tmp_path: Path,
     distopt: bool,
+    layerwise: bool,
     multi_instance: bool,
     rank_count: int,
     validator,
@@ -220,6 +240,7 @@ def test_dp_overlap_contract_accepts_cross_iteration_lifecycle(
             tmp_path,
             rank=rank,
             distopt=distopt,
+            layerwise=layerwise,
             multi_instance=multi_instance,
         )
 
@@ -257,3 +278,13 @@ def test_dp_multi_instance_contract_requires_stream_join(tmp_path: Path) -> None
     failures = dp_probe_contract.validate_dp_multi_instance_distopt_overlap(tmp_path)
 
     assert "trace.dp.field" in {failure.code for failure in failures}
+
+
+def test_dp_layerwise_contract_rejects_distopt_route(tmp_path: Path) -> None:
+    _write_trace(tmp_path, rank=0, distopt=True)
+
+    failures = dp_probe_contract.validate_dp_layerwise_overlap(tmp_path)
+
+    assert {"trace.dp.route", "trace.dp.field"} <= {
+        failure.code for failure in failures
+    }
