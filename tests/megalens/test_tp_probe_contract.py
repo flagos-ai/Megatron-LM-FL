@@ -362,3 +362,17 @@ def test_tp2_sp_final_sync_contract_rejects_layernorm_inside_all_grads(
     assert "trace.tp.final_sync_parent" in {
         failure.code for failure in failures
     }
+
+
+def test_tp2_sp_profile_contract_combines_all_three_boundaries(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    assert tp_probe_contract.validate_tp2_sp_profile(tmp_path) == ()

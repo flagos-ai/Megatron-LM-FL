@@ -821,3 +821,16 @@ def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
                 )
             )
     return tuple(failures)
+
+
+def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
+    validators = (
+        validate_tp2_gqa_collective_hierarchy,
+        validate_tp2_sp_linear_lifecycle,
+        validate_tp2_sp_final_grad_sync,
+    )
+    return tuple(
+        failure
+        for validator in validators
+        for failure in validator(trace_root)
+    )

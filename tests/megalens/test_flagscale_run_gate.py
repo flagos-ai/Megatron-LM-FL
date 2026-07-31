@@ -13,11 +13,13 @@ from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
+from tests.test_utils.runners import tp_probe_contract
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
+    "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
     "flagscale_single_node_pp2_unbatched_smoke.yaml": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
@@ -502,6 +504,69 @@ def test_dp2_layerwise_profile_only_selects_dist_muon_parameter_overlap() -> Non
         "dp-param-sync-complete",
     }
     assert profile.contract is dp_probe_contract.validate_dp_layerwise_overlap
+
+
+def test_tp2_sp_profile_only_selects_the_local_tp_routes() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_gpt_eager_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    tp2_sp = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_local_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = tp2_sp["experiment"]["exp_name"]
+    baseline["experiment"]["runner"]["nproc_per_node"] = 2
+    baseline["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1"
+    baseline["train"]["system"]["tensor_model_parallel_size"] = 2
+    baseline["train"]["system"]["sequence_parallel"] = True
+    model = baseline["train"]["model"]
+    model["no_gradient_accumulation_fusion"] = True
+    model["group_query_attention"] = True
+    model["num_query_groups"] = 1
+    model["normalization"] = "LayerNorm"
+
+    assert tp2_sp == baseline
+    model = tp2_sp["train"]["model"]
+    system = tp2_sp["train"]["system"]
+    assert model["transformer_impl"] == "local"
+    assert model["global_batch_size"] == 1
+    assert model["untie_embeddings_and_output_weights"] is True
+    assert system["pipeline_model_parallel_size"] == 1
+    assert system["context_parallel_size"] == 1
+
+    profile = gate.PROFILES["tp2-sp-local"]
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == {
+        "tp-all-gather-first",
+        "tp-all-gather-last",
+        "tp-reduce-scatter",
+        "tp-reduce-scatter-last",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+    }
+    assert profile.contract is tp_probe_contract.validate_tp2_sp_profile
+
+    args = gate._parser().parse_args(
+        (
+            "--run-dir",
+            "unused",
+            "--input-config",
+            "unknown.yaml",
+            "--mode",
+            "trace-on",
+            "--image",
+            "example/flagscale:dev",
+            "--topology",
+            "tp2",
+        )
+    )
+    assert gate._profile_from_arguments(args).name == "tp2-sp-local"
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(

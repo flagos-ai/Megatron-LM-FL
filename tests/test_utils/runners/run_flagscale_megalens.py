@@ -22,6 +22,7 @@ from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
+from tests.test_utils.runners import tp_probe_contract  # noqa: E402
 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
 CONTAINER_RUN_ROOT = "/artifacts/run"
@@ -104,6 +105,13 @@ _DP_FIELDS = (
     "operation_id",
     "payload_role",
 )
+_TP_COLLECTIVE_FIELDS = (
+    *_COMMON_FIELDS,
+    "op",
+    "dim",
+    "data_bytes",
+    "group_size",
+)
 
 
 def _ep_events(
@@ -156,6 +164,58 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             "MLP.forward",
         ),
         gpt_probe_contract.validate_gpt_pp1_eager_phases,
+    ),
+    "tp2-sp-local": manifest.TraceProfile(
+        "tp2-sp-local",
+        2,
+        (
+            *(
+                manifest.EventRequirement(
+                    name,
+                    _TP_COLLECTIVE_FIELDS,
+                    "B",
+                )
+                for name in (
+                    "tp-all-gather-first",
+                    "tp-all-gather-last",
+                    "tp-reduce-scatter",
+                    "tp-reduce-scatter-last",
+                )
+            ),
+            manifest.EventRequirement(
+                "tp-linear-async-launch",
+                (*_COMMON_FIELDS, "operation_id", "collective_op", "launch_site"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "tp-linear-async-complete",
+                (
+                    *_COMMON_FIELDS,
+                    "operation_id",
+                    "collective_op",
+                    "completion_kind",
+                ),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "grad-sync",
+                (*_COMMON_FIELDS, "schedule", "timing_phase"),
+                "B",
+            ),
+            manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
+            manifest.EventRequirement(
+                "sp-layernorm-allreduce",
+                (
+                    *_COMMON_FIELDS,
+                    "data_bytes",
+                    "group_size",
+                    "reduce_op",
+                    "grad_bucket",
+                ),
+                "B",
+            ),
+        ),
+        tp_probe_contract.validate_tp2_sp_profile,
     ),
     "pp2": manifest.TraceProfile(
         "pp2",
@@ -272,6 +332,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
 _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
+    "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
     "flagscale_single_node_pp2_smoke": "pp2",
     "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
@@ -339,6 +400,8 @@ def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
         return PROFILES["te-attn-cuda-graph"]
     if args.cuda_graph_profile == "transformer-engine-moe-router":
         return PROFILES["te-moe-router-cuda-graph"]
+    if args.topology == "tp2":
+        return PROFILES["tp2-sp-local"]
     if args.topology == "pp2":
         return PROFILES["pp2"]
     if args.topology == "ep2":
@@ -499,7 +562,7 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--image", required=True)
     parser.add_argument(
         "--topology",
-        choices=("pp1", "pp2", "ep2", "dp2", "dp4", "dp8"),
+        choices=("pp1", "pp2", "tp2", "ep2", "dp2", "dp4", "dp8"),
         default=None,
     )
     parser.add_argument("--ep-dispatcher", choices=("alltoall", "allgather"))
