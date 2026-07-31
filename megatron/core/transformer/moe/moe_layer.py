@@ -10,7 +10,7 @@ import torch
 
 from megatron.core import parallel_state, tensor_parallel, utils
 from megatron.core.extensions.transformer_engine import HAVE_TE
-from megatron.core.observability import open_trace_scope, prepare_trace_scope
+from megatron.core.observability import open_trace_scope, prepare_trace_scope, trace_is_enabled
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import (
@@ -436,6 +436,10 @@ class MoELayer(BaseMoELayer):
         input_ids: Optional[torch.Tensor] = None,
     ):
         """Route once and capture fields for the matching eager dispatch."""
+        if not trace_is_enabled("moe-dispatch"):
+            probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
+            return probs, routing_map, None
+
         with capture_dispatch_fields() as collector:
             probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
         return probs, routing_map, collector.fields()

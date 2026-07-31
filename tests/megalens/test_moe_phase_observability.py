@@ -1240,6 +1240,42 @@ def test_dispatch_handoff_resets_after_route_and_dispatch_errors() -> None:
     assert direct_fields == {name: None for name in DISPATCH_ROUTER_FIELDS}
 
 
+def test_closed_dispatch_gate_skips_route_field_capture(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = _RecordingSink(enabled=False)
+    install_trace_sink(sink)
+    layer, _, _ = _layer_fixture(sink, [])
+    hidden_states = torch.ones((2, 3))
+    probs = torch.ones(2)
+    routing_map = torch.ones((2, 1), dtype=torch.bool)
+
+    def route(
+        self: Any,
+        actual_hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+    ):
+        assert not dispatch_fields_requested()
+        return probs, routing_map
+
+    def fail(*args: Any, **kwargs: Any):
+        pytest.fail("closed dispatch gate created a route-field collector")
+
+    layer.route = MethodType(route, layer)
+    monkeypatch.setattr(moe_layer_module, "capture_dispatch_fields", fail)
+
+    actual_probs, actual_map, dispatch_fields = MoELayer._route_for_dispatch(
+        layer, hidden_states
+    )
+
+    assert actual_probs is probs
+    assert actual_map is routing_map
+    assert dispatch_fields is None
+    assert sink.records == []
+    assert sink.gate_calls == ["moe-dispatch"]
+
+
 def test_sequential_combine_scope_includes_dispatcher_postprocess_only() -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
