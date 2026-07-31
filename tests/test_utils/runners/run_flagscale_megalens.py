@@ -194,6 +194,24 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         dp_probe_contract.validate_dp_standard_overlap,
     ),
     "dp2-distopt": manifest.TraceProfile("dp2-distopt", 2, _dp_events("distopt")),
+    "dp2-distopt-overlap": manifest.TraceProfile(
+        "dp2-distopt-overlap",
+        2,
+        (
+            *_dp_events("distopt"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "dp-param-sync-complete",
+                (*_COMMON_FIELDS, "operation_id", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_distopt_overlap,
+    ),
     "dp8-standard-ddp": manifest.TraceProfile(
         "dp8-standard-ddp", 8, _dp_events("standard-ddp")
     ),
@@ -225,6 +243,7 @@ _CONFIG_PROFILES = {
         "dp2-standard-ddp-overlap"
     ),
     "flagscale_single_node_dp2_distopt_smoke": "dp2-distopt",
+    "flagscale_single_node_dp2_distopt_overlap_smoke": "dp2-distopt-overlap",
     "flagscale_single_node_dp8_standard_smoke": "dp8-standard-ddp",
     "flagscale_single_node_dp8_distopt_smoke": "dp8-distopt",
     "flagscale_single_node_te_cuda_graph_attn_smoke": "te-attn-cuda-graph",
@@ -439,7 +458,12 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--ep-profile", choices=("standard", "fine-grained"))
     parser.add_argument(
         "--dp-profile",
-        choices=("standard-ddp", "standard-ddp-overlap", "distopt"),
+        choices=(
+            "standard-ddp",
+            "standard-ddp-overlap",
+            "distopt",
+            "distopt-overlap",
+        ),
     )
     parser.add_argument(
         "--cuda-graph-profile",

@@ -27,6 +27,9 @@ _CONFIG_PROFILE_CASES = {
         "dp2-standard-ddp-overlap"
     ),
     "flagscale_single_node_dp2_distopt_smoke.yaml": "dp2-distopt",
+    "flagscale_single_node_dp2_distopt_overlap_smoke.yaml": (
+        "dp2-distopt-overlap"
+    ),
     "flagscale_single_node_dp8_standard_smoke.yaml": "dp8-standard-ddp",
     "flagscale_single_node_dp8_distopt_smoke.yaml": "dp8-distopt",
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
@@ -377,26 +380,43 @@ def test_unbatched_pp2_profile_uses_vpp_without_unsupported_p2p_cli_keys() -> No
     assert model["global_batch_size"] == 2
 
 
-def test_dp2_standard_overlap_profile_only_enables_gradient_overlap() -> None:
+@pytest.mark.parametrize(
+    ("baseline_name", "overlap_name", "profile_name", "changes", "contract"),
+    (
+        (
+            "flagscale_single_node_dp2_standard_smoke.yaml",
+            "flagscale_single_node_dp2_standard_overlap_smoke.yaml",
+            "dp2-standard-ddp-overlap",
+            {"overlap_grad_reduce": True},
+            dp_probe_contract.validate_dp_standard_overlap,
+        ),
+        (
+            "flagscale_single_node_dp2_distopt_smoke.yaml",
+            "flagscale_single_node_dp2_distopt_overlap_smoke.yaml",
+            "dp2-distopt-overlap",
+            {"overlap_grad_reduce": True, "overlap_param_gather": True},
+            dp_probe_contract.validate_dp_distopt_overlap,
+        ),
+    ),
+)
+def test_dp2_overlap_profiles_only_enable_the_selected_overlap_route(
+    baseline_name: str,
+    overlap_name: str,
+    profile_name: str,
+    changes: dict[str, bool],
+    contract,
+) -> None:
     baseline = yaml.safe_load(
-        (_FIXTURES / "flagscale_single_node_dp2_standard_smoke.yaml").read_text(
-            encoding="utf-8"
-        )
+        (_FIXTURES / baseline_name).read_text(encoding="utf-8")
     )
     overlap = yaml.safe_load(
-        (
-            _FIXTURES
-            / "flagscale_single_node_dp2_standard_overlap_smoke.yaml"
-        ).read_text(encoding="utf-8")
+        (_FIXTURES / overlap_name).read_text(encoding="utf-8")
     )
     baseline["experiment"]["exp_name"] = overlap["experiment"]["exp_name"]
-    baseline["train"]["system"]["overlap_grad_reduce"] = True
+    baseline["train"]["system"].update(changes)
 
     assert overlap == baseline
-    assert (
-        gate.PROFILES["dp2-standard-ddp-overlap"].contract
-        is dp_probe_contract.validate_dp_standard_overlap
-    )
+    assert gate.PROFILES[profile_name].contract is contract
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
