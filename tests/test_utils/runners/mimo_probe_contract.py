@@ -90,24 +90,23 @@ def _validate_mimo_training_trace(
                 )
             )
             continue
-        bridge_ends = [
-            event.rel_ts for event in events if event.name in _BRIDGE_EVENTS and event.ph == "E"
-        ]
+        bridge_events = [event for event in events if event.name in _BRIDGE_EVENTS]
+        bridge_ends = [event.rel_ts for event in bridge_events if event.ph == "E"]
         if bridge_ends:
             observed_bridge_ranks.add(rank)
-        if not bridge_ends and rank in required_bridge_ranks:
-            failures.append(
-                _failure(
-                    "trace.mimo.bridge",
-                    "MiMo training iteration contains no completed Bridge event",
-                    evidence,
-                )
-            )
-        elif bridge_ends and rank not in required_bridge_ranks:
+        if bridge_events and rank not in required_bridge_ranks:
             failures.append(
                 _failure(
                     "trace.mimo.bridge_rank",
                     "MiMo Bridge event appeared on an inactive topology rank",
+                    evidence,
+                )
+            )
+        elif not bridge_ends and rank in required_bridge_ranks:
+            failures.append(
+                _failure(
+                    "trace.mimo.bridge",
+                    "MiMo training iteration contains no completed Bridge event",
                     evidence,
                 )
             )

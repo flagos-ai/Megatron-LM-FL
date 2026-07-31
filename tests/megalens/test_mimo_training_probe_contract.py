@@ -64,6 +64,7 @@ def _write_trace(
     optimizer_before_bridge: bool = False,
     world_size: int = 2,
     bridge_ranks: frozenset[int] | None = None,
+    bridge_begin_only_ranks: frozenset[int] = frozenset(),
 ) -> None:
     trace_root.mkdir(parents=True)
     direction_attributes = {
@@ -99,7 +100,7 @@ def _write_trace(
             event("optimizer-step", "B")
             event("optimizer-step", "E")
 
-        def bridge() -> None:
+        def bridge(*, begin_only: bool = False) -> None:
             event(
                 "bridge-p2p-launch",
                 "B",
@@ -111,6 +112,8 @@ def _write_trace(
                 dest_module="language",
                 transport_api="batch_isend_irecv",
             )
+            if begin_only:
+                return
             event("bridge-p2p-launch", "E")
             event(
                 "bridge-grid-broadcast",
@@ -145,6 +148,8 @@ def _write_trace(
             optimizer()
         if bridge_ranks is None or rank in bridge_ranks:
             bridge()
+        elif rank in bridge_begin_only_ranks:
+            bridge(begin_only=True)
         if not optimizer_before_bridge:
             optimizer()
         rows.append({"name": "iteration", "ph": "E", "iteration": 1, "duration_wall": timestamp})
@@ -200,6 +205,8 @@ def test_mimo_eight_rank_profiles_reuse_proven_asymmetric_grids(
     assert config["experiment"]["runner"]["nproc_per_node"] == 8
     assert config["train"]["system"]["trace_granularity"] == "full"
     assert config["train"]["mimo"]["micro_batch_size"] == micro_batch_size
+    assert config["train"]["mimo"]["num_microbatches"] == 4
+    assert config["train"]["mimo"]["use_distributed_optimizer"] is False
     assert config["train"]["mimo"]["encoder_grid"] == encoder_grid
     assert config["train"]["mimo"]["llm_grid"] == llm_grid
     assert gate._CONFIG_PROFILES[fixture.stem] == profile
@@ -261,3 +268,19 @@ def test_mimo_trace_contract_rejects_optimizer_before_bridge(tmp_path: Path) -> 
     failures = mimo_probe_contract.validate_mimo_training_trace(trace_root)
 
     assert {failure.code for failure in failures} == {"trace.mimo.order"}
+
+
+def test_mimo_eight_rank_trace_contract_rejects_bridge_begin_on_inactive_rank(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_trace(
+        trace_root,
+        world_size=8,
+        bridge_ranks=frozenset((0, 1, 2, 3, 4, 5)),
+        bridge_begin_only_ranks=frozenset((6,)),
+    )
+
+    failures = mimo_probe_contract.validate_mimo_training_fanin_trace(trace_root)
+
+    assert {failure.code for failure in failures} == {"trace.mimo.bridge_rank"}
