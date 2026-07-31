@@ -80,6 +80,8 @@ BASE_TRACING_EVENTS = {
     'p2p-launch',
     'p2p-batch-complete',
     'p2p-batch-device-sync',
+    'bridge-p2p-launch',
+    'bridge-grid-broadcast',
     'bridge-send-forward',
     'bridge-recv-forward',
     'bridge-send-backward',

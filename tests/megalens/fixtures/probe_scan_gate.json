@@ -181,6 +181,8 @@
         "all-grads-sync",
         "attention",
         "backward-step",
+        "bridge-grid-broadcast",
+        "bridge-p2p-launch",
         "bridge-recv-backward",
         "bridge-recv-forward",
         "bridge-send-backward",
@@ -252,6 +254,8 @@
       "target_only": [
         "all-grads-sync",
         "backward-step",
+        "bridge-grid-broadcast",
+        "bridge-p2p-launch",
         "bridge-recv-backward",
         "bridge-recv-forward",
         "bridge-send-backward",
@@ -284,6 +288,8 @@
     }
   },
   "declared_target_only_events": [
+    "bridge-grid-broadcast",
+    "bridge-p2p-launch",
     "bridge-recv-backward",
     "bridge-recv-forward",
     "bridge-send-backward",

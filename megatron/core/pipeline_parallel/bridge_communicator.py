@@ -3,19 +3,22 @@
 import logging
 from dataclasses import dataclass, field
 from enum import Enum
+from itertools import count
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import torch.distributed as dist
 
 from megatron.core.hyper_comm_grid import HyperCommGrid
-from megatron.core.observability import open_trace_scope, prepare_trace_scope
+from megatron.core.observability import open_trace_scope, prepare_trace_scope, trace_is_enabled
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
 ########## FlagScale End ##########
+
+_BRIDGE_BATCH_SEQUENCE = count(1)
 
 
 def _bridge_payload_context(
@@ -38,6 +41,7 @@ def _bridge_payload_context(
         "device_completion_guaranteed": False,
         "direction": direction,
         "duration_attribution": "per_operation",
+        "message_kind": "payload",
         "operation_count": 1,
         "payload_role": "activation" if pipeline_direction == "forward" else "gradient",
         "peer_rank": peer_rank,
@@ -162,6 +166,274 @@ def _bridge_recv_backward(
         slots=("completed", "error_type"),
     )
     return _run_bridge_payload(scope, tensor, peer_rank, direction="recv")
+
+
+@dataclass(frozen=True, slots=True)
+class _BridgeBatchOperation:
+    batch_id: str
+    index: int
+    event_name: str
+    direction: str
+    pipeline_direction: str
+    peer_rank: int
+    data_bytes: int
+    message_kind: str
+    backend: str
+
+    @property
+    def operation_id(self) -> str:
+        return f"{self.batch_id}:{self.index}"
+
+    def trace_fields(self) -> dict[str, Any]:
+        fields = {
+            "backend": self.backend,
+            "comm_type": "p2p",
+            "completion_mode": "internal_wait",
+            "data_bytes": self.data_bytes,
+            "direction": self.direction,
+            "message_kind": self.message_kind,
+            "microbatch": None,
+            "operation_id": self.operation_id,
+            "peer_rank": self.peer_rank,
+            "pipeline_direction": self.pipeline_direction,
+            "request_id": self.operation_id,
+            "transport_api": "batch_isend_irecv",
+        }
+        semantic_role = "activation" if self.pipeline_direction == "forward" else "gradient"
+        if self.message_kind == "shape":
+            fields["shape_of"] = semantic_role
+        else:
+            fields["payload_role"] = semantic_role
+        return fields
+
+
+_BridgeBatchSpec = Tuple[str, str, str, int, int, str]
+
+
+def _bridge_batch_observation_requested(launch_gate: Any) -> bool:
+    return (
+        launch_gate is not None
+        or trace_is_enabled("bridge-send-forward")
+        or trace_is_enabled("bridge-recv-forward")
+        or trace_is_enabled("bridge-send-backward")
+        or trace_is_enabled("bridge-recv-backward")
+    )
+
+
+def _build_bridge_batch_operations(
+    specs: List[_BridgeBatchSpec],
+) -> List[_BridgeBatchOperation]:
+    batch_id = f"bridge-p2p:{next(_BRIDGE_BATCH_SEQUENCE)}"
+    backend = str(dist.get_backend())
+    return [
+        _BridgeBatchOperation(
+            batch_id=batch_id,
+            index=index,
+            event_name=event_name,
+            direction=direction,
+            pipeline_direction=pipeline_direction,
+            peer_rank=peer_rank,
+            data_bytes=data_bytes,
+            message_kind=message_kind,
+            backend=backend,
+        )
+        for index, (
+            event_name,
+            direction,
+            pipeline_direction,
+            peer_rank,
+            data_bytes,
+            message_kind,
+        ) in enumerate(specs)
+    ]
+
+
+def _bridge_batch_launch_context(
+    communicator: "BridgeCommunicator",
+    operations: List[_BridgeBatchOperation],
+) -> dict[str, Any]:
+    first = operations[0]
+    return {
+        "backend": first.backend,
+        "batch_id": first.batch_id,
+        "comm_type": "p2p-launch",
+        "communicator_kind": "bridge",
+        "completion_included": False,
+        "completion_mode": "internal_wait",
+        "dest_module": communicator.dest_module_name,
+        "message_kind": first.message_kind,
+        "operation_count": len(operations),
+        "operations": [operation.trace_fields() for operation in operations],
+        "request_pairing": "position",
+        "src_module": communicator.src_module_name,
+        "timing_phase": "launch",
+        "transport_api": "batch_isend_irecv",
+    }
+
+
+def _launch_bridge_batch(
+    communicator: "BridgeCommunicator",
+    ops: List[torch.distributed.P2POp],
+    operations: List[_BridgeBatchOperation],
+    launch_gate: Any,
+):
+    if launch_gate is None:
+        return torch.distributed.batch_isend_irecv(ops)
+    launch_scope = open_trace_scope(
+        launch_gate,
+        "bridge-p2p-launch",
+        ctx=_bridge_batch_launch_context(communicator, operations),
+    )
+    with launch_scope:
+        return torch.distributed.batch_isend_irecv(ops)
+
+
+def _bridge_batch_wait_context(
+    communicator: "BridgeCommunicator",
+    operation: _BridgeBatchOperation,
+) -> dict[str, Any]:
+    return {
+        **operation.trace_fields(),
+        "batch_id": operation.batch_id,
+        "communicator_kind": "bridge",
+        "completion_guarantee": "current_stream_after_wait",
+        "completion_included": True,
+        "completion_kind": "work_wait",
+        "completion_site": "bridge_internal_wait",
+        "dest_module": communicator.dest_module_name,
+        "duration_attribution": "per_request",
+        "host_blocking_guaranteed": False,
+        "op": "wait",
+        "operation_count": 1,
+        "operation_ids": [operation.operation_id],
+        "operation_id_scope": "rank_local",
+        "request_pairing": "position",
+        "src_module": communicator.src_module_name,
+        "timing_phase": "stream_dependency",
+    }
+
+
+def _wait_bridge_batch_operation(
+    communicator: "BridgeCommunicator",
+    request: Any,
+    operation: _BridgeBatchOperation,
+):
+    completion_gate = prepare_trace_scope(operation.event_name)
+    if completion_gate is None:
+        return request.wait()
+    completion_scope = open_trace_scope(
+        completion_gate,
+        operation.event_name,
+        ctx=_bridge_batch_wait_context(communicator, operation),
+        slots=("completed", "error_type"),
+    )
+    with completion_scope as completion:
+        try:
+            result = request.wait()
+        except BaseException as wait_error:
+            completion.set("completed", False)
+            completion.set("error_type", type(wait_error).__name__)
+            raise
+        completion.set("completed", result is not False)
+        return result
+
+
+def _run_bridge_batch(
+    communicator: "BridgeCommunicator",
+    ops: List[torch.distributed.P2POp],
+    specs: Optional[List[_BridgeBatchSpec]],
+    launch_gate: Any,
+) -> None:
+    if specs is None:
+        requests = torch.distributed.batch_isend_irecv(ops)
+        for request in requests:
+            request.wait()
+        return
+
+    operations = _build_bridge_batch_operations(specs)
+    requests = _launch_bridge_batch(communicator, ops, operations, launch_gate)
+    if len(requests) != len(operations):
+        for request in requests:
+            request.wait()
+        return
+    for request, operation in zip(requests, operations):
+        _wait_bridge_batch_operation(communicator, request, operation)
+
+
+def _bridge_grid_broadcast_context(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    *,
+    source_rank: int,
+    pipeline_direction: str,
+    message_kind: str,
+    grid_side: str,
+    collective_role: str,
+) -> dict[str, Any]:
+    context = {
+        "backend": "nccl",
+        "collective_role": collective_role,
+        "comm_type": "collective",
+        "communicator_kind": "bridge",
+        "completion_guarantee": "api_return_observed",
+        "completion_included": True,
+        "completion_kind": "inline_api_return",
+        "data_bytes": int(tensor.numel() * tensor.element_size()),
+        "dest_module": communicator.dest_module_name,
+        "device_completion_guaranteed": False,
+        "grid_side": grid_side,
+        "message_kind": message_kind,
+        "pipeline_direction": pipeline_direction,
+        "source_rank": source_rank,
+        "src_module": communicator.src_module_name,
+        "timing_phase": "inline_api_call",
+        "transport_api": "broadcast",
+    }
+    semantic_role = "activation" if pipeline_direction == "forward" else "gradient"
+    if message_kind == "shape":
+        context["shape_of"] = semantic_role
+    else:
+        context["payload_role"] = semantic_role
+    return context
+
+
+def _bridge_grid_broadcast(
+    communicator: "BridgeCommunicator",
+    tensor: torch.Tensor,
+    *,
+    source_rank: int,
+    group: Any,
+    pipeline_direction: str,
+    message_kind: str,
+    grid_side: str,
+    collective_role: str,
+):
+    gate = prepare_trace_scope("bridge-grid-broadcast")
+    if gate is None:
+        return dist.broadcast(tensor, src=source_rank, group=group)
+    scope = open_trace_scope(
+        gate,
+        "bridge-grid-broadcast",
+        ctx=_bridge_grid_broadcast_context(
+            communicator,
+            tensor,
+            source_rank=source_rank,
+            pipeline_direction=pipeline_direction,
+            message_kind=message_kind,
+            grid_side=grid_side,
+            collective_role=collective_role,
+        ),
+        slots=("completed", "error_type"),
+    )
+    with scope as observation:
+        try:
+            result = dist.broadcast(tensor, src=source_rank, group=group)
+        except BaseException as broadcast_error:
+            observation.set("completed", False)
+            observation.set("error_type", type(broadcast_error).__name__)
+            raise
+        observation.set("completed", True)
+        return result
 
 
 class CommRole(Enum):
@@ -569,11 +841,27 @@ class BridgeCommunicator:
             shape_tensor = torch.tensor(
                 aggregated_tensor.shape, device=aggregated_tensor.device, dtype=torch.int64
             )
-            dist.broadcast(shape_tensor, src=self.current_rank, group=self.dest_grid_broadcast_pg)
+            _bridge_grid_broadcast(
+                self,
+                shape_tensor,
+                source_rank=self.current_rank,
+                group=self.dest_grid_broadcast_pg,
+                pipeline_direction="forward",
+                message_kind="shape",
+                grid_side="dest",
+                collective_role="source",
+            )
 
             # Step 2: broadcast the actual tensor
-            dist.broadcast(
-                aggregated_tensor, src=self.current_rank, group=self.dest_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                aggregated_tensor,
+                source_rank=self.current_rank,
+                group=self.dest_grid_broadcast_pg,
+                pipeline_direction="forward",
+                message_kind="payload",
+                grid_side="dest",
+                collective_role="source",
             )
 
             return aggregated_tensor
@@ -586,8 +874,15 @@ class BridgeCommunicator:
             shape_tensor = torch.empty(
                 (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
             )
-            dist.broadcast(
-                shape_tensor, src=self.dest_local_leader_rank, group=self.dest_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                shape_tensor,
+                source_rank=self.dest_local_leader_rank,
+                group=self.dest_grid_broadcast_pg,
+                pipeline_direction="forward",
+                message_kind="shape",
+                grid_side="dest",
+                collective_role="participant",
             )
 
             received_shape = tuple(shape_tensor.tolist())
@@ -599,8 +894,15 @@ class BridgeCommunicator:
             )
 
             # Receive the full tensor via broadcast
-            dist.broadcast(
-                received_tensor, src=self.dest_local_leader_rank, group=self.dest_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                received_tensor,
+                source_rank=self.dest_local_leader_rank,
+                group=self.dest_grid_broadcast_pg,
+                pipeline_direction="forward",
+                message_kind="payload",
+                grid_side="dest",
+                collective_role="participant",
             )
 
             logging.debug(
@@ -699,11 +1001,27 @@ class BridgeCommunicator:
             shape_tensor = torch.tensor(
                 aggregated_gradient.shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
             )
-            dist.broadcast(shape_tensor, src=self.current_rank, group=self.src_grid_broadcast_pg)
+            _bridge_grid_broadcast(
+                self,
+                shape_tensor,
+                source_rank=self.current_rank,
+                group=self.src_grid_broadcast_pg,
+                pipeline_direction="backward",
+                message_kind="shape",
+                grid_side="src",
+                collective_role="source",
+            )
 
             # Scatter the tensors to all ranks in the group
-            dist.broadcast(
-                aggregated_gradient, src=self.current_rank, group=self.src_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                aggregated_gradient,
+                source_rank=self.current_rank,
+                group=self.src_grid_broadcast_pg,
+                pipeline_direction="backward",
+                message_kind="payload",
+                grid_side="src",
+                collective_role="source",
             )
             return aggregated_gradient
 
@@ -715,8 +1033,15 @@ class BridgeCommunicator:
             shape_tensor = torch.empty(
                 (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
             )
-            dist.broadcast(
-                shape_tensor, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                shape_tensor,
+                source_rank=self.src_local_leader_rank,
+                group=self.src_grid_broadcast_pg,
+                pipeline_direction="backward",
+                message_kind="shape",
+                grid_side="src",
+                collective_role="participant",
             )
 
             logging.debug(
@@ -728,8 +1053,15 @@ class BridgeCommunicator:
                 received_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Add
             )
 
-            dist.broadcast(
-                received_gradient, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                received_gradient,
+                source_rank=self.src_local_leader_rank,
+                group=self.src_grid_broadcast_pg,
+                pipeline_direction="backward",
+                message_kind="payload",
+                grid_side="src",
+                collective_role="participant",
             )
             logging.debug(
                 f"[Bridge Communicator] [receive_backward] Rank {self.current_rank} "
@@ -790,6 +1122,12 @@ class BridgeCommunicator:
 
                 # Create batch P2P operations for simultaneous send/receive
                 ops = []
+                launch_gate = prepare_trace_scope("bridge-p2p-launch")
+                batch_specs = (
+                    []
+                    if _bridge_batch_observation_requested(launch_gate)
+                    else None
+                )
                 for dest_rank, activation_split, grad_tensor in zip(
                     rank_info.send_to_ranks, activation_splits, received_gradients_list
                 ):
@@ -799,18 +1137,38 @@ class BridgeCommunicator:
                             torch.distributed.isend, activation_split, dest_rank
                         )
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-send-forward",
+                                "send",
+                                "forward",
+                                dest_rank,
+                                int(activation_split.numel() * activation_split.element_size()),
+                                "payload",
+                            )
+                        )
                     # Receive gradient
                     ops.append(
                         torch.distributed.P2POp(torch.distributed.irecv, grad_tensor, dest_rank)
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-recv-backward",
+                                "recv",
+                                "backward",
+                                dest_rank,
+                                int(grad_tensor.numel() * grad_tensor.element_size()),
+                                "payload",
+                            )
+                        )
 
                 logging.debug(
                     f"[Bridge Communicator] [send_forward_recv_backward] Rank {self.current_rank} "
                     f"executing {len(ops)} simultaneous P2P operations"
                 )
-                reqs = torch.distributed.batch_isend_irecv(ops)
-                for req in reqs:
-                    req.wait()
+                _run_bridge_batch(self, ops, batch_specs, launch_gate)
 
                 # Concatenate received gradients
                 aggregated_gradient = torch.cat(received_gradients_list, dim=self._batch_dim)
@@ -827,13 +1185,27 @@ class BridgeCommunicator:
                     dtype=torch.int64,
                     # FlagScale End
                 )
-                dist.broadcast(
-                    shape_tensor, src=self.current_rank, group=self.src_grid_broadcast_pg
+                _bridge_grid_broadcast(
+                    self,
+                    shape_tensor,
+                    source_rank=self.current_rank,
+                    group=self.src_grid_broadcast_pg,
+                    pipeline_direction="backward",
+                    message_kind="shape",
+                    grid_side="src",
+                    collective_role="source",
                 )
 
                 # Broadcast the tensors to all ranks in the group
-                dist.broadcast(
-                    aggregated_gradient, src=self.current_rank, group=self.src_grid_broadcast_pg
+                _bridge_grid_broadcast(
+                    self,
+                    aggregated_gradient,
+                    source_rank=self.current_rank,
+                    group=self.src_grid_broadcast_pg,
+                    pipeline_direction="backward",
+                    message_kind="payload",
+                    grid_side="src",
+                    collective_role="source",
                 )
 
                 return aggregated_gradient
@@ -846,8 +1218,15 @@ class BridgeCommunicator:
             shape_tensor = torch.empty(
                 (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
             )
-            dist.broadcast(
-                shape_tensor, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                shape_tensor,
+                source_rank=self.src_local_leader_rank,
+                group=self.src_grid_broadcast_pg,
+                pipeline_direction="backward",
+                message_kind="shape",
+                grid_side="src",
+                collective_role="participant",
             )
 
             # Use the received shape to create tensor for broadcast
@@ -855,8 +1234,15 @@ class BridgeCommunicator:
             received_gradient = torch.empty(
                 received_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Add
             )
-            dist.broadcast(
-                received_gradient, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                received_gradient,
+                source_rank=self.src_local_leader_rank,
+                group=self.src_grid_broadcast_pg,
+                pipeline_direction="backward",
+                message_kind="payload",
+                grid_side="src",
+                collective_role="participant",
             )
             logging.debug(
                 f"[Bridge Communicator] [send_forward_recv_backward] Rank {self.current_rank} "
@@ -916,6 +1302,12 @@ class BridgeCommunicator:
 
                 # Create batch P2P operations for simultaneous send/receive
                 ops = []
+                launch_gate = prepare_trace_scope("bridge-p2p-launch")
+                batch_specs = (
+                    []
+                    if _bridge_batch_observation_requested(launch_gate)
+                    else None
+                )
                 for src_rank, gradient_split, activation_tensor in zip(
                     rank_info.recv_from_ranks, gradient_splits, received_activations_list
                 ):
@@ -923,6 +1315,17 @@ class BridgeCommunicator:
                     ops.append(
                         torch.distributed.P2POp(torch.distributed.isend, gradient_split, src_rank)
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-send-backward",
+                                "send",
+                                "backward",
+                                src_rank,
+                                int(gradient_split.numel() * gradient_split.element_size()),
+                                "payload",
+                            )
+                        )
 
                     # Receive activation
                     ops.append(
@@ -930,15 +1333,24 @@ class BridgeCommunicator:
                             torch.distributed.irecv, activation_tensor, src_rank
                         )
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-recv-forward",
+                                "recv",
+                                "forward",
+                                src_rank,
+                                int(activation_tensor.numel() * activation_tensor.element_size()),
+                                "payload",
+                            )
+                        )
 
                 # Execute all operations simultaneously
                 logging.debug(
                     f"[Bridge Communicator] [send_backward_recv_backward] Rank {self.current_rank} "
                     f"executing {len(ops)} simultaneous P2P operations"
                 )
-                reqs = torch.distributed.batch_isend_irecv(ops)
-                for req in reqs:
-                    req.wait()
+                _run_bridge_batch(self, ops, batch_specs, launch_gate)
 
                 # Concatenate received activations
                 aggregated_activation = torch.cat(received_activations_list, dim=self._batch_dim)
@@ -952,13 +1364,27 @@ class BridgeCommunicator:
                 shape_tensor = torch.tensor(
                     tensor_shape_to_scatter, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
                 )
-                dist.broadcast(
-                    shape_tensor, src=self.current_rank, group=self.dest_grid_broadcast_pg
+                _bridge_grid_broadcast(
+                    self,
+                    shape_tensor,
+                    source_rank=self.current_rank,
+                    group=self.dest_grid_broadcast_pg,
+                    pipeline_direction="forward",
+                    message_kind="shape",
+                    grid_side="dest",
+                    collective_role="source",
                 )
 
                 # Scatter the tensors to all ranks in the group
-                dist.broadcast(
-                    aggregated_activation, src=self.current_rank, group=self.dest_grid_broadcast_pg
+                _bridge_grid_broadcast(
+                    self,
+                    aggregated_activation,
+                    source_rank=self.current_rank,
+                    group=self.dest_grid_broadcast_pg,
+                    pipeline_direction="forward",
+                    message_kind="payload",
+                    grid_side="dest",
+                    collective_role="source",
                 )
                 return aggregated_activation
 
@@ -969,8 +1395,15 @@ class BridgeCommunicator:
             shape_tensor = torch.empty(
                 (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
             )
-            dist.broadcast(
-                shape_tensor, src=self.dest_local_leader_rank, group=self.dest_grid_broadcast_pg
+            _bridge_grid_broadcast(
+                self,
+                shape_tensor,
+                source_rank=self.dest_local_leader_rank,
+                group=self.dest_grid_broadcast_pg,
+                pipeline_direction="forward",
+                message_kind="shape",
+                grid_side="dest",
+                collective_role="participant",
             )
 
             # Use the received shape to create tensor for scatter operation
@@ -981,10 +1414,15 @@ class BridgeCommunicator:
                 dtype=self.comm_dtype,
                 requires_grad=True,
             )
-            dist.broadcast(
+            _bridge_grid_broadcast(
+                self,
                 received_activation,
-                src=self.dest_local_leader_rank,
+                source_rank=self.dest_local_leader_rank,
                 group=self.dest_grid_broadcast_pg,
+                pipeline_direction="forward",
+                message_kind="payload",
+                grid_side="dest",
+                collective_role="participant",
             )
             logging.debug(
                 f"[Bridge Communicator] [send_backward_recv_backward] Rank {self.current_rank}  "
@@ -1027,6 +1465,12 @@ class BridgeCommunicator:
         )
         # Collect all P2P operations for batch execution
         ops = []
+        launch_gate = prepare_trace_scope("bridge-p2p-launch")
+        batch_specs = (
+            []
+            if _bridge_batch_observation_requested(launch_gate)
+            else None
+        )
         recv_forward_shape_tensors = []
         recv_grad_shape_tensors = []
 
@@ -1044,6 +1488,17 @@ class BridgeCommunicator:
                             torch.distributed.isend, send_shape_tensor, dest_rank
                         )
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-send-forward",
+                                "send",
+                                "forward",
+                                dest_rank,
+                                int(send_shape_tensor.numel() * send_shape_tensor.element_size()),
+                                "shape",
+                            )
+                        )
 
             # If expecting gradients back, prepare receive operations
             if recv_next:
@@ -1057,6 +1512,17 @@ class BridgeCommunicator:
                             torch.distributed.irecv, grad_shape_tensor, dest_rank
                         )
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-recv-backward",
+                                "recv",
+                                "backward",
+                                dest_rank,
+                                int(grad_shape_tensor.numel() * grad_shape_tensor.element_size()),
+                                "shape",
+                            )
+                        )
 
         elif rank_info.role == CommRole.RECEIVER:
             # Prepare receive operations for forward shapes
@@ -1071,6 +1537,20 @@ class BridgeCommunicator:
                             torch.distributed.irecv, forward_shape_tensor, src_rank
                         )
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-recv-forward",
+                                "recv",
+                                "forward",
+                                src_rank,
+                                int(
+                                    forward_shape_tensor.numel()
+                                    * forward_shape_tensor.element_size()
+                                ),
+                                "shape",
+                            )
+                        )
 
             # If we need to send gradient shapes back, prepare send operations
             if tensor_to_send_prev is not None:
@@ -1086,12 +1566,21 @@ class BridgeCommunicator:
                             torch.distributed.isend, grad_shape_tensor, src_rank
                         )
                     )
+                    if batch_specs is not None:
+                        batch_specs.append(
+                            (
+                                "bridge-send-backward",
+                                "send",
+                                "backward",
+                                src_rank,
+                                int(grad_shape_tensor.numel() * grad_shape_tensor.element_size()),
+                                "shape",
+                            )
+                        )
 
         # Execute all operations in a single batch
         if ops:
-            reqs = torch.distributed.batch_isend_irecv(ops)
-            for req in reqs:
-                req.wait()
+            _run_bridge_batch(self, ops, batch_specs, launch_gate)
 
         # Extract shapes from received tensors
         for forward_shape_tensor in recv_forward_shape_tensors:

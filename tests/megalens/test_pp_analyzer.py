@@ -308,13 +308,17 @@ def test_bridge_events_do_not_enter_standard_atomic_p2p_analysis() -> None:
     graph = TraceGraph(
         [
             _span("p2p-launch", 80, 10, rank=0),
+            _span("bridge-p2p-launch", 90, 5, rank=0),
             standard_send,
             standard_recv,
             bridge_send,
             bridge_recv,
+            _span("bridge-grid-broadcast", 400, 10, rank=1),
         ]
     )
 
+    assert len(graph.p2p_launch_events) == 1
+    assert graph.p2p_launch_events[0].name == "p2p-launch"
     bridge_events = [
         event for event in graph.comm_events if event.name.startswith("bridge-")
     ]
