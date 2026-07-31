@@ -448,7 +448,9 @@ def _wait_p2p_batch_request(request: Any, operations: list[_P2POperation]):
 
 
 def _p2p_batch_device_sync_context(
-    operations: list[_P2POperation], physical_request_count: int
+    operations: list[_P2POperation],
+    physical_request_count: int,
+    transport_api: str,
 ) -> dict[str, Any]:
     operation_count = len(operations)
     if operation_count == 0:
@@ -456,7 +458,9 @@ def _p2p_batch_device_sync_context(
         request_pairing = "none"
     else:
         backend_fields = _p2p_backend_fields(operations)
-        if physical_request_count == operation_count:
+        if transport_api == "ring_exchange":
+            request_pairing = "none"
+        elif physical_request_count == operation_count:
             request_pairing = "position"
         elif physical_request_count == 1 and operation_count > 1:
             request_pairing = "aggregate"
@@ -484,19 +488,26 @@ def _p2p_batch_device_sync_context(
         "request_pairing": request_pairing,
         "stage": "batch_p2p_device_sync",
         "timing_phase": "device_synchronize",
-        "transport_api": "batch_isend_irecv",
+        "transport_api": transport_api,
     }
 
 
 def _synchronize_p2p_batch(
-    sync_gate: Any, operations: list[_P2POperation], physical_request_count: int
+    sync_gate: Any,
+    operations: list[_P2POperation],
+    physical_request_count: int,
+    transport_api: str,
 ):
     if sync_gate is None:
         return cur_platform.synchronize()
     sync_scope = open_trace_scope(
         sync_gate,
         "p2p-batch-device-sync",
-        ctx=_p2p_batch_device_sync_context(operations, physical_request_count),
+        ctx=_p2p_batch_device_sync_context(
+            operations,
+            physical_request_count,
+            transport_api,
+        ),
         slots=(
             "completed",
             "device_completion_guaranteed",
@@ -1131,7 +1142,12 @@ class P2PCommunicator:
             # User should assert that we have a modern enough PyTorch to not need this
             sync_gate = prepare_trace_scope("p2p-batch-device-sync")
             sync_operations = ensure_operations() if sync_gate is not None else []
-            _synchronize_p2p_batch(sync_gate, sync_operations, physical_request_count)
+            _synchronize_p2p_batch(
+                sync_gate,
+                sync_operations,
+                physical_request_count,
+                transport_api,
+            )
 
         return tensor_recv_prev, tensor_recv_next, reqs
 

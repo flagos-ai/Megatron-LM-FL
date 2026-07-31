@@ -1105,6 +1105,66 @@ def test_ring_exchange_records_inline_launch_without_work_wait(monkeypatch) -> N
     assert sink.records[0]["values"] == {"completed": True}
 
 
+def test_ring_exchange_preserves_configured_device_sync_and_transport_metadata(
+    monkeypatch,
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    communicator = _make_communicator(
+        monkeypatch,
+        use_ring_exchange_p2p=True,
+        batch_p2p_comm=True,
+        batch_p2p_sync=True,
+    )
+    output = torch.arange(6, dtype=torch.float16)
+    real_empty = torch.empty
+    call_order = []
+
+    def cpu_empty(shape, *, requires_grad, device, dtype):
+        del device
+        return real_empty(shape, requires_grad=requires_grad, dtype=dtype)
+
+    def fake_ring_exchange(**kwargs):
+        call_order.append(("ring", kwargs))
+
+    def fake_synchronize():
+        call_order.append(("sync", None))
+
+    monkeypatch.setattr(p2p_communication.torch, "empty", cpu_empty)
+    monkeypatch.setattr(
+        p2p_communication.torch.distributed,
+        "ring_exchange",
+        fake_ring_exchange,
+        raising=False,
+    )
+    monkeypatch.setattr(p2p_communication.cur_platform, "synchronize", fake_synchronize)
+
+    output_grad = communicator.send_forward_recv_backward(
+        output,
+        tensor_shapes=(6,),
+        is_last_stage=False,
+    )
+
+    assert tuple(output_grad.shape) == (6,)
+    assert [name for name, _ in call_order] == ["ring", "sync"]
+    assert [record["name"] for record in sink.records] == [
+        "p2p-launch",
+        "p2p-batch-device-sync",
+    ]
+    launch, device_sync = (record["ctx"] for record in sink.records)
+    assert device_sync["transport_api"] == "ring_exchange"
+    assert device_sync["request_pairing"] == "none"
+    assert device_sync["physical_request_count"] == 0
+    assert device_sync["batch_id"] == launch["batch_id"]
+    assert device_sync["operation_ids"] == launch["operation_ids"]
+    assert device_sync["operations"] == launch["operations"]
+    assert sink.records[1]["values"] == {
+        "completed": True,
+        "device_completion_guaranteed": True,
+        "host_blocking_guaranteed": True,
+    }
+
+
 def test_ring_exchange_inline_launch_preserves_exception_identity(monkeypatch) -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)

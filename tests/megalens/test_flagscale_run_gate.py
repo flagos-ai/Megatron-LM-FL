@@ -84,6 +84,7 @@ def _write_gpt_phase_trace(
     include_optimizer: bool = False,
     include_optimizer_postprocess: bool = True,
     p2p_route: str | None = None,
+    ring_directional_wait: bool = False,
 ) -> None:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
@@ -109,15 +110,13 @@ def _write_gpt_phase_trace(
     def p2p_events(iteration: int) -> None:
         if p2p_route is None:
             return
-        if p2p_route not in {"batch", "unbatched"}:
+        if p2p_route not in {"batch", "unbatched", "ring"}:
             raise ValueError(f"unknown P2P route: {p2p_route}")
 
-        transport_api = (
-            "batch_isend_irecv" if p2p_route == "batch" else "isend_irecv"
-        )
-        launch_pairing = "backend_dependent" if p2p_route == "batch" else "key"
-        completion_pairing = "position" if p2p_route == "batch" else "key"
         if p2p_route == "batch":
+            transport_api = "batch_isend_irecv"
+            launch_pairing = "backend_dependent"
+            completion_pairing = "position"
             launch_groups = (
                 ("internal_wait", (("send-forward", "send_next"),)),
                 ("internal_wait", (("recv-backward", "recv_next"),)),
@@ -127,7 +126,10 @@ def _write_gpt_phase_trace(
                     ("internal_wait", (("recv-forward", "recv_prev"),)),
                     ("internal_wait", (("send-backward", "send_prev"),)),
                 )
-        else:
+        elif p2p_route == "unbatched":
+            transport_api = "isend_irecv"
+            launch_pairing = "key"
+            completion_pairing = "key"
             backward_mode = "internal_wait" if rank == 0 else "external_wait"
             launch_groups = (
                 (
@@ -145,6 +147,19 @@ def _write_gpt_phase_trace(
                     ),
                 ),
             )
+        else:
+            transport_api = "ring_exchange"
+            launch_pairing = "none"
+            completion_pairing = "none"
+            launch_groups = (
+                ("inline", (("send-forward", "send_next"),)),
+                ("inline", (("recv-backward", "recv_next"),)),
+            )
+            if rank == 1:
+                launch_groups = (
+                    ("inline", (("recv-forward", "recv_prev"),)),
+                    ("inline", (("send-backward", "send_prev"),)),
+                )
 
         for index, (completion_mode, directional_events) in enumerate(launch_groups):
             batch_id = f"p2p:{iteration}:{index}"
@@ -155,7 +170,9 @@ def _write_gpt_phase_trace(
                 operations.append(
                     {
                         "operation_id": operation_id,
-                        "request_id": operation_id,
+                        "request_id": (
+                            None if p2p_route == "ring" else operation_id
+                        ),
                         "direction": direction,
                         "pipeline_direction": pipeline_direction,
                         "peer_rank": 1 - rank,
@@ -167,22 +184,83 @@ def _write_gpt_phase_trace(
                         "completion_mode": completion_mode,
                     }
                 )
+            launch_fields = {
+                "batch_id": batch_id,
+                "comm_type": "p2p-launch",
+                "backend": "nccl",
+                "backends": ["nccl"],
+                "backend_complete": True,
+                "transport_api": transport_api,
+                "request_pairing": launch_pairing,
+                "completion_mode": completion_mode,
+                "completion_included": False,
+                "operation_count": len(operations),
+                "operations": operations,
+            }
+            if p2p_route == "ring":
+                launch_fields.update(
+                    {
+                        "timing_phase": "inline_api_call",
+                        "api_return_included": True,
+                        "completion_guarantee": "api_return_observed",
+                        "completion_kind": "inline_api_return",
+                        "device_completion_guaranteed": False,
+                        "duration_attribution": "shared_nonexclusive",
+                        "host_blocking_guaranteed": False,
+                        "operation_ids": [
+                            operation["operation_id"] for operation in operations
+                        ],
+                        "operation_id_scope": "rank_local",
+                        "physical_request_count": 0,
+                        "stage": "p2p_inline_api",
+                    }
+                )
+            event("p2p-launch", "B", **launch_fields)
             event(
                 "p2p-launch",
-                "B",
-                batch_id=batch_id,
-                comm_type="p2p-launch",
-                backend="nccl",
-                backends=["nccl"],
-                backend_complete=True,
-                transport_api=transport_api,
-                request_pairing=launch_pairing,
-                completion_mode=completion_mode,
-                completion_included=False,
-                operation_count=len(operations),
-                operations=operations,
+                "E",
+                **({"completed": True} if p2p_route == "ring" else {}),
             )
-            event("p2p-launch", "E")
+            if p2p_route == "ring":
+                if ring_directional_wait:
+                    operation = operations[0]
+                    event(
+                        str(directional_events[0][0]),
+                        "B",
+                        **operation,
+                        completion_kind="work_wait",
+                    )
+                    event(str(directional_events[0][0]), "E", completed=True)
+                operation_ids = [
+                    operation["operation_id"] for operation in operations
+                ]
+                event(
+                    "p2p-batch-device-sync",
+                    "B",
+                    batch_id=batch_id,
+                    comm_type="p2p",
+                    backend="nccl",
+                    backends=["nccl"],
+                    backend_complete=True,
+                    transport_api="ring_exchange",
+                    request_pairing="none",
+                    completion_site="batch_p2p_sync_workaround",
+                    completion_included=True,
+                    completion_kind="device_synchronize",
+                    operation_count=len(operations),
+                    operation_ids=operation_ids,
+                    operations=operations,
+                    physical_request_count=0,
+                )
+                event(
+                    "p2p-batch-device-sync",
+                    "E",
+                    completed=True,
+                    device_completion_guaranteed=True,
+                    error_type=None,
+                    host_blocking_guaranteed=True,
+                )
+                continue
             completion_site = (
                 "communicate_internal_wait"
                 if completion_mode == "internal_wait"
@@ -799,6 +877,39 @@ def test_pp2_unbatched_contract_rejects_batched_route(tmp_path: Path) -> None:
     assert "trace.p2p.field" in codes
     assert "trace.p2p.sync_count" in codes
     assert "trace.p2p.external_wait" in codes
+
+
+def test_pp2_ring_contract_accepts_inline_api_return(tmp_path: Path) -> None:
+    trace_root = tmp_path / "pp2-ring"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            p2p_route="ring",
+        )
+
+    assert p2p_probe_contract.validate_pp2_ring_route(trace_root) == ()
+
+
+def test_pp2_ring_contract_rejects_work_wait_events(tmp_path: Path) -> None:
+    trace_root = tmp_path / "wrong-pp2-ring"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            p2p_route="ring",
+            ring_directional_wait=rank == 0,
+        )
+
+    failures = p2p_probe_contract.validate_pp2_ring_route(trace_root)
+
+    assert "trace.p2p.ring_completion" in {
+        failure.code for failure in failures
+    }
 
 
 def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
