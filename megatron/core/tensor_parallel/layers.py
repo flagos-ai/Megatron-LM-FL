@@ -40,6 +40,11 @@ from .mappings import (
     reduce_scatter_to_sequence_parallel_region,
     scatter_to_tensor_model_parallel_region,
 )
+from .observability import (
+    async_linear_collective_launch_scope,
+    sync_linear_all_gather_scope,
+    wait_async_linear_collective,
+)
 from .random import get_cuda_rng_tracker, get_expert_parallel_rng_tracker_name
 from .utils import VocabUtility
 
@@ -482,7 +487,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             dim_size[0] = dim_size[0] * tp_group.size()
 
             all_gather_buffer = get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu")
-            dist_all_gather_func(all_gather_buffer, input, group=tp_group)
+            with sync_linear_all_gather_scope(input, tp_group):
+                dist_all_gather_func(all_gather_buffer, input, group=tp_group)
             total_input = all_gather_buffer
         else:
             total_input = input
@@ -502,6 +508,8 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         grad_output_buffer = ctx.grad_output_buffer
         wgrad_deferral_limit = ctx.wgrad_deferral_limit
         handle = None
+        wgrad_all_gather_observation = None
+        dgrad_observation = None
         tp_group = ctx.tp_group
 
         if ctx.gradient_accumulation_fusion:
@@ -521,9 +529,17 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 all_gather_buffer = get_global_memory_buffer().get_tensor(
                     dim_size, input.dtype, "mpu"
                 )
-                handle = dist_all_gather_func(
-                    all_gather_buffer, input, group=tp_group, async_op=True
-                )
+                with async_linear_collective_launch_scope(
+                    input,
+                    tp_group,
+                    collective_op="all-gather",
+                    dim="first",
+                    launch_site="linear_backward_wgrad_input_all_gather",
+                    payload_role="weight_gradient_input",
+                ) as wgrad_all_gather_observation:
+                    handle = dist_all_gather_func(
+                        all_gather_buffer, input, group=tp_group, async_op=True
+                    )
 
                 # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
                 # gather is scheduled before the input gradient computation
@@ -534,7 +550,13 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
 
         if ctx.sequence_parallel and wgrad_compute:
             # pylint: disable=possibly-used-before-assignment
-            handle.wait()
+            wait_async_linear_collective(
+                handle,
+                wgrad_all_gather_observation,
+                completion_site="linear_backward_wgrad_input_ready",
+                wait_role="dependency",
+                terminal=True,
+            )
 
         if wgrad_compute:
             grad_output, total_input = prepare_input_tensors_for_wgrad_compute(
@@ -543,7 +565,15 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
 
         if ctx.allreduce_dgrad:
             # Asynchronous all-reduce
-            handle = torch.distributed.all_reduce(grad_input, group=tp_group, async_op=True)
+            with async_linear_collective_launch_scope(
+                grad_input,
+                tp_group,
+                collective_op="all-reduce",
+                dim=None,
+                launch_site="linear_backward_dgrad_all_reduce",
+                payload_role="input_gradient",
+            ) as dgrad_observation:
+                handle = torch.distributed.all_reduce(grad_input, group=tp_group, async_op=True)
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # all-reduce is scheduled before the weight gradient computation
 
@@ -559,9 +589,17 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 # FlagScale End
             )
             # reduce_scatter
-            handle = dist_reduce_scatter_func(
-                sub_grad_input, grad_input, group=tp_group, async_op=True
-            )
+            with async_linear_collective_launch_scope(
+                grad_input,
+                tp_group,
+                collective_op="reduce-scatter",
+                dim="first",
+                launch_site="linear_backward_dgrad_reduce_scatter",
+                payload_role="input_gradient",
+            ) as dgrad_observation:
+                handle = dist_reduce_scatter_func(
+                    sub_grad_input, grad_input, group=tp_group, async_op=True
+                )
             # Here we rely on CUDA_DEVICE_MAX_CONNECTIONS=1 to ensure that the
             # reduce scatter is scheduled before the weight gradient computation
 
@@ -635,7 +673,13 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
         grad_bias = grad_output.sum(dim=0) if use_bias else None
 
         if ctx.sequence_parallel:
-            handle.wait()
+            wait_async_linear_collective(
+                handle,
+                dgrad_observation,
+                completion_site="linear_backward_dgrad_reduce_scatter_return",
+                wait_role="return",
+                terminal=True,
+            )
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
             # FlagScale Begin
@@ -654,7 +698,13 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             # FlagScale End
 
         if ctx.allreduce_dgrad:
-            handle.wait()
+            wait_async_linear_collective(
+                handle,
+                dgrad_observation,
+                completion_site="linear_backward_dgrad_all_reduce_return",
+                wait_role="return",
+                terminal=True,
+            )
 
         return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None  # FlagScale Add
 
