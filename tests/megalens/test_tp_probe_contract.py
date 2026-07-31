@@ -182,16 +182,16 @@ def _write_collective_trace(
                 and rank == 0
                 and iteration == 1,
             )
-            if include_linear_allreduce:
-                linear_lifecycle(
-                    operation_id=f"tp-linear:{rank}:{iteration}:all-reduce",
-                    collective_op="all-reduce",
-                    launch_site="linear_backward_dgrad_all_reduce",
-                    payload_role="input_gradient",
-                    completion_site="linear_backward_dgrad_all_reduce_return",
-                    wait_role="return",
-                    dim=None,
-                )
+        if include_linear_allreduce:
+            linear_lifecycle(
+                operation_id=f"tp-linear:{rank}:{iteration}:all-reduce",
+                collective_op="all-reduce",
+                launch_site="linear_backward_dgrad_all_reduce",
+                payload_role="input_gradient",
+                completion_site="linear_backward_dgrad_all_reduce_return",
+                wait_role="return",
+                dim=None,
+            )
         if include_final_grad_sync:
             event(
                 "grad-sync",
@@ -311,6 +311,30 @@ def test_tp2_sp_linear_contract_rejects_allreduce_route(tmp_path: Path) -> None:
         )
 
     failures = tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path)
+
+    assert "trace.tp_linear.route" in {failure.code for failure in failures}
+
+
+def test_tp2_no_sp_linear_contract_accepts_allreduce(tmp_path: Path) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_allreduce=True,
+        )
+
+    assert tp_probe_contract.validate_tp2_local_allreduce_lifecycle(tmp_path) == ()
+
+
+def test_tp2_no_sp_linear_contract_rejects_sp_routes(tmp_path: Path) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_local_allreduce_lifecycle(tmp_path)
 
     assert "trace.tp_linear.route" in {failure.code for failure in failures}
 

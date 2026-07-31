@@ -40,7 +40,15 @@ _LINEAR_ROUTE_SPECS = {
         "completion_site": "linear_backward_dgrad_reduce_scatter_return",
         "wait_role": "return",
     },
+    "all-reduce": {
+        "launch_site": "linear_backward_dgrad_all_reduce",
+        "payload_role": "input_gradient",
+        "completion_site": "linear_backward_dgrad_all_reduce_return",
+        "wait_role": "return",
+    },
 }
+_SP_LINEAR_ROUTES = frozenset(("all-gather", "reduce-scatter"))
+_ALLREDUCE_LINEAR_ROUTES = frozenset(("all-reduce",))
 _LINEAR_LAUNCH_FIELDS = {
     "operation_id_scope": "rank_local",
     "execution_route": "local_linear_direct_async",
@@ -334,6 +342,7 @@ def _validate_linear_lifecycle(
     iteration: Iteration,
     *,
     rank: int,
+    expected_routes: frozenset[str],
 ) -> tuple[list[Failure], set[str]]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _LINEAR_EVENTS, rank=rank)
@@ -368,7 +377,7 @@ def _validate_linear_lifecycle(
             failures.append(
                 _failure(
                     "trace.tp_linear.route",
-                    f"SP profile observed unsupported route {route!r}",
+                    f"local Linear profile observed unsupported route {route!r}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -389,6 +398,15 @@ def _validate_linear_lifecycle(
                     iteration=iteration_id,
                 )
             )
+            if "dim" not in _LINEAR_ROUTE_SPECS[str(route)] and "dim" in begin.attrs:
+                failures.append(
+                    _failure(
+                        "trace.tp_linear.field",
+                        f"route {route!r} records unsupported dim={begin.attrs['dim']!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
         data_bytes = begin.attrs.get("data_bytes")
         if (
             not isinstance(data_bytes, int)
@@ -437,12 +455,12 @@ def _validate_linear_lifecycle(
             )
         )
 
-    if observed_routes != set(_LINEAR_ROUTE_SPECS):
+    if observed_routes != set(expected_routes):
         failures.append(
             _failure(
                 "trace.tp_linear.route",
-                f"SP profile routes are {sorted(observed_routes)}, "
-                f"expected {sorted(_LINEAR_ROUTE_SPECS)}",
+                f"local Linear routes are {sorted(observed_routes)}, "
+                f"expected {sorted(expected_routes)}",
                 rank=rank,
                 iteration=iteration_id,
             )
@@ -464,21 +482,32 @@ def _validate_linear_lifecycle(
         )
         if route in _LINEAR_ROUTE_SPECS:
             route_spec = _LINEAR_ROUTE_SPECS[str(route)]
+            route_fields = {
+                "launch_site": route_spec["launch_site"],
+                "payload_role": route_spec["payload_role"],
+                "completion_site": route_spec["completion_site"],
+                "wait_role": route_spec["wait_role"],
+            }
+            if "dim" in route_spec:
+                route_fields["dim"] = route_spec["dim"]
             failures.extend(
                 _field_failures(
                     begin,
-                    {
-                        "dim": route_spec["dim"],
-                        "launch_site": route_spec["launch_site"],
-                        "payload_role": route_spec["payload_role"],
-                        "completion_site": route_spec["completion_site"],
-                        "wait_role": route_spec["wait_role"],
-                    },
+                    route_fields,
                     code="trace.tp_linear.field",
                     rank=rank,
                     iteration=iteration_id,
                 )
             )
+            if "dim" not in route_spec and "dim" in begin.attrs:
+                failures.append(
+                    _failure(
+                        "trace.tp_linear.field",
+                        f"route {route!r} records unsupported dim={begin.attrs['dim']!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
         launch = launched.get(operation_id) if isinstance(operation_id, str) else None
         if (
             launch is None
@@ -731,7 +760,12 @@ def validate_tp2_gqa_collective_hierarchy(
     return tuple(failures)
 
 
-def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
+def _validate_tp2_linear_lifecycle(
+    trace_root: Path,
+    *,
+    expected_routes: frozenset[str],
+    profile_name: str,
+) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
     if tuple(sorted(by_rank)) != (0, 1):
@@ -739,7 +773,7 @@ def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
             Failure(
                 "trace.tp_linear.ranks",
                 f"TP2 linear contract expects ranks [0, 1], observed {sorted(by_rank)}",
-                "tp2-local-sp",
+                profile_name,
             )
         )
 
@@ -760,6 +794,7 @@ def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
             iteration_failures, operation_ids = _validate_linear_lifecycle(
                 iteration,
                 rank=rank,
+                expected_routes=expected_routes,
             )
             failures.extend(iteration_failures)
             duplicates = rank_operation_ids & operation_ids
@@ -774,6 +809,22 @@ def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
                 )
             rank_operation_ids.update(operation_ids)
     return tuple(failures)
+
+
+def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
+    return _validate_tp2_linear_lifecycle(
+        trace_root,
+        expected_routes=_SP_LINEAR_ROUTES,
+        profile_name="tp2-local-sp",
+    )
+
+
+def validate_tp2_local_allreduce_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
+    return _validate_tp2_linear_lifecycle(
+        trace_root,
+        expected_routes=_ALLREDUCE_LINEAR_ROUTES,
+        profile_name="tp2-local-allreduce",
+    )
 
 
 def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
