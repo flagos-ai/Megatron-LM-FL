@@ -17,11 +17,14 @@ import megatron.core.transformer.moe.router as router_module
 from megatron.core.observability import install_trace_sink, reset_trace_sink
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.observability import (
+    DISPATCH_ROUTER_FIELDS,
     EXPERT_WORKLOAD_SLOTS,
     ROUTER_WORKLOAD_SLOTS,
     collect_router_loss_fields,
+    dispatch_fields_requested,
     expert_workload,
     observe_router_loss,
+    publish_dispatch_fields,
     router_trace_context,
     router_workload,
 )
@@ -87,6 +90,16 @@ class _RecordingSink:
         }
         self.records.append(record)
         return _RecordingScope(self, record)
+
+
+class _SelectiveRecordingSink(_RecordingSink):
+    def __init__(self, enabled_names: set[str]) -> None:
+        super().__init__()
+        self.enabled_names = enabled_names
+
+    def is_enabled(self, name: str) -> bool:
+        self.gate_calls.append(name)
+        return name in self.enabled_names
 
 
 class _Group:
@@ -1051,6 +1064,12 @@ def test_dispatch_and_combine_emit_target_static_fields_and_preserve_results() -
         "dispatcher": "alltoall",
         "num_tokens": 6,
         "capacity_factor": 1.25,
+        "dropped_tokens": None,
+        "drop_rate": None,
+        "expert_cv": None,
+        "top1_expert_share": None,
+        "aux_loss": None,
+        "z_loss": None,
     }
     assert _event_fields(sink.records[1]) == {
         "layer": 7,
@@ -1064,6 +1083,161 @@ def test_dispatch_and_combine_emit_target_static_fields_and_preserve_results() -
         ("dispatch", ("moe-dispatch",)),
         ("combine", ("moe-combine",)),
     ]
+
+
+def test_router_handoff_populates_dispatch_when_only_dispatch_event_is_enabled() -> None:
+    sink = _SelectiveRecordingSink({"moe-dispatch"})
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    router, input_tensor, probs, routing_map = _router_fixture(
+        sink,
+        events,
+        loss_observations=[
+            ("load_balancing_loss", torch.tensor(1.25)),
+            ("z_loss", torch.tensor(0.75)),
+        ],
+    )
+    layer, _, _ = _layer_fixture(sink, events)
+
+    def route(
+        self: Any,
+        hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+    ):
+        return TopKRouter.forward(router, hidden_states, padding_mask, input_ids)
+
+    layer.route = MethodType(route, layer)
+    layer.dispatch = MethodType(MoELayer.dispatch, layer)
+
+    actual_probs, actual_map, dispatch_fields = MoELayer._route_for_dispatch(
+        layer, input_tensor
+    )
+    dispatch_result = MoELayer._dispatch_with_fields(
+        layer, input_tensor, actual_probs, dispatch_fields
+    )
+
+    assert actual_probs is probs
+    assert actual_map is routing_map
+    assert dispatch_result[0] is input_tensor
+    assert dispatch_result[1] is probs
+    assert dispatch_fields is not None
+    assert set(dispatch_fields) == set(DISPATCH_ROUTER_FIELDS)
+    assert dispatch_fields == {
+        "dropped_tokens": None,
+        "drop_rate": None,
+        "expert_cv": pytest.approx(math.sqrt(1.25) / 1.5),
+        "top1_expert_share": pytest.approx(0.5),
+        "aux_loss": pytest.approx(1.25),
+        "z_loss": pytest.approx(0.75),
+    }
+    dispatch_record = sink.records[0]
+    assert dispatch_record["name"] == "moe-dispatch"
+    assert {name: _event_fields(dispatch_record)[name] for name in DISPATCH_ROUTER_FIELDS} == (
+        dispatch_fields
+    )
+    assert not dispatch_fields_requested()
+
+
+def test_dispatch_handoffs_do_not_cross_route_invocations_or_leak_to_direct_calls() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    layer, _, _ = _layer_fixture(sink, [])
+    input_a = torch.ones((2, 3))
+    input_b = torch.ones((4, 3))
+    fields_by_route = [
+        {
+            "dropped_tokens": 1,
+            "drop_rate": 0.125,
+            "expert_cv": 0.25,
+            "top1_expert_share": 0.5,
+            "aux_loss": 1.25,
+            "z_loss": 0.75,
+        },
+        {
+            "dropped_tokens": 2,
+            "drop_rate": 0.25,
+            "expert_cv": 0.5,
+            "top1_expert_share": 0.625,
+            "aux_loss": 2.5,
+            "z_loss": 1.5,
+        },
+    ]
+
+    def route(
+        self: Any,
+        hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+    ):
+        publish_dispatch_fields(fields_by_route[len(route_calls)])
+        route_calls.append(hidden_states)
+        return hidden_states[:, 0], torch.ones((hidden_states.shape[0], 1), dtype=torch.bool)
+
+    route_calls: list[torch.Tensor] = []
+    layer.route = MethodType(route, layer)
+    layer.dispatch = MethodType(MoELayer.dispatch, layer)
+
+    probs_a, _, fields_a = MoELayer._route_for_dispatch(layer, input_a)
+    probs_b, _, fields_b = MoELayer._route_for_dispatch(layer, input_b)
+    MoELayer._dispatch_with_fields(layer, input_a, probs_a, fields_a)
+    MoELayer._dispatch_with_fields(layer, input_b, probs_b, fields_b)
+    MoELayer.dispatch(layer, input_a, probs_a)
+
+    assert route_calls[0] is input_a
+    assert route_calls[1] is input_b
+    assert fields_a == fields_by_route[0]
+    assert fields_b == fields_by_route[1]
+    assert len(sink.records) == 3
+    observed_dispatch_fields = [
+        {name: _event_fields(record)[name] for name in DISPATCH_ROUTER_FIELDS}
+        for record in sink.records
+    ]
+    assert observed_dispatch_fields == [
+        fields_by_route[0],
+        fields_by_route[1],
+        {name: None for name in DISPATCH_ROUTER_FIELDS},
+    ]
+    assert not dispatch_fields_requested()
+
+
+def test_dispatch_handoff_resets_after_route_and_dispatch_errors() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    route_error = RuntimeError("route failed")
+    dispatch_error = RuntimeError("dispatch failed")
+    layer, dispatcher, _ = _layer_fixture(sink, [], dispatch_error=dispatch_error)
+    hidden_states = torch.ones((2, 3))
+    probs = torch.ones(2)
+    fields = {name: float(index) for index, name in enumerate(DISPATCH_ROUTER_FIELDS)}
+
+    def route(
+        self: Any,
+        actual_hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+    ):
+        publish_dispatch_fields(fields)
+        raise route_error
+
+    layer.route = MethodType(route, layer)
+    layer.dispatch = MethodType(MoELayer.dispatch, layer)
+
+    with pytest.raises(RuntimeError) as raised_route:
+        MoELayer._route_for_dispatch(layer, hidden_states)
+    assert raised_route.value is route_error
+    assert not dispatch_fields_requested()
+
+    with pytest.raises(RuntimeError) as raised_dispatch:
+        MoELayer._dispatch_with_fields(layer, hidden_states, probs, fields)
+    assert raised_dispatch.value is dispatch_error
+
+    dispatcher.dispatch_error = None
+    MoELayer.dispatch(layer, hidden_states, probs)
+    direct_fields = {
+        name: _event_fields(sink.records[-1])[name] for name in DISPATCH_ROUTER_FIELDS
+    }
+    assert direct_fields == {name: None for name in DISPATCH_ROUTER_FIELDS}
 
 
 def test_sequential_combine_scope_includes_dispatcher_postprocess_only() -> None:
@@ -1381,6 +1555,46 @@ def test_real_adapter_places_source_fields_on_end() -> None:
     }
 
 
+def test_real_adapter_places_all_dispatch_fields_on_end() -> None:
+    tracer = Tracer()
+    tracer.global_args = SimpleNamespace(trace=True, trace_mode=1, trace_granularity="full")
+    tracer.iter = 1
+    tracer._pendings = []
+    tracer._iteration_open = True
+    ticks: list[tuple[str, str, dict[str, Any]]] = []
+    tracer._tick = lambda name, phase, attrs: ticks.append((name, phase, dict(attrs)))
+    install_trace_sink(MegaLensTraceSink(tracer))
+    layer, _, _ = _layer_fixture(_RecordingSink(), [])
+    layer.dispatch = MethodType(MoELayer.dispatch, layer)
+    hidden_states = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+    probs = torch.arange(6, dtype=torch.float32)
+    dispatch_fields = {
+        "dropped_tokens": 2,
+        "drop_rate": 0.25,
+        "expert_cv": 0.5,
+        "top1_expert_share": 0.625,
+        "aux_loss": 1.25,
+        "z_loss": 0.75,
+    }
+
+    MoELayer._dispatch_with_fields(layer, hidden_states, probs, dispatch_fields)
+
+    assert [tick[:2] for tick in ticks] == [("moe-dispatch", "B"), ("moe-dispatch", "E")]
+    assert ticks[0][2] == {}
+    assert ticks[1][2] == {
+        "layer": 7,
+        "ep_size": 2,
+        "num_experts": 4,
+        "num_local_experts": 2,
+        "router_topk": 2,
+        "dispatcher": "alltoall",
+        "num_tokens": 6,
+        "capacity_factor": 1.25,
+        **dispatch_fields,
+    }
+    assert len(ticks[1][2]) == 14
+
+
 def test_real_adapter_records_shared_expert_source_fields() -> None:
     tracer = Tracer()
     tracer.global_args = SimpleNamespace(trace=True, trace_mode=1, trace_granularity="full")
@@ -1422,6 +1636,12 @@ def test_moe_probe_markers_and_public_signatures_remain_stable() -> None:
         "padding_mask",
         "input_ids",
     ]
+    assert list(inspect.signature(MoELayer.route).parameters) == [
+        "self",
+        "hidden_states",
+        "padding_mask",
+        "input_ids",
+    ]
     assert list(inspect.signature(MoELayer.dispatch).parameters) == [
         "self",
         "hidden_states",
@@ -1447,6 +1667,25 @@ def test_moe_probe_markers_and_public_signatures_remain_stable() -> None:
         "synchronize(",
     ):
         assert forbidden not in helper_source
+
+
+def test_dispatch_handoff_is_wired_without_persistent_router_cache() -> None:
+    moe_layer_source = (
+        ROOT / "megatron/core/transformer/moe/moe_layer.py"
+    ).read_text()
+    router_source = (ROOT / "megatron/core/transformer/moe/router.py").read_text()
+    fine_grained_source = (
+        ROOT / "megatron/core/models/gpt/fine_grained_callables.py"
+    ).read_text()
+
+    assert "probs, routing_map, dispatch_fields = self._route_for_dispatch(" in moe_layer_source
+    assert "self._dispatch_with_fields(" in moe_layer_source
+    assert "node.layer_state.moe_dispatch_fields = dispatch_fields" in fine_grained_source
+    assert "node.layer_state.moe_dispatch_fields = None" in fine_grained_source
+    assert "layer.mlp._dispatch_with_fields(" in fine_grained_source
+    for forbidden in ("_last_router_metrics", "_last_aux_loss", "_last_z_loss"):
+        assert forbidden not in moe_layer_source
+        assert forbidden not in router_source
 
 
 def test_shared_expert_routes_use_the_canonical_method_and_exclude_dualpipev() -> None:

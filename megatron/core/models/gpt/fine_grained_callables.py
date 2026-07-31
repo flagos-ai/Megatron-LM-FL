@@ -456,6 +456,8 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         computations between attention and dispatch:
             pre mlp layernorm->router->dispatch preprocess
         """
+        dispatch_fields = None
+        node.layer_state.moe_dispatch_fields = None
 
         ########## FlagScale Begin ##########
         if getattr(node.layer_state, "is_engram", False):
@@ -487,6 +489,7 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                 packed_seq_params: Optional[PackedSeqParams] = None,
                 sequence_len_offset: Optional[Tensor] = None,
             ):
+                nonlocal dispatch_fields
                 hidden_states, _ = layer._forward_attention(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
@@ -515,7 +518,9 @@ def build_transformer_layer_callables(layer: TransformerLayer):
                         )
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output)
+                probs, routing_map, dispatch_fields = layer.mlp._route_for_dispatch(
+                    pre_mlp_layernorm_output
+                )
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
@@ -532,6 +537,8 @@ def build_transformer_layer_callables(layer: TransformerLayer):
         )
         if not isinstance(layer.mlp, MoELayer):
             return hidden_states
+
+        node.layer_state.moe_dispatch_fields = dispatch_fields
 
         # Detach here for mlp_bda residual connection
         node.layer_state.residual = node.detach(hidden_states)
@@ -553,7 +560,13 @@ def build_transformer_layer_callables(layer: TransformerLayer):
             # backward graph from connecting to attn submodule
             token_dispatcher._comm_manager.token_probs = probs
 
-        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
+        dispatch_fields = getattr(node.layer_state, "moe_dispatch_fields", None)
+        try:
+            dispatched_tokens, dispatched_probs = layer.mlp._dispatch_with_fields(
+                local_tokens, probs, dispatch_fields
+            )
+        finally:
+            node.layer_state.moe_dispatch_fields = None
 
         # `dispatched_probs` is needed by backward pass of swiglu, therefore it's
         # passed to moe_forward within `layer_state` to avoid the free_input process
