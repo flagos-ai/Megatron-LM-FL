@@ -174,6 +174,10 @@ _BRIDGE_EVENTS = (
         )
     ),
 )
+_MIMO_TERMINAL_EVENTS = (
+    *_BRIDGE_EVENTS,
+    manifest.EventRequirement("optimizer-step", _COMMON_FIELDS, "B"),
+)
 
 
 def _ep_events(
@@ -492,12 +496,23 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "mimo-train2": manifest.TraceProfile(
         "mimo-train2",
         2,
-        (
-            *_BRIDGE_EVENTS,
-            manifest.EventRequirement("optimizer-step", _COMMON_FIELDS, "B"),
-        ),
+        _MIMO_TERMINAL_EVENTS,
         mimo_probe_contract.validate_mimo_training_trace,
         mimo_probe_contract.validate_mimo_training_run,
+    ),
+    "mimo-train8-fanin": manifest.TraceProfile(
+        "mimo-train8-fanin",
+        8,
+        _MIMO_TERMINAL_EVENTS,
+        mimo_probe_contract.validate_mimo_training_fanin_trace,
+        mimo_probe_contract.validate_mimo_training_fanin_run,
+    ),
+    "mimo-train8-fanout": manifest.TraceProfile(
+        "mimo-train8-fanout",
+        8,
+        _MIMO_TERMINAL_EVENTS,
+        mimo_probe_contract.validate_mimo_training_fanout_trace,
+        mimo_probe_contract.validate_mimo_training_fanout_run,
     ),
 }
 
@@ -536,6 +551,8 @@ _CONFIG_PROFILES = {
         "multimodule-bridge8-fanout"
     ),
     "flagscale_single_node_mimo_smoke": "mimo-train2",
+    "flagscale_single_node_mimo_fanin": "mimo-train8-fanin",
+    "flagscale_single_node_mimo_fanout": "mimo-train8-fanout",
 }
 
 

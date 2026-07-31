@@ -26,6 +26,17 @@ _BRIDGE_EVENTS = frozenset(
         "bridge-recv-backward",
     )
 )
+_TWO_RANK_ROLES = {0: "encoder", 1: "llm"}
+_EIGHT_RANK_ROLES = {
+    0: "encoder",
+    1: "encoder",
+    2: "encoder",
+    3: "encoder",
+    4: "llm",
+    5: "llm",
+    6: "llm",
+    7: "llm",
+}
 
 
 def _failure(code: str, message: str, evidence: str) -> Failure:
@@ -50,12 +61,13 @@ def _event_span(events: Sequence[Event], name: str) -> tuple[Event, Event] | Non
     return matching[0], matching[1]
 
 
-def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
-    """Check the terminal optimizer step relative to the MiMo Bridge schedule."""
-
+def _validate_mimo_training_trace(
+    trace_root: Path, expected_ranks: Sequence[int], *, required_bridge_ranks: frozenset[int]
+) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
-    for rank in (0, 1):
+    observed_bridge_ranks: set[int] = set()
+    for rank in expected_ranks:
         iterations = by_rank.get(rank, ())
         evidence = f"rank={rank}"
         if len(iterations) != 1:
@@ -81,7 +93,9 @@ def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
         bridge_ends = [
             event.rel_ts for event in events if event.name in _BRIDGE_EVENTS and event.ph == "E"
         ]
-        if not bridge_ends:
+        if bridge_ends:
+            observed_bridge_ranks.add(rank)
+        if not bridge_ends and rank in required_bridge_ranks:
             failures.append(
                 _failure(
                     "trace.mimo.bridge",
@@ -89,7 +103,15 @@ def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
                     evidence,
                 )
             )
-        elif max(bridge_ends) > optimizer[0].rel_ts:
+        elif bridge_ends and rank not in required_bridge_ranks:
+            failures.append(
+                _failure(
+                    "trace.mimo.bridge_rank",
+                    "MiMo Bridge event appeared on an inactive topology rank",
+                    evidence,
+                )
+            )
+        elif bridge_ends and max(bridge_ends) > optimizer[0].rel_ts:
             failures.append(
                 _failure(
                     "trace.mimo.order",
@@ -97,14 +119,51 @@ def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
                     evidence,
                 )
             )
+    if not observed_bridge_ranks:
+        failures.append(
+            _failure(
+                "trace.mimo.bridge",
+                "MiMo training iteration contains no completed Bridge event",
+                "all-ranks",
+            )
+        )
     return tuple(failures)
 
 
-def validate_mimo_training_run(run_root: Path, trace_enabled: bool) -> tuple[Failure, ...]:
-    """Validate real F/B, optimizer update, and checkpoint reload on two ranks."""
+def validate_mimo_training_trace(trace_root: Path) -> tuple[Failure, ...]:
+    """Check the two-rank optimizer step relative to each local Bridge schedule."""
+
+    return _validate_mimo_training_trace(
+        trace_root, tuple(_TWO_RANK_ROLES), required_bridge_ranks=frozenset(_TWO_RANK_ROLES)
+    )
+
+
+def validate_mimo_training_fanin_trace(trace_root: Path) -> tuple[Failure, ...]:
+    """Check the DP4-to-TP2/PP2 Bridge and optimizer boundaries."""
+
+    return _validate_mimo_training_trace(
+        trace_root, tuple(_EIGHT_RANK_ROLES), required_bridge_ranks=frozenset((0, 1, 2, 3, 4, 5))
+    )
+
+
+def validate_mimo_training_fanout_trace(trace_root: Path) -> tuple[Failure, ...]:
+    """Check the TP2/PP2-to-DP4 Bridge and optimizer boundaries."""
+
+    return _validate_mimo_training_trace(
+        trace_root, tuple(_EIGHT_RANK_ROLES), required_bridge_ranks=frozenset((2, 3, 4, 5, 6, 7))
+    )
+
+
+def _validate_mimo_training_run(
+    run_root: Path,
+    trace_enabled: bool,
+    *,
+    expected_roles: Mapping[int, str],
+    loss_ranks: frozenset[int],
+) -> tuple[Failure, ...]:
+    """Validate real F/B, optimizer update, and checkpoint reload."""
 
     failures: list[Failure] = []
-    expected_roles = {0: "encoder", 1: "llm"}
     checkpoint_paths: set[str] = set()
     for rank, role in expected_roles.items():
         path = run_root / f"training-result-rank-{rank}.json"
@@ -131,7 +190,7 @@ def validate_mimo_training_run(run_root: Path, trace_enabled: bool) -> tuple[Fai
             "optimizer_success": True,
             "trace_enabled": trace_enabled,
             "use_distributed_optimizer": False,
-            "world_size": 2,
+            "world_size": len(expected_roles),
         }
         for field, value in expected.items():
             if payload.get(field) != value:
@@ -171,7 +230,7 @@ def validate_mimo_training_run(run_root: Path, trace_enabled: bool) -> tuple[Fai
                     str(path),
                 )
             )
-        expected_loss_count = 0 if rank == 0 else 4
+        expected_loss_count = 4 if rank in loss_ranks else 0
         if payload.get("loss_count") != expected_loss_count:
             failures.append(
                 _failure(
@@ -223,3 +282,30 @@ def validate_mimo_training_run(run_root: Path, trace_enabled: bool) -> tuple[Fai
             )
         )
     return tuple(failures)
+
+
+def validate_mimo_training_run(run_root: Path, trace_enabled: bool) -> tuple[Failure, ...]:
+    """Validate the two-rank MiMo terminal state."""
+
+    return _validate_mimo_training_run(
+        run_root, trace_enabled, expected_roles=_TWO_RANK_ROLES, loss_ranks=frozenset((1,))
+    )
+
+
+def validate_mimo_training_fanin_run(run_root: Path, trace_enabled: bool) -> tuple[Failure, ...]:
+    """Validate the DP4 encoder to TP2/PP2 language-model terminal state."""
+
+    return _validate_mimo_training_run(
+        run_root, trace_enabled, expected_roles=_EIGHT_RANK_ROLES, loss_ranks=frozenset((6, 7))
+    )
+
+
+def validate_mimo_training_fanout_run(run_root: Path, trace_enabled: bool) -> tuple[Failure, ...]:
+    """Validate the TP2/PP2 encoder to DP4 language-model terminal state."""
+
+    return _validate_mimo_training_run(
+        run_root,
+        trace_enabled,
+        expected_roles=_EIGHT_RANK_ROLES,
+        loss_ranks=frozenset((4, 5, 6, 7)),
+    )
