@@ -110,6 +110,8 @@ def _validate_iteration(
     launch_ends = _events(iteration, "p2p-launch", "E")
     completions = _route_events(iteration, "B")
     completion_ends = _route_events(iteration, "E")
+    batch_completions = _events(iteration, "p2p-batch-complete", "B")
+    batch_completion_ends = _events(iteration, "p2p-batch-complete", "E")
     syncs = _events(iteration, "p2p-batch-device-sync", "B")
     sync_ends = _events(iteration, "p2p-batch-device-sync", "E")
 
@@ -143,11 +145,37 @@ def _validate_iteration(
             )
         )
 
-    completion_counts_match = len(completions) == len(completion_ends) and all(
+    directional_counts_match = len(completions) == len(completion_ends) and all(
         len(_events(iteration, name, "B")) == len(_events(iteration, name, "E"))
         for name in _DIRECTIONAL_EVENTS
     )
-    if not completions or not completion_counts_match:
+    if batched:
+        expected_directional_completions = sum(
+            len(group) == 1 for group in operation_groups
+        )
+        expected_batch_completions = sum(
+            len(group) > 1 for group in operation_groups
+        )
+        if (
+            not directional_counts_match
+            or len(completions) != expected_directional_completions
+            or len(batch_completions) != expected_batch_completions
+            or len(batch_completion_ends) != expected_batch_completions
+        ):
+            failures.append(
+                _failure(
+                    "trace.p2p.completion_count",
+                    "completion B/E counts differ from singleton/aggregate "
+                    f"batches: directional={len(completions)}/{len(completion_ends)} "
+                    f"expected={expected_directional_completions}; "
+                    f"aggregate={len(batch_completions)}/"
+                    f"{len(batch_completion_ends)} "
+                    f"expected={expected_batch_completions}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    elif not completions or not directional_counts_match:
         failures.append(
             _failure(
                 "trace.p2p.completion_count",
@@ -170,7 +198,7 @@ def _validate_iteration(
         )
 
     launched: dict[str, tuple[str, str, str]] = {}
-    operations_by_batch: dict[str, set[str]] = {}
+    operations_by_batch: dict[str, tuple[str, ...]] = {}
     observed_operation_groups: list[tuple[str, ...]] = []
     completion_modes: set[str] = set()
     for launch in launches:
@@ -209,7 +237,7 @@ def _validate_iteration(
             continue
 
         completion_modes.add(mode)
-        operation_ids: set[str] = set()
+        operation_ids: list[str] = []
         operation_names: list[str] = []
         for operation in operations:
             if not isinstance(operation, Mapping):
@@ -242,9 +270,9 @@ def _validate_iteration(
                     )
                 )
                 continue
-            operation_ids.add(operation_id)
+            operation_ids.append(operation_id)
             launched[operation_id] = (batch_id, event_name, mode)
-        operations_by_batch[batch_id] = operation_ids
+        operations_by_batch[batch_id] = tuple(operation_ids)
         observed_operation_groups.append(tuple(operation_names))
 
     if batched and tuple(observed_operation_groups) != operation_groups:
@@ -258,7 +286,7 @@ def _validate_iteration(
             )
         )
 
-    if len(completions) != len(launched):
+    if not batched and len(completions) != len(launched):
         failures.append(
             _failure(
                 "trace.p2p.completion_count",
@@ -301,6 +329,8 @@ def _validate_iteration(
                     "completion_site": completion_site,
                     "completion_included": True,
                     "completion_kind": "work_wait",
+                    "operation_count": 1,
+                    "operation_ids": [operation_id],
                 },
                 rank=rank,
                 iteration=iteration_id,
@@ -316,8 +346,120 @@ def _validate_iteration(
                     iteration=iteration_id,
                 )
             )
+        expected_batch_ids = operations_by_batch.get(batch_id)
+        if batched and expected_batch_ids != (operation_id,):
+            failures.append(
+                _failure(
+                    "trace.p2p.identity",
+                    f"directional completion for operation_id={operation_id!r} "
+                    "does not belong to a singleton batch",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
         if isinstance(operation_id, str):
             completed_ids.append(operation_id)
+
+    for completion, completion_end in zip(completions, completion_ends):
+        if completion.name != completion_end.name:
+            failures.append(
+                _failure(
+                    "trace.p2p.identity",
+                    f"directional completion begins as {completion.name!r} and "
+                    f"ends as {completion_end.name!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        failures.extend(
+            _check_fields(
+                completion_end,
+                {"completed": True},
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    if batched:
+        completed_batches: list[str] = []
+        for completion in batch_completions:
+            batch_id = completion.attrs.get("batch_id")
+            operation_ids = completion.attrs.get("operation_ids")
+            expected_ids = operations_by_batch.get(batch_id)
+            failures.extend(
+                _check_fields(
+                    completion,
+                    {
+                        "transport_api": "batch_isend_irecv",
+                        "request_pairing": "aggregate",
+                        "stage": "batch_p2p_completion",
+                        "timing_phase": "stream_dependency",
+                        "completion_mode": "internal_wait",
+                        "completion_included": True,
+                        "completion_kind": "aggregate_work_wait",
+                        "completion_guarantee": "current_stream_after_wait",
+                        "duration_attribution": "shared_nonexclusive",
+                        "host_blocking_guaranteed": False,
+                        "physical_request_count": 1,
+                    },
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            # The producer has no completion_site for an aggregate Work. Its
+            # stage and timing_phase fields identify the observed wait boundary.
+            if (
+                expected_ids is None
+                or len(expected_ids) <= 1
+                or not isinstance(operation_ids, list)
+                or tuple(operation_ids) != expected_ids
+                or completion.attrs.get("operation_count") != len(expected_ids)
+            ):
+                failures.append(
+                    _failure(
+                        "trace.p2p.identity",
+                        "aggregate completion does not preserve its launch "
+                        f"batch or ordered operation IDs for batch_id={batch_id!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            if isinstance(batch_id, str):
+                completed_batches.append(batch_id)
+            if isinstance(operation_ids, list):
+                completed_ids.extend(
+                    operation_id
+                    for operation_id in operation_ids
+                    if isinstance(operation_id, str)
+                )
+
+        for completion_end in batch_completion_ends:
+            failures.extend(
+                _check_fields(
+                    completion_end,
+                    {"completed": True},
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+        expected_aggregate_batches = {
+            batch_id
+            for batch_id, operation_ids in operations_by_batch.items()
+            if len(operation_ids) > 1
+        }
+        if (
+            len(completed_batches) != len(set(completed_batches))
+            or set(completed_batches) != expected_aggregate_batches
+        ):
+            failures.append(
+                _failure(
+                    "trace.p2p.identity",
+                    "multi-operation launch and aggregate-completion batch IDs differ",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
 
     if len(completed_ids) != len(set(completed_ids)) or set(completed_ids) != set(launched):
         failures.append(
@@ -331,7 +473,14 @@ def _validate_iteration(
 
     if batched:
         synced_batches = set()
-        for sync in syncs:
+        for sync, sync_end in zip(syncs, sync_ends):
+            batch_id = sync.attrs.get("batch_id")
+            expected_ids = operations_by_batch.get(batch_id)
+            expected_pairing = (
+                "aggregate"
+                if expected_ids is not None and len(expected_ids) > 1
+                else "position"
+            )
             failures.extend(
                 _check_fields(
                     sync,
@@ -340,18 +489,19 @@ def _validate_iteration(
                         "completion_kind": "device_synchronize",
                         "completion_site": "batch_p2p_sync_workaround",
                         "completion_included": True,
+                        "request_pairing": expected_pairing,
+                        "physical_request_count": 1,
                     },
                     rank=rank,
                     iteration=iteration_id,
                 )
             )
-            batch_id = sync.attrs.get("batch_id")
             operation_ids = sync.attrs.get("operation_ids")
-            expected_ids = operations_by_batch.get(batch_id)
             if (
                 expected_ids is None
                 or not isinstance(operation_ids, list)
-                or set(operation_ids) != expected_ids
+                or tuple(operation_ids) != expected_ids
+                or sync.attrs.get("operation_count") != len(expected_ids)
             ):
                 failures.append(
                     _failure(
@@ -363,6 +513,14 @@ def _validate_iteration(
                 )
             elif isinstance(batch_id, str):
                 synced_batches.add(batch_id)
+            failures.extend(
+                _check_fields(
+                    sync_end,
+                    {"completed": True},
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
         if synced_batches != set(operations_by_batch):
             failures.append(
                 _failure(
@@ -378,10 +536,19 @@ def _validate_iteration(
             for group in operation_groups
             for item in (
                 (("p2p-launch", "B"), ("p2p-launch", "E"))
-                + tuple(
-                    event
-                    for direction in group
-                    for event in ((direction, "B"), (direction, "E"))
+                + (
+                    (
+                        group[0]
+                        if len(group) == 1
+                        else "p2p-batch-complete",
+                        "B",
+                    ),
+                    (
+                        group[0]
+                        if len(group) == 1
+                        else "p2p-batch-complete",
+                        "E",
+                    ),
                 )
                 + (
                     ("p2p-batch-device-sync", "B"),
@@ -393,7 +560,8 @@ def _validate_iteration(
             (event.name, event.ph)
             for event in iteration.events
             if event.name in _DIRECTIONAL_EVENTS
-            or event.name in {"p2p-launch", "p2p-batch-device-sync"}
+            or event.name
+            in {"p2p-launch", "p2p-batch-complete", "p2p-batch-device-sync"}
         )
         if observed_sequence != expected_sequence:
             failures.append(

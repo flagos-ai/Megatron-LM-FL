@@ -332,28 +332,66 @@ def _write_gpt_phase_trace(
                 if completion_mode == "internal_wait"
                 else "exposed_request_wait"
             )
-            for operation in operations:
-                event_name = (
-                    f"{operation['direction']}-{operation['pipeline_direction']}"
-                )
-                operation_id = operation["operation_id"]
+            operation_ids = [
+                operation["operation_id"] for operation in operations
+            ]
+            if (
+                p2p_route in {"batch", "batch-steady"}
+                and len(operations) > 1
+            ):
                 event(
-                    event_name,
+                    "p2p-batch-complete",
                     "B",
-                    **operation,
                     batch_id=batch_id,
-                    request_pairing=completion_pairing,
-                    completion_site=completion_site,
+                    comm_type="p2p",
+                    backend="nccl",
+                    backends=["nccl"],
+                    backend_complete=True,
+                    completion_guarantee="current_stream_after_wait",
                     completion_included=True,
-                    completion_kind="work_wait",
-                    operation_count=1,
-                    operation_ids=[operation_id],
+                    completion_kind="aggregate_work_wait",
+                    completion_mode=completion_mode,
+                    duration_attribution="shared_nonexclusive",
+                    host_blocking_guaranteed=False,
+                    op="wait",
+                    operation_count=len(operations),
+                    operation_ids=operation_ids,
+                    operation_id_scope="rank_local",
+                    operations=operations,
+                    physical_request_count=1,
+                    request_id=f"{batch_id}:aggregate",
+                    request_pairing="aggregate",
+                    stage="batch_p2p_completion",
+                    timing_phase="stream_dependency",
+                    transport_api=transport_api,
                 )
-                event(event_name, "E", completed=True, error_type=None)
+                event(
+                    "p2p-batch-complete",
+                    "E",
+                    completed=True,
+                    error_type=None,
+                )
+            else:
+                for operation in operations:
+                    event_name = (
+                        f"{operation['direction']}-"
+                        f"{operation['pipeline_direction']}"
+                    )
+                    operation_id = operation["operation_id"]
+                    event(
+                        event_name,
+                        "B",
+                        **operation,
+                        batch_id=batch_id,
+                        request_pairing=completion_pairing,
+                        completion_site=completion_site,
+                        completion_included=True,
+                        completion_kind="work_wait",
+                        operation_count=1,
+                        operation_ids=[operation_id],
+                    )
+                    event(event_name, "E", completed=True, error_type=None)
             if p2p_route in {"batch", "batch-steady"}:
-                operation_ids = [
-                    operation["operation_id"] for operation in operations
-                ]
                 event(
                     "p2p-batch-device-sync",
                     "B",
@@ -363,14 +401,16 @@ def _write_gpt_phase_trace(
                     backends=["nccl"],
                     backend_complete=True,
                     transport_api=transport_api,
-                    request_pairing="position",
+                    request_pairing=(
+                        "aggregate" if len(operations) > 1 else "position"
+                    ),
                     completion_site="batch_p2p_sync_workaround",
                     completion_included=True,
                     completion_kind="device_synchronize",
                     operation_count=len(operations),
                     operation_ids=operation_ids,
                     operations=operations,
-                    physical_request_count=len(operations),
+                    physical_request_count=1,
                 )
                 event(
                     "p2p-batch-device-sync",
@@ -1088,7 +1128,79 @@ def test_pp2_batched_steady_profile_accepts_steady_operation_groups(
             p2p_route="batch-steady",
         )
 
+    aggregate_completions = []
+    for path in trace_root.glob("benchmark-*.json"):
+        aggregate_completions.extend(
+            row
+            for row in json.loads(path.read_text(encoding="utf-8"))
+            if row.get("name") == "p2p-batch-complete"
+            and row.get("ph") == "B"
+        )
+    assert len(aggregate_completions) == 4
+    assert all(
+        completion["operation_count"] == 2
+        and completion["request_pairing"] == "aggregate"
+        and completion["physical_request_count"] == 1
+        and "completion_site" not in completion
+        for completion in aggregate_completions
+    )
     assert gate.PROFILES["pp2-batched-steady"].contract(trace_root) == ()
+
+
+def test_pp2_batched_steady_contract_rejects_reordered_aggregate_ids(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-batched-steady-reordered-aggregate"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            p2p_route="batch-steady",
+        )
+
+    rank_zero = next(trace_root.glob("*pipeline-0-tensor-0.json"))
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    completion = next(
+        row
+        for row in rows
+        if row.get("name") == "p2p-batch-complete" and row.get("ph") == "B"
+    )
+    completion["operation_ids"] = list(reversed(completion["operation_ids"]))
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = p2p_probe_contract.validate_pp2_batched_steady_route(trace_root)
+
+    assert "trace.p2p.identity" in {failure.code for failure in failures}
+
+
+def test_pp2_batched_steady_contract_requires_completed_aggregate_end(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-batched-steady-incomplete-aggregate"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            p2p_route="batch-steady",
+        )
+
+    rank_zero = next(trace_root.glob("*pipeline-0-tensor-0.json"))
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    completion_end = next(
+        row
+        for row in rows
+        if row.get("name") == "p2p-batch-complete" and row.get("ph") == "E"
+    )
+    completion_end["completed"] = False
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = p2p_probe_contract.validate_pp2_batched_steady_route(trace_root)
+
+    assert "trace.p2p.field" in {failure.code for failure in failures}
 
 
 def test_pp2_batched_steady_contract_rejects_single_microbatch_route(
