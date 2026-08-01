@@ -119,6 +119,7 @@ def test_mimo_pretrain_profile_uses_megatron_production_entry() -> None:
     assert config["train"]["system"]["pipeline_model_parallel_size"] == 1
     assert config["train"]["system"]["use_distributed_optimizer"] is False
     assert config["train"]["system"]["trace_granularity"] == "full"
+    assert config["train"]["system"]["checkpoint"]["save_interval"] == 100
     assert config["train"]["model"]["global_batch_size"] == 4
     assert config["train"]["model"]["micro_batch_size"] == 1
     assert config["train"]["model"]["train_iters"] == 2

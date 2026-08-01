@@ -48,7 +48,7 @@ train:
       log_interval: 1
       log_throughput: true
     checkpoint:
-      save_interval: 1
+      save_interval: 100
       ckpt_format: torch_dist
   model:
     transformer_impl: transformer_engine
