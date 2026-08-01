@@ -35,10 +35,12 @@ kernel；Liger 提供 Legacy LCE 的 Triton CE kernel，以及超大 FC1 拆分�
 SiLU×Mul operation。这样无需维护一份 Qwen 专用自动替换表，也不会把 HF 模型结构
 假设带入 Megatron。
 
-对于单次 FC1 输出达到 4 GiB 的 bias-free SwiGLU，默认策略会保留 TE/Megatron
+对于单次 FC1 输出达到 0.5 GiB 的 bias-free SwiGLU，默认策略会保留 TE/Megatron
 拼接后的 FC1 权重和 checkpoint 格式，但在 forward 中把它作为 gate/up 两个 view
 执行两次 GEMM，再调用 Liger SiLU×Mul。这样兼容原有 checkpoint，同时避免 14B、
-BS64 时单个约 4.25 GiB 临时张量造成的 CUDA allocator cache retry。阈值可通过
+BS64 时单个约 4.25 GiB 临时张量造成的 CUDA allocator cache retry，并让中等 batch
+使用 checkpoint early-stop 路径。0.25 GiB 边界实测会使 4B/BS8 退化，因此没有
+对所有 batch 强制拆分。阈值可通过
 `MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB` 调整，设为 `0` 可关闭。
 
 `slideformer-slot` 在 backward 中按层恢复 boundary hidden 并重建 autograd graph。
@@ -67,6 +69,16 @@ Megatron copy 累计时间反而更少（6.960 s 对 8.203 s）。剩余约 0.56
 差异主要来自约 0.20 s 的调度空隙和 copy/compute 重叠布局差异，GPU busy 利用率为
 99.31% 对 99.73%。因此当前没有证据支持继续替换 TE/FlashAttention kernel；后续
 优化应聚焦调度边界，而不是增加模型专用 kernel 分支。
+
+中等 batch 的形状选择不同。Qwen3-14B/BS8 的 trace 中，TE 拼接 FC1 对应的
+CUTLASS GEMM（80 次）累计约 0.879 s，而 torch native 的 gate/up 两路 GEMM
+（160 次）累计约 0.272 s。0.5 GiB 自动拆分后，孤立 3+10 复测从
+7.2572 s/step 降至 7.1022 s/step，peak reserved 为 7.816 GiB；split trace 的
+kernel 累计为 5.642 s，已少于 native 的 5.813 s。剩余差距来自调度重叠：GPU
+span 仍为 7.117 s 对 6.506 s，idle 为 0.461 s 对 0.207 s。关闭统一 H2D
+调度器的孤立复测为 7.0992 s/step，没有实际收益，因此保持共享深度 3 的安全
+默认值；后续优化需要联合调整 checkpoint callback 与参数池 lease，不能只删除
+Megatron backward hook。
 
 早期同一台 RTX 4090、同一 Qwen3-8B checkpoint、BF16、seq=1024、BS64、
 3 warmup + 10 measured 的单点结果为：
@@ -173,8 +185,8 @@ export MEGATRON_SLIDEFORMER_MAX_OUTSTANDING_H2D=3
 export MEGATRON_SLIDEFORMER_KERNEL_POLICY=auto
 export MEGATRON_SLIDEFORMER_ATTENTION_BACKEND=auto
 export MEGATRON_SLIDEFORMER_MLP_BACKEND=auto
-# 自动拆分 >=4 GiB 的 SwiGLU FC1 输出；设为 0 可禁用
-export MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB=4.0
+# 自动拆分 >=0.5 GiB 的 SwiGLU FC1 输出；设为 0 可禁用
+export MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB=0.5
 export MEGATRON_SLIDEFORMER_LOSS_BACKEND=auto
 export MEGATRON_SLIDEFORMER_NORM_BACKEND=auto
 export MEGATRON_SLIDEFORMER_ROPE_BACKEND=auto

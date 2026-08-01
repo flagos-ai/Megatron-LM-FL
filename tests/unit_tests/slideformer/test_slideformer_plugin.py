@@ -116,7 +116,7 @@ def test_config_reads_megatron_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.kernel_policy == "auto"
     assert config.attention_backend == "auto"
     assert config.mlp_backend == "auto"
-    assert config.split_swiglu_threshold_gib == 4.0
+    assert config.split_swiglu_threshold_gib == 0.5
     assert config.loss_backend == "auto"
     assert config.norm_backend == "auto"
     assert config.rope_backend == "auto"
@@ -203,7 +203,11 @@ def test_default_policy_splits_oversized_te_swiglu(monkeypatch) -> None:
 
     assert args._slideformer_split_te_swiglu is True
     assert report["mlp_prebuild_backend"] == "split_te_swiglu"
-    args.micro_batch_size = 32
+    args.micro_batch_size = 8
+    report = prepare_kernel_policy(args, MegatronSlideFormerConfig())
+    assert args._slideformer_split_te_swiglu is True
+    assert report["mlp_prebuild_backend"] == "split_te_swiglu"
+    args.micro_batch_size = 4
     report = prepare_kernel_policy(args, MegatronSlideFormerConfig())
     assert args._slideformer_split_te_swiglu is False
     assert "mlp_prebuild_backend" not in report
