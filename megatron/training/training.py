@@ -295,7 +295,7 @@ def _apply_slideformer_if_enabled(model):
     _validate_slideformer_runtime(slideformer_config)
     if len(model) != 1:
         raise ValueError("Megatron-LM-FL SlideFormer currently supports one model chunk only")
-    kernel_report = apply_kernel_policy(model[0], slideformer_config)
+    kernel_report = apply_kernel_policy(model[0], slideformer_config, runtime_args=get_args())
     engine = apply_true_megatron_slideformer(
         model[0],
         config=MegatronSlideFormerEngineConfig(

@@ -121,6 +121,68 @@ def _liger_mlp_forward(self, hidden_states, per_token_scale=None, **kwargs):
     return _liger_swiglu_compute(self, hidden_states), None
 
 
+def _split_te_mlp_forward(self, hidden_states, per_token_scale=None, **kwargs):
+    del kwargs
+    if per_token_scale is not None:
+        raise RuntimeError("SlideFormer split SwiGLU does not support per-token scaling")
+    fc1 = self.linear_fc1
+    norm_weight = getattr(fc1, "layer_norm_weight", None)
+    if norm_weight is None:
+        raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
+    normalized = F.rms_norm(
+        hidden_states, (hidden_states.shape[-1],), norm_weight, self.config.layernorm_epsilon
+    )
+    fc1_weight = fc1.weight
+    gate_weight, up_weight = torch.chunk(fc1_weight, 2, dim=0)
+    fc1_bias = getattr(fc1, "bias", None)
+    gate_bias = up_bias = None
+    if fc1_bias is not None and fc1_bias.numel() > 0:
+        gate_bias, up_bias = torch.chunk(fc1_bias, 2, dim=0)
+    gate = F.linear(normalized, gate_weight, gate_bias)
+    up = F.linear(normalized, up_weight, up_bias)
+    activated = LigerSiLUMulFunction.apply(gate, up)
+    output, fc2_bias = self.linear_fc2(activated)
+    return output, fc2_bias
+
+
+def apply_split_te_swiglu(model: nn.Module) -> int:
+    """Split TE's concatenated Qwen FC1 into gate/up GEMMs without changing weights."""
+
+    if LigerSiLUMulFunction is None:
+        raise RuntimeError("SlideFormer split SwiGLU requires the liger-kernel package")
+    compatible, reason, _ = _validate_dense_swiglu(model)
+    if not compatible:
+        raise RuntimeError(reason)
+    patched = 0
+    for layer in resolve_megatron_decoder_layout(model).layers:
+        mlp = layer.mlp
+        if not hasattr(mlp.linear_fc1, "layer_norm_weight"):
+            raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
+        if hasattr(mlp, "_slideformer_liger_original_forward"):
+            continue
+        mlp._slideformer_liger_original_forward = mlp.forward
+        mlp._slideformer_liger_backend = "split_te"
+        mlp.forward = MethodType(_split_te_mlp_forward, mlp)
+        patched += 1
+    return patched
+
+
+def _should_split_te_swiglu(args, config) -> bool:
+    threshold_gib = config.split_swiglu_threshold_gib
+    if threshold_gib <= 0 or config.mlp_backend != "auto":
+        return False
+    if not getattr(args, "swiglu", False) or getattr(args, "add_bias_linear", True):
+        return False
+    micro_batch_size = getattr(args, "micro_batch_size", None)
+    seq_length = getattr(args, "seq_length", None)
+    ffn_hidden_size = getattr(args, "ffn_hidden_size", None)
+    if not micro_batch_size or not seq_length or not ffn_hidden_size:
+        return False
+    element_size = 2 if getattr(args, "bf16", False) or getattr(args, "fp16", False) else 4
+    fc1_output_bytes = micro_batch_size * seq_length * 2 * ffn_hidden_size * element_size
+    return fc1_output_bytes >= threshold_gib * 1024**3
+
+
 def apply_liger_swiglu(model: nn.Module) -> int:
     if LigerSiLUMulFunction is None:
         raise RuntimeError("SlideFormer fused SwiGLU requires the liger-kernel package")
@@ -244,6 +306,10 @@ def prepare_kernel_policy(args, config) -> dict[str, Any]:
         if getattr(args, "position_embedding_type", None) == "rope":
             args.apply_rope_fusion = True
         report["structural_backend"] = "transformer_engine"
+        split_te_swiglu = _should_split_te_swiglu(args, config)
+        setattr(args, "_slideformer_split_te_swiglu", split_te_swiglu)
+        if split_te_swiglu:
+            report["mlp_prebuild_backend"] = "split_te_swiglu"
 
     if config.attention_backend != "megatron" and getattr(args, "reset_attention_mask", False):
         raise RuntimeError(
@@ -374,7 +440,7 @@ def legacy_fused_linear_cross_entropy(
     return token_losses.view_as(labels_t).transpose(0, 1).contiguous()
 
 
-def apply_kernel_policy(model: nn.Module, config) -> dict[str, Any]:
+def apply_kernel_policy(model: nn.Module, config, *, runtime_args=None) -> dict[str, Any]:
     report: dict[str, Any] = {
         "policy": config.kernel_policy,
         "attention": {"requested": config.attention_backend, "effective": "megatron"},
@@ -391,7 +457,13 @@ def apply_kernel_policy(model: nn.Module, config) -> dict[str, Any]:
     uses_transformer_engine = (
         getattr(model_config, "transformer_impl", None) == "transformer_engine"
     )
-    if uses_transformer_engine:
+    split_te_swiglu = bool(
+        runtime_args is not None and getattr(runtime_args, "_slideformer_split_te_swiglu", False)
+    )
+    if split_te_swiglu:
+        count = apply_split_te_swiglu(model)
+        report["mlp"].update(effective="split_te_swiglu", patched_layers=count)
+    elif uses_transformer_engine:
         te_attention_backend = getattr(model_config, "attention_backend", None)
         report["attention"]["effective"] = (
             "transformer_engine_flash_attention"

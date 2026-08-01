@@ -25,7 +25,7 @@
 | 模块 | 默认实现 | 不兼容或缺依赖时 |
 | --- | --- | --- |
 | dense causal attention | TE auto（Qwen3 实测选择 FlashAttention 2.8.3） | 显式选择 local backend |
-| dense SwiGLU | TE MCore fused SwiGLU | 有 bias 时保留 Megatron bias-activation fusion |
+| dense SwiGLU | TE MCore fused SwiGLU；超大 FC1 自动拆分 gate/up GEMM | 有 bias 时保留 Megatron bias-activation fusion |
 | LM head + CE | SlideFormer Legacy LCE | 显式选择现代 `liger` 或 `megatron` |
 | RMSNorm（含 Q/K norm） | TE MCore RMSNorm | 显式选择 local backend |
 | standard dense RoPE | TE fused RoPE | 显式选择 local backend |
@@ -33,6 +33,19 @@
 这里不使用 Liger 的 Hugging Face `AutoModel` monkey patch。MCore/TE 负责模型结构
 kernel；Liger 仅作为 Legacy LCE 底层 Triton CE kernel 的依赖。这样无需维护一份
 Qwen 专用自动替换表，也不会把 HF 模型结构假设带入 Megatron。
+
+对于单次 FC1 输出达到 4 GiB 的 bias-free SwiGLU，默认策略会保留 TE/Megatron
+拼接后的 FC1 权重和 checkpoint 格式，但在 forward 中把它作为 gate/up 两个 view
+执行两次 GEMM，再调用 Liger SiLU×Mul。这样兼容原有 checkpoint，同时避免 14B、
+BS64 时单个约 4.25 GiB 临时张量造成的 CUDA allocator cache retry。阈值可通过
+`MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB` 调整，设为 `0` 可关闭。
+
+Qwen3-14B、BF16、seq=1024、BS64、3 warmup + 10 measured 的正式复测中，自动拆分
+把 Megatron-LM-FL 从 54.8709 s/step 提升至 50.4093 s/step（1300.1 tokens/s），
+peak allocated 从 22.041 GiB 降至 19.924 GiB，peak reserved 从 22.896 GiB 降至
+22.273 GiB，allocator retry 从 529 降至 0。相对同协议 torch native 的
+1405.3 tokens/s 仍慢约 7.5%，因此这项修正解决的是最明显的 FC1 分配问题，不能宣称
+14B 已达到完全性能一致。
 
 早期同一台 RTX 4090、同一 Qwen3-8B checkpoint、BF16、seq=1024、BS64、
 3 warmup + 10 measured 的单点结果为：
@@ -138,6 +151,8 @@ export MEGATRON_SLIDEFORMER_MAX_OUTSTANDING_H2D=3
 export MEGATRON_SLIDEFORMER_KERNEL_POLICY=auto
 export MEGATRON_SLIDEFORMER_ATTENTION_BACKEND=auto
 export MEGATRON_SLIDEFORMER_MLP_BACKEND=auto
+# 自动拆分 >=4 GiB 的 SwiGLU FC1 输出；设为 0 可禁用
+export MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB=4.0
 export MEGATRON_SLIDEFORMER_LOSS_BACKEND=auto
 export MEGATRON_SLIDEFORMER_NORM_BACKEND=auto
 export MEGATRON_SLIDEFORMER_ROPE_BACKEND=auto

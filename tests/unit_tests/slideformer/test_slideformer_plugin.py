@@ -116,6 +116,7 @@ def test_config_reads_megatron_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.kernel_policy == "auto"
     assert config.attention_backend == "auto"
     assert config.mlp_backend == "auto"
+    assert config.split_swiglu_threshold_gib == 4.0
     assert config.loss_backend == "auto"
     assert config.norm_backend == "auto"
     assert config.rope_backend == "auto"
@@ -176,6 +177,119 @@ def test_prebuild_kernel_policy_enables_native_swiglu_and_flash_rope(monkeypatch
     assert args.bias_swiglu_fusion is True
     assert args.apply_rope_fusion is False
     assert report == {"megatron_fused_swiglu": True, "rope_prebuild_backend": "flash_attention"}
+
+
+def test_default_policy_splits_oversized_te_swiglu(monkeypatch) -> None:
+    from megatron.core.extensions import transformer_engine
+
+    monkeypatch.setattr(transformer_engine, "HAVE_TE", True)
+    monkeypatch.setattr(kernels, "flash_attn_func", object())
+    args = SimpleNamespace(
+        swiglu=True,
+        bias_swiglu_fusion=False,
+        position_embedding_type="rope",
+        apply_rope_fusion=False,
+        reset_attention_mask=False,
+        add_bias_linear=False,
+        micro_batch_size=64,
+        seq_length=1024,
+        ffn_hidden_size=17408,
+        bf16=True,
+        fp16=False,
+    )
+
+    report = prepare_kernel_policy(args, MegatronSlideFormerConfig())
+
+    assert args._slideformer_split_te_swiglu is True
+    assert report["mlp_prebuild_backend"] == "split_te_swiglu"
+    args.micro_batch_size = 32
+    report = prepare_kernel_policy(args, MegatronSlideFormerConfig())
+    assert args._slideformer_split_te_swiglu is False
+    assert "mlp_prebuild_backend" not in report
+
+
+def test_split_te_swiglu_preserves_concatenated_weight_numerics(monkeypatch) -> None:
+    class FakeLigerSiLUMulFunction:
+        @staticmethod
+        def apply(gate, up):
+            return F.silu(gate) * up
+
+    class FusedNormFC1(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.weight = nn.Parameter(torch.randn(16, 8))
+            self.layer_norm_weight = nn.Parameter(torch.randn(8))
+            self.bias = None
+
+    class TupleLinear(nn.Linear):
+        def forward(self, inputs):
+            return super().forward(inputs), None
+
+    class DenseSwiGLU(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(
+                gated_linear_unit=True,
+                activation_func=F.silu,
+                add_bias_linear=False,
+                tensor_model_parallel_size=1,
+                layernorm_epsilon=1e-6,
+            )
+            self.linear_fc1 = FusedNormFC1()
+            self.linear_fc2 = TupleLinear(8, 8, bias=False)
+
+        def forward(self, hidden_states, **_):
+            normalized = F.rms_norm(
+                hidden_states,
+                (8,),
+                self.linear_fc1.layer_norm_weight,
+                self.config.layernorm_epsilon,
+            )
+            intermediate = F.linear(normalized, self.linear_fc1.weight)
+            gate, up = torch.chunk(intermediate, 2, dim=-1)
+            output, _ = self.linear_fc2(F.silu(gate) * up)
+            return output, None
+
+    class Layer(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mlp = DenseSwiGLU()
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(
+                transformer_impl="transformer_engine",
+                attention_backend=kernels.AttnBackend.auto,
+                gated_linear_unit=True,
+                normalization="RMSNorm",
+                mtp_num_layers=None,
+                use_mup=False,
+            )
+            self.embedding = nn.Embedding(8, 8)
+            self.decoder = nn.Module()
+            self.decoder.layers = nn.ModuleList([Layer()])
+            self.decoder.final_layernorm = nn.RMSNorm(8)
+            self.output_layer = nn.Linear(8, 8, bias=False)
+            self.position_embedding_type = "rope"
+
+    monkeypatch.setattr(kernels, "LigerSiLUMulFunction", FakeLigerSiLUMulFunction)
+    model = Model()
+    inputs = torch.randn(3, 2, 8, requires_grad=True)
+    expected = model.decoder.layers[0].mlp(inputs)[0]
+    runtime_args = SimpleNamespace(_slideformer_split_te_swiglu=True)
+
+    report = apply_kernel_policy(
+        model, replace(MegatronSlideFormerConfig(), strict_kernels=False), runtime_args=runtime_args
+    )
+    actual = model.decoder.layers[0].mlp(inputs)[0]
+
+    assert report["mlp"] == {
+        "requested": "auto",
+        "effective": "split_te_swiglu",
+        "patched_layers": 1,
+    }
+    torch.testing.assert_close(actual, expected)
 
 
 def test_default_prebuild_kernel_policy_selects_transformer_engine(monkeypatch) -> None:

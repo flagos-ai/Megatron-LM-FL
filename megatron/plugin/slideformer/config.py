@@ -36,6 +36,7 @@ class MegatronSlideFormerConfig:
     kernel_policy: str = "auto"
     attention_backend: str = "auto"
     mlp_backend: str = "auto"
+    split_swiglu_threshold_gib: float = 4.0
     loss_backend: str = "auto"
     norm_backend: str = "auto"
     rope_backend: str = "auto"
@@ -195,6 +196,9 @@ class MegatronSlideFormerConfig:
             kernel_policy=os.getenv("MEGATRON_SLIDEFORMER_KERNEL_POLICY", "auto"),
             attention_backend=os.getenv("MEGATRON_SLIDEFORMER_ATTENTION_BACKEND", "auto"),
             mlp_backend=os.getenv("MEGATRON_SLIDEFORMER_MLP_BACKEND", "auto"),
+            split_swiglu_threshold_gib=float(
+                os.getenv("MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB", "4.0")
+            ),
             loss_backend=os.getenv("MEGATRON_SLIDEFORMER_LOSS_BACKEND", "auto"),
             norm_backend=os.getenv("MEGATRON_SLIDEFORMER_NORM_BACKEND", "auto"),
             rope_backend=os.getenv("MEGATRON_SLIDEFORMER_ROPE_BACKEND", "auto"),
@@ -261,6 +265,8 @@ class MegatronSlideFormerConfig:
             raise ValueError("SlideFormer attention_backend must be auto, flash, or megatron")
         if self.mlp_backend not in {"auto", "liger", "megatron"}:
             raise ValueError("SlideFormer mlp_backend must be auto, liger, or megatron")
+        if self.split_swiglu_threshold_gib < 0:
+            raise ValueError("SlideFormer split SwiGLU threshold must be non-negative")
         if self.loss_backend not in {"auto", "legacy", "liger", "megatron"}:
             raise ValueError("SlideFormer loss_backend must be auto, legacy, liger, or megatron")
         if self.norm_backend not in {"auto", "liger", "megatron"}:
