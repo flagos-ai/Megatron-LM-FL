@@ -476,8 +476,8 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
                 "B",
             ),
         ),
-        dp_probe_contract.validate_dp_distopt_force_sync,
-        training_run_contract.validate_two_iteration_legacy_pp2_checkpoint,
+        dp_probe_contract.validate_dp_optimizer_step_force_sync_training,
+        training_run_contract.validate_two_iteration_legacy_pp2_force_sync,
     ),
     "dp2-layerwise-overlap": manifest.TraceProfile(
         "dp2-layerwise-overlap",

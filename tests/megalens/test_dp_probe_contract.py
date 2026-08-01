@@ -210,7 +210,7 @@ def _write_force_sync_trace(
     trace_root: Path,
     *,
     rank: int,
-    completion_site: str = "force_sync",
+    omit_final_param: bool = False,
 ) -> None:
     rows: list[dict[str, object]] = []
     timestamp = 0
@@ -266,6 +266,36 @@ def _write_force_sync_trace(
                 "iteration": iteration,
             }
         )
+        if iteration == 2:
+            forward_param_id = f"dp:param:forward:{rank}:{iteration}"
+            dispatch(
+                "dp-param-all-gather",
+                forward_param_id,
+                async_op=True,
+                op="all_gather",
+                group_role="intra_optimizer_instance",
+                optimizer_kind="distributed",
+                payload_role="parameter_bucket",
+                stage="distributed_optimizer_param_allgather",
+            )
+            event(
+                "dp-param-sync-complete",
+                "B",
+                completion_guarantee="current_stream_after_wait",
+                completion_included=True,
+                completion_kind="work_wait",
+                completion_site="finish_param_sync",
+                host_blocking_guaranteed=False,
+                launch_observed=True,
+                op="wait",
+                operation_count=1,
+                operation_id=forward_param_id,
+                operation_ids=[forward_param_id],
+                operation_id_scope="rank_local",
+                stage="parameter_allgather_completion",
+                timing_phase="stream_dependency",
+            )
+            event("dp-param-sync-complete", "E", completed=True, error_type=None)
         for chunk in range(2):
             grad_id = f"dp:grad:{rank}:{iteration}:{chunk}"
             dispatch(
@@ -304,46 +334,17 @@ def _write_force_sync_trace(
                 use_distributed_optimizer=True,
             )
             event("dp-grad-sync-complete", "E", completed=True, error_type=None)
-
-        async_param_id = f"dp:param:async:{rank}:{iteration}"
-        dispatch(
-            "dp-param-all-gather",
-            async_param_id,
-            async_op=True,
-            op="all_gather",
-            group_role="intra_optimizer_instance",
-            optimizer_kind="distributed",
-            payload_role="parameter_bucket",
-            stage="distributed_optimizer_param_allgather",
-        )
-        event(
-            "dp-param-sync-complete",
-            "B",
-            completion_guarantee="current_stream_after_wait",
-            completion_included=True,
-            completion_kind="work_wait",
-            completion_site=completion_site,
-            host_blocking_guaranteed=False,
-            launch_observed=True,
-            op="wait",
-            operation_count=1,
-            operation_id=async_param_id,
-            operation_ids=[async_param_id],
-            operation_id_scope="rank_local",
-            stage="parameter_allgather_completion",
-            timing_phase="stream_dependency",
-        )
-        event("dp-param-sync-complete", "E", completed=True, error_type=None)
-        dispatch(
-            "dp-param-all-gather",
-            f"dp:param:sync:{rank}:{iteration}",
-            async_op=False,
-            op="all_gather",
-            group_role="intra_optimizer_instance",
-            optimizer_kind="distributed",
-            payload_role="parameter_bucket",
-            stage="distributed_optimizer_param_allgather",
-        )
+        if not omit_final_param:
+            dispatch(
+                "dp-param-all-gather",
+                f"dp:param:optimizer:{rank}:{iteration}",
+                async_op=True,
+                op="all_gather",
+                group_role="intra_optimizer_instance",
+                optimizer_kind="distributed",
+                payload_role="parameter_bucket",
+                stage="distributed_optimizer_param_allgather",
+            )
         rows.append(
             {
                 "name": "iteration",
@@ -445,22 +446,27 @@ def test_dp_layerwise_contract_rejects_distopt_route(tmp_path: Path) -> None:
     }
 
 
-def test_dp_force_sync_contract_accepts_pending_work_then_sync_dispatch(
+def test_dp_force_sync_training_contract_accepts_optimizer_step_pending_work(
     tmp_path: Path,
 ) -> None:
     for rank in range(4):
         _write_force_sync_trace(tmp_path, rank=rank)
 
-    assert dp_probe_contract.validate_dp_distopt_force_sync(tmp_path) == ()
+    assert (
+        dp_probe_contract.validate_dp_optimizer_step_force_sync_training(tmp_path)
+        == ()
+    )
 
 
-def test_dp_force_sync_contract_requires_the_force_sync_completion_site(
+def test_dp_force_sync_training_contract_requires_the_final_pending_work(
     tmp_path: Path,
 ) -> None:
-    _write_force_sync_trace(tmp_path, rank=0, completion_site="finish_param_sync")
+    _write_force_sync_trace(tmp_path, rank=0, omit_final_param=True)
 
-    failures = dp_probe_contract.validate_dp_distopt_force_sync(tmp_path)
+    failures = dp_probe_contract.validate_dp_optimizer_step_force_sync_training(
+        tmp_path
+    )
 
-    assert {"trace.dp.field", "trace.dp.force_sync"} <= {
+    assert {"trace.dp.event_count", "trace.dp.force_sync"} <= {
         failure.code for failure in failures
     }

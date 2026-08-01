@@ -533,6 +533,26 @@ def test_legacy_pp2_training_contract_requires_both_pipeline_stages(
     )
 
 
+def test_force_sync_run_contract_requires_all_weight_hash_callbacks(
+    tmp_path: Path,
+) -> None:
+    _write_legacy_pp2_terminal_checkpoint(tmp_path)
+    (tmp_path / "launcher.log").write_text(
+        "\n".join(
+            f">>> Weight hashes match after {iteration} iterations..."
+            for iteration in (0, 1, 2)
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        training_run_contract.validate_two_iteration_legacy_pp2_force_sync(
+            tmp_path, True
+        )
+        == ()
+    )
+
+
 def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
     profiles_with_specialized_run_contracts = {
         "multimodule-bridge2",
@@ -558,7 +578,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
 
     assert (
         gate.PROFILES["pp2-dp2-distopt-force-sync"].run_contract
-        is training_run_contract.validate_two_iteration_legacy_pp2_checkpoint
+        is training_run_contract.validate_two_iteration_legacy_pp2_force_sync
     )
 
 
@@ -747,10 +767,13 @@ def test_force_sync_profile_selects_interleaved_pp2_dp2_legacy_checkpoint() -> N
     assert force_sync == baseline
     profile = gate.PROFILES["pp2-dp2-distopt-force-sync"]
     assert profile.rank_count == 4
-    assert profile.contract is dp_probe_contract.validate_dp_distopt_force_sync
+    assert (
+        profile.contract
+        is dp_probe_contract.validate_dp_optimizer_step_force_sync_training
+    )
     assert (
         profile.run_contract
-        is training_run_contract.validate_two_iteration_legacy_pp2_checkpoint
+        is training_run_contract.validate_two_iteration_legacy_pp2_force_sync
     )
 
 

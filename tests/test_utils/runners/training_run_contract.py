@@ -68,3 +68,37 @@ def validate_two_iteration_legacy_pp2_checkpoint(
                     )
                 )
     return tuple(failures)
+
+
+def validate_two_iteration_legacy_pp2_force_sync(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require legacy terminal state and every configured weight-hash callback."""
+
+    failures = list(
+        validate_two_iteration_legacy_pp2_checkpoint(run_root, trace_enabled)
+    )
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    for iteration in (0, 1, 2):
+        marker = f">>> Weight hashes match after {iteration} iterations..."
+        if marker not in log_text:
+            failures.append(
+                Failure(
+                    "run.training.force_sync",
+                    "configured DP weight-hash callback did not complete",
+                    marker,
+                )
+            )
+    return tuple(failures)
