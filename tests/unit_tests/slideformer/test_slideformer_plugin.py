@@ -191,6 +191,7 @@ def test_default_policy_splits_oversized_te_swiglu(monkeypatch) -> None:
         apply_rope_fusion=False,
         reset_attention_mask=False,
         add_bias_linear=False,
+        normalization="RMSNorm",
         micro_batch_size=64,
         seq_length=1024,
         ffn_hidden_size=17408,
@@ -203,6 +204,11 @@ def test_default_policy_splits_oversized_te_swiglu(monkeypatch) -> None:
     assert args._slideformer_split_te_swiglu is True
     assert report["mlp_prebuild_backend"] == "split_te_swiglu"
     args.micro_batch_size = 32
+    report = prepare_kernel_policy(args, MegatronSlideFormerConfig())
+    assert args._slideformer_split_te_swiglu is False
+    assert "mlp_prebuild_backend" not in report
+    args.micro_batch_size = 64
+    args.normalization = "LayerNorm"
     report = prepare_kernel_policy(args, MegatronSlideFormerConfig())
     assert args._slideformer_split_te_swiglu is False
     assert "mlp_prebuild_backend" not in report
@@ -220,6 +226,9 @@ def test_split_te_swiglu_preserves_concatenated_weight_numerics(monkeypatch) -> 
             self.weight = nn.Parameter(torch.randn(16, 8))
             self.layer_norm_weight = nn.Parameter(torch.randn(8))
             self.bias = None
+            self.normalization = "RMSNorm"
+            self.zero_centered_gamma = False
+            self.eps = 1e-6
 
     class TupleLinear(nn.Linear):
         def forward(self, inputs):

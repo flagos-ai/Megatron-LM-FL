@@ -129,9 +129,11 @@ def _split_te_mlp_forward(self, hidden_states, per_token_scale=None, **kwargs):
     norm_weight = getattr(fc1, "layer_norm_weight", None)
     if norm_weight is None:
         raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
-    normalized = F.rms_norm(
-        hidden_states, (hidden_states.shape[-1],), norm_weight, self.config.layernorm_epsilon
-    )
+    if getattr(fc1, "normalization", None) != "RMSNorm":
+        raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
+    if getattr(fc1, "zero_centered_gamma", False):
+        norm_weight = norm_weight + 1
+    normalized = F.rms_norm(hidden_states, (hidden_states.shape[-1],), norm_weight, fc1.eps)
     fc1_weight = fc1.weight
     gate_weight, up_weight = torch.chunk(fc1_weight, 2, dim=0)
     fc1_bias = getattr(fc1, "bias", None)
@@ -156,7 +158,10 @@ def apply_split_te_swiglu(model: nn.Module) -> int:
     patched = 0
     for layer in resolve_megatron_decoder_layout(model).layers:
         mlp = layer.mlp
-        if not hasattr(mlp.linear_fc1, "layer_norm_weight"):
+        if (
+            not hasattr(mlp.linear_fc1, "layer_norm_weight")
+            or getattr(mlp.linear_fc1, "normalization", None) != "RMSNorm"
+        ):
             raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
         if hasattr(mlp, "_slideformer_liger_original_forward"):
             continue
@@ -172,6 +177,8 @@ def _should_split_te_swiglu(args, config) -> bool:
     if threshold_gib <= 0 or config.mlp_backend != "auto":
         return False
     if not getattr(args, "swiglu", False) or getattr(args, "add_bias_linear", True):
+        return False
+    if getattr(args, "normalization", None) != "RMSNorm" or getattr(args, "fp8", None):
         return False
     micro_batch_size = getattr(args, "micro_batch_size", None)
     seq_length = getattr(args, "seq_length", None)
