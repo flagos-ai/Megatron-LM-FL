@@ -968,8 +968,18 @@ def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
     assert payload["source"]["path"] == str(gate._REPOSITORY_ROOT.resolve())
     assert payload["source"]["head"] == gate._source_head(gate._REPOSITORY_ROOT)
     source_mount = f"{gate._REPOSITORY_ROOT.resolve()}:{gate.CONTAINER_SOURCE_ROOT}:ro"
+    dataset_overlay = (
+        f"{run_dir / 'build' / 'megatron-core-datasets'}:"
+        f"{gate.CONTAINER_SOURCE_ROOT}/megatron/core/datasets"
+    )
     assert source_mount in command
+    assert dataset_overlay in command
     assert command.index(source_mount) < command.index("example/flagscale:dev")
+    assert command.index(source_mount) < command.index(dataset_overlay)
+    assert (run_dir / "build" / "megatron-core-datasets" / "Makefile").is_file()
+    assert not tuple(
+        (run_dir / "build" / "megatron-core-datasets").glob("helpers_cpp*.so")
+    )
     assert any("conda activate flagscale-train" in argument for argument in command)
     assert ("flagscale", "run") == command[-5:-3]
     assert command[-1] == "--action=test"

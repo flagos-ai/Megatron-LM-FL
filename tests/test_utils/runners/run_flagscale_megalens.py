@@ -654,6 +654,7 @@ def _docker_command(
     rdzv_port: int,
     ep_dispatcher: str | None,
     flagscale_training_overlay: Path | None,
+    dataset_helper_overlay: Path | None = None,
 ) -> tuple[str, ...]:
     overlay = ()
     if flagscale_training_overlay is not None:
@@ -661,6 +662,13 @@ def _docker_command(
             "--volume",
             f"{flagscale_training_overlay}:"
             "/workspace/FlagScale/flagscale/train/megatron/training/training.py:ro",
+        )
+    dataset_overlay = ()
+    if dataset_helper_overlay is not None:
+        dataset_overlay = (
+            "--volume",
+            f"{dataset_helper_overlay}:"
+            f"{CONTAINER_SOURCE_ROOT}/megatron/core/datasets",
         )
     dispatcher = ()
     if ep_dispatcher is not None:
@@ -695,6 +703,7 @@ def _docker_command(
         f"{run_dir}:{CONTAINER_RUN_ROOT}",
         "--volume",
         f"{source_root}:{CONTAINER_SOURCE_ROOT}:ro",
+        *dataset_overlay,
         *overlay,
         "--env",
         f"MEGALENS_GATE_CONTAINER_RUN_DIR={CONTAINER_RUN_ROOT}",
@@ -764,6 +773,19 @@ def _copy_inputs(
     shutil.copyfile(source, destination)
     if profile.name == "bert-encoder":
         generate_bert_smoke_inputs.generate_inputs(inputs)
+    return destination
+
+
+def _prepare_dataset_helper_overlay(source_root: Path, run_dir: Path) -> Path:
+    """Copy the dataset helper sources to a writable per-run build directory."""
+
+    source = source_root / "megatron" / "core" / "datasets"
+    destination = run_dir / "build" / "megatron-core-datasets"
+    shutil.copytree(
+        source,
+        destination,
+        ignore=shutil.ignore_patterns("__pycache__", "helpers_cpp*.so"),
+    )
     return destination
 
 
@@ -856,6 +878,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     started_at = manifest.utc_now()
     copied_config = _copy_inputs(args.input_config.resolve(), run_dir, profile)
+    dataset_helper_overlay = _prepare_dataset_helper_overlay(source_root, run_dir)
     launcher_log = run_dir / "launcher.log"
     dispatcher = _ep_dispatcher(profile, args.ep_dispatcher)
     overlay = (
@@ -872,6 +895,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         rdzv_port=rdzv_port,
         ep_dispatcher=dispatcher,
         flagscale_training_overlay=overlay,
+        dataset_helper_overlay=dataset_helper_overlay,
     )
     environment = os.environ.copy()
     environment.update(
