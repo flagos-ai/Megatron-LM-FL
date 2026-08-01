@@ -127,6 +127,19 @@ BS64 复测中，将 tied weight 拆为一个专用常驻槽后，Megatron-LM-FL
 14.4166 s / 12.105 GiB / 12.115 GiB。吞吐差距由 6.68% 收窄到 1.87%，且
 allocated 已低于原生实现。剩余约 1.31 GiB reserved 差距不能再归因于参数槽尺寸。
 
+对应 BS64 Nsight 单步中，Megatron-LM-FL 的 GPU span/busy/idle 分别为
+14.573/14.446/0.128 s，原生实现为 14.180/14.154/0.025 s；kernel sum 分别为
+14.322 和 14.082 s。剩余差距主要已在计算图内，而不是 H2D 调度器空转。
+Megatron interleaved `linear_qkv` 在 forward 和 recompute 中产生的 attention layout
+clone 共约 339 ms；原生 HF 的分离 q/k/v projection 不需要同样的布局转换。
+Qwen3 的 QK RMSNorm 又使 Megatron 现有 `fused_single_qkv_rope` 路径不适用，若要
+继续消除这部分开销，需要单独实现和验收 TP=1 batch-major QKV/attention builder。
+
+两项低风险替代均未带来收益：强制 TE FlashAttention 为 14.7166 s/step，略慢于
+TE auto 的 14.6855 s/step；`cudaMallocAsync` screening 把 reserved 提高到
+20.344 GiB。默认因此继续使用“验证 FlashAttention 可用、由 TE auto dispatch”
+和 `expandable_segments`。
+
 CPU RSS 差异主要不是 sliding checkpoint 语义不同。两者都为 36 层保留约
 18 GiB 的 BF16 boundary activation slots；Megatron 的显式统计为
 30.513 GiB FP32 master、61.026 GiB Adam 状态、2.318 GiB shared gradients、
