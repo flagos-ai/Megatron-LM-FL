@@ -23,6 +23,7 @@ from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
 from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
+from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
 
@@ -500,6 +501,19 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         mimo_probe_contract.validate_mimo_training_trace,
         mimo_probe_contract.validate_mimo_training_run,
     ),
+    "mimo-pretrain2": manifest.TraceProfile(
+        "mimo-pretrain2",
+        2,
+        _events(
+            "forward-step",
+            "loss",
+            "optimizer",
+            "optimizer-step",
+            "optimizer-postprocess",
+        ),
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_trace,
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_run,
+    ),
     "mimo-train8-fanin": manifest.TraceProfile(
         "mimo-train8-fanin",
         8,
@@ -551,6 +565,7 @@ _CONFIG_PROFILES = {
         "multimodule-bridge8-fanout"
     ),
     "flagscale_single_node_mimo_smoke": "mimo-train2",
+    "flagscale_single_node_mimo_pretrain_smoke": "mimo-pretrain2",
     "flagscale_single_node_mimo_fanin": "mimo-train8-fanin",
     "flagscale_single_node_mimo_fanout": "mimo-train8-fanout",
 }
