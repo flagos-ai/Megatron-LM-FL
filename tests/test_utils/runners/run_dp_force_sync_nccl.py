@@ -84,7 +84,7 @@ def _validate_trace(trace_dir: Path, rank: int) -> dict[str, object]:
     operation_id = launch.get("operation_id")
     if not isinstance(operation_id, str):
         raise AssertionError("parameter AllGather has no operation identity")
-    expected_group = list(range(dist.get_world_size()))
+    expected_group = [peer for peer in range(dist.get_world_size()) if peer != rank]
     expected_fields = {
         "api_async_op": True,
         "async_op": True,
@@ -119,7 +119,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=torch.device("cuda", local_rank))
     runtime: MegaLensRuntime | None = None
     try:
         parallel_state.initialize_model_parallel(create_gloo_process_groups=False)
