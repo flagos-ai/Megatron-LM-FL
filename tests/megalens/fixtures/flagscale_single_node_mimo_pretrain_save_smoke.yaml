@@ -36,13 +36,12 @@ train:
     sequence_parallel: false
     use_distributed_optimizer: false
     finetune: false
-    exit_interval: 1
     trace: ${oc.decode:${oc.env:MEGALENS_GATE_TRACE,false}}
     trace_mode: 1
     trace_dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/traces
     hardware_monitor: false
-    trace_interval: 1
-    continuous_trace_iterations: 1
+    trace_interval: 2
+    continuous_trace_iterations: 2
     trace_granularity: full
     trace_cupti_kernels: "off"
     logging:

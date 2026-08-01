@@ -51,6 +51,7 @@ train:
       save_interval: 100
       ckpt_format: torch_dist
       load: /artifacts/load/checkpoints
+      ckpt_step: 1
   model:
     transformer_impl: transformer_engine
     num_layers: 1

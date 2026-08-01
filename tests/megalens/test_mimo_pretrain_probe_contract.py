@@ -150,13 +150,14 @@ def test_mimo_pretrain_resume_profiles_preserve_the_two_iteration_schedule() -> 
     save_config = yaml.safe_load(_SAVE_FIXTURE.read_text(encoding="utf-8"))
     resume_config = yaml.safe_load(_RESUME_FIXTURE.read_text(encoding="utf-8"))
 
-    assert save_config["train"]["system"]["exit_interval"] == 1
+    assert "exit_interval" not in save_config["train"]["system"]
     assert save_config["train"]["system"]["logging"]["log_energy"] is True
     assert save_config["train"]["system"]["checkpoint"]["save_interval"] == 1
     assert save_config["train"]["model"]["train_iters"] == 2
     assert resume_config["train"]["system"]["checkpoint"]["load"] == (
         gate.CONTAINER_CHECKPOINT_LOAD_ROOT
     )
+    assert resume_config["train"]["system"]["checkpoint"]["ckpt_step"] == 1
     assert resume_config["train"]["model"]["train_iters"] == 2
     assert gate._CONFIG_PROFILES[_SAVE_FIXTURE.stem] == "mimo-pretrain-save2"
     assert gate._CONFIG_PROFILES[_RESUME_FIXTURE.stem] == "mimo-pretrain-resume2"
@@ -223,11 +224,14 @@ def test_mimo_pretrain_save_contract_accepts_the_restart_checkpoint(
 ) -> None:
     _write_run_artifacts(
         tmp_path,
-        consumed_train_samples=4,
-        final_iteration=1,
+        consumed_train_samples=8,
+        final_iteration=2,
         loaded_iteration=0,
         trace_enabled=False,
     )
+    restart = tmp_path / "checkpoints" / "iter_0000001"
+    restart.mkdir()
+    (restart / "common.pt").write_bytes(b"common")
 
     assert (
         mimo_pretrain_probe_contract.validate_mimo_pretrain_save_run(

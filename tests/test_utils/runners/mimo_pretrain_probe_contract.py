@@ -132,9 +132,9 @@ def validate_mimo_pretrain_trace(trace_root: Path) -> tuple[Failure, ...]:
 
 
 def validate_mimo_pretrain_save_trace(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate the first iteration before a process restart."""
+    """Validate a run that retains the first iteration for a restart."""
 
-    return _validate_mimo_pretrain_trace(trace_root, (1,))
+    return _validate_mimo_pretrain_trace(trace_root, (1, 2))
 
 
 def validate_mimo_pretrain_resume_trace(trace_root: Path) -> tuple[Failure, ...]:
@@ -239,16 +239,30 @@ def validate_mimo_pretrain_run(
 def validate_mimo_pretrain_save_run(
     run_root: Path, trace_enabled: bool
 ) -> tuple[Failure, ...]:
-    """Validate the checkpoint written before a process restart."""
+    """Validate the intermediate and terminal restart checkpoints."""
 
-    return _validate_mimo_pretrain_run(
-        run_root,
-        trace_enabled,
-        consumed_train_samples=4,
-        final_iteration=1,
-        loaded_iteration=0,
-        train_iters=2,
+    failures = list(
+        _validate_mimo_pretrain_run(
+            run_root,
+            trace_enabled,
+            consumed_train_samples=8,
+            final_iteration=2,
+            loaded_iteration=0,
+            train_iters=2,
+        )
     )
+    iteration_root = run_root / "checkpoints" / "iter_0000001"
+    if not iteration_root.is_dir() or not any(
+        path.is_file() for path in iteration_root.rglob("*")
+    ):
+        failures.append(
+            _failure(
+                "run.mimo_pretrain.restart_checkpoint",
+                "iteration 1 restart checkpoint is absent or empty",
+                str(iteration_root),
+            )
+        )
+    return tuple(failures)
 
 
 def validate_mimo_pretrain_resume_run(
