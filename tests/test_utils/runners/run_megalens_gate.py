@@ -91,6 +91,7 @@ def _profile_checks(
             "tests/megalens/test_probe_contract_scan.py",
             "tests/megalens/test_run_manifest.py",
             "tests/megalens/test_flagscale_run_gate.py",
+            "tests/megalens/test_combined_1f1b_probe_contract.py",
             "tests/megalens/test_legacy_checkpoint_comparator.py",
             "tests/megalens/test_dual_node_probe_profiles.py",
             "tests/megalens/test_tp_allreduce_observability.py",
