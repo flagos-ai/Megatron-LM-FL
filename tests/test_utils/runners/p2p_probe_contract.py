@@ -1131,14 +1131,10 @@ def validate_pp2_unbatched_warmup_flush_route(
 
 
 _MODEL_KERNEL_MARKERS = (
-    "attention",
-    "attn",
-    "cudnn",
     "gemm",
-    "nvjet",
+    "nvjet_",
     "sdpa",
-    "transformer_engine",
-    "triton",
+    "transformer_engine::",
 )
 
 

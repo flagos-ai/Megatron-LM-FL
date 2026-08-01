@@ -1647,6 +1647,31 @@ def test_pp2_overlap_timeline_profile_rejects_disjoint_kernels(
     assert "trace.p2p.kernel_overlap" in {failure.code for failure in failures}
 
 
+def test_pp2_overlap_timeline_profile_rejects_generic_triton_kernel(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-overlap-timeline-generic-triton"
+    for rank in (0, 1):
+        _write_pp2_unbatched_warmup_flush_trace(
+            trace_root, rank=rank, kernel_timeline=True
+        )
+
+    rank_one = next(trace_root.glob("*pipeline-1-tensor-0.json"))
+    rows = json.loads(rank_one.read_text(encoding="utf-8"))
+    model_kernel = next(
+        row
+        for row in rows
+        if row.get("record_type") == "cuda_kernel"
+        and row.get("name") == "transformer_engine::model_gemm"
+    )
+    model_kernel["name"] = "triton_unrelated_kernel"
+    rank_one.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = p2p_probe_contract.validate_pp2_overlap_timeline_route(trace_root)
+
+    assert "trace.p2p.kernel_overlap" in {failure.code for failure in failures}
+
+
 def test_pp2_unbatched_warmup_flush_rejects_the_wrong_unwaited_send(
     tmp_path: Path,
 ) -> None:
