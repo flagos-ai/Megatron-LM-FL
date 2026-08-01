@@ -108,8 +108,9 @@ class MockVLMDataset(Dataset):
         labels[:-1] = input_ids[1:]
         labels[-1] = self.pad_token_id  # Padding for the last position
 
-        # Set labels for image tokens to -100 (ignored in loss calculation)
-        labels[input_ids == self.image_token_id] = -100
+        # Keep masked labels inside the vocabulary. Megatron applies ``loss_mask``
+        # after vocabulary-parallel cross entropy rather than using ignore_index.
+        labels[input_ids == self.image_token_id] = self.pad_token_id
 
         # Create loss mask (1 for tokens to calculate loss on, 0 for others)
         loss_mask = torch.ones_like(input_ids).float()
@@ -125,8 +126,10 @@ class MockVLMDataset(Dataset):
             "loss_mask": loss_mask,
             "position_ids": position_ids,
             "modality_inputs": {
-                "clip_encoder": {
-                    "images": image,
+                "images": {
+                    "clip_encoder": {
+                        "x": image,
+                    }
                 }
             },
         }
@@ -218,7 +221,9 @@ def _collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
     Returns:
         Dictionary of batched tensors
     """
-    images = torch.stack([item["images"] for item in batch])
+    images = torch.stack(
+        [item["modality_inputs"]["images"]["clip_encoder"]["x"] for item in batch]
+    )
     input_ids = torch.stack([item["input_ids"] for item in batch])
     labels = torch.stack([item["labels"] for item in batch])
     loss_mask = torch.stack([item["loss_mask"] for item in batch])
@@ -230,8 +235,10 @@ def _collate_fn(batch: List[Dict]) -> Dict[str, torch.Tensor]:
         "loss_mask": loss_mask,
         "position_ids": position_ids,
         "modality_inputs": {
-            "clip_encoder": {
-                "images": images,
+            "images": {
+                "clip_encoder": {
+                    "x": images,
+                }
             }
         },
     }
