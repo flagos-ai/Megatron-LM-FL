@@ -165,6 +165,36 @@ def _apply_rotary_pos_emb_bshd(
     return torch.cat((t, t_pass), dim=-1)
 
 
+def _apply_rotary_pos_emb_flash_bshd(
+    t: Tensor,
+    freqs: Tensor,
+    rotary_interleaved: bool = False,
+    mscale: float = 1.0,
+    inverse: bool = False,
+) -> Tensor:
+    """Apply standard dense RoPE with FlashAttention's fused rotary kernel."""
+
+    if apply_rotary_emb_flash is None:
+        raise RuntimeError("FlashAttention rotary kernel is unavailable")
+    if t.dim() != 4:
+        raise NotImplementedError("FlashAttention rotary requires [sequence, batch, heads, dim]")
+    if freqs.dim() == t.dim() + 1 and freqs.size(-2) == 1:
+        freqs = freqs.squeeze(-2)
+    if freqs.shape[-1] % 2:
+        raise ValueError("RoPE dimension must be even")
+    non_repeated = freqs[..., ::2] if rotary_interleaved else freqs[..., : freqs.shape[-1] // 2]
+    while non_repeated.dim() > 2:
+        if non_repeated.size(1) != 1:
+            raise NotImplementedError("FlashAttention rotary does not support batched RoPE")
+        non_repeated = non_repeated.squeeze(1)
+    cos = (torch.cos(non_repeated) * mscale).to(t.dtype).contiguous()
+    sin = (torch.sin(non_repeated) * mscale).to(t.dtype).contiguous()
+    if inverse:
+        sin = -sin
+    output = apply_rotary_emb_flash(t.permute(1, 0, 2, 3), cos, sin, rotary_interleaved)
+    return output.permute(1, 0, 2, 3)
+
+
 def _get_thd_freqs_on_this_cp_rank(
     cp_rank: int, cp_size: int, x: Tensor, freqs: Tensor, offset: int = 0
 ) -> Tensor:
@@ -319,6 +349,16 @@ def apply_rotary_pos_emb(
     # Keep for backward compatibility. Will deprecate in the future.
     if cp_group is None:
         cp_group = parallel_state.get_context_parallel_group()
+
+    if (
+        getattr(config, "_slideformer_flash_rope", False)
+        and cu_seqlens is None
+        and not mla_rotary_interleaved
+        and not mla_output_remove_interleaving
+    ):
+        return _apply_rotary_pos_emb_flash_bshd(
+            t, freqs, rotary_interleaved=config.rotary_interleaved, mscale=mscale, inverse=inverse
+        )
 
     if config.apply_rope_fusion:
         if cu_seqlens is None:

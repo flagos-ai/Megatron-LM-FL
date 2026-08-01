@@ -151,8 +151,11 @@ class GPTModel(LanguageModule):
         self.rotary_scaling = rope_scaling
         self.mtp_block_spec = mtp_block_spec
         self.mtp_process = mtp_block_spec is not None and mtp_on_this_rank(
-            self.config, ignore_virtual=False, vp_stage=vp_stage, 
-            ignore_dualpipev=False, dualpipev_stage=dualpipev_stage
+            self.config,
+            ignore_virtual=False,
+            vp_stage=vp_stage,
+            ignore_dualpipev=False,
+            dualpipev_stage=dualpipev_stage,
         )
 
         if self.pre_process or self.mtp_process:
@@ -680,6 +683,17 @@ class GPTModel(LanguageModule):
                     scale_logits_fn=self._scale_logits if self.config.use_mup else None,
                 )
         sequence_parallel_override = False
+
+        output_processor = getattr(self, "_slideformer_output_processor", None)
+        if output_processor is not None and labels is not None:
+            return output_processor(
+                hidden_states=hidden_states,
+                output_layer=self.output_layer,
+                output_weight=output_weight,
+                labels=labels,
+                loss_mask=loss_mask,
+                runtime_gather_output=runtime_gather_output,
+            )
 
         if in_inference_mode and inference_context.config.materialize_only_last_token_logits:
             if inference_context.is_static_batching():

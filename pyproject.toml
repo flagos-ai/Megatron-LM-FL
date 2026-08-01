@@ -72,6 +72,11 @@ training = [
     "accelerate",
 ]
 
+slideformer = [
+    "flash-attn>=2.8,<3",
+    "liger-kernel>=0.7,<0.9",
+]
+
 ### 'mlm' group is deprecated. please use 'training' instead ###
 mlm = [
     "flask-restful",
