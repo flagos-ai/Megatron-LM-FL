@@ -48,7 +48,7 @@ def _write_result() -> None:
         "checkpoint_tracker_iteration": _read_tracker(checkpoint_root),
         "completed": True,
         "consumed_train_samples": int(args.consumed_train_samples),
-        "final_iteration": int(args.curr_iteration),
+        "final_iteration": int(args.curr_iteration) + 1,
         "global_rank": rank,
         "loaded_iteration": int(args.iteration),
         "trace_enabled": bool(args.trace),
