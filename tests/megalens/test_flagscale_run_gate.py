@@ -39,6 +39,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_dp2_distopt_overlap_smoke.yaml": (
         "dp2-distopt-overlap"
     ),
+    "flagscale_single_node_pp2_dp2_distopt_force_sync_smoke.yaml": (
+        "pp2-dp2-distopt-force-sync"
+    ),
     "flagscale_single_node_dp2_layerwise_overlap_smoke.yaml": (
         "dp2-layerwise-overlap"
     ),
@@ -92,6 +95,22 @@ def _write_terminal_checkpoint(run_dir: Path) -> None:
         "2", encoding="utf-8"
     )
     (iteration_root / "common.pt").write_bytes(b"checkpoint")
+
+
+def _write_legacy_pp2_terminal_checkpoint(run_dir: Path) -> None:
+    checkpoint_root = run_dir / "checkpoints"
+    iteration_root = checkpoint_root / "iter_0000002"
+    (checkpoint_root / "latest_checkpointed_iteration.txt").parent.mkdir(
+        parents=True, exist_ok=True
+    )
+    (checkpoint_root / "latest_checkpointed_iteration.txt").write_text(
+        "2", encoding="utf-8"
+    )
+    for pipeline_rank in range(2):
+        rank_root = iteration_root / f"mp_rank_00_{pipeline_rank:03d}"
+        rank_root.mkdir(parents=True)
+        (rank_root / "model_optim_rng.pt").write_bytes(b"model")
+        (rank_root / "distrib_optim.pt").write_bytes(b"optimizer")
 
 
 def _write_gpt_phase_trace(
@@ -492,6 +511,28 @@ def test_training_contract_requires_the_terminal_checkpoint(
     )
 
 
+def test_legacy_pp2_training_contract_requires_both_pipeline_stages(
+    tmp_path: Path,
+) -> None:
+    failures = training_run_contract.validate_two_iteration_legacy_pp2_checkpoint(
+        tmp_path, False
+    )
+
+    assert {failure.code for failure in failures} == {
+        "run.training.tracker",
+        "run.training.checkpoint",
+    }
+
+    _write_legacy_pp2_terminal_checkpoint(tmp_path)
+
+    assert (
+        training_run_contract.validate_two_iteration_legacy_pp2_checkpoint(
+            tmp_path, False
+        )
+        == ()
+    )
+
+
 def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
     profiles_with_specialized_run_contracts = {
         "multimodule-bridge2",
@@ -503,6 +544,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "mimo-pretrain-resume2",
         "mimo-train8-fanin",
         "mimo-train8-fanout",
+        "pp2-dp2-distopt-force-sync",
     }
 
     for name, profile in gate.PROFILES.items():
@@ -513,6 +555,11 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
                 profile.run_contract
                 is training_run_contract.validate_two_iteration_checkpoint
             )
+
+    assert (
+        gate.PROFILES["pp2-dp2-distopt-force-sync"].run_contract
+        is training_run_contract.validate_two_iteration_legacy_pp2_checkpoint
+    )
 
 
 def test_raw_framework_event_requirements_use_the_enclosing_iteration() -> None:
@@ -665,6 +712,46 @@ def test_dp2_layerwise_profile_only_selects_dist_muon_parameter_overlap() -> Non
         "dp-param-sync-complete",
     }
     assert profile.contract is dp_probe_contract.validate_dp_layerwise_overlap
+
+
+def test_force_sync_profile_selects_interleaved_pp2_dp2_legacy_checkpoint() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_pp2_unbatched_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    force_sync = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_pp2_dp2_distopt_force_sync_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = force_sync["experiment"]["exp_name"]
+    baseline["experiment"]["ckpt_format"] = "torch"
+    baseline["experiment"]["runner"]["nproc_per_node"] = 4
+    baseline["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    system = baseline["train"]["system"]
+    system.update(
+        {
+            "use_distributed_optimizer": True,
+            "overlap_grad_reduce": True,
+            "overlap_param_gather": True,
+            "overlap_param_gather_with_optimizer_step": True,
+            "num_distributed_optimizer_instances": 1,
+            "check_weight_hash_across_dp_replicas_interval": 1,
+        }
+    )
+    system["checkpoint"]["ckpt_format"] = "torch"
+    baseline["train"]["model"]["global_batch_size"] = 4
+
+    assert force_sync == baseline
+    profile = gate.PROFILES["pp2-dp2-distopt-force-sync"]
+    assert profile.rank_count == 4
+    assert profile.contract is dp_probe_contract.validate_dp_distopt_force_sync
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_legacy_pp2_checkpoint
+    )
 
 
 def test_tp2_sp_profile_only_selects_the_local_tp_routes() -> None:

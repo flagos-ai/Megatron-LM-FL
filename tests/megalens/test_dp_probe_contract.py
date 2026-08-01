@@ -206,6 +206,161 @@ def _write_trace(
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
+def _write_force_sync_trace(
+    trace_root: Path,
+    *,
+    rank: int,
+    completion_site: str = "force_sync",
+) -> None:
+    rows: list[dict[str, object]] = []
+    timestamp = 0
+    group = [0, 1] if rank < 2 else [2, 3]
+
+    def event(name: str, phase: str, **attrs: object) -> None:
+        nonlocal timestamp
+        timestamp += 1
+        rows.append(
+            {
+                "name": name,
+                "ph": phase,
+                "rel_ts": timestamp,
+                "g_rk": rank,
+                "dp_rk": rank % 2,
+                "pp_rk": rank // 2,
+                "tp_rk": 0,
+                **attrs,
+            }
+        )
+
+    def dispatch(
+        name: str,
+        operation_id: str,
+        *,
+        async_op: bool,
+        **route: object,
+    ) -> None:
+        event(
+            name,
+            "B",
+            api_async_op=async_op,
+            async_op=async_op,
+            completion_included=False,
+            data_bytes=32768,
+            group=group,
+            group_size=2,
+            n_buckets=1,
+            operation_id=operation_id,
+            operation_id_scope="rank_local",
+            overlap_enabled=True,
+            timing_phase="async_dispatch" if async_op else "collective_call",
+            **route,
+        )
+        event(name, "E")
+
+    for iteration in (1, 2):
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "B",
+                "pad_before": 0,
+                "iteration": iteration,
+            }
+        )
+        for chunk in range(2):
+            grad_id = f"dp:grad:{rank}:{iteration}:{chunk}"
+            dispatch(
+                "dp-reduce-scatter",
+                grad_id,
+                async_op=True,
+                op="reduce_scatter",
+                group_role="intra_optimizer_instance",
+                payload_role="gradient_bucket",
+                stage="intra_instance_reduce_scatter",
+            )
+            event(
+                "dp-grad-sync-complete",
+                "B",
+                completion_guarantee="current_stream_after_wait",
+                completion_included=True,
+                completion_kind="work_wait",
+                completion_site="finish_grad_sync",
+                force_all_reduce=False,
+                host_blocking_guaranteed=False,
+                launch_observed=True,
+                num_distributed_optimizer_instances=1,
+                op="wait",
+                operation_count=1,
+                operation_ids=[grad_id],
+                operation_id_scope="rank_local",
+                operations=[
+                    {
+                        "event_name": "dp-reduce-scatter",
+                        "operation_id": grad_id,
+                        "stage": "intra_instance_reduce_scatter",
+                    }
+                ],
+                stage="gradient_collective_completion",
+                timing_phase="stream_dependency",
+                use_distributed_optimizer=True,
+            )
+            event("dp-grad-sync-complete", "E", completed=True, error_type=None)
+
+        async_param_id = f"dp:param:async:{rank}:{iteration}"
+        dispatch(
+            "dp-param-all-gather",
+            async_param_id,
+            async_op=True,
+            op="all_gather",
+            group_role="intra_optimizer_instance",
+            optimizer_kind="distributed",
+            payload_role="parameter_bucket",
+            stage="distributed_optimizer_param_allgather",
+        )
+        event(
+            "dp-param-sync-complete",
+            "B",
+            completion_guarantee="current_stream_after_wait",
+            completion_included=True,
+            completion_kind="work_wait",
+            completion_site=completion_site,
+            host_blocking_guaranteed=False,
+            launch_observed=True,
+            op="wait",
+            operation_count=1,
+            operation_id=async_param_id,
+            operation_ids=[async_param_id],
+            operation_id_scope="rank_local",
+            stage="parameter_allgather_completion",
+            timing_phase="stream_dependency",
+        )
+        event("dp-param-sync-complete", "E", completed=True, error_type=None)
+        dispatch(
+            "dp-param-all-gather",
+            f"dp:param:sync:{rank}:{iteration}",
+            async_op=False,
+            op="all_gather",
+            group_role="intra_optimizer_instance",
+            optimizer_kind="distributed",
+            payload_role="parameter_bucket",
+            stage="distributed_optimizer_param_allgather",
+        )
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "E",
+                "iteration": iteration,
+                "duration_wall": timestamp,
+            }
+        )
+
+    trace_root.mkdir(parents=True, exist_ok=True)
+    path = (
+        trace_root
+        / f"benchmark-global-{rank}-data-{rank % 2}-pipeline-{rank // 2}-tensor-0.json"
+    )
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     ("distopt", "layerwise", "multi_instance", "rank_count", "validator"),
     (
@@ -286,5 +441,26 @@ def test_dp_layerwise_contract_rejects_distopt_route(tmp_path: Path) -> None:
     failures = dp_probe_contract.validate_dp_layerwise_overlap(tmp_path)
 
     assert {"trace.dp.route", "trace.dp.field"} <= {
+        failure.code for failure in failures
+    }
+
+
+def test_dp_force_sync_contract_accepts_pending_work_then_sync_dispatch(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        _write_force_sync_trace(tmp_path, rank=rank)
+
+    assert dp_probe_contract.validate_dp_distopt_force_sync(tmp_path) == ()
+
+
+def test_dp_force_sync_contract_requires_the_force_sync_completion_site(
+    tmp_path: Path,
+) -> None:
+    _write_force_sync_trace(tmp_path, rank=0, completion_site="finish_param_sync")
+
+    failures = dp_probe_contract.validate_dp_distopt_force_sync(tmp_path)
+
+    assert {"trace.dp.field", "trace.dp.force_sync"} <= {
         failure.code for failure in failures
     }

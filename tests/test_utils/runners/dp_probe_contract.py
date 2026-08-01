@@ -30,6 +30,14 @@ _COMMON_COMPLETION = {
     "operation_id_scope": "rank_local",
     "timing_phase": "stream_dependency",
 }
+_COMMON_SYNC_DISPATCH = {
+    "api_async_op": False,
+    "async_op": False,
+    "completion_included": False,
+    "operation_id_scope": "rank_local",
+    "overlap_enabled": True,
+    "timing_phase": "collective_call",
+}
 _STANDARD_DISPATCHES = {
     "dp-allreduce": {
         "op": "all_reduce",
@@ -137,6 +145,7 @@ def _validate_rank(
     use_distributed_optimizer: bool,
     num_instances: int,
     rank: int,
+    param_completion_site: str = "finish_param_sync",
 ) -> list[Failure]:
     gradient_dispatches = frozenset(dispatch_specs) - frozenset(("dp-param-all-gather",))
     stream_join = num_instances > 1
@@ -163,7 +172,7 @@ def _validate_rank(
         completion_specs["dp-param-sync-complete"] = {
             "allowed": frozenset(("dp-param-all-gather",)),
             "fields": {
-                "completion_site": "finish_param_sync",
+                "completion_site": param_completion_site,
                 "op": "wait",
                 "stage": "parameter_allgather_completion",
             },
@@ -325,6 +334,149 @@ def _validate_rank(
     return failures
 
 
+def _validate_force_sync_rank(
+    events: list[tuple[int, Event]], rank: int
+) -> list[Failure]:
+    """Validate the mixed async/sync parameter gather force-sync lifecycle."""
+
+    filtered: list[tuple[int, Event]] = []
+    sync_begins: list[tuple[int, int, Event]] = []
+    sync_ends: list[tuple[int, int, Event]] = []
+    pending_sync_end = False
+    for position, (iteration, event) in enumerate(events):
+        if (
+            event.name == "dp-param-all-gather"
+            and event.ph == "B"
+            and event.attrs.get("async_op") is False
+        ):
+            sync_begins.append((position, iteration, event))
+            pending_sync_end = True
+            continue
+        if (
+            event.name == "dp-param-all-gather"
+            and event.ph == "E"
+            and pending_sync_end
+        ):
+            sync_ends.append((position, iteration, event))
+            pending_sync_end = False
+            continue
+        filtered.append((iteration, event))
+
+    failures = _validate_rank(
+        filtered,
+        _DISTOPT_DISPATCHES,
+        use_distributed_optimizer=True,
+        num_instances=1,
+        rank=rank,
+        param_completion_site="force_sync",
+    )
+    if pending_sync_end or len(sync_begins) != len(sync_ends):
+        failures.append(
+            _failure(
+                "trace.dp.event_count",
+                "synchronous parameter AllGather B/E counts differ",
+                rank,
+            )
+        )
+
+    expected_group = [0, 1] if rank < 2 else [2, 3]
+    for _, iteration, event in sync_begins:
+        failures.extend(
+            _field_failures(
+                event,
+                {
+                    **_COMMON_SYNC_DISPATCH,
+                    **_DISTOPT_DISPATCHES["dp-param-all-gather"],
+                    "group": expected_group,
+                    "group_size": 2,
+                },
+                rank,
+                iteration,
+            )
+        )
+
+    dispatch_begins = [
+        (position, iteration, event)
+        for position, (iteration, event) in enumerate(events)
+        if event.ph == "B" and event.name in _DISTOPT_DISPATCHES
+    ]
+    operation_ids = [event.attrs.get("operation_id") for _, _, event in dispatch_begins]
+    if any(not isinstance(operation_id, str) for operation_id in operation_ids) or len(
+        operation_ids
+    ) != len(set(operation_ids)):
+        failures.append(
+            _failure(
+                "trace.dp.operation_id",
+                "force-sync dispatch operation IDs are missing or duplicated",
+                rank,
+            )
+        )
+
+    for _, iteration, event in dispatch_begins:
+        if event.attrs.get("group") != expected_group or event.attrs.get("group_size") != 2:
+            failures.append(
+                _failure(
+                    "trace.dp.group",
+                    f"{event.name!r} does not use the expected DP peer group",
+                    rank,
+                    iteration,
+                )
+            )
+
+    for iteration in (1, 2):
+        begins = [
+            (position, event)
+            for position, (event_iteration, event) in enumerate(events)
+            if event_iteration == iteration and event.ph == "B"
+        ]
+        async_param = [
+            position
+            for position, event in begins
+            if event.name == "dp-param-all-gather"
+            and event.attrs.get("async_op") is True
+        ]
+        sync_param = [
+            position
+            for position, event in begins
+            if event.name == "dp-param-all-gather"
+            and event.attrs.get("async_op") is False
+        ]
+        force_completion = [
+            position
+            for position, event in begins
+            if event.name == "dp-param-sync-complete"
+            and event.attrs.get("completion_site") == "force_sync"
+        ]
+        expected_counts = {
+            "dp-reduce-scatter": 2,
+            "dp-grad-sync-complete": 2,
+        }
+        for name, expected_count in expected_counts.items():
+            observed_count = sum(event.name == name for _, event in begins)
+            if observed_count != expected_count:
+                failures.append(
+                    _failure(
+                        "trace.dp.event_count",
+                        f"{name!r} has {observed_count} scopes, expected {expected_count}",
+                        rank,
+                        iteration,
+                    )
+                )
+        if not (
+            len(async_param) == len(sync_param) == len(force_completion) == 1
+            and async_param[0] < force_completion[0] < sync_param[0]
+        ):
+            failures.append(
+                _failure(
+                    "trace.dp.force_sync",
+                    "expected async dispatch, force completion, then synchronous dispatch",
+                    rank,
+                    iteration,
+                )
+            )
+    return failures
+
+
 def _validate(
     trace_root: Path,
     dispatch_specs: Mapping[str, Mapping[str, Any]],
@@ -358,6 +510,14 @@ def validate_dp_distopt_overlap(trace_root: Path) -> tuple[Failure, ...]:
         trace_root,
         _DISTOPT_DISPATCHES,
         use_distributed_optimizer=True,
+    )
+
+
+def validate_dp_distopt_force_sync(trace_root: Path) -> tuple[Failure, ...]:
+    return tuple(
+        failure
+        for rank, events in _load_rank_events(trace_root).items()
+        for failure in _validate_force_sync_rank(events, rank)
     )
 
 

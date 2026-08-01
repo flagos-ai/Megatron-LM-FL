@@ -460,6 +460,25 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         dp_probe_contract.validate_dp_distopt_overlap,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "pp2-dp2-distopt-force-sync": manifest.TraceProfile(
+        "pp2-dp2-distopt-force-sync",
+        4,
+        (
+            *_dp_events("distopt"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "dp-param-sync-complete",
+                (*_COMMON_FIELDS, "operation_id", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_distopt_force_sync,
+        training_run_contract.validate_two_iteration_legacy_pp2_checkpoint,
+    ),
     "dp2-layerwise-overlap": manifest.TraceProfile(
         "dp2-layerwise-overlap",
         2,
@@ -615,6 +634,9 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_dp2_distopt_smoke": "dp2-distopt",
     "flagscale_single_node_dp2_distopt_overlap_smoke": "dp2-distopt-overlap",
+    "flagscale_single_node_pp2_dp2_distopt_force_sync_smoke": (
+        "pp2-dp2-distopt-force-sync"
+    ),
     "flagscale_single_node_dp2_layerwise_overlap_smoke": "dp2-layerwise-overlap",
     "flagscale_single_node_dp4_distopt_multi_instance_overlap_smoke": (
         "dp4-distopt-multi-instance-overlap"
