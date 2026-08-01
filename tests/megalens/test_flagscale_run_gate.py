@@ -16,6 +16,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
 from tests.test_utils.runners import tp_probe_contract
+from tests.test_utils.runners import training_run_contract
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 _CONFIG_PROFILE_CASES = {
@@ -61,8 +62,6 @@ _CONFIG_PROFILE_CASES = {
         "multimodule-bridge8-fanout"
     ),
 }
-
-
 def _write_rank_trace(run_dir: Path, rank: int, event: str = "forward") -> None:
     trace_root = run_dir / "traces"
     trace_root.mkdir(exist_ok=True)
@@ -83,6 +82,16 @@ def _write_rank_trace(run_dir: Path, rank: int, event: str = "forward") -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_terminal_checkpoint(run_dir: Path) -> None:
+    checkpoint_root = run_dir / "checkpoints"
+    iteration_root = checkpoint_root / "iter_0000002"
+    iteration_root.mkdir(parents=True)
+    (checkpoint_root / "latest_checkpointed_iteration.txt").write_text(
+        "2", encoding="utf-8"
+    )
+    (iteration_root / "common.pt").write_bytes(b"checkpoint")
 
 
 def _write_gpt_phase_trace(
@@ -390,6 +399,7 @@ def _invoke(
     image: str = "example/flagscale:dev",
     child_returncode: int = 0,
     config: str = "flagscale_single_node_smoke.yaml",
+    write_checkpoint: bool = True,
 ) -> tuple[int, Path, tuple[str, ...]]:
     run_dir = tmp_path / "run"
     observed_command: tuple[str, ...] = ()
@@ -404,8 +414,12 @@ def _invoke(
         nonlocal observed_command
         observed_command = tuple(argv)
         launcher_log.write_text("official FlagScale entrypoint\n", encoding="utf-8")
-        if mode == "trace-on" and child_returncode == 0:
-            _write_rank_trace(Path(env["MEGALENS_GATE_RUN_DIR"]), 0)
+        if child_returncode == 0:
+            run_root = Path(env["MEGALENS_GATE_RUN_DIR"])
+            if write_checkpoint:
+                _write_terminal_checkpoint(run_root)
+            if mode == "trace-on":
+                _write_rank_trace(run_root, 0)
         return gate.ExecutionResult(child_returncode)
 
     monkeypatch.setattr(gate, "run_foreground", fake_run_foreground)
@@ -445,6 +459,60 @@ def test_existing_yaml_profiles_remain_selectable(config: str, profile: str) -> 
     )
 
     assert gate._profile_from_arguments(args).name == profile
+
+
+def test_gpt_eager_profile_disables_persistent_layernorm() -> None:
+    payload = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_gpt_eager_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert payload["train"]["model"]["transformer_impl"] == "local"
+    assert payload["train"]["model"]["no_persist_layer_norm"] is True
+
+
+def test_training_contract_requires_the_terminal_checkpoint(
+    tmp_path: Path,
+) -> None:
+    failures = training_run_contract.validate_two_iteration_checkpoint(
+        tmp_path, False
+    )
+
+    assert {failure.code for failure in failures} == {
+        "run.training.tracker",
+        "run.training.checkpoint",
+    }
+
+    _write_terminal_checkpoint(tmp_path)
+
+    assert (
+        training_run_contract.validate_two_iteration_checkpoint(tmp_path, False)
+        == ()
+    )
+
+
+def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
+    profiles_with_specialized_run_contracts = {
+        "multimodule-bridge2",
+        "multimodule-bridge8-fanin",
+        "multimodule-bridge8-fanout",
+        "mimo-train2",
+        "mimo-pretrain2",
+        "mimo-pretrain-save2",
+        "mimo-pretrain-resume2",
+        "mimo-train8-fanin",
+        "mimo-train8-fanout",
+    }
+
+    for name, profile in gate.PROFILES.items():
+        if name in profiles_with_specialized_run_contracts:
+            assert profile.run_contract is not None
+        else:
+            assert (
+                profile.run_contract
+                is training_run_contract.validate_two_iteration_checkpoint
+            )
 
 
 def test_raw_framework_event_requirements_use_the_enclosing_iteration() -> None:
@@ -616,6 +684,7 @@ def test_tp2_sp_profile_only_selects_the_local_tp_routes() -> None:
     baseline["train"]["system"]["tensor_model_parallel_size"] = 2
     baseline["train"]["system"]["sequence_parallel"] = True
     model = baseline["train"]["model"]
+    model.pop("no_persist_layer_norm")
     model["no_gradient_accumulation_fusion"] = True
     model["group_query_attention"] = True
     model["num_query_groups"] = 1
@@ -1014,6 +1083,27 @@ def test_trace_off_succeeds_without_trace_shards(
     assert returncode == 0
     assert payload["mode"] == "trace-off"
     assert payload["validation"]["trace"]["shards"] == []
+
+
+def test_trace_off_rejects_a_missing_terminal_checkpoint(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    returncode, run_dir, _ = _invoke(
+        tmp_path,
+        monkeypatch,
+        mode="trace-off",
+        write_checkpoint=False,
+    )
+    payload = json.loads((run_dir / manifest.MANIFEST_NAME).read_text(encoding="utf-8"))
+
+    assert returncode == 1
+    assert payload["execution"]["returncode"] == 0
+    assert payload["status"] == "failed"
+    assert {failure["code"] for failure in payload["validation"]["failures"]} == {
+        "run.training.tracker",
+        "run.training.checkpoint",
+    }
 
 
 def test_child_failure_is_preserved_in_simple_manifest(

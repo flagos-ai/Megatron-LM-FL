@@ -26,6 +26,7 @@ from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
 from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
+from tests.test_utils.runners import training_run_contract  # noqa: E402
 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
 CONTAINER_RUN_ROOT = "/artifacts/run"
@@ -222,7 +223,11 @@ def _dp_events(profile: str) -> tuple[manifest.EventRequirement, ...]:
 
 
 PROFILES: Mapping[str, manifest.TraceProfile] = {
-    "pp1": manifest.TraceProfile("pp1", 1),
+    "pp1": manifest.TraceProfile(
+        "pp1",
+        1,
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "gpt-eager-full": manifest.TraceProfile(
         "gpt-eager-full",
         1,
@@ -239,6 +244,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             "MLP.forward",
         ),
         gpt_probe_contract.validate_gpt_pp1_eager_phases,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "tp2-sp-local": manifest.TraceProfile(
         "tp2-sp-local",
@@ -291,6 +297,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         tp_probe_contract.validate_tp2_sp_profile,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",
@@ -336,6 +343,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
         ),
         tp_probe_contract.validate_tp2_local_allreduce_profile,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "tp2-pp2-embedding": manifest.TraceProfile(
         "tp2-pp2-embedding",
@@ -370,6 +378,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "pp2": manifest.TraceProfile(
         "pp2",
@@ -379,20 +388,38 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             gpt_probe_contract.validate_gpt_pp2_training_phases,
             p2p_probe_contract.validate_pp2_batched_route,
         ),
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "pp2-unbatched": manifest.TraceProfile(
         "pp2-unbatched",
         2,
         _PP2_UNBATCHED_EVENTS,
         p2p_probe_contract.validate_pp2_unbatched_route,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
-    "ep2-alltoall": manifest.TraceProfile("ep2-alltoall", 2, _ep_events("alltoall")),
-    "ep2-allgather": manifest.TraceProfile("ep2-allgather", 2, _ep_events("allgather")),
+    "ep2-alltoall": manifest.TraceProfile(
+        "ep2-alltoall",
+        2,
+        _ep_events("alltoall"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "ep2-allgather": manifest.TraceProfile(
+        "ep2-allgather",
+        2,
+        _ep_events("allgather"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "ep2-fine-grained": manifest.TraceProfile(
-        "ep2-fine-grained", 4, _ep_events("alltoall", fine_grained=True)
+        "ep2-fine-grained",
+        4,
+        _ep_events("alltoall", fine_grained=True),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
     "dp2-standard-ddp": manifest.TraceProfile(
-        "dp2-standard-ddp", 2, _dp_events("standard-ddp")
+        "dp2-standard-ddp",
+        2,
+        _dp_events("standard-ddp"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
     "dp2-standard-ddp-overlap": manifest.TraceProfile(
         "dp2-standard-ddp-overlap",
@@ -406,8 +433,14 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         dp_probe_contract.validate_dp_standard_overlap,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
-    "dp2-distopt": manifest.TraceProfile("dp2-distopt", 2, _dp_events("distopt")),
+    "dp2-distopt": manifest.TraceProfile(
+        "dp2-distopt",
+        2,
+        _dp_events("distopt"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "dp2-distopt-overlap": manifest.TraceProfile(
         "dp2-distopt-overlap",
         2,
@@ -425,6 +458,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         dp_probe_contract.validate_dp_distopt_overlap,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "dp2-layerwise-overlap": manifest.TraceProfile(
         "dp2-layerwise-overlap",
@@ -444,6 +478,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         dp_probe_contract.validate_dp_layerwise_overlap,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "dp4-distopt-multi-instance-overlap": manifest.TraceProfile(
         "dp4-distopt-multi-instance-overlap",
@@ -463,13 +498,25 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             ),
         ),
         dp_probe_contract.validate_dp_multi_instance_distopt_overlap,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "dp8-standard-ddp": manifest.TraceProfile(
-        "dp8-standard-ddp", 8, _dp_events("standard-ddp")
+        "dp8-standard-ddp",
+        8,
+        _dp_events("standard-ddp"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
-    "dp8-distopt": manifest.TraceProfile("dp8-distopt", 8, _dp_events("distopt")),
+    "dp8-distopt": manifest.TraceProfile(
+        "dp8-distopt",
+        8,
+        _dp_events("distopt"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "te-attn-cuda-graph": manifest.TraceProfile(
-        "te-attn-cuda-graph", 1, _events("MLP.forward")
+        "te-attn-cuda-graph",
+        1,
+        _events("MLP.forward"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
     "te-moe-router-cuda-graph": manifest.TraceProfile(
         "te-moe-router-cuda-graph",
@@ -479,8 +526,14 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             manifest.EventRequirement("ep-alltoall-dispatch", _EP_ROUTE_FIELDS, "E"),
             manifest.EventRequirement("ep-alltoall-combine", _EP_ROUTE_FIELDS, "E"),
         ),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
-    "bert-encoder": manifest.TraceProfile("bert-encoder", 1, _events("encoder")),
+    "bert-encoder": manifest.TraceProfile(
+        "bert-encoder",
+        1,
+        _events("encoder"),
+        run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "multimodule-bridge2": manifest.TraceProfile(
         "multimodule-bridge2",
         2,

@@ -55,6 +55,7 @@ train:
       ckpt_format: torch_dist
   model:
     transformer_impl: local
+    no_persist_layer_norm: true
     num_layers: 2
     hidden_size: 128
     ffn_hidden_size: 256
