@@ -32,6 +32,9 @@ _CONFIG_PROFILE_CASES = {
         "pp2-batched-steady"
     ),
     "flagscale_single_node_pp2_unbatched_smoke.yaml": "pp2-unbatched",
+    "flagscale_single_node_pp2_unbatched_warmup_flush_smoke.yaml": (
+        "pp2-unbatched-warmup-flush"
+    ),
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_dp2_standard_smoke.yaml": "dp2-standard-ddp",
@@ -477,6 +480,171 @@ def _write_gpt_phase_trace(
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
+def _write_pp2_unbatched_warmup_flush_trace(
+    trace_root: Path,
+    *,
+    rank: int,
+) -> None:
+    # Reuse the locked profile table so the fixture focuses on trace encoding.
+    launch_specs = p2p_probe_contract._WARMUP_FLUSH_LAUNCHES
+    timelines = p2p_probe_contract._WARMUP_FLUSH_TIMELINE
+    compute_specs = p2p_probe_contract._WARMUP_FLUSH_COMPUTE
+    request_keys = {
+        "send-forward": "send_next",
+        "recv-forward": "recv_prev",
+        "send-backward": "send_prev",
+        "recv-backward": "recv_next",
+    }
+    trace_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    timestamp = 0
+
+    def event(name: str, phase: str, **attrs: object) -> None:
+        nonlocal timestamp
+        timestamp += 1
+        rows.append(
+            {
+                "name": name,
+                "ph": phase,
+                "rel_ts": timestamp,
+                "dev": rank,
+                "g_rk": rank,
+                "dp_rk": 0,
+                "pp_rk": rank,
+                "tp_rk": 0,
+                **attrs,
+            }
+        )
+
+    for iteration in (1, 2):
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "B",
+                "pad_before": 0,
+                "iteration": iteration,
+            }
+        )
+        for name, microbatch, vp_stage in compute_specs[rank]:
+            event(
+                name,
+                "B",
+                current_microbatch=microbatch,
+                vp_stage=vp_stage,
+                is_first_microbatch=microbatch == 0,
+                is_last_stage=rank == 1 and vp_stage == 1,
+                timing_phase="framework_phase",
+            )
+            event(
+                name,
+                "E",
+                operation_id=f"pp:microbatch={microbatch}:vp={vp_stage}",
+            )
+
+        launch_records: list[tuple[dict[str, object], ...]] = []
+        for launch_index, (operation_names, completion_mode) in enumerate(
+            launch_specs[rank]
+        ):
+            batch_id = f"p2p:{rank}:{iteration}:{launch_index}"
+            operations = []
+            for event_name in operation_names:
+                direction, pipeline_direction = event_name.split("-", 1)
+                request_key = request_keys[event_name]
+                operation_id = f"{batch_id}:{request_key}"
+                operations.append(
+                    {
+                        "operation_id": operation_id,
+                        "request_id": operation_id,
+                        "direction": direction,
+                        "pipeline_direction": pipeline_direction,
+                        "peer_rank": 1 - rank,
+                        "data_bytes": 32768,
+                        "microbatch": None,
+                        "comm_type": "p2p",
+                        "backend": "nccl",
+                        "transport_api": "isend_irecv",
+                        "completion_mode": completion_mode,
+                    }
+                )
+            launch_records.append(tuple(operations))
+
+        for action, launch_index, event_name in timelines[rank]:
+            operations = launch_records[launch_index]
+            completion_mode = launch_specs[rank][launch_index][1]
+            batch_id = str(operations[0]["operation_id"]).rsplit(":", 1)[0]
+            if action == "launch":
+                event(
+                    "p2p-launch",
+                    "B",
+                    batch_id=batch_id,
+                    comm_type="p2p-launch",
+                    timing_phase="launch",
+                    backend="nccl",
+                    backends=["nccl"],
+                    backend_complete=True,
+                    transport_api="isend_irecv",
+                    request_pairing="key",
+                    completion_mode=completion_mode,
+                    completion_included=False,
+                    operation_count=len(operations),
+                    operations=list(operations),
+                )
+                event("p2p-launch", "E")
+                continue
+
+            operation = next(
+                operation
+                for operation in operations
+                if (
+                    f"{operation['direction']}-"
+                    f"{operation['pipeline_direction']}"
+                )
+                == event_name
+            )
+            operation_id = str(operation["operation_id"])
+            completion_site = (
+                "communicate_internal_wait"
+                if completion_mode == "internal_wait"
+                else "exposed_request_wait"
+            )
+            event(
+                str(event_name),
+                "B",
+                **operation,
+                batch_id=batch_id,
+                completion_guarantee="current_stream_after_wait",
+                completion_included=True,
+                completion_kind="work_wait",
+                completion_site=completion_site,
+                duration_attribution="per_request",
+                host_blocking_guaranteed=False,
+                op="wait",
+                operation_count=1,
+                operation_ids=[operation_id],
+                operation_id_scope="rank_local",
+                request_pairing="key",
+                stage="p2p_request_completion",
+                timeout_supplied=False,
+                timing_phase="stream_dependency",
+            )
+            event(str(event_name), "E", completed=True, error_type=None)
+
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "E",
+                "iteration": iteration,
+                "duration_wall": timestamp,
+            }
+        )
+
+    path = (
+        trace_root
+        / f"benchmark-global-{rank}-data-0-pipeline-{rank}-tensor-0.json"
+    )
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+
 def _invoke(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -681,6 +849,45 @@ def test_unbatched_pp2_profile_uses_vpp_without_unsupported_p2p_cli_keys() -> No
     assert model["num_layers"] == 4
     assert model["micro_batch_size"] == 1
     assert model["global_batch_size"] == 2
+
+
+def test_pp2_unbatched_warmup_flush_profile_only_enables_selected_route() -> None:
+    baseline = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_pp2_unbatched_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    warmup_flush = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_pp2_unbatched_warmup_flush_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = warmup_flush["experiment"]["exp_name"]
+    baseline["train"]["system"][
+        "overlap_p2p_communication_warmup_flush"
+    ] = True
+
+    assert warmup_flush == baseline
+    profile = gate.PROFILES["pp2-unbatched-warmup-flush"]
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == {
+        "p2p-launch",
+        "send-forward",
+        "recv-forward",
+        "send-backward",
+        "recv-backward",
+        "forward-step",
+        "backward-step",
+    }
+    assert (
+        profile.contract
+        is p2p_probe_contract.validate_pp2_unbatched_warmup_flush_route
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
 
 
 def test_pp2_batched_steady_profile_only_adds_a_second_microbatch() -> None:
@@ -1241,6 +1448,104 @@ def test_pp2_unbatched_profile_accepts_mixed_wait_route(tmp_path: Path) -> None:
     )
 
     assert gate.PROFILES["pp2-unbatched"].contract(trace_root) == ()
+
+
+def test_pp2_unbatched_warmup_flush_profile_accepts_exact_lifecycle(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-unbatched-warmup-flush"
+    for rank in (0, 1):
+        _write_pp2_unbatched_warmup_flush_trace(trace_root, rank=rank)
+
+    assert gate.PROFILES["pp2-unbatched-warmup-flush"].contract(trace_root) == ()
+
+
+def test_pp2_unbatched_warmup_flush_rejects_the_wrong_unwaited_send(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-unbatched-warmup-flush-wrong-gap"
+    for rank in (0, 1):
+        _write_pp2_unbatched_warmup_flush_trace(trace_root, rank=rank)
+
+    rank_zero = next(trace_root.glob("*pipeline-0-tensor-0.json"))
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    launches = [
+        row
+        for row in rows
+        if row.get("name") == "p2p-launch" and row.get("ph") == "B"
+    ]
+    missing_launch = launches[3]
+    replaced_launch = launches[9]
+    missing_operation = missing_launch["operations"][0]
+    replacement_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.get("ph") == "B"
+        and row.get("batch_id") == replaced_launch["batch_id"]
+        and row.get("name") in {
+            "send-forward",
+            "recv-forward",
+            "send-backward",
+            "recv-backward",
+        }
+    )
+    replacement = rows[replacement_index]
+    replacement.update(missing_operation)
+    replacement.update(
+        {
+            "name": "send-forward",
+            "batch_id": missing_launch["batch_id"],
+            "operation_ids": [missing_operation["operation_id"]],
+        }
+    )
+    rows[replacement_index + 1]["name"] = "send-forward"
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = p2p_probe_contract.validate_pp2_unbatched_warmup_flush_route(
+        trace_root
+    )
+
+    assert "trace.p2p.warmup_flush.completion_identity" in {
+        failure.code for failure in failures
+    }
+
+
+def test_pp2_unbatched_warmup_flush_rejects_wrong_launch_mode(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-unbatched-warmup-flush-wrong-mode"
+    for rank in (0, 1):
+        _write_pp2_unbatched_warmup_flush_trace(trace_root, rank=rank)
+
+    rank_one = next(trace_root.glob("*pipeline-1-tensor-0.json"))
+    rows = json.loads(rank_one.read_text(encoding="utf-8"))
+    launches = [
+        row
+        for row in rows
+        if row.get("name") == "p2p-launch" and row.get("ph") == "B"
+    ]
+    changed_launch = launches[1]
+    changed_launch["completion_mode"] = "internal_wait"
+    changed_launch["operations"][0]["completion_mode"] = "internal_wait"
+    completion = next(
+        row
+        for row in rows
+        if row.get("ph") == "B"
+        and row.get("operation_id")
+        == changed_launch["operations"][0]["operation_id"]
+        and row.get("name") == "recv-forward"
+    )
+    completion["completion_mode"] = "internal_wait"
+    completion["completion_site"] = "communicate_internal_wait"
+    rank_one.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = p2p_probe_contract.validate_pp2_unbatched_warmup_flush_route(
+        trace_root
+    )
+
+    assert "trace.p2p.warmup_flush.launch_structure" in {
+        failure.code for failure in failures
+    }
 
 
 def test_pp2_unbatched_contract_rejects_batched_route(tmp_path: Path) -> None:

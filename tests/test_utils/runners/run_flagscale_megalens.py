@@ -78,6 +78,10 @@ _PP2_UNBATCHED_EVENTS = _events(
     "send-backward",
     "recv-backward",
 )
+_PP2_UNBATCHED_WARMUP_FLUSH_EVENTS = (
+    *_PP2_UNBATCHED_EVENTS,
+    *_events("forward-step", "backward-step"),
+)
 _EP_COMMON_EVENTS = (
     manifest.EventRequirement(
         "moe-router",
@@ -405,6 +409,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         p2p_probe_contract.validate_pp2_unbatched_route,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "pp2-unbatched-warmup-flush": manifest.TraceProfile(
+        "pp2-unbatched-warmup-flush",
+        2,
+        _PP2_UNBATCHED_WARMUP_FLUSH_EVENTS,
+        p2p_probe_contract.validate_pp2_unbatched_warmup_flush_route,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "ep2-alltoall": manifest.TraceProfile(
         "ep2-alltoall",
         2,
@@ -636,6 +647,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_pp2_smoke": "pp2",
     "flagscale_single_node_pp2_batched_steady_smoke": "pp2-batched-steady",
     "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",
+    "flagscale_single_node_pp2_unbatched_warmup_flush_smoke": (
+        "pp2-unbatched-warmup-flush"
+    ),
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_dp2_standard_smoke": "dp2-standard-ddp",

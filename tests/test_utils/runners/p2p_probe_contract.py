@@ -33,6 +33,103 @@ _BATCH_STEADY_OPERATION_GROUPS = {
         ("send-backward",),
     ),
 }
+_WARMUP_FLUSH_LAUNCHES = {
+    0: (
+        (("send-forward",), "external_wait"),
+        (("recv-forward", "send-forward"), "external_wait"),
+        (("recv-forward", "send-forward"), "external_wait"),
+        (("send-forward",), "external_wait"),
+        (("recv-backward",), "internal_wait"),
+        (("recv-backward",), "external_wait"),
+        (("send-backward",), "external_wait"),
+        (("recv-backward",), "external_wait"),
+        (("send-backward",), "external_wait"),
+        (("recv-backward",), "external_wait"),
+    ),
+    1: (
+        (("recv-forward",), "internal_wait"),
+        (("recv-forward",), "external_wait"),
+        (("send-forward",), "external_wait"),
+        (("recv-forward",), "external_wait"),
+        (("send-forward",), "external_wait"),
+        (("recv-forward",), "external_wait"),
+        (("send-backward",), "external_wait"),
+        (("send-backward", "recv-backward"), "external_wait"),
+        (("send-backward", "recv-backward"), "external_wait"),
+        (("send-backward",), "external_wait"),
+    ),
+}
+_WARMUP_FLUSH_TIMELINE = {
+    0: (
+        ("launch", 0, None),
+        ("launch", 1, None),
+        ("wait", 0, "send-forward"),
+        ("wait", 1, "recv-forward"),
+        ("launch", 2, None),
+        ("wait", 1, "send-forward"),
+        ("wait", 2, "recv-forward"),
+        ("launch", 3, None),
+        ("wait", 2, "send-forward"),
+        ("launch", 4, None),
+        ("wait", 4, "recv-backward"),
+        ("launch", 5, None),
+        ("launch", 6, None),
+        ("wait", 5, "recv-backward"),
+        ("launch", 7, None),
+        ("launch", 8, None),
+        ("wait", 6, "send-backward"),
+        ("wait", 7, "recv-backward"),
+        ("launch", 9, None),
+        ("wait", 8, "send-backward"),
+        ("wait", 9, "recv-backward"),
+    ),
+    1: (
+        ("launch", 0, None),
+        ("wait", 0, "recv-forward"),
+        ("launch", 1, None),
+        ("launch", 2, None),
+        ("wait", 1, "recv-forward"),
+        ("launch", 3, None),
+        ("launch", 4, None),
+        ("wait", 2, "send-forward"),
+        ("wait", 3, "recv-forward"),
+        ("launch", 5, None),
+        ("wait", 4, "send-forward"),
+        ("launch", 6, None),
+        ("wait", 5, "recv-forward"),
+        ("launch", 7, None),
+        ("wait", 6, "send-backward"),
+        ("wait", 7, "recv-backward"),
+        ("launch", 8, None),
+        ("wait", 7, "send-backward"),
+        ("wait", 8, "recv-backward"),
+        ("launch", 9, None),
+        ("wait", 8, "send-backward"),
+        ("wait", 9, "send-backward"),
+    ),
+}
+_WARMUP_FLUSH_COMPUTE = {
+    0: (
+        ("forward-step", 0, 0),
+        ("forward-step", 1, 0),
+        ("forward-step", 0, 1),
+        ("forward-step", 1, 1),
+        ("backward-step", 0, 1),
+        ("backward-step", 1, 1),
+        ("backward-step", 0, 0),
+        ("backward-step", 1, 0),
+    ),
+    1: (
+        ("forward-step", 0, 0),
+        ("forward-step", 1, 0),
+        ("forward-step", 0, 1),
+        ("backward-step", 0, 1),
+        ("forward-step", 1, 1),
+        ("backward-step", 1, 1),
+        ("backward-step", 0, 0),
+        ("backward-step", 1, 0),
+    ),
+}
 
 
 def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
@@ -664,6 +761,373 @@ def validate_pp2_unbatched_route(trace_root: Path) -> tuple[Failure, ...]:
     """Validate unbatched key pairing and at least one external wait."""
 
     return _validate_pp2_route(trace_root, batched=False)
+
+
+def _validate_warmup_flush_compute(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> list[Failure]:
+    iteration_id = int(iteration.iteration_id)
+    failures: list[Failure] = []
+    expected = _WARMUP_FLUSH_COMPUTE[rank]
+    compute_events = [
+        event
+        for event in iteration.events
+        if event.name in {"forward-step", "backward-step"}
+    ]
+    expected_scopes = tuple(
+        item
+        for name, _, _ in expected
+        for item in ((name, "B"), (name, "E"))
+    )
+    if tuple((event.name, event.ph) for event in compute_events) != expected_scopes:
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.compute_sequence",
+                "forward/backward scope order differs from the PP2/VPP2 "
+                "warmup, steady, and flush schedule",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    begins = [event for event in compute_events if event.ph == "B"]
+    observed = tuple(
+        (
+            event.name,
+            event.attrs.get("current_microbatch"),
+            event.attrs.get("vp_stage"),
+        )
+        for event in begins
+    )
+    if observed != expected:
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.compute_identity",
+                f"forward/backward identities {observed!r}, expected {expected!r}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    for event, (_, microbatch, vp_stage) in zip(begins, expected):
+        failures.extend(
+            _check_fields(
+                event,
+                {
+                    "current_microbatch": microbatch,
+                    "vp_stage": vp_stage,
+                    "is_first_microbatch": microbatch == 0,
+                    "is_last_stage": rank == 1 and vp_stage == 1,
+                    "timing_phase": "framework_phase",
+                },
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return failures
+
+
+def _validate_unbatched_warmup_flush_iteration(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> list[Failure]:
+    iteration_id = int(iteration.iteration_id)
+    failures: list[Failure] = []
+    expected_launches = _WARMUP_FLUSH_LAUNCHES[rank]
+    expected_timeline = _WARMUP_FLUSH_TIMELINE[rank]
+    launches = _events(iteration, "p2p-launch", "B")
+    launch_ends = _events(iteration, "p2p-launch", "E")
+    completions = _route_events(iteration, "B")
+    completion_ends = _route_events(iteration, "E")
+
+    forbidden_names = {"p2p-batch-complete", "p2p-batch-device-sync"}
+    if any(event.name in forbidden_names for event in iteration.events):
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.forbidden_event",
+                "unbatched warmup/flush route emitted a batched completion or "
+                "device-sync event",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    launch_scopes = tuple(
+        (event.name, event.ph)
+        for event in iteration.events
+        if event.name == "p2p-launch"
+    )
+    expected_launch_scopes = (("p2p-launch", "B"), ("p2p-launch", "E")) * 10
+    if launch_scopes != expected_launch_scopes:
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.launch_count",
+                f"p2p-launch B/E={len(launches)}/{len(launch_ends)}, "
+                "expected ten closed scopes",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    launched: dict[str, tuple[str, str, str, int]] = {}
+    batch_to_index: dict[str, int] = {}
+    operation_ids_by_launch: list[tuple[str, ...]] = []
+    observed_launches = []
+    for index, launch in enumerate(launches):
+        operations = tuple(launch.attrs.get("operations", ()))
+        operation_names = tuple(_operation_event_name(operation) for operation in operations)
+        completion_mode = launch.attrs.get("completion_mode")
+        batch_id = launch.attrs.get("batch_id")
+        observed_launches.append((operation_names, completion_mode))
+        failures.extend(
+            _check_fields(
+                launch,
+                {
+                    "comm_type": "p2p-launch",
+                    "backend": "nccl",
+                    "backends": ["nccl"],
+                    "backend_complete": True,
+                    "transport_api": "isend_irecv",
+                    "request_pairing": "key",
+                    "completion_included": False,
+                    "timing_phase": "launch",
+                    "operation_count": len(operations),
+                },
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        operation_ids = []
+        if isinstance(batch_id, str):
+            if batch_id in batch_to_index:
+                failures.append(
+                    _failure(
+                        "trace.p2p.warmup_flush.operation",
+                        f"duplicate launch batch_id={batch_id!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            batch_to_index[batch_id] = index
+        for operation, event_name in zip(operations, operation_names):
+            operation_id = operation.get("operation_id")
+            data_bytes = operation.get("data_bytes")
+            valid = (
+                isinstance(batch_id, str)
+                and isinstance(operation_id, str)
+                and operation.get("request_id") == operation_id
+                and operation.get("peer_rank") == 1 - rank
+                and isinstance(data_bytes, int)
+                and not isinstance(data_bytes, bool)
+                and data_bytes > 0
+                and operation.get("microbatch") is None
+                and operation.get("comm_type") == "p2p"
+                and operation.get("backend") == "nccl"
+                and operation.get("transport_api") == "isend_irecv"
+                and operation.get("completion_mode") == completion_mode
+                and event_name in _DIRECTIONAL_EVENTS
+            )
+            if not valid:
+                failures.append(
+                    _failure(
+                        "trace.p2p.warmup_flush.operation",
+                        f"invalid launch operation {operation!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+                continue
+            operation_ids.append(operation_id)
+            launched[operation_id] = (
+                batch_id,
+                event_name,
+                str(completion_mode),
+                index,
+            )
+        operation_ids_by_launch.append(tuple(operation_ids))
+
+    if tuple(observed_launches) != expected_launches or len(launched) != 12:
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.launch_structure",
+                "expected ten isend_irecv launches, twelve operations, "
+                "nine external-wait batches, and one internal-wait batch",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    expected_completion_scopes = tuple(
+        item
+        for kind, _, name in expected_timeline
+        if kind == "wait"
+        for item in ((str(name), "B"), (str(name), "E"))
+    )
+    completion_scopes = tuple(
+        (event.name, event.ph)
+        for event in iteration.events
+        if event.name in _DIRECTIONAL_EVENTS
+    )
+    if completion_scopes != expected_completion_scopes:
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.completion_count",
+                f"directional completion B/E={len(completions)}/"
+                f"{len(completion_ends)}, expected "
+                f"{11 if rank == 0 else 12} closed waits in exact order",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    completed_ids = []
+    for completion, completion_end in zip(completions, completion_ends):
+        operation_id = completion.attrs.get("operation_id")
+        launched_operation = launched.get(operation_id)
+        if launched_operation is None:
+            failures.append(
+                _failure(
+                    "trace.p2p.warmup_flush.identity",
+                    f"unknown completion operation_id={operation_id!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+        batch_id, event_name, completion_mode, _ = launched_operation
+        completion_site = (
+            "communicate_internal_wait"
+            if completion_mode == "internal_wait"
+            else "exposed_request_wait"
+        )
+        failures.extend(
+            _check_fields(
+                completion,
+                {
+                    "batch_id": batch_id,
+                    "request_id": operation_id,
+                    "transport_api": "isend_irecv",
+                    "request_pairing": "key",
+                    "completion_mode": completion_mode,
+                    "completion_site": completion_site,
+                    "completion_included": True,
+                    "completion_kind": "work_wait",
+                    "operation_count": 1,
+                    "operation_ids": [operation_id],
+                },
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        if completion.name != event_name:
+            failures.append(
+                _failure(
+                    "trace.p2p.warmup_flush.identity",
+                    f"operation_id={operation_id!r} completed as "
+                    f"{completion.name!r}, expected {event_name!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        failures.extend(
+            _check_fields(
+                completion_end,
+                {"completed": True},
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        if isinstance(operation_id, str):
+            completed_ids.append(operation_id)
+
+    expected_completed_ids = set(launched)
+    if rank == 0 and len(operation_ids_by_launch) > 3:
+        expected_completed_ids.difference_update(operation_ids_by_launch[3])
+    if (
+        len(completed_ids) != len(set(completed_ids))
+        or set(completed_ids) != expected_completed_ids
+    ):
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.completion_identity",
+                "completion coverage must be one-to-one; rank 0 leaves only "
+                "the fourth send-forward launch without an explicit wait",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    timeline = []
+    for event in iteration.events:
+        if event.ph != "B":
+            continue
+        if event.name == "p2p-launch":
+            timeline.append(
+                ("launch", batch_to_index.get(event.attrs.get("batch_id"), -1), None)
+            )
+        elif event.name in _DIRECTIONAL_EVENTS:
+            operation = launched.get(event.attrs.get("operation_id"))
+            timeline.append(("wait", operation[3] if operation else -1, event.name))
+    if tuple(timeline) != expected_timeline:
+        failures.append(
+            _failure(
+                "trace.p2p.warmup_flush.timeline",
+                "launch and delayed-wait order differs from the observed "
+                "unbatched warmup/flush lifecycle",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    failures.extend(_validate_warmup_flush_compute(iteration, rank=rank))
+    return failures
+
+
+def validate_pp2_unbatched_warmup_flush_route(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the exact PP2/VPP2 unbatched warmup/flush lifecycle."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    if tuple(sorted(by_rank)) != (0, 1):
+        failures.append(
+            Failure(
+                "trace.p2p.warmup_flush.ranks",
+                "PP2 warmup/flush contract expects ranks [0, 1], "
+                f"observed {sorted(by_rank)}",
+                "pp2-unbatched-warmup-flush",
+            )
+        )
+    for rank in (0, 1):
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.p2p.warmup_flush.iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        for iteration in iterations:
+            pipeline_ranks = {event.rank.pipeline for event in iteration.events}
+            if pipeline_ranks != {rank}:
+                failures.append(
+                    _failure(
+                        "trace.p2p.warmup_flush.pipeline_rank",
+                        f"events use pipeline ranks {sorted(pipeline_ranks)}, "
+                        f"expected [{rank}]",
+                        rank=rank,
+                        iteration=int(iteration.iteration_id),
+                    )
+                )
+            failures.extend(
+                _validate_unbatched_warmup_flush_iteration(iteration, rank=rank)
+            )
+    return tuple(failures)
 
 
 def _validate_ring_iteration(
