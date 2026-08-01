@@ -427,7 +427,10 @@ class _SlideFormerSlotCheckpointFunction(torch.autograd.Function):
         with torch.enable_grad():
             record("activation_recompute_start")
             _submit_previous_slot_prefetch(ctx, record)
-            recomputed = ctx.run_function(*recompute_args)
+            from megatron.plugin.slideformer.kernels import split_te_recompute_early_stop
+
+            with split_te_recompute_early_stop():
+                recomputed = ctx.run_function(*recompute_args)
             record("activation_recompute_end")
         if torch.is_tensor(recomputed):
             recomputed_items = (recomputed,)

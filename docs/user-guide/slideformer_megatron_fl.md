@@ -13,7 +13,7 @@
 - `megatron/plugin/slideformer/kernels.py`
 - `megatron/training/training.py`
 
-## 2026-07-31 单卡验收状态
+## 2026-08-01 单卡验收状态
 
 单卡功能、正确性、CPU/GPU memory 和 BS64 吞吐验收均已通过。正式训练入口会在建模前选择必须影响
 `TransformerConfig` 的开关，在建模后扫描实际模块结构并应用兼容 kernel。
@@ -41,12 +41,32 @@ SiLU×Mul operation。这样无需维护一份 Qwen 专用自动替换表，也�
 BS64 时单个约 4.25 GiB 临时张量造成的 CUDA allocator cache retry。阈值可通过
 `MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB` 调整，设为 `0` 可关闭。
 
-Qwen3-14B、BF16、seq=1024、BS64、3 warmup + 10 measured 的正式复测中，自动拆分
-把 Megatron-LM-FL 从 54.8709 s/step 提升至 50.4093 s/step（1300.1 tokens/s），
-peak allocated 从 22.041 GiB 降至 19.924 GiB，peak reserved 从 22.896 GiB 降至
-22.273 GiB，allocator retry 从 529 降至 0。相对同协议 torch native 的
-1405.3 tokens/s 仍慢约 7.5%，因此这项修正解决的是最明显的 FC1 分配问题，不能宣称
-14B 已达到完全性能一致。
+`slideformer-slot` 在 backward 中按层恢复 boundary hidden 并重建 autograd graph。
+对于上述 bias-free split SwiGLU 且 `hidden_dropout=0` 的兼容路径，重建阶段不会再次
+计算最终 FC2 的输出值，而是直接构建 FC2 Jacobian，并把 wgrad 写入 TE main-grad
+slot。这与 torch non-reentrant checkpoint 的 early-stop 目标一致：原 forward 和
+checkpoint/参数格式不变，同时避免每层一次不会被 backward 使用的 FC2 forward
+GEMM。带 bias 或 dropout 的模型自动保留完整重算路径。
+
+Qwen3-14B、BF16、seq=1024、BS64、3 warmup + 10 measured 的第一阶段正式复测中，
+自动拆分把 Megatron-LM-FL 从 54.8709 s/step 提升至 50.4093 s/step
+（1300.1 tokens/s），peak allocated 从 22.041 GiB 降至 19.924 GiB，peak reserved
+从 22.896 GiB 降至 22.273 GiB，allocator retry 从 529 降至 0。Nsight 随后确认，
+剩余差距的主体是 `slideformer-slot` 在每层 backward recompute 中多执行的一次 FC2
+forward GEMM，而不是 FlashAttention、LCE、SiLU×Mul 或 H2D copy。
+
+加入 FC2 recompute early-stop 后，同一正式协议结果为 47.4577 s/step、
+1380.9 tokens/s、19.924 GiB peak allocated、22.273 GiB peak reserved、
+212.387 GiB CPU RSS，allocator retry/OOM 均为 0。相对第一阶段吞吐提高 6.22%；
+相对同协议 torch native 的 46.6349 s/step、1405.3 tokens/s、21.751 GiB allocated、
+21.764 GiB reserved、210.619 GiB CPU RSS，吞吐差距缩小到 -1.73%。Megatron 的
+allocated 少 1.828 GiB，reserved 多 0.510 GiB。
+
+优化后的 measured-step Nsight trace 中，两边 CUDA kernel 累计时间仅差 0.097 s；
+Megatron copy 累计时间反而更少（6.960 s 对 8.203 s）。剩余约 0.56 s GPU span
+差异主要来自约 0.20 s 的调度空隙和 copy/compute 重叠布局差异，GPU busy 利用率为
+99.31% 对 99.73%。因此当前没有证据支持继续替换 TE/FlashAttention kernel；后续
+优化应聚焦调度边界，而不是增加模型专用 kernel 分支。
 
 早期同一台 RTX 4090、同一 Qwen3-8B checkpoint、BF16、seq=1024、BS64、
 3 warmup + 10 measured 的单点结果为：
@@ -126,7 +146,8 @@ torch native 的更高 RSS 主要来自 HF checkpoint/model materialization、�
 
 - 与当前 PyTorch/CUDA ABI 匹配的 `transformer-engine[pytorch]`。
 - `flash-attn`，用于默认的 TE FlashAttention dispatch。
-- `liger-kernel`，仅用于 Legacy LCE 的 Triton CE kernel。
+- `liger-kernel`，用于 Legacy LCE 的 Triton CE kernel、超大 split SwiGLU 的
+  SiLU×Mul，以及该路径中的 Liger RMSNorm。
 - `ninja` 和可用的 C++ 编译器，用于首次构建 LayerAdam CPU 扩展。
 - `tensornvme`，仅在启用 NVMe optimizer-state offload 时需要。
 
@@ -206,7 +227,7 @@ pytest -q tests/unit_tests/slideformer/test_slideformer_plugin.py
 结果：
 
 ```text
-22 passed
+26 passed
 ```
 
 ### Megatron-LM-FL 训练 smoke

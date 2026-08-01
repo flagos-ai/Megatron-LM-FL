@@ -238,8 +238,8 @@ class MegatronSlideFormerEngineConfig:
             {
                 "mechanism": "native_save_on_cpu_all_saved_tensors",
                 "reason": "Megatron's non-reentrant checkpoint path does not expose the real internal saved tensors to the outer saved_tensors_hooks context.",
-                "approximation": "Explicitly offload the TransformerLayer boundary hidden state and recompute layer internals during backward.",
-                "semantic_difference": "QKV/attention/MLP intermediates are recomputed rather than saved to CPU and restored.",
+                "approximation": "Explicitly offload the TransformerLayer boundary hidden state and recompute layer internals during backward; compatible bias-free split SwiGLU elides the unused final FC2 value.",
+                "semantic_difference": "QKV/attention/MLP intermediates are recomputed rather than saved to CPU and restored, with an early-stop-equivalent FC2 Jacobian path when hidden dropout is zero.",
             },
             {
                 "mechanism": "native_attention_mask_rotary_cpu_slots",

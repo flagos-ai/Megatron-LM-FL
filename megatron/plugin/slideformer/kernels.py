@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+from contextvars import ContextVar
 from types import MethodType
 from typing import Any
 
@@ -30,6 +32,50 @@ try:
     from liger_kernel.transformers import LigerFusedLinearCrossEntropyLoss
 except ImportError:  # pragma: no cover - deployment dependent
     LigerFusedLinearCrossEntropyLoss = None
+
+
+_split_te_recompute_early_stop: ContextVar[bool] = ContextVar(
+    "slideformer_split_te_recompute_early_stop", default=False
+)
+
+
+@contextmanager
+def split_te_recompute_early_stop():
+    """Skip the final MLP projection value during layer recomputation.
+
+    A checkpoint backward only needs the final projection's Jacobian.  The
+    projection output feeds a value-independent residual add, so materializing
+    it with a GEMM repeats work already done in the original forward.
+    """
+
+    token = _split_te_recompute_early_stop.set(True)
+    try:
+        yield
+    finally:
+        _split_te_recompute_early_stop.reset(token)
+
+
+class _LinearBackwardOnly(torch.autograd.Function):
+    """Represent a bias-free linear during recompute without its forward GEMM."""
+
+    @staticmethod
+    def forward(ctx: Any, inputs: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
+        ctx.save_for_backward(inputs, weight)
+        return inputs.new_zeros((*inputs.shape[:-1], weight.shape[0]))
+
+    @staticmethod
+    def backward(ctx: Any, grad_output: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        inputs, weight = ctx.saved_tensors
+        inputs_2d = inputs.reshape(-1, inputs.shape[-1])
+        grad_output_2d = grad_output.reshape(-1, grad_output.shape[-1])
+        grad_inputs = grad_output_2d.matmul(weight).reshape_as(inputs)
+        main_grad = getattr(weight, "main_grad", None)
+        if main_grad is not None:
+            torch.mm(grad_output_2d.transpose(0, 1), inputs_2d, out=main_grad)
+            grad_weight = None
+        else:
+            grad_weight = grad_output_2d.transpose(0, 1).matmul(inputs_2d)
+        return grad_inputs, grad_weight
 
 
 class FlashAttentionCore(nn.Module):
@@ -131,9 +177,15 @@ def _split_te_mlp_forward(self, hidden_states, per_token_scale=None, **kwargs):
         raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
     if getattr(fc1, "normalization", None) != "RMSNorm":
         raise RuntimeError("SlideFormer split SwiGLU requires TE fused FC1 RMSNorm")
-    if getattr(fc1, "zero_centered_gamma", False):
-        norm_weight = norm_weight + 1
-    normalized = F.rms_norm(hidden_states, (hidden_states.shape[-1],), norm_weight, fc1.eps)
+    norm_offset = 1.0 if getattr(fc1, "zero_centered_gamma", False) else 0.0
+    if hidden_states.is_cuda:
+        normalized = LigerRMSNormFunction.apply(
+            hidden_states, norm_weight, fc1.eps, norm_offset, "llama", True, None
+        )
+    else:
+        normalized = F.rms_norm(
+            hidden_states, (hidden_states.shape[-1],), norm_weight + norm_offset, fc1.eps
+        )
     fc1_weight = fc1.weight
     gate_weight, up_weight = torch.chunk(fc1_weight, 2, dim=0)
     fc1_bias = getattr(fc1, "bias", None)
@@ -143,7 +195,15 @@ def _split_te_mlp_forward(self, hidden_states, per_token_scale=None, **kwargs):
     gate = F.linear(normalized, gate_weight, gate_bias)
     up = F.linear(normalized, up_weight, up_bias)
     activated = LigerSiLUMulFunction.apply(gate, up)
-    output, fc2_bias = self.linear_fc2(activated)
+    if _split_te_recompute_early_stop.get() and getattr(self.config, "hidden_dropout", 0.0) == 0.0:
+        fc2 = self.linear_fc2
+        fc2_bias_param = getattr(fc2, "bias", None)
+        if fc2_bias_param is not None and fc2_bias_param.numel() > 0:
+            raise RuntimeError("SlideFormer FC2 recompute early-stop requires bias-free SwiGLU")
+        output = _LinearBackwardOnly.apply(activated, fc2.weight)
+        fc2_bias = None
+    else:
+        output, fc2_bias = self.linear_fc2(activated)
     return output, fc2_bias
 
 

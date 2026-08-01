@@ -243,6 +243,7 @@ def test_split_te_swiglu_preserves_concatenated_weight_numerics(monkeypatch) -> 
                 add_bias_linear=False,
                 tensor_model_parallel_size=1,
                 layernorm_epsilon=1e-6,
+                hidden_dropout=0.0,
             )
             self.linear_fc1 = FusedNormFC1()
             self.linear_fc2 = TupleLinear(8, 8, bias=False)
@@ -299,6 +300,29 @@ def test_split_te_swiglu_preserves_concatenated_weight_numerics(monkeypatch) -> 
         "patched_layers": 1,
     }
     torch.testing.assert_close(actual, expected)
+
+    grad_output = torch.randn_like(actual)
+    actual.backward(grad_output)
+    expected_input_grad = inputs.grad.detach().clone()
+    expected_fc1_grad = model.decoder.layers[0].mlp.linear_fc1.weight.grad.detach().clone()
+    fc2_weight = model.decoder.layers[0].mlp.linear_fc2.weight
+    expected_fc2_grad = fc2_weight.grad.detach().clone()
+
+    inputs.grad = None
+    model.decoder.layers[0].mlp.linear_fc1.weight.grad = None
+    fc2_weight.grad = None
+    fc2_weight.main_grad = torch.empty_like(fc2_weight)
+    with kernels.split_te_recompute_early_stop():
+        recomputed = model.decoder.layers[0].mlp(inputs)[0]
+    assert torch.count_nonzero(recomputed) == 0
+    recomputed.backward(grad_output)
+
+    torch.testing.assert_close(inputs.grad, expected_input_grad)
+    torch.testing.assert_close(
+        model.decoder.layers[0].mlp.linear_fc1.weight.grad, expected_fc1_grad
+    )
+    torch.testing.assert_close(fc2_weight.main_grad, expected_fc2_grad)
+    assert fc2_weight.grad is None
 
 
 def test_default_prebuild_kernel_policy_selects_transformer_engine(monkeypatch) -> None:
