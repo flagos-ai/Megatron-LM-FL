@@ -1,0 +1,25 @@
+SlideFormer plugin for Megatron-LM-FL
+Copyright 2025-2026 The SlideFormer Authors
+
+This plugin adapts the single-GPU offload design from SlideFormer, licensed
+under the Apache License 2.0.
+Canonical source: https://github.com/RegiaYoung/SlideFormer
+
+The LayerAdam extension includes components derived from Microsoft DeepSpeed,
+licensed under the Apache License 2.0, and NVIDIA Apex. Original copyright,
+license, and commit provenance notices are retained in the corresponding
+source files.
+
+The Legacy fused linear cross-entropy implementation is derived from LinkedIn
+Liger Kernel under the BSD 2-Clause License. Its source header retains the
+original copyright and SPDX identifier. Liger Kernel is also an optional
+runtime dependency of the plugin.
+Upstream: https://github.com/linkedin/Liger-Kernel
+
+FlashAttention is an optional runtime dependency used by the strict attention
+policy.
+Upstream: https://github.com/Dao-AILab/flash-attention
+
+Third-party names and trademarks belong to their respective owners. This
+NOTICE file is informational and does not modify the terms of the repository
+LICENSE or the notices retained in individual source files.
