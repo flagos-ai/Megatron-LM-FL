@@ -18,6 +18,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPOSITORY_ROOT))
 
 from tests.test_utils.runners import bridge_probe_contract  # noqa: E402
+from tests.test_utils.runners import combined_1f1b_probe_contract  # noqa: E402
 from tests.test_utils.runners import dp_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
@@ -413,6 +414,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         "ep2-fine-grained",
         4,
         _ep_events("alltoall", fine_grained=True),
+        combined_1f1b_probe_contract.validate_ep2_fine_grained_combined,
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
     "dp2-standard-ddp": manifest.TraceProfile(
