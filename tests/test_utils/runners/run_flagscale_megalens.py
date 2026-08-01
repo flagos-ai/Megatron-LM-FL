@@ -499,6 +499,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         p2p_probe_contract.validate_pp2_unbatched_warmup_flush_route,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "pp2-overlap-timeline": manifest.TraceProfile(
+        "pp2-overlap-timeline",
+        2,
+        _PP2_UNBATCHED_WARMUP_FLUSH_EVENTS,
+        p2p_probe_contract.validate_pp2_overlap_timeline_route,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "ep2-alltoall": manifest.TraceProfile(
         "ep2-alltoall",
         2,
@@ -740,6 +747,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_pp2_unbatched_warmup_flush_smoke": (
         "pp2-unbatched-warmup-flush"
     ),
+    "flagscale_single_node_pp2_overlap_timeline_smoke": "pp2-overlap-timeline",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke": (

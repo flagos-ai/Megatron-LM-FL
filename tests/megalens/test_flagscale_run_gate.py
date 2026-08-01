@@ -36,6 +36,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_pp2_unbatched_warmup_flush_smoke.yaml": (
         "pp2-unbatched-warmup-flush"
     ),
+    "flagscale_single_node_pp2_overlap_timeline_smoke.yaml": (
+        "pp2-overlap-timeline"
+    ),
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke.yaml": (
@@ -488,6 +491,7 @@ def _write_pp2_unbatched_warmup_flush_trace(
     trace_root: Path,
     *,
     rank: int,
+    kernel_timeline: bool = False,
 ) -> None:
     # Reuse the locked profile table so the fixture focuses on trace encoding.
     launch_specs = p2p_probe_contract._WARMUP_FLUSH_LAUNCHES
@@ -641,6 +645,38 @@ def _write_pp2_unbatched_warmup_flush_trace(
                 "duration_wall": timestamp,
             }
         )
+
+    if kernel_timeline:
+        p2p_start, p2p_end = 100, 200
+        compute_start, compute_end = ((150, 160) if rank == 1 else (250, 260))
+        for name, start, end in (
+            (
+                "ncclDevKernel_SendRecv(ncclDevKernelArgsStorage<4096ul>)",
+                p2p_start,
+                p2p_end,
+            ),
+            ("transformer_engine::model_gemm", compute_start, compute_end),
+        ):
+            rows.append(
+                {
+                    "record_type": "cuda_kernel",
+                    "name": name,
+                    "ph": "X",
+                    "start_us": start,
+                    "end_us": end,
+                    "wall_start_us": 1000 + start,
+                    "wall_end_us": 1000 + end,
+                    "iter_rel_start_us": start,
+                    "iter_rel_end_us": end,
+                    "duration_us": end - start,
+                    "device": rank,
+                    "iteration": 1,
+                    "g_rk": rank,
+                    "dp_rk": 0,
+                    "pp_rk": rank,
+                    "tp_rk": 0,
+                }
+            )
 
     path = (
         trace_root
@@ -963,6 +999,32 @@ def test_pp2_unbatched_warmup_flush_profile_only_enables_selected_route() -> Non
         profile.contract
         is p2p_probe_contract.validate_pp2_unbatched_warmup_flush_route
     )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+
+
+def test_pp2_overlap_timeline_profile_only_enables_cupti_kernel_capture() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_pp2_unbatched_warmup_flush_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    timeline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_pp2_overlap_timeline_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = timeline["experiment"]["exp_name"]
+    baseline["train"]["system"]["trace_cupti_kernels"] = "on"
+
+    assert timeline == baseline
+    profile = gate.PROFILES["pp2-overlap-timeline"]
+    assert profile.rank_count == 2
+    assert profile.events == gate.PROFILES["pp2-unbatched-warmup-flush"].events
+    assert profile.contract is p2p_probe_contract.validate_pp2_overlap_timeline_route
     assert (
         profile.run_contract
         is training_run_contract.validate_two_iteration_checkpoint
@@ -1537,6 +1599,52 @@ def test_pp2_unbatched_warmup_flush_profile_accepts_exact_lifecycle(
         _write_pp2_unbatched_warmup_flush_trace(trace_root, rank=rank)
 
     assert gate.PROFILES["pp2-unbatched-warmup-flush"].contract(trace_root) == ()
+
+
+def test_pp2_overlap_timeline_profile_accepts_device_kernel_interval_overlap(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-overlap-timeline"
+    for rank in (0, 1):
+        _write_pp2_unbatched_warmup_flush_trace(
+            trace_root, rank=rank, kernel_timeline=True
+        )
+
+    assert gate.PROFILES["pp2-overlap-timeline"].contract(trace_root) == ()
+
+
+def test_pp2_overlap_timeline_profile_rejects_disjoint_kernels(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-overlap-timeline-disjoint"
+    for rank in (0, 1):
+        _write_pp2_unbatched_warmup_flush_trace(
+            trace_root, rank=rank, kernel_timeline=True
+        )
+
+    rank_one = next(trace_root.glob("*pipeline-1-tensor-0.json"))
+    rows = json.loads(rank_one.read_text(encoding="utf-8"))
+    model_kernel = next(
+        row
+        for row in rows
+        if row.get("record_type") == "cuda_kernel"
+        and row.get("name") == "transformer_engine::model_gemm"
+    )
+    model_kernel.update(
+        {
+            "start_us": 250,
+            "end_us": 260,
+            "wall_start_us": 1250,
+            "wall_end_us": 1260,
+            "iter_rel_start_us": 250,
+            "iter_rel_end_us": 260,
+        }
+    )
+    rank_one.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = p2p_probe_contract.validate_pp2_overlap_timeline_route(trace_root)
+
+    assert "trace.p2p.kernel_overlap" in {failure.code for failure in failures}
 
 
 def test_pp2_unbatched_warmup_flush_rejects_the_wrong_unwaited_send(

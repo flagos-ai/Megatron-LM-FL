@@ -1130,6 +1130,126 @@ def validate_pp2_unbatched_warmup_flush_route(
     return tuple(failures)
 
 
+_MODEL_KERNEL_MARKERS = (
+    "attention",
+    "attn",
+    "cudnn",
+    "gemm",
+    "nvjet",
+    "sdpa",
+    "transformer_engine",
+    "triton",
+)
+
+
+def _kernel_interval(event: Event) -> tuple[int, int] | None:
+    try:
+        start = int(event.attrs["start_us"])
+        end = int(event.attrs["end_us"])
+    except (KeyError, TypeError, ValueError):
+        return None
+    if end <= start:
+        return None
+    return start, end
+
+
+def _kernel_name(event: Event) -> str:
+    return str(event.attrs.get("name", ""))
+
+
+def _is_p2p_nccl_kernel(event: Event) -> bool:
+    name = _kernel_name(event).lower()
+    return "nccl" in name and "sendrecv" in name
+
+
+def _is_model_compute_kernel(event: Event) -> bool:
+    name = _kernel_name(event).lower()
+    return "nccl" not in name and any(marker in name for marker in _MODEL_KERNEL_MARKERS)
+
+
+def _overlap_us(left: Event, right: Event) -> int:
+    left_interval = _kernel_interval(left)
+    right_interval = _kernel_interval(right)
+    if left_interval is None or right_interval is None:
+        return 0
+    return max(
+        0,
+        min(left_interval[1], right_interval[1])
+        - max(left_interval[0], right_interval[0]),
+    )
+
+
+def validate_pp2_overlap_timeline_route(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate framework waits and one sampled P2P NCCL/model-kernel overlap."""
+
+    failures = list(validate_pp2_unbatched_warmup_flush_route(trace_root))
+    by_rank = _load_iterations(trace_root)
+    overlap_observed = False
+
+    for rank in (0, 1):
+        sampled_iteration_count = 0
+        p2p_kernel_count = 0
+        model_kernel_count = 0
+        for iteration in by_rank.get(rank, ()):
+            kernels = [
+                event
+                for event in iteration.events
+                if event.name == "cuda_kernel" and event.ph == "X"
+            ]
+            if not kernels:
+                continue
+            sampled_iteration_count += 1
+            p2p_kernels = [event for event in kernels if _is_p2p_nccl_kernel(event)]
+            model_kernels = [
+                event for event in kernels if _is_model_compute_kernel(event)
+            ]
+            p2p_kernel_count += len(p2p_kernels)
+            model_kernel_count += len(model_kernels)
+            overlap = sum(
+                _overlap_us(p2p_kernel, model_kernel)
+                for p2p_kernel in p2p_kernels
+                for model_kernel in model_kernels
+            )
+            if overlap > 0:
+                overlap_observed = True
+
+        if sampled_iteration_count == 0:
+            failures.append(
+                Failure(
+                    "trace.p2p.kernel_capture",
+                    f"rank {rank} has no sampled CUDA kernel iteration",
+                    f"rank={rank}",
+                )
+            )
+        if p2p_kernel_count == 0:
+            failures.append(
+                Failure(
+                    "trace.p2p.nccl_sendrecv_kernel",
+                    f"rank {rank} has no NCCL SendRecv kernel",
+                    f"rank={rank}",
+                )
+            )
+        if model_kernel_count == 0:
+            failures.append(
+                Failure(
+                    "trace.p2p.model_compute_kernel",
+                    f"rank {rank} has no recognized model compute kernel",
+                    f"rank={rank}",
+                )
+            )
+
+    if not overlap_observed:
+        failures.append(
+            Failure(
+                "trace.p2p.kernel_overlap",
+                "no sampled rank contains an overlapping NCCL SendRecv and "
+                "recognized model compute kernel interval",
+                "pp2-overlap-timeline",
+            )
+        )
+    return tuple(failures)
+
+
 def _validate_ring_iteration(
     iteration: Iteration,
     *,
