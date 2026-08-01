@@ -11,6 +11,7 @@ import yaml
 
 from tests.test_utils.runners import check_ring_exchange
 from tests.test_utils.runners import dp_probe_contract
+from tests.test_utils.runners import dualpipev_probe_contract
 from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import p2p_probe_contract
@@ -37,6 +38,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
+    "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke.yaml": (
+        "pp2-dp2-ep2-dualpipev"
+    ),
     "flagscale_single_node_dp2_standard_smoke.yaml": "dp2-standard-ddp",
     "flagscale_single_node_dp2_standard_overlap_smoke.yaml": (
         "dp2-standard-ddp-overlap"
@@ -724,6 +728,81 @@ def test_gpt_eager_profile_disables_persistent_layernorm() -> None:
 
     assert payload["train"]["model"]["transformer_impl"] == "local"
     assert payload["train"]["model"]["no_persist_layer_norm"] is True
+
+
+def test_dualpipev_profile_is_the_minimal_supported_ep2_route() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_ep2_fine_grained_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    dualpipev = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = dualpipev["experiment"]["exp_name"]
+    system = baseline["train"]["system"]
+    system.pop("num_layers_per_virtual_pipeline_stage")
+    system.pop("microbatch_group_size_per_virtual_pipeline_stage")
+    system.update(
+        {
+            "use_dualpipev": True,
+            "moe_fb_overlap": True,
+            "delay_wgrad_compute": True,
+        }
+    )
+    model = baseline["train"]["model"]
+    model.update(
+        {
+            "moe_token_dispatcher_type": "alltoall",
+            "moe_grouped_gemm": True,
+            "moe_shared_expert_intermediate_size": 256,
+            "moe_shared_expert_overlap": False,
+        }
+    )
+
+    assert dualpipev == baseline
+    assert dualpipev["experiment"]["runner"]["nproc_per_node"] == 4
+    assert system["pipeline_model_parallel_size"] == 2
+    assert system["expert_model_parallel_size"] == 2
+    assert model["num_layers"] == 4
+    assert model["micro_batch_size"] == 1
+    assert model["global_batch_size"] == 8
+
+    profile = gate.PROFILES["pp2-dp2-ep2-dualpipev"]
+    assert profile.rank_count == 4
+    assert {requirement.name for requirement in profile.events} == {
+        "forward-step",
+        "backward-step",
+        "combined-forward-backward-step",
+        "ep-alltoall-async-launch",
+        "ep-alltoall-async-complete",
+        "moe-router",
+        "p2p-launch",
+        "send-forward",
+        "recv-forward",
+        "send-backward",
+        "recv-backward",
+        "grad-sync",
+        "all-grads-sync",
+        "dp-allreduce",
+    }
+    assert {
+        "moe-dispatch",
+        "moe-experts",
+        "moe-combine",
+        "ep-alltoall-dispatch",
+        "ep-alltoall-combine",
+    }.isdisjoint(requirement.name for requirement in profile.events)
+    assert (
+        profile.contract is dualpipev_probe_contract.validate_dualpipev_route
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
 
 
 def test_training_contract_requires_the_terminal_checkpoint(

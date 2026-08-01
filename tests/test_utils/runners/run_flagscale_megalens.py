@@ -20,6 +20,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 from tests.test_utils.runners import bridge_probe_contract  # noqa: E402
 from tests.test_utils.runners import combined_1f1b_probe_contract  # noqa: E402
 from tests.test_utils.runners import dp_probe_contract  # noqa: E402
+from tests.test_utils.runners import dualpipev_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
 from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
@@ -129,6 +130,88 @@ _TP_ALLREDUCE_FIELDS = (
     "group_size",
     "timing_phase",
     "payload_role",
+)
+_DUALPIPEV_PHASE_FIELDS = (
+    *_COMMON_FIELDS,
+    "current_microbatch",
+    "dualpipev_stage",
+    "operation_id",
+    "schedule",
+    "schedule_phase",
+    "uses_model_graph",
+)
+_DUALPIPEV_COMBINED_FIELDS = (
+    *_COMMON_FIELDS,
+    "operation_id",
+    "forward_operation_id",
+    "backward_operation_id",
+    "forward_microbatch",
+    "backward_microbatch",
+    "forward_dualpipev_stage",
+    "backward_dualpipev_stage",
+    "execution_mode",
+    "overlap_active",
+    "schedule",
+    "schedule_phase",
+)
+_DUALPIPEV_A2A_FIELDS = (
+    *_COMMON_FIELDS,
+    "operation_id",
+    "request_id",
+    "layer",
+    "comm_type",
+    "dispatcher",
+    "data_bytes",
+    "group_size",
+    "ep_size",
+    "tp_size",
+    "execution_route",
+    "pass_direction",
+    "logical_phase",
+    "payload_role",
+)
+_DUALPIPEV_EVENTS = (
+    manifest.EventRequirement("forward-step", _DUALPIPEV_PHASE_FIELDS, "B"),
+    manifest.EventRequirement("backward-step", _DUALPIPEV_PHASE_FIELDS, "B"),
+    manifest.EventRequirement(
+        "combined-forward-backward-step",
+        _DUALPIPEV_COMBINED_FIELDS,
+        "B",
+    ),
+    manifest.EventRequirement(
+        "ep-alltoall-async-launch",
+        (*_DUALPIPEV_A2A_FIELDS, "async_op", "completion_included"),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "ep-alltoall-async-complete",
+        (
+            *_DUALPIPEV_A2A_FIELDS,
+            "completion_site",
+            "terminal",
+            "wait_role",
+        ),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "moe-router",
+        (*_COMMON_FIELDS, "layer", "num_experts", "router_topk"),
+        "E",
+    ),
+    *_events(
+        "p2p-launch",
+        "send-forward",
+        "recv-forward",
+        "send-backward",
+        "recv-backward",
+    ),
+    manifest.EventRequirement(
+        "grad-sync",
+        (*_COMMON_FIELDS, "schedule", "timing_phase"),
+        "B",
+    ),
+    manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
+    manifest.EventRequirement("dp-allreduce", _DP_FIELDS, "B"),
 )
 _BRIDGE_DIRECTION_FIELDS = (
     *_COMMON_FIELDS,
@@ -435,6 +518,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         combined_1f1b_probe_contract.validate_ep2_fine_grained_combined,
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "pp2-dp2-ep2-dualpipev": manifest.TraceProfile(
+        "pp2-dp2-ep2-dualpipev",
+        4,
+        _DUALPIPEV_EVENTS,
+        dualpipev_probe_contract.validate_dualpipev_route,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "dp2-standard-ddp": manifest.TraceProfile(
         "dp2-standard-ddp",
         2,
@@ -652,6 +742,9 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
+    "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke": (
+        "pp2-dp2-ep2-dualpipev"
+    ),
     "flagscale_single_node_dp2_standard_smoke": "dp2-standard-ddp",
     "flagscale_single_node_dp2_standard_overlap_smoke": (
         "dp2-standard-ddp-overlap"
