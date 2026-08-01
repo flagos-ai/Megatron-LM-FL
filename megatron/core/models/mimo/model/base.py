@@ -38,7 +38,13 @@ class MimoModel(MegatronModule):
             Configuration for the model, including language model and modality submodules
     """
 
-    def __init__(self, mimo_config: MimoModelConfig, cp_group=None, tp_group=None) -> None:
+    def __init__(
+        self,
+        mimo_config: MimoModelConfig,
+        cp_group=None,
+        tp_group=None,
+        pg_collection=None,
+    ) -> None:
         """Initialize the multimodal model.
 
         Example:
@@ -58,6 +64,10 @@ class MimoModel(MegatronModule):
         )
 
         self.mimo_config = mimo_config
+        self.pg_collection = pg_collection
+        if pg_collection is not None:
+            cp_group = pg_collection.cp if cp_group is None else cp_group
+            tp_group = pg_collection.tp if tp_group is None else tp_group
         modality_names = list(mimo_config.modality_submodules_spec.keys())
         if mimo_config.module_to_grid_map:
             self.role = RankRole.from_grid_map(mimo_config.module_to_grid_map, modality_names)

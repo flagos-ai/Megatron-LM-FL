@@ -10,6 +10,7 @@ import torch
 
 from examples.mimo.data.mock import MockVLMDataset, _collate_fn
 from examples.mimo import train
+from examples.mimo.model_providers import mock as mock_model_provider
 
 
 def test_mock_data_matches_mimo_modality_schema_and_label_contract() -> None:
@@ -82,3 +83,36 @@ def test_model_provider_routes_runtime_image_token_to_mock_builder(monkeypatch) 
             {"special_token_id": 42000, "pg_collection": process_groups},
         )
     ]
+
+
+def test_mock_builder_preserves_framework_process_group_collection(monkeypatch) -> None:
+    calls = []
+    process_groups = SimpleNamespace(cp=object(), tp=object())
+    layer_spec = SimpleNamespace(submodules=object())
+
+    def build_mimo(config, **kwargs):
+        calls.append((config, kwargs))
+        return "mock-model"
+
+    monkeypatch.setattr(mock_model_provider, "MimoModel", build_mimo)
+    monkeypatch.setattr(
+        mock_model_provider, "get_mock_language_layer_spec", lambda: layer_spec
+    )
+    monkeypatch.setattr(
+        mock_model_provider, "get_mock_vision_layer_spec", lambda: layer_spec
+    )
+    monkeypatch.setattr(
+        mock_model_provider, "get_mock_projection_layer_spec", lambda: layer_spec
+    )
+
+    result = mock_model_provider.model_provider_mock_vlm_single_encoder(
+        pg_collection=process_groups
+    )
+
+    assert result == "mock-model"
+    assert len(calls) == 1
+    assert calls[0][1] == {
+        "cp_group": process_groups.cp,
+        "tp_group": process_groups.tp,
+        "pg_collection": process_groups,
+    }
