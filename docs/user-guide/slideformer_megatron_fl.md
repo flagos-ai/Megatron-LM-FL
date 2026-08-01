@@ -31,8 +31,9 @@
 | standard dense RoPE | TE fused RoPE | 显式选择 local backend |
 
 这里不使用 Liger 的 Hugging Face `AutoModel` monkey patch。MCore/TE 负责模型结构
-kernel；Liger 仅作为 Legacy LCE 底层 Triton CE kernel 的依赖。这样无需维护一份
-Qwen 专用自动替换表，也不会把 HF 模型结构假设带入 Megatron。
+kernel；Liger 提供 Legacy LCE 的 Triton CE kernel，以及超大 FC1 拆分路径中的
+SiLU×Mul operation。这样无需维护一份 Qwen 专用自动替换表，也不会把 HF 模型结构
+假设带入 Megatron。
 
 对于单次 FC1 输出达到 4 GiB 的 bias-free SwiGLU，默认策略会保留 TE/Megatron
 拼接后的 FC1 权重和 checkpoint 格式，但在 forward 中把它作为 gate/up 两个 view
