@@ -1652,6 +1652,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     if (
         not (args.use_torch_fsdp2 and args.use_cpu_initialization)
         and not args.init_model_with_meta_device
+        and not (_slideformer_enabled() and not wrap_with_ddp)
     ):
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
@@ -1863,6 +1864,9 @@ def setup_model_and_optimizer(
     slideformer_config = _get_slideformer_config()
     if slideformer_config.enable:
         _validate_slideformer_runtime(slideformer_config)
+        # Building the full model on CUDA defeats layer sliding and prevents
+        # models larger than device memory from reaching the offload engine.
+        args.use_cpu_initialization = True
         prepare_kernel_policy(args, slideformer_config)
     skip_optimizer = (
         args.skip_train and (not args.perform_rl_step or args.no_load_optim)

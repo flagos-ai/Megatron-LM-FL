@@ -1718,7 +1718,14 @@ class MegatronSlideFormerEngine:
                 else []
             )
         }
-        tied_embedding_output = bool(embedding_param_ids & output_param_ids)
+        # MCore normally implements tied embeddings by constructing the output
+        # projection without its own weight and passing the embedding weight to
+        # it at call time.  In that representation there is no literal
+        # Parameter alias for the identity test below to find.
+        tied_embedding_output = bool(
+            getattr(self.layout.model, "share_embeddings_and_output_weights", False)
+            or embedding_param_ids & output_param_ids
+        )
         self._tied_embedding_output = tied_embedding_output
         add(self.layout.embedding, keep_loaded_after_forward=tied_embedding_output)
         for layer in self.layout.layers:

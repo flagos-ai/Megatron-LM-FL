@@ -68,6 +68,32 @@ class ToyMegatronModel(nn.Module):
         return self.output_layer(x)
 
 
+class ToySharedOutput(nn.Module):
+    def forward(self, inputs: torch.Tensor, *, weight: torch.Tensor) -> torch.Tensor:
+        return F.linear(inputs, weight)
+
+
+class ToyMegatronTiedModel(nn.Module):
+    """MCore-style tying passes embedding weight into a weightless output layer."""
+
+    share_embeddings_and_output_weights = True
+
+    def __init__(self, hidden_size: int = 8) -> None:
+        super().__init__()
+        self.embedding = nn.Embedding(hidden_size, hidden_size)
+        self.decoder = nn.Module()
+        self.decoder.layers = nn.ModuleList([nn.Linear(hidden_size, hidden_size)])
+        self.decoder.final_layernorm = nn.LayerNorm(hidden_size)
+        self.output_layer = ToySharedOutput()
+
+    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
+        hidden = self.embedding(tokens)
+        for layer in self.decoder.layers:
+            hidden = layer(hidden)
+        hidden = self.decoder.final_layernorm(hidden)
+        return self.output_layer(hidden, weight=self.embedding.weight)
+
+
 def test_config_reads_megatron_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_ENABLE", "1")
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_ACTIVATION_OFFLOAD", "true")
@@ -549,6 +575,53 @@ def test_layout_fails_on_uncovered_trainable_parameter() -> None:
 
     with pytest.raises(ValueError, match="extra_projection"):
         assert_trainable_parameter_coverage(model)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="SlideFormer engine requires CUDA")
+def test_mcore_style_tied_embedding_stays_resident_through_output() -> None:
+    model = ToyMegatronTiedModel().cuda()
+    engine = apply_true_megatron_slideformer(
+        model,
+        config=MegatronSlideFormerEngineConfig(
+            activation_offload=False, offload_after_forward=True, prefetch=True
+        ),
+    )
+    try:
+        embedding_owner = next(
+            owner for owner in engine.managed_layers if owner.layer is model.embedding
+        )
+        assert engine._tied_embedding_output is True
+        assert embedding_owner.keep_loaded_after_forward is True
+        assert embedding_owner.gpu_param_pool is not None
+        assert len(embedding_owner.gpu_param_pool.tensors) == 3
+
+        engine.zero_unmanaged_grads()
+        loss = model(torch.arange(8, device="cuda").view(2, 4)).float().pow(2).mean()
+        assert model.embedding.weight.is_cuda
+        loss.backward()
+        engine.step_unmanaged_params()
+    finally:
+        engine.close()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="SlideFormer engine requires CUDA")
+def test_slideformer_engine_accepts_cpu_initialized_model() -> None:
+    model = ToyMegatronModel()
+    assert all(not parameter.is_cuda for parameter in model.parameters())
+    engine = apply_true_megatron_slideformer(
+        model,
+        config=MegatronSlideFormerEngineConfig(
+            activation_offload=False, offload_after_forward=True, prefetch=True
+        ),
+    )
+    try:
+        engine.zero_unmanaged_grads()
+        loss = model(torch.randn(2, 4, 8, device="cuda")).float().pow(2).mean()
+        loss.backward()
+        engine.step_unmanaged_params()
+        assert engine.traffic_counters.get("parameter_sync_h2d_count", 0) == 0
+    finally:
+        engine.close()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="SlideFormer engine requires CUDA")
