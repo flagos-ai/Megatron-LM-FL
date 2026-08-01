@@ -1073,3 +1073,24 @@ def test_docker_command_keeps_optional_flagscale_overlay_without_hash_lock(
         "/workspace/FlagScale/flagscale/train/megatron/training/training.py:ro"
     ) in command
     assert not any("sha256:" in argument for argument in command)
+
+
+def test_docker_command_mounts_checkpoint_input_read_only(tmp_path: Path) -> None:
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+
+    command = gate._docker_command(
+        run_dir=tmp_path,
+        config_name="mimo-resume",
+        mode="trace-on",
+        image="example/flagscale:dev",
+        source_root=gate._REPOSITORY_ROOT,
+        rdzv_port=12345,
+        ep_dispatcher=None,
+        flagscale_training_overlay=None,
+        checkpoint_load_root=checkpoint_root,
+    )
+
+    assert (
+        f"{checkpoint_root.resolve()}:{gate.CONTAINER_CHECKPOINT_LOAD_ROOT}:ro"
+    ) in command

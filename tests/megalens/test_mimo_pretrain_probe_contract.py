@@ -16,9 +16,20 @@ _FIXTURE = (
     / "fixtures"
     / "flagscale_single_node_mimo_pretrain_smoke.yaml"
 )
+_SAVE_FIXTURE = _FIXTURE.with_name(
+    "flagscale_single_node_mimo_pretrain_save_smoke.yaml"
+)
+_RESUME_FIXTURE = _FIXTURE.with_name(
+    "flagscale_single_node_mimo_pretrain_resume_smoke.yaml"
+)
 
 
-def _write_trace(trace_root: Path, *, include_bridge: bool = False) -> None:
+def _write_trace(
+    trace_root: Path,
+    *,
+    include_bridge: bool = False,
+    iterations: tuple[int, ...] = (1, 2),
+) -> None:
     trace_root.mkdir(parents=True)
     for rank in (0, 1):
         rows: list[dict[str, object]] = []
@@ -41,7 +52,7 @@ def _write_trace(trace_root: Path, *, include_bridge: bool = False) -> None:
                 }
             )
 
-        for iteration in (1, 2):
+        for iteration in iterations:
             rows.append(
                 {
                     "name": "iteration",
@@ -77,23 +88,30 @@ def _write_trace(trace_root: Path, *, include_bridge: bool = False) -> None:
         path.write_text(json.dumps(rows), encoding="utf-8")
 
 
-def _write_run_artifacts(run_root: Path, *, trace_enabled: bool) -> None:
+def _write_run_artifacts(
+    run_root: Path,
+    *,
+    consumed_train_samples: int = 8,
+    final_iteration: int = 2,
+    loaded_iteration: int = 0,
+    trace_enabled: bool,
+) -> None:
     checkpoint_root = run_root / "checkpoints"
     checkpoint_root.mkdir()
     (checkpoint_root / "latest_checkpointed_iteration.txt").write_text(
-        "2", encoding="utf-8"
+        str(final_iteration), encoding="utf-8"
     )
-    iteration_root = checkpoint_root / "iter_0000002"
+    iteration_root = checkpoint_root / f"iter_{final_iteration:07d}"
     iteration_root.mkdir()
     (iteration_root / "common.pt").write_bytes(b"common")
     for rank in (0, 1):
         payload = {
-            "checkpoint_tracker_iteration": 2,
+            "checkpoint_tracker_iteration": final_iteration,
             "completed": True,
-            "consumed_train_samples": 8,
-            "final_iteration": 2,
+            "consumed_train_samples": consumed_train_samples,
+            "final_iteration": final_iteration,
             "global_rank": rank,
-            "loaded_iteration": 0,
+            "loaded_iteration": loaded_iteration,
             "trace_enabled": trace_enabled,
             "train_iters": 2,
             "world_size": 2,
@@ -128,6 +146,22 @@ def test_mimo_pretrain_profile_uses_megatron_production_entry() -> None:
     assert gate._CONFIG_PROFILES[_FIXTURE.stem] == "mimo-pretrain2"
 
 
+def test_mimo_pretrain_resume_profiles_preserve_the_two_iteration_schedule() -> None:
+    save_config = yaml.safe_load(_SAVE_FIXTURE.read_text(encoding="utf-8"))
+    resume_config = yaml.safe_load(_RESUME_FIXTURE.read_text(encoding="utf-8"))
+
+    assert save_config["train"]["system"]["exit_interval"] == 1
+    assert save_config["train"]["system"]["logging"]["log_energy"] is True
+    assert save_config["train"]["system"]["checkpoint"]["save_interval"] == 1
+    assert save_config["train"]["model"]["train_iters"] == 2
+    assert resume_config["train"]["system"]["checkpoint"]["load"] == (
+        gate.CONTAINER_CHECKPOINT_LOAD_ROOT
+    )
+    assert resume_config["train"]["model"]["train_iters"] == 2
+    assert gate._CONFIG_PROFILES[_SAVE_FIXTURE.stem] == "mimo-pretrain-save2"
+    assert gate._CONFIG_PROFILES[_RESUME_FIXTURE.stem] == "mimo-pretrain-resume2"
+
+
 def test_mimo_pretrain_trace_contract_accepts_production_sequence(tmp_path: Path) -> None:
     trace_root = tmp_path / "traces"
     _write_trace(trace_root)
@@ -156,3 +190,48 @@ def test_mimo_pretrain_run_contract_accepts_checkpoint_and_counters(
     _write_run_artifacts(tmp_path, trace_enabled=True)
 
     assert mimo_pretrain_probe_contract.validate_mimo_pretrain_run(tmp_path, True) == ()
+
+
+def test_mimo_pretrain_resume_contract_accepts_only_the_restored_iteration(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_trace(trace_root, iterations=(2,))
+    _write_run_artifacts(
+        tmp_path,
+        consumed_train_samples=8,
+        final_iteration=2,
+        loaded_iteration=1,
+        trace_enabled=True,
+    )
+
+    report = manifest.validate_trace(
+        trace_root,
+        gate.PROFILES["mimo-pretrain-resume2"],
+        trace_enabled=True,
+    )
+    failures = mimo_pretrain_probe_contract.validate_mimo_pretrain_resume_run(
+        tmp_path, True
+    )
+
+    assert report.passed
+    assert failures == ()
+
+
+def test_mimo_pretrain_save_contract_accepts_the_restart_checkpoint(
+    tmp_path: Path,
+) -> None:
+    _write_run_artifacts(
+        tmp_path,
+        consumed_train_samples=4,
+        final_iteration=1,
+        loaded_iteration=0,
+        trace_enabled=False,
+    )
+
+    assert (
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_save_run(
+            tmp_path, False
+        )
+        == ()
+    )

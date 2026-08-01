@@ -51,8 +51,10 @@ def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
     return by_rank
 
 
-def validate_mimo_pretrain_trace(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate two production iterations on both colocated DP ranks."""
+def _validate_mimo_pretrain_trace(
+    trace_root: Path, expected_iterations: tuple[int, ...]
+) -> tuple[Failure, ...]:
+    """Validate production iterations on both colocated DP ranks."""
 
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -68,11 +70,12 @@ def validate_mimo_pretrain_trace(trace_root: Path) -> tuple[Failure, ...]:
     for rank in (0, 1):
         iterations = by_rank.get(rank, ())
         iteration_ids = tuple(int(item.iteration_id) for item in iterations)
-        if iteration_ids != (1, 2):
+        if iteration_ids != expected_iterations:
             failures.append(
                 _failure(
                     "trace.mimo_pretrain.iterations",
-                    f"rank {rank} has iterations {iteration_ids}, expected (1, 2)",
+                    f"rank {rank} has iterations {iteration_ids}, "
+                    f"expected {expected_iterations}",
                     f"rank={rank}",
                 )
             )
@@ -122,20 +125,44 @@ def validate_mimo_pretrain_trace(trace_root: Path) -> tuple[Failure, ...]:
     return tuple(failures)
 
 
-def validate_mimo_pretrain_run(
-    run_root: Path, trace_enabled: bool
+def validate_mimo_pretrain_trace(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate a continuous two-iteration production run."""
+
+    return _validate_mimo_pretrain_trace(trace_root, (1, 2))
+
+
+def validate_mimo_pretrain_save_trace(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the first iteration before a process restart."""
+
+    return _validate_mimo_pretrain_trace(trace_root, (1,))
+
+
+def validate_mimo_pretrain_resume_trace(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the second iteration after loading a checkpoint."""
+
+    return _validate_mimo_pretrain_trace(trace_root, (2,))
+
+
+def _validate_mimo_pretrain_run(
+    run_root: Path,
+    trace_enabled: bool,
+    *,
+    consumed_train_samples: int,
+    final_iteration: int,
+    loaded_iteration: int,
+    train_iters: int,
 ) -> tuple[Failure, ...]:
     """Validate terminal counters and the standard torch_dist checkpoint."""
 
     failures: list[Failure] = []
     expected = {
-        "checkpoint_tracker_iteration": 2,
+        "checkpoint_tracker_iteration": final_iteration,
         "completed": True,
-        "consumed_train_samples": 8,
-        "final_iteration": 2,
-        "loaded_iteration": 0,
+        "consumed_train_samples": consumed_train_samples,
+        "final_iteration": final_iteration,
+        "loaded_iteration": loaded_iteration,
         "trace_enabled": trace_enabled,
-        "train_iters": 2,
+        "train_iters": train_iters,
         "world_size": 2,
     }
     for rank in (0, 1):
@@ -162,21 +189,24 @@ def validate_mimo_pretrain_run(
 
     checkpoint_root = run_root / "checkpoints"
     tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
-    if not tracker.is_file() or tracker.read_text(encoding="utf-8").strip() != "2":
+    if (
+        not tracker.is_file()
+        or tracker.read_text(encoding="utf-8").strip() != str(final_iteration)
+    ):
         failures.append(
             _failure(
                 "run.mimo_pretrain.tracker",
-                "checkpoint tracker does not point to iteration 2",
+                f"checkpoint tracker does not point to iteration {final_iteration}",
                 str(tracker),
             )
         )
-    iteration_root = checkpoint_root / "iter_0000002"
+    iteration_root = checkpoint_root / f"iter_{final_iteration:07d}"
     files = tuple(path for path in iteration_root.rglob("*") if path.is_file())
     if not iteration_root.is_dir() or not files:
         failures.append(
             _failure(
                 "run.mimo_pretrain.checkpoint",
-                "iteration 2 torch_dist checkpoint is absent or empty",
+                f"iteration {final_iteration} torch_dist checkpoint is absent or empty",
                 str(iteration_root),
             )
         )
@@ -184,8 +214,53 @@ def validate_mimo_pretrain_run(
         failures.append(
             _failure(
                 "run.mimo_pretrain.common_state",
-                "iteration 2 checkpoint has no common state",
+                f"iteration {final_iteration} checkpoint has no common state",
                 str(iteration_root),
             )
         )
     return tuple(failures)
+
+
+def validate_mimo_pretrain_run(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Validate a fresh two-iteration production run."""
+
+    return _validate_mimo_pretrain_run(
+        run_root,
+        trace_enabled,
+        consumed_train_samples=8,
+        final_iteration=2,
+        loaded_iteration=0,
+        train_iters=2,
+    )
+
+
+def validate_mimo_pretrain_save_run(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Validate the checkpoint written before a process restart."""
+
+    return _validate_mimo_pretrain_run(
+        run_root,
+        trace_enabled,
+        consumed_train_samples=4,
+        final_iteration=1,
+        loaded_iteration=0,
+        train_iters=2,
+    )
+
+
+def validate_mimo_pretrain_resume_run(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Validate restored counters and the next checkpoint."""
+
+    return _validate_mimo_pretrain_run(
+        run_root,
+        trace_enabled,
+        consumed_train_samples=8,
+        final_iteration=2,
+        loaded_iteration=1,
+        train_iters=2,
+    )

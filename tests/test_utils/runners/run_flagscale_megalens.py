@@ -29,6 +29,7 @@ from tests.test_utils.runners import tp_probe_contract  # noqa: E402
 
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
 CONTAINER_RUN_ROOT = "/artifacts/run"
+CONTAINER_CHECKPOINT_LOAD_ROOT = "/artifacts/load/checkpoints"
 
 _COMMON_FIELDS = ("g_rk", "dp_rk", "pp_rk", "tp_rk")
 
@@ -178,6 +179,13 @@ _BRIDGE_EVENTS = (
 _MIMO_TERMINAL_EVENTS = (
     *_BRIDGE_EVENTS,
     manifest.EventRequirement("optimizer-step", _COMMON_FIELDS, "B"),
+)
+_MIMO_PRETRAIN_EVENTS = _events(
+    "forward-step",
+    "loss",
+    "optimizer",
+    "optimizer-step",
+    "optimizer-postprocess",
 )
 
 
@@ -504,15 +512,23 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "mimo-pretrain2": manifest.TraceProfile(
         "mimo-pretrain2",
         2,
-        _events(
-            "forward-step",
-            "loss",
-            "optimizer",
-            "optimizer-step",
-            "optimizer-postprocess",
-        ),
+        _MIMO_PRETRAIN_EVENTS,
         mimo_pretrain_probe_contract.validate_mimo_pretrain_trace,
         mimo_pretrain_probe_contract.validate_mimo_pretrain_run,
+    ),
+    "mimo-pretrain-save2": manifest.TraceProfile(
+        "mimo-pretrain-save2",
+        2,
+        _MIMO_PRETRAIN_EVENTS,
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_save_trace,
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_save_run,
+    ),
+    "mimo-pretrain-resume2": manifest.TraceProfile(
+        "mimo-pretrain-resume2",
+        2,
+        _MIMO_PRETRAIN_EVENTS,
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_resume_trace,
+        mimo_pretrain_probe_contract.validate_mimo_pretrain_resume_run,
     ),
     "mimo-train8-fanin": manifest.TraceProfile(
         "mimo-train8-fanin",
@@ -566,6 +582,8 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_mimo_smoke": "mimo-train2",
     "flagscale_single_node_mimo_pretrain_smoke": "mimo-pretrain2",
+    "flagscale_single_node_mimo_pretrain_save_smoke": "mimo-pretrain-save2",
+    "flagscale_single_node_mimo_pretrain_resume_smoke": "mimo-pretrain-resume2",
     "flagscale_single_node_mimo_fanin": "mimo-train8-fanin",
     "flagscale_single_node_mimo_fanout": "mimo-train8-fanout",
 }
@@ -655,6 +673,7 @@ def _docker_command(
     ep_dispatcher: str | None,
     flagscale_training_overlay: Path | None,
     dataset_helper_overlay: Path | None = None,
+    checkpoint_load_root: Path | None = None,
 ) -> tuple[str, ...]:
     overlay = ()
     if flagscale_training_overlay is not None:
@@ -669,6 +688,12 @@ def _docker_command(
             "--volume",
             f"{dataset_helper_overlay}:"
             f"{CONTAINER_SOURCE_ROOT}/megatron/core/datasets",
+        )
+    checkpoint_overlay = ()
+    if checkpoint_load_root is not None:
+        checkpoint_overlay = (
+            "--volume",
+            f"{checkpoint_load_root}:{CONTAINER_CHECKPOINT_LOAD_ROOT}:ro",
         )
     dispatcher = ()
     if ep_dispatcher is not None:
@@ -704,6 +729,7 @@ def _docker_command(
         "--volume",
         f"{source_root}:{CONTAINER_SOURCE_ROOT}:ro",
         *dataset_overlay,
+        *checkpoint_overlay,
         *overlay,
         "--env",
         f"MEGALENS_GATE_CONTAINER_RUN_DIR={CONTAINER_RUN_ROOT}",
@@ -826,6 +852,7 @@ def _parser() -> argparse.ArgumentParser:
         help="current source checkout mounted over the image source",
     )
     parser.add_argument("--flagscale-training-overlay", type=Path)
+    parser.add_argument("--checkpoint-load-root", type=Path)
     parser.add_argument(
         "--controller-revision",
         help="accepted for compatibility; the manifest records the mounted source HEAD",
@@ -859,6 +886,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     source_root = args.megatron_source_root.resolve()
     if not source_root.is_dir():
         parser.error("--megatron-source-root must be a directory")
+    checkpoint_load_root = None
+    if args.checkpoint_load_root is not None:
+        checkpoint_load_root = args.checkpoint_load_root.resolve()
+        if not checkpoint_load_root.is_dir():
+            parser.error("--checkpoint-load-root must be a directory")
     try:
         source_head = _source_head(source_root)
         rdzv_port = _reserve_loopback_port(args.rdzv_port)
@@ -896,6 +928,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         ep_dispatcher=dispatcher,
         flagscale_training_overlay=overlay,
         dataset_helper_overlay=dataset_helper_overlay,
+        checkpoint_load_root=checkpoint_load_root,
     )
     environment = os.environ.copy()
     environment.update(
