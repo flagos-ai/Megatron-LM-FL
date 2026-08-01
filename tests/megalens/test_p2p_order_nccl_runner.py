@@ -6,10 +6,14 @@ from tests.test_utils.runners import run_p2p_order_nccl
 
 
 def test_p2p_order_nccl_arguments_and_rank_plans() -> None:
-    assert run_p2p_order_nccl._parser().parse_args(()).tensor_elements == 8
-    assert (
-        run_p2p_order_nccl._parser().parse_args(("--tensor-elements", "16")).tensor_elements == 16
+    defaults = run_p2p_order_nccl._parser().parse_args(())
+    assert defaults.tensor_elements == 8
+    assert defaults.output_dir is None
+    configured = run_p2p_order_nccl._parser().parse_args(
+        ("--tensor-elements", "16", "--output-dir", "/tmp/p2p-order")
     )
+    assert configured.tensor_elements == 16
+    assert configured.output_dir.as_posix() == "/tmp/p2p-order"
     assert run_p2p_order_nccl._expected_api_calls(0) == (
         ("send_next", "isend", "primary"),
         ("recv_next", "irecv", "world"),

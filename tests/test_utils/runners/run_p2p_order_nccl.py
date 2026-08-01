@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+from pathlib import Path
 from typing import Any, Sequence
 
 import torch
@@ -32,6 +33,7 @@ def _expected_api_calls(rank: int) -> tuple[tuple[str, str, str], ...]:
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tensor-elements", type=_positive_int, default=8)
+    parser.add_argument("--output-dir", type=Path)
     return parser
 
 
@@ -196,8 +198,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             tensor_elements=args.tensor_elements,
             primary_group=primary_group,
         )
+        encoded_evidence = json.dumps(evidence, sort_keys=True)
+        if args.output_dir is not None:
+            args.output_dir.mkdir(parents=True, exist_ok=True)
+            (args.output_dir / f"rank-{dist.get_rank()}.json").write_text(
+                f"{encoded_evidence}\n", encoding="utf-8"
+            )
+        for output_rank in range(dist.get_world_size()):
+            dist.barrier()
+            if dist.get_rank() == output_rank:
+                print(encoded_evidence, flush=True)
         dist.barrier()
-        print(json.dumps(evidence, sort_keys=True), flush=True)
     finally:
         if primary_group is not None:
             dist.destroy_process_group(primary_group)
