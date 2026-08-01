@@ -102,7 +102,8 @@ Megatron-LM-FL 为 2338.8 tokens/s，差距为 -3.83%；因此当前不能宣称
   每个 TransformerLayer 只提交一次整层 D2H。
 - checkpoint 外层 backward boundary 负责在 TE 自定义 autograd 完成后释放层；
   不在 backward 中把 TE 保存的 `Parameter.data` 替换成 CPU storage。
-- GPU 参数使用 embedding/output 单大槽和 Transformer/final-norm 双滑动槽；
+- untied 模型使用两个全局 max-layer 滑动槽；tied embedding/output 使用一个独立
+  常驻槽，Transformer/final-norm 继续使用两个按其自身最大层尺寸分配的滑动槽；
   activation prefetch 与参数 prefetch 共用深度 3 的 H2D 调度器。
 
 同一 RTX 4090、Qwen3-8B checkpoint、BF16、seq=1024、BS64、
@@ -117,6 +118,14 @@ Megatron-LM-FL 吞吐差距为 -0.94%，allocated 多 0.360 GiB，reserved 多
 1.410 GiB；10 个 measured loss 与同步安全参考的最大差约 `2e-4`，
 allocator retry 和 OOM 均为 0。相比修正后但仍逐参数 D2H 的安全版本
 30.7945 s / 22.955 GiB reserved，最终版本快 10.4%，并减少 4.061 GiB reserved。
+
+Qwen3-4B tied checkpoint 还暴露了一个独立问题：词表 embedding/output 是最大层时，
+如果三个共享槽都按它的尺寸分配，会无意义地放大 Transformer 滑动缓存。同机同协议
+BS64 复测中，将 tied weight 拆为一个专用常驻槽后，Megatron-LM-FL 从
+15.3794 s / 12.628 GiB allocated / 14.500 GiB reserved 改善为
+14.6855 s / 11.555 GiB / 13.426 GiB；原生 SlideFormer 为
+14.4166 s / 12.105 GiB / 12.115 GiB。吞吐差距由 6.68% 收窄到 1.87%，且
+allocated 已低于原生实现。剩余约 1.31 GiB reserved 差距不能再归因于参数槽尺寸。
 
 CPU RSS 差异主要不是 sliding checkpoint 语义不同。两者都为 36 层保留约
 18 GiB 的 BF16 boundary activation slots；Megatron 的显式统计为

@@ -1525,7 +1525,7 @@ class MegatronSlideFormerEngine:
         )
         self.cpu_grad_pools, self.cpu_param_staging_pools = self._build_shared_cpu_pools()
         self.gpu_grad_pools = self._build_shared_gpu_grad_pools()
-        self.gpu_param_pools = self._build_shared_gpu_param_pools()
+        self.gpu_param_pools, self.gpu_tied_param_pools = self._build_shared_gpu_param_pools()
         self.managed_layers = [
             _ManagedLayer(
                 spec.module,
@@ -1545,7 +1545,11 @@ class MegatronSlideFormerEngine:
                     self._spec_execution_dtype(spec)
                 ),
                 gpu_grad_pool=self.gpu_grad_pools.get(self._spec_execution_dtype(spec)),
-                gpu_param_pool=self.gpu_param_pools.get(self._spec_execution_dtype(spec)),
+                gpu_param_pool=(
+                    self.gpu_tied_param_pools
+                    if self._tied_embedding_output and spec.module is self.layout.embedding
+                    else self.gpu_param_pools
+                ).get(self._spec_execution_dtype(spec)),
             )
             for idx, spec in enumerate(self.managed_module_specs)
         ]
@@ -1623,35 +1627,45 @@ class MegatronSlideFormerEngine:
             if numel
         }
 
-    def _build_shared_gpu_param_pools(self) -> dict[torch.dtype, _SharedGPUParameterPool]:
+    def _build_shared_gpu_param_pools(
+        self,
+    ) -> tuple[
+        dict[torch.dtype, _SharedGPUParameterPool], dict[torch.dtype, _SharedGPUParameterPool]
+    ]:
         max_numel_by_dtype: dict[torch.dtype, int] = {}
+        tied_numel_by_dtype: dict[torch.dtype, int] = {}
         for spec in self.managed_module_specs:
             dtype = self._spec_execution_dtype(spec)
             if dtype is None:
                 continue
-            max_numel_by_dtype[dtype] = max(
-                max_numel_by_dtype.get(dtype, 0), sum(param.numel() for param in spec.params)
-            )
+            numel = sum(param.numel() for param in spec.params)
+            if self._tied_embedding_output and spec.module is self.layout.embedding:
+                tied_numel_by_dtype[dtype] = max(tied_numel_by_dtype.get(dtype, 0), numel)
+                continue
+            max_numel_by_dtype[dtype] = max(max_numel_by_dtype.get(dtype, 0), numel)
         # Match SlideFormer's cache-unit ownership model: every managed
         # module leases one of two max-layer parameter units. This lets the
         # output projection remain resident after forward while the second
         # unit prefetches the preceding layer for backward. The optional
         # double-buffer mode uses the original SlideFormer three-unit depth.
-        # A Megatron model whose embedding/output Parameter is literally tied
-        # also needs three until that alias can be rebound into the output
-        # unit independently: one resident tied-weight unit plus two sliding
-        # units avoids deadlocking the prefetch hook.
-        unit_count = max(
-            self.config.gpu_buffer_count,
-            3 if self.config.double_buffer or getattr(self, "_tied_embedding_output", False) else 2,
-        )
-        return {
+        # A tied embedding/output weight remains resident in a dedicated slot
+        # across the loss and output backward. Keeping that slot separate lets
+        # Transformer/final-norm owners retain a true two-unit sliding window
+        # without sizing all three units to the vocabulary projection.
+        unit_count = max(self.config.gpu_buffer_count, 3 if self.config.double_buffer else 2)
+        sliding_pools = {
             dtype: _SharedGPUParameterPool(
                 numel=numel, dtype=dtype, count=unit_count, device=self.device
             )
             for dtype, numel in max_numel_by_dtype.items()
             if numel
         }
+        tied_pools = {
+            dtype: _SharedGPUParameterPool(numel=numel, dtype=dtype, count=1, device=self.device)
+            for dtype, numel in tied_numel_by_dtype.items()
+            if numel
+        }
+        return sliding_pools, tied_pools
 
     def _build_layer_optimizer(self) -> LayerAdam:
         distributed_cfg = SimpleNamespace(

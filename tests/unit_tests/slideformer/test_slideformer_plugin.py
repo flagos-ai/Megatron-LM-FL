@@ -744,7 +744,13 @@ def test_mcore_style_tied_embedding_stays_resident_through_output() -> None:
         assert engine._tied_embedding_output is True
         assert embedding_owner.keep_loaded_after_forward is True
         assert embedding_owner.gpu_param_pool is not None
-        assert len(embedding_owner.gpu_param_pool.tensors) == 3
+        assert len(embedding_owner.gpu_param_pool.tensors) == 1
+        transformer_owner = next(
+            owner for owner in engine.managed_layers if owner.is_transformer_layer
+        )
+        assert transformer_owner.gpu_param_pool is not None
+        assert transformer_owner.gpu_param_pool is not embedding_owner.gpu_param_pool
+        assert len(transformer_owner.gpu_param_pool.tensors) == 2
 
         engine.zero_unmanaged_grads()
         loss = model(torch.arange(8, device="cuda").view(2, 4)).float().pow(2).mean()
