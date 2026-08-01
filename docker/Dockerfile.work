@@ -8,12 +8,22 @@
 #
 #   MEGATRON_ROOT=/path/to/Megatron-LM-FL
 #   FLAGSCALE_ROOT=/path/to/FlagScale
+#   EMERGING_OPTIMIZERS_ROOT=/path/to/Emerging-Optimizers
 #   CONTEXT=/path/to/empty/flagos-work-context
 #   REVISION="$(git -C "${MEGATRON_ROOT}" rev-parse HEAD)"
 #   SOURCE_TREE="$(git -C "${MEGATRON_ROOT}" rev-parse HEAD^{tree})"
 #   FLAGSCALE_REVISION="$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD)"
 #   FLAGSCALE_TREE="$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})"
-#   mkdir -p "${CONTEXT}"
+#   EMERGING_OPTIMIZERS_REVISION="$(git -C "${EMERGING_OPTIMIZERS_ROOT}" rev-parse HEAD)"
+#   test "${EMERGING_OPTIMIZERS_REVISION}" = \
+#     d5363b4a418128cd8111983b191c4b8869a9766b
+#   EMERGING_OPTIMIZERS_SOURCE_DATE_EPOCH="$(git -C \
+#     "${EMERGING_OPTIMIZERS_ROOT}" show -s --format=%ct HEAD)"
+#   mkdir -p "${CONTEXT}/wheels"
+#   SOURCE_DATE_EPOCH="${EMERGING_OPTIMIZERS_SOURCE_DATE_EPOCH}" uv build \
+#     --wheel --out-dir "${CONTEXT}/wheels" "${EMERGING_OPTIMIZERS_ROOT}"
+#   EMERGING_OPTIMIZERS_WHEEL_SHA256="$(sha256sum \
+#     "${CONTEXT}/wheels/emerging_optimizers-0.1.0-py3-none-any.whl" | cut -d' ' -f1)"
 #   git -C "${MEGATRON_ROOT}" archive --format=tar \
 #     --prefix=Megatron-LM-FL/ "${REVISION}" | tar -xf - -C "${CONTEXT}"
 #   git -C "${FLAGSCALE_ROOT}" archive --format=tar \
@@ -23,6 +33,8 @@
 #     --build-arg SOURCE_TREE="${SOURCE_TREE}" \
 #     --build-arg FLAGSCALE_REVISION="${FLAGSCALE_REVISION}" \
 #     --build-arg FLAGSCALE_TREE="${FLAGSCALE_TREE}" \
+#     --build-arg EMERGING_OPTIMIZERS_REVISION="${EMERGING_OPTIMIZERS_REVISION}" \
+#     --build-arg EMERGING_OPTIMIZERS_WHEEL_SHA256="${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
 #     -t "caohongliang-flagos:cu128-${REVISION:0:12}" "${CONTEXT}"
 #
 # The target node currently requires privileged NVIDIA runtime injection:
@@ -46,6 +58,8 @@ ARG SOURCE_TREE=unknown
 ARG MEGATRON_CODE_PARENT=c47fc24f8f13d992c1b77477ae3b18919a36a737
 ARG FLAGSCALE_REVISION=6d775cd01d5c822f9413b9952a81652c917d273e
 ARG FLAGSCALE_TREE=198de8867fee8bce6e140d100910c7899ab84690
+ARG EMERGING_OPTIMIZERS_REVISION=d5363b4a418128cd8111983b191c4b8869a9766b
+ARG EMERGING_OPTIMIZERS_WHEEL_SHA256=03c111935f484bb89ca6e1954448130d926b0d3568832fd7181547680837640a
 
 LABEL org.opencontainers.image.title="caohongliang-flagos"
 LABEL org.opencontainers.image.description="Megatron-LM-FL and FlagScale CUDA 12.8 work environment"
@@ -55,6 +69,8 @@ LABEL org.flagos.megatron.tree="${SOURCE_TREE}"
 LABEL org.flagos.megatron.code-parent="${MEGATRON_CODE_PARENT}"
 LABEL org.flagos.flagscale.revision="${FLAGSCALE_REVISION}"
 LABEL org.flagos.flagscale.tree="${FLAGSCALE_TREE}"
+LABEL org.flagos.emerging-optimizers.revision="${EMERGING_OPTIMIZERS_REVISION}"
+LABEL org.flagos.emerging-optimizers.wheel.sha256="${EMERGING_OPTIMIZERS_WHEEL_SHA256}"
 
 ENV FLAGOS_ENV=/root/miniconda3/envs/flagscale-train
 ENV PROJECT_ROOT=/workspace/Megatron-LM-FL
@@ -68,22 +84,31 @@ ENV PYTHONUNBUFFERED=1
 
 COPY Megatron-LM-FL/ /workspace/Megatron-LM-FL
 COPY FlagScale/ /workspace/FlagScale
+COPY wheels/emerging_optimizers-0.1.0-py3-none-any.whl /tmp/emerging_optimizers-0.1.0-py3-none-any.whl
 COPY Megatron-LM-FL/docker/patches/flagscale-megalens.patch /tmp/flagscale-megalens.patch
 WORKDIR /workspace/Megatron-LM-FL
 
 SHELL ["/bin/bash", "-lc"]
 
 # Preserve the base image's CUDA 12.8, PyTorch, TE, FlashAttention, and NCCL
-# packages. Only add the missing NVML binding and replace megatron-core with
-# the source snapshot. Installing the project extras or running uv sync here
-# would resolve the repository's CUDA 13 development dependencies.
+# packages. Add the missing NVML and layerwise optimizer dependencies, then
+# replace megatron-core with the source snapshot. Installing the project extras
+# or running uv sync here would resolve the repository's CUDA 13 development
+# dependencies.
 RUN source /root/miniconda3/etc/profile.d/conda.sh \
     && conda activate flagscale-train \
     && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && printf '%s  %s\n' \
+        "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" "/tmp/emerging_optimizers-0.1.0-py3-none-any.whl" \
+        | sha256sum -c - \
     && python -m pip install \
         --no-cache-dir \
         --no-deps \
         "nvidia-ml-py==13.595.45" \
+        "absl-py==2.4.0" \
+        /tmp/emerging_optimizers-0.1.0-py3-none-any.whl \
+    && python -c \
+        'import importlib.metadata as md; from emerging_optimizers.orthogonalized_optimizers import OrthogonalizedOptimizer, get_muon_scale_factor; from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp; assert md.version("emerging-optimizers") == "0.1.0"' \
     && python -c \
         'import packaging, pybind11, setuptools; from packaging.version import Version; assert Version(setuptools.__version__) < Version("80"); assert Version(packaging.__version__) >= Version("24.2"); print("build-tools", setuptools.__version__, pybind11.__version__, packaging.__version__)' \
     && python -m pip uninstall -y megatron-core \
@@ -93,7 +118,9 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         --no-build-isolation \
         -e "${PROJECT_ROOT}" \
     && python -m pip check \
-    && printf '%s\n' "${SOURCE_REVISION}" > /etc/flagos-source-revision
+    && printf '%s\n' "${SOURCE_REVISION}" > /etc/flagos-source-revision \
+    && printf '%s\n' "${EMERGING_OPTIMIZERS_REVISION}" \
+        > /etc/flagos-emerging-optimizers-revision
 
 # FlagScale's runner prepends its vendored megatron.training package to
 # PYTHONPATH. Apply the reviewable compatibility diff that mirrors the
@@ -133,7 +160,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         -e "${FLAGSCALE_ROOT}" \
     && python -m pip check \
     && printf '%s\n' "${FLAGSCALE_REVISION}" > /etc/flagscale-source-revision \
-    && printf '{\n  "base_image": "%s",\n  "megatron_integration_revision": "%s",\n  "megatron_tree": "%s",\n  "megatron_code_parent": "%s",\n  "flagscale_revision": "%s",\n  "flagscale_tree": "%s",\n  "flagscale_patch_sha256": "%s"\n}\n' \
+    && printf '{\n  "base_image": "%s",\n  "megatron_integration_revision": "%s",\n  "megatron_tree": "%s",\n  "megatron_code_parent": "%s",\n  "flagscale_revision": "%s",\n  "flagscale_tree": "%s",\n  "flagscale_patch_sha256": "%s",\n  "emerging_optimizers_revision": "%s",\n  "emerging_optimizers_wheel_sha256": "%s"\n}\n' \
         "${BASE_IMAGE}" \
         "${SOURCE_REVISION}" \
         "${SOURCE_TREE}" \
@@ -141,6 +168,8 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         "${FLAGSCALE_REVISION}" \
         "${FLAGSCALE_TREE}" \
         "2ce5473b6280598d1954c575b068523d9f9facdf20a685ac08dd61822bdaa162" \
+        "${EMERGING_OPTIMIZERS_REVISION}" \
+        "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
         > /etc/flagos-sources.json
 
 # Build stages do not receive GPUs on the target Docker daemon. Validate
