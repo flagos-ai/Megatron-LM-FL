@@ -28,6 +28,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_tp2_pp2_embedding_smoke.yaml": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
+    "flagscale_single_node_pp2_batched_steady_smoke.yaml": (
+        "pp2-batched-steady"
+    ),
     "flagscale_single_node_pp2_unbatched_smoke.yaml": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
@@ -149,10 +152,10 @@ def _write_gpt_phase_trace(
     def p2p_events(iteration: int) -> None:
         if p2p_route is None:
             return
-        if p2p_route not in {"batch", "unbatched", "ring"}:
+        if p2p_route not in {"batch", "batch-steady", "unbatched", "ring"}:
             raise ValueError(f"unknown P2P route: {p2p_route}")
 
-        if p2p_route == "batch":
+        if p2p_route in {"batch", "batch-steady"}:
             transport_api = "batch_isend_irecv"
             launch_pairing = "backend_dependent"
             completion_pairing = "position"
@@ -165,6 +168,30 @@ def _write_gpt_phase_trace(
                     ("internal_wait", (("recv-forward", "recv_prev"),)),
                     ("internal_wait", (("send-backward", "send_prev"),)),
                 )
+            if p2p_route == "batch-steady":
+                launch_groups = (
+                    ("internal_wait", (("send-forward", "send_next"),)),
+                    (
+                        "internal_wait",
+                        (
+                            ("send-forward", "send_next"),
+                            ("recv-backward", "recv_next"),
+                        ),
+                    ),
+                    ("internal_wait", (("recv-backward", "recv_next"),)),
+                )
+                if rank == 1:
+                    launch_groups = (
+                        ("internal_wait", (("recv-forward", "recv_prev"),)),
+                        (
+                            "internal_wait",
+                            (
+                                ("send-backward", "send_prev"),
+                                ("recv-forward", "recv_prev"),
+                            ),
+                        ),
+                        ("internal_wait", (("send-backward", "send_prev"),)),
+                    )
         elif p2p_route == "unbatched":
             transport_api = "isend_irecv"
             launch_pairing = "key"
@@ -323,7 +350,7 @@ def _write_gpt_phase_trace(
                     operation_ids=[operation_id],
                 )
                 event(event_name, "E", completed=True, error_type=None)
-            if p2p_route == "batch":
+            if p2p_route in {"batch", "batch-steady"}:
                 operation_ids = [
                     operation["operation_id"] for operation in operations
                 ]
@@ -614,6 +641,29 @@ def test_unbatched_pp2_profile_uses_vpp_without_unsupported_p2p_cli_keys() -> No
     assert model["num_layers"] == 4
     assert model["micro_batch_size"] == 1
     assert model["global_batch_size"] == 2
+
+
+def test_pp2_batched_steady_profile_only_adds_a_second_microbatch() -> None:
+    baseline = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_pp2_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    steady = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_pp2_batched_steady_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = steady["experiment"]["exp_name"]
+    baseline["train"]["model"]["global_batch_size"] = 2
+
+    assert steady == baseline
+    profile = gate.PROFILES["pp2-batched-steady"]
+    assert profile.rank_count == 2
+    assert (
+        profile.contract
+        is p2p_probe_contract.validate_pp2_batched_steady_route
+    )
 
 
 @pytest.mark.parametrize(
@@ -1022,6 +1072,43 @@ def test_pp2_batched_profile_accepts_internal_wait_route(tmp_path: Path) -> None
         )
 
     assert gate.PROFILES["pp2"].contract(trace_root) == ()
+
+
+def test_pp2_batched_steady_profile_accepts_steady_operation_groups(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-batched-steady"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            include_optimizer=True,
+            p2p_route="batch-steady",
+        )
+
+    assert gate.PROFILES["pp2-batched-steady"].contract(trace_root) == ()
+
+
+def test_pp2_batched_steady_contract_rejects_single_microbatch_route(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "pp2-batched-no-steady"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=rank,
+            include_postprocess=rank == 1,
+            p2p_route="batch",
+        )
+
+    failures = p2p_probe_contract.validate_pp2_batched_steady_route(trace_root)
+
+    assert "trace.p2p.batch_structure" in {
+        failure.code for failure in failures
+    }
 
 
 def test_pp2_unbatched_profile_accepts_mixed_wait_route(tmp_path: Path) -> None:

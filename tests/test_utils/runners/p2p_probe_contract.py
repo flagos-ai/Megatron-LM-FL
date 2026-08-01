@@ -21,6 +21,18 @@ _BATCH_DIRECTIONS = {
     0: ("send-forward", "recv-backward"),
     1: ("recv-forward", "send-backward"),
 }
+_BATCH_STEADY_OPERATION_GROUPS = {
+    0: (
+        ("send-forward",),
+        ("send-forward", "recv-backward"),
+        ("recv-backward",),
+    ),
+    1: (
+        ("recv-forward",),
+        ("send-backward", "recv-forward"),
+        ("send-backward",),
+    ),
+}
 
 
 def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
@@ -86,6 +98,7 @@ def _validate_iteration(
     *,
     rank: int,
     batched: bool,
+    expected_batched_operation_groups: Sequence[Sequence[str]] | None = None,
 ) -> tuple[list[Failure], set[str]]:
     iteration_id = int(iteration.iteration_id)
     failures: list[Failure] = []
@@ -100,7 +113,19 @@ def _validate_iteration(
     syncs = _events(iteration, "p2p-batch-device-sync", "B")
     sync_ends = _events(iteration, "p2p-batch-device-sync", "E")
 
-    expected_launches = 2 if batched else None
+    if batched:
+        operation_groups = tuple(
+            tuple(group)
+            for group in (
+                expected_batched_operation_groups
+                if expected_batched_operation_groups is not None
+                else ((direction,) for direction in _BATCH_DIRECTIONS[rank])
+            )
+        )
+        expected_launches = len(operation_groups)
+    else:
+        operation_groups = ()
+        expected_launches = None
     valid_launch_count = (
         bool(launches)
         and len(launches) == len(launch_ends)
@@ -146,6 +171,7 @@ def _validate_iteration(
 
     launched: dict[str, tuple[str, str, str]] = {}
     operations_by_batch: dict[str, set[str]] = {}
+    observed_operation_groups: list[tuple[str, ...]] = []
     completion_modes: set[str] = set()
     for launch in launches:
         failures.extend(
@@ -184,6 +210,7 @@ def _validate_iteration(
 
         completion_modes.add(mode)
         operation_ids: set[str] = set()
+        operation_names: list[str] = []
         for operation in operations:
             if not isinstance(operation, Mapping):
                 failures.append(
@@ -197,6 +224,7 @@ def _validate_iteration(
                 continue
             operation_id = operation.get("operation_id")
             event_name = _operation_event_name(operation)
+            operation_names.append(event_name)
             if (
                 not isinstance(operation_id, str)
                 or operation_id in launched
@@ -217,6 +245,18 @@ def _validate_iteration(
             operation_ids.add(operation_id)
             launched[operation_id] = (batch_id, event_name, mode)
         operations_by_batch[batch_id] = operation_ids
+        observed_operation_groups.append(tuple(operation_names))
+
+    if batched and tuple(observed_operation_groups) != operation_groups:
+        failures.append(
+            _failure(
+                "trace.p2p.batch_structure",
+                "batched P2P operation groups "
+                f"{observed_operation_groups!r}, expected {operation_groups!r}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
 
     if len(completions) != len(launched):
         failures.append(
@@ -335,14 +375,18 @@ def _validate_iteration(
 
         expected_sequence = tuple(
             item
-            for direction in _BATCH_DIRECTIONS[rank]
+            for group in operation_groups
             for item in (
-                ("p2p-launch", "B"),
-                ("p2p-launch", "E"),
-                (direction, "B"),
-                (direction, "E"),
-                ("p2p-batch-device-sync", "B"),
-                ("p2p-batch-device-sync", "E"),
+                (("p2p-launch", "B"), ("p2p-launch", "E"))
+                + tuple(
+                    event
+                    for direction in group
+                    for event in ((direction, "B"), (direction, "E"))
+                )
+                + (
+                    ("p2p-batch-device-sync", "B"),
+                    ("p2p-batch-device-sync", "E"),
+                )
             )
         )
         observed_sequence = tuple(
@@ -364,7 +408,14 @@ def _validate_iteration(
     return failures, completion_modes
 
 
-def _validate_pp2_route(trace_root: Path, *, batched: bool) -> tuple[Failure, ...]:
+def _validate_pp2_route(
+    trace_root: Path,
+    *,
+    batched: bool,
+    expected_batched_operation_groups: Mapping[
+        int, Sequence[Sequence[str]]
+    ] | None = None,
+) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     observed_completion_modes: set[str] = set()
     by_rank = _load_iterations(trace_root)
@@ -405,6 +456,11 @@ def _validate_pp2_route(trace_root: Path, *, batched: bool) -> tuple[Failure, ..
                 iteration,
                 rank=rank,
                 batched=batched,
+                expected_batched_operation_groups=(
+                    expected_batched_operation_groups[rank]
+                    if expected_batched_operation_groups is not None
+                    else None
+                ),
             )
             failures.extend(iteration_failures)
             observed_completion_modes.update(completion_modes)
@@ -424,6 +480,16 @@ def validate_pp2_batched_route(trace_root: Path) -> tuple[Failure, ...]:
     """Validate batch transport, internal waits, and device synchronization."""
 
     return _validate_pp2_route(trace_root, batched=True)
+
+
+def validate_pp2_batched_steady_route(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate PP2 warmup/steady/cooldown batches with two microbatches."""
+
+    return _validate_pp2_route(
+        trace_root,
+        batched=True,
+        expected_batched_operation_groups=_BATCH_STEADY_OPERATION_GROUPS,
+    )
 
 
 def validate_pp2_unbatched_route(trace_root: Path) -> tuple[Failure, ...]:

@@ -391,6 +391,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         ),
         training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "pp2-batched-steady": manifest.TraceProfile(
+        "pp2-batched-steady",
+        2,
+        _PP2_EVENTS,
+        p2p_probe_contract.validate_pp2_batched_steady_route,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "pp2-unbatched": manifest.TraceProfile(
         "pp2-unbatched",
         2,
@@ -627,6 +634,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",
+    "flagscale_single_node_pp2_batched_steady_smoke": "pp2-batched-steady",
     "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
