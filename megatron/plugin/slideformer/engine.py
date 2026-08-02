@@ -25,6 +25,10 @@ from megatron.plugin.slideformer.layout import (
     assert_trainable_parameter_coverage,
     resolve_megatron_decoder_layout,
 )
+from megatron.plugin.slideformer.kernels import (
+    apply_tp1_batch_major_attention,
+    restore_tp1_batch_major_attention,
+)
 
 
 @dataclass(frozen=True)
@@ -87,6 +91,7 @@ class MegatronSlideFormerEngineConfig:
     skip_cpu_adam_step: bool = False
     flat_grad_d2h: bool = False
     te_fused_main_grad: bool = False
+    qkv_layout_backend: str = "megatron"
     shared_cpu_buffers: bool = True
     cpu_grad_buffer_count: int = 0
     cpu_param_staging_buffer_count: int = 1
@@ -100,6 +105,10 @@ class MegatronSlideFormerEngineConfig:
     enable_timing: bool = False
 
     def __post_init__(self) -> None:
+        if self.qkv_layout_backend not in {"auto", "tp1_batch_major", "megatron"}:
+            raise ValueError(
+                "qkv_layout_backend must be 'auto', 'tp1_batch_major', or 'megatron'"
+            )
         if self.activation_backend not in {"checkpoint", "slideformer-slot"}:
             raise ValueError("activation_backend must be 'checkpoint' or 'slideformer-slot'")
         if self.activation_backend == "slideformer-slot" and not self.activation_offload:
@@ -1449,6 +1458,20 @@ class MegatronSlideFormerEngine:
         self._closed = False
         self.layout = layout or resolve_megatron_decoder_layout(model)
         assert_trainable_parameter_coverage(model, self.layout)
+        self.qkv_layout_report: dict[str, Any] = {
+            "requested": self.config.qkv_layout_backend,
+            "effective": "megatron_sequence_major",
+            "patched_layers": 0,
+        }
+        if self.config.qkv_layout_backend != "megatron":
+            patched_layers = apply_tp1_batch_major_attention(model)
+            self.qkv_layout_report.update(
+                effective="tp1_batch_major_attention",
+                patched_layers=patched_layers,
+            )
+            kernel_report = getattr(self.layout.model, "_slideformer_kernel_report", None)
+            if isinstance(kernel_report, dict):
+                kernel_report["qkv_layout"] = dict(self.qkv_layout_report)
         self.managed_module_specs = self._collect_managed_module_specs()
         self.managed_modules = [spec.module for spec in self.managed_module_specs]
         self.layer_optimizer = self._build_layer_optimizer()
@@ -2469,6 +2492,9 @@ class MegatronSlideFormerEngine:
                 module.forward = original_forward
                 delattr(module, "_megatron_slideformer_original_forward")
                 delattr(module, "_megatron_slideformer_wrapped_forward")
+
+        if self.qkv_layout_report["patched_layers"]:
+            restore_tp1_batch_major_attention(self.model)
 
         self.activation_prefetch_cache.clear()
         self.activation_prefetch_events.clear()

@@ -127,9 +127,135 @@ class FlashAttentionCore(nn.Module):
             dropout_p=self.config.attention_dropout if self.training else 0.0,
             softmax_scale=self.softmax_scale,
             causal=causal,
+            deterministic=getattr(self.config, "deterministic_mode", False),
         )
         output = output.permute(1, 0, 2, 3).contiguous()
         return output.view(output.shape[0], output.shape[1], -1)
+
+
+class TP1BatchMajorFlashAttentionCore(FlashAttentionCore):
+    """Keep FlashAttention output batch-major through the output projection.
+
+    Megatron's public attention boundary is sequence-major, but FlashAttention 2
+    natively produces ``[batch, sequence, heads, head_dim]``.  Converting that
+    tensor to contiguous sequence-major before the output projection copies a
+    full hidden-state activation in every forward and recompute.  The TP=1
+    adapter leaves it batch-major for the projection; the attention wrapper
+    returns a cheap transposed view at the module boundary.
+    """
+
+    def forward(
+        self,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        attention_mask: torch.Tensor | None,
+        attn_mask_type: AttnMaskType | None = None,
+        attention_bias: torch.Tensor | None = None,
+        packed_seq_params=None,
+        **_: Any,
+    ) -> torch.Tensor:
+        if attention_bias is not None or packed_seq_params is not None:
+            raise NotImplementedError(
+                "SlideFormer TP=1 batch-major attention supports dense attention without bias"
+            )
+        mask_type = attn_mask_type or self.attn_mask_type
+        causal = mask_type == AttnMaskType.causal
+        if attention_mask is not None and not causal:
+            if attention_mask.dtype != torch.bool or bool(attention_mask.any()):
+                raise NotImplementedError(
+                    "SlideFormer FlashAttention does not support arbitrary attention masks"
+                )
+        output = flash_attn_func(
+            query.permute(1, 0, 2, 3),
+            key.permute(1, 0, 2, 3),
+            value.permute(1, 0, 2, 3),
+            dropout_p=self.config.attention_dropout if self.training else 0.0,
+            softmax_scale=self.softmax_scale,
+            causal=causal,
+            deterministic=getattr(self.config, "deterministic_mode", False),
+        )
+        return output.reshape(output.shape[0], output.shape[1], -1)
+
+
+def _tp1_batch_major_attention_forward(self, *args, **kwargs):
+    output, bias = self._slideformer_tp1_batch_major_original_forward(*args, **kwargs)
+    if output.ndim != 3:
+        raise RuntimeError(
+            "SlideFormer TP=1 batch-major attention expected a three-dimensional output"
+        )
+    return output.transpose(0, 1), bias
+
+
+def apply_tp1_batch_major_attention(model: nn.Module) -> int:
+    """Keep dense single-GPU attention batch-major between FA2 and O projection."""
+
+    if flash_attn_func is None:
+        raise RuntimeError("SlideFormer TP=1 batch-major attention requires flash-attn")
+    patched = 0
+    for index, layer in enumerate(resolve_megatron_decoder_layout(model).layers):
+        attention = getattr(layer, "self_attention", None)
+        core_attention = getattr(attention, "core_attention", None)
+        if attention is None or core_attention is None:
+            raise RuntimeError("decoder layer has no replaceable self-attention core")
+        if hasattr(attention, "_slideformer_tp1_batch_major_original_forward"):
+            continue
+        config = getattr(attention, "config", getattr(layer, "config", None))
+        if config is None:
+            raise RuntimeError("self-attention has no TransformerConfig")
+        if getattr(config, "tensor_model_parallel_size", 1) != 1:
+            raise RuntimeError("SlideFormer batch-major attention requires TP=1")
+        if getattr(config, "context_parallel_size", 1) != 1:
+            raise RuntimeError("SlideFormer batch-major attention requires CP=1")
+        if getattr(config, "attention_output_gate", False):
+            raise RuntimeError("SlideFormer batch-major attention does not support output gates")
+        if getattr(config, "window_size", None) is not None:
+            raise RuntimeError("SlideFormer batch-major attention only supports dense attention")
+        if getattr(attention, "batch_invariant_mode", False):
+            raise RuntimeError(
+                "SlideFormer batch-major attention does not support batch-invariant mode"
+            )
+        if getattr(attention, "attention_type", "self") != "self":
+            raise RuntimeError("SlideFormer batch-major attention only supports self-attention")
+        mask_type = getattr(
+            core_attention,
+            "attn_mask_type",
+            getattr(attention, "attn_mask_type", AttnMaskType.causal),
+        )
+        replacement = TP1BatchMajorFlashAttentionCore(
+            config,
+            getattr(attention, "layer_number", index + 1),
+            mask_type,
+        )
+        replacement.train(core_attention.training)
+        attention._slideformer_tp1_batch_major_original_forward = attention.forward
+        # Bypass Module.__setattr__: keeping the replaced, parameterless TE core
+        # for restoration must not register a second checkpoint submodule.
+        attention.__dict__["_slideformer_tp1_batch_major_original_core_attention"] = (
+            core_attention
+        )
+        attention.core_attention = replacement
+        attention.forward = MethodType(_tp1_batch_major_attention_forward, attention)
+        patched += 1
+    return patched
+
+
+def restore_tp1_batch_major_attention(model: nn.Module) -> int:
+    """Restore attention modules patched by :func:`apply_tp1_batch_major_attention`."""
+
+    restored = 0
+    for layer in resolve_megatron_decoder_layout(model).layers:
+        attention = getattr(layer, "self_attention", None)
+        if attention is None or not hasattr(
+            attention, "_slideformer_tp1_batch_major_original_forward"
+        ):
+            continue
+        attention.forward = attention._slideformer_tp1_batch_major_original_forward
+        attention.core_attention = attention._slideformer_tp1_batch_major_original_core_attention
+        delattr(attention, "_slideformer_tp1_batch_major_original_forward")
+        del attention.__dict__["_slideformer_tp1_batch_major_original_core_attention"]
+        restored += 1
+    return restored
 
 
 def _validate_dense_swiglu(model: nn.Module) -> tuple[bool, str, int]:
@@ -508,9 +634,20 @@ def legacy_fused_linear_cross_entropy(
 
 
 def apply_kernel_policy(model: nn.Module, config, *, runtime_args=None) -> dict[str, Any]:
+    enable_tp1_layout = (
+        config.kernel_policy != "off" and config.qkv_layout_backend != "megatron"
+    )
+    if config.qkv_layout_backend == "auto" and config.attention_backend == "megatron":
+        enable_tp1_layout = False
     report: dict[str, Any] = {
         "policy": config.kernel_policy,
         "attention": {"requested": config.attention_backend, "effective": "megatron"},
+        "qkv_layout": {
+            "requested": config.qkv_layout_backend,
+            "effective": (
+                "pending_engine" if enable_tp1_layout else "megatron_sequence_major"
+            ),
+        },
         "mlp": {"requested": config.mlp_backend, "effective": "megatron"},
         "loss": {"requested": config.loss_backend, "effective": "megatron"},
         "norm": {"requested": config.norm_backend, "effective": "megatron"},

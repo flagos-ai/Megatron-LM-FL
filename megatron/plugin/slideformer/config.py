@@ -35,6 +35,7 @@ class MegatronSlideFormerConfig:
     fp32_master_params: bool = True
     kernel_policy: str = "auto"
     attention_backend: str = "auto"
+    qkv_layout_backend: str = "auto"
     mlp_backend: str = "auto"
     split_swiglu_threshold_gib: float = 0.5
     loss_backend: str = "auto"
@@ -195,6 +196,9 @@ class MegatronSlideFormerConfig:
             not in {"0", "false", "no", "off"},
             kernel_policy=os.getenv("MEGATRON_SLIDEFORMER_KERNEL_POLICY", "auto"),
             attention_backend=os.getenv("MEGATRON_SLIDEFORMER_ATTENTION_BACKEND", "auto"),
+            qkv_layout_backend=os.getenv(
+                "MEGATRON_SLIDEFORMER_QKV_LAYOUT_BACKEND", "auto"
+            ),
             mlp_backend=os.getenv("MEGATRON_SLIDEFORMER_MLP_BACKEND", "auto"),
             split_swiglu_threshold_gib=float(
                 os.getenv("MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB", "0.5")
@@ -263,6 +267,10 @@ class MegatronSlideFormerConfig:
             raise ValueError("SlideFormer kernel_policy must be auto or off")
         if self.attention_backend not in {"auto", "flash", "megatron"}:
             raise ValueError("SlideFormer attention_backend must be auto, flash, or megatron")
+        if self.qkv_layout_backend not in {"auto", "tp1_batch_major", "megatron"}:
+            raise ValueError(
+                "SlideFormer qkv_layout_backend must be auto, tp1_batch_major, or megatron"
+            )
         if self.mlp_backend not in {"auto", "liger", "megatron"}:
             raise ValueError("SlideFormer mlp_backend must be auto, liger, or megatron")
         if self.split_swiglu_threshold_gib < 0:

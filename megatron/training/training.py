@@ -329,6 +329,15 @@ def _apply_slideformer_if_enabled(model):
             cpu_param_staging_buffer_count=slideformer_config.cpu_param_staging_buffer_count,
             te_fused_main_grad=slideformer_config.te_fused_main_grad,
             fp32_master_params=slideformer_config.fp32_master_params,
+            qkv_layout_backend=(
+                slideformer_config.qkv_layout_backend
+                if slideformer_config.kernel_policy != "off"
+                and not (
+                    slideformer_config.qkv_layout_backend == "auto"
+                    and slideformer_config.attention_backend == "megatron"
+                )
+                else "megatron"
+            ),
         ),
     )
     print_rank_0(

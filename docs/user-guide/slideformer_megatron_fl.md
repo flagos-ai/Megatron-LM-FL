@@ -25,6 +25,7 @@
 | 模块 | 默认实现 | 不兼容或缺依赖时 |
 | --- | --- | --- |
 | dense causal attention | TE auto（Qwen3 实测选择 FlashAttention 2.8.3） | 显式选择 local backend |
+| TP=1 attention layout | FA2 batch-major output 直接进入 O projection | `megatron` 保留原 sequence-major clone |
 | dense SwiGLU | TE MCore fused SwiGLU；超大 FC1 自动拆分 gate/up GEMM | 有 bias 时保留 Megatron bias-activation fusion |
 | LM head + CE | SlideFormer Legacy LCE | 显式选择现代 `liger` 或 `megatron` |
 | RMSNorm（含 Q/K norm） | TE MCore RMSNorm | 显式选择 local backend |
@@ -135,6 +136,29 @@ clone 共约 339 ms；原生 HF 的分离 q/k/v projection 不需要同样的布
 Qwen3 的 QK RMSNorm 又使 Megatron 现有 `fused_single_qkv_rope` 路径不适用，若要
 继续消除这部分开销，需要单独实现和验收 TP=1 batch-major QKV/attention builder。
 
+TP=1 batch-major attention adapter 的第一阶段保留 Megatron/TE 的单个 `linear_qkv`
+和 checkpoint 参数格式，只让 FlashAttention 2 的 `[batch, sequence, heads, head_dim]`
+输出以 batch-major 形式直接进入 output projection，并在 attention 模块边界返回
+sequence-major view。通过 `MEGATRON_SLIDEFORMER_QKV_LAYOUT_BACKEND` 可选择
+`auto`（单卡 SlideFormer 默认）、`tp1_batch_major` 或 `megatron`。
+
+同机 Qwen3-4B、BS64、3 warmup + 10 measured 的结果为 14.5616 s/step、
+12.180 GiB allocated、13.309 GiB reserved、67.731 GiB CPU RSS。相对旧布局的
+14.6855 s/step 提升 0.85%，与 torch native 14.4165 s/step 的差距从 1.87%
+缩小到 1.01%。paired 三步正确性测试的最大 loss 差为 `6.49e-5`。
+
+Nsight 单步验证显示 GPU kernel sum 从 14.322 s 降到 14.181 s，kernel 数从
+2906 降到 2654；`direct_copy_kernel_cuda` 从 339.5 ms/508 次降到
+217.7 ms/256 次。被移除的主要是 72 次完整 attention output layout copy 和
+batch-major K/V layout copy。代价是 output projection backward 新增约 27 ms 的
+batch-major hidden-gradient copy，并多保留约 0.625 GiB allocated；reserved 与 CPU
+RSS 没有增加。剩余主要布局成本是 QKV split backward 和 QK RMSNorm 前后的拼接/复制，
+继续优化需要将 Q/K/V projection 与归一化的 backward 输出直接写入兼容的梯度槽。
+把 sequence-major hidden 先复制成 batch-major、再执行现有单个 QKV GEMM 的第二阶段
+screening 为 14.6142 s/step、12.492 GiB allocated、13.641 GiB reserved，慢于第一阶段，
+CPU RSS 也增加约 1.13 GiB，因此未合入。后续不能用额外 staging copy 冒充 QKV layout
+优化；需要 builder/kernel 原生写出目标布局。
+
 两项低风险替代均未带来收益：强制 TE FlashAttention 为 14.7166 s/step，略慢于
 TE auto 的 14.6855 s/step；`cudaMallocAsync` screening 把 reserved 提高到
 20.344 GiB。默认因此继续使用“验证 FlashAttention 可用、由 TE auto dispatch”
@@ -206,6 +230,7 @@ export MEGATRON_SLIDEFORMER_ACTIVATION_SLOT_PREFETCH=1
 export MEGATRON_SLIDEFORMER_MAX_OUTSTANDING_H2D=3
 export MEGATRON_SLIDEFORMER_KERNEL_POLICY=auto
 export MEGATRON_SLIDEFORMER_ATTENTION_BACKEND=auto
+export MEGATRON_SLIDEFORMER_QKV_LAYOUT_BACKEND=auto
 export MEGATRON_SLIDEFORMER_MLP_BACKEND=auto
 # 自动拆分 >=0.5 GiB 的 SwiGLU FC1 输出；设为 0 可禁用
 export MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB=0.5

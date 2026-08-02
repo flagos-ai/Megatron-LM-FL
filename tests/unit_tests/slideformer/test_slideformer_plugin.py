@@ -115,6 +115,7 @@ def test_config_reads_megatron_env(monkeypatch: pytest.MonkeyPatch) -> None:
     assert config.te_fused_main_grad is True
     assert config.kernel_policy == "auto"
     assert config.attention_backend == "auto"
+    assert config.qkv_layout_backend == "auto"
     assert config.mlp_backend == "auto"
     assert config.split_swiglu_threshold_gib == 0.5
     assert config.loss_backend == "auto"
@@ -125,6 +126,7 @@ def test_config_reads_megatron_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_config_reads_kernel_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_KERNEL_POLICY", "auto")
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_ATTENTION_BACKEND", "megatron")
+    monkeypatch.setenv("MEGATRON_SLIDEFORMER_QKV_LAYOUT_BACKEND", "tp1_batch_major")
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_MLP_BACKEND", "liger")
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_LOSS_BACKEND", "megatron")
     monkeypatch.setenv("MEGATRON_SLIDEFORMER_NORM_BACKEND", "liger")
@@ -134,6 +136,7 @@ def test_config_reads_kernel_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     config = MegatronSlideFormerConfig.from_env()
 
     assert config.attention_backend == "megatron"
+    assert config.qkv_layout_backend == "tp1_batch_major"
     assert config.mlp_backend == "liger"
     assert config.loss_backend == "megatron"
     assert config.norm_backend == "liger"
@@ -419,6 +422,112 @@ def test_flash_attention_preserves_megatron_softmax_scaling(monkeypatch) -> None
     assert call["softmax_scale"] == pytest.approx(1 / 16)
 
 
+def test_tp1_batch_major_flash_attention_avoids_sequence_major_clone(monkeypatch) -> None:
+    def fake_flash_attention(query, key, value, **kwargs):
+        del key, value, kwargs
+        return query.contiguous()
+
+    monkeypatch.setattr(kernels, "flash_attn_func", fake_flash_attention)
+    config = SimpleNamespace(
+        attention_dropout=0.0,
+        softmax_scale=None,
+        kv_channels=4,
+        apply_query_key_layer_scaling=False,
+        softmax_type="vanilla",
+    )
+    core = kernels.TP1BatchMajorFlashAttentionCore(
+        config, layer_number=1, attn_mask_type=kernels.AttnMaskType.causal
+    )
+    query = torch.randn(5, 2, 3, 4, requires_grad=True)
+
+    output = core(query, query, query, attention_mask=None)
+
+    assert output.shape == (2, 5, 12)
+    assert output.is_contiguous()
+    torch.testing.assert_close(output, query.permute(1, 0, 2, 3).reshape(2, 5, 12))
+    output.sum().backward()
+    torch.testing.assert_close(query.grad, torch.ones_like(query))
+
+
+def test_tp1_batch_major_attention_preserves_megatron_boundary_and_restores(
+    monkeypatch,
+) -> None:
+    def fake_flash_attention(query, key, value, **kwargs):
+        del key, value, kwargs
+        return query.contiguous()
+
+    class TupleProjection(nn.Linear):
+        def forward(self, inputs):
+            return super().forward(inputs), None
+
+    class ReferenceCore(nn.Module):
+        attn_mask_type = kernels.AttnMaskType.causal
+
+    class Attention(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.config = SimpleNamespace(
+                attention_dropout=0.0,
+                softmax_scale=None,
+                kv_channels=4,
+                apply_query_key_layer_scaling=False,
+                softmax_type="vanilla",
+                tensor_model_parallel_size=1,
+                context_parallel_size=1,
+                attention_output_gate=False,
+            )
+            self.attention_type = "self"
+            self.layer_number = 1
+            self.core_attention = ReferenceCore()
+            self.linear_proj = TupleProjection(12, 12, bias=False)
+
+        def get_query_key_value_tensors(
+            self,
+            hidden_states,
+            key_value_states=None,
+            output_gate=False,
+            split_qkv=True,
+        ):
+            del key_value_states, output_gate, split_qkv
+            sequence, batch, _ = hidden_states.shape
+            query = hidden_states.view(sequence, batch, 3, 4)
+            return query, query, query
+
+        def forward(self, hidden_states):
+            query, key, value = self.get_query_key_value_tensors(hidden_states)
+            context = self.core_attention(query, key, value, None)
+            return self.linear_proj(context)
+
+    class Model(nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.decoder = nn.Module()
+            layer = nn.Module()
+            layer.self_attention = Attention()
+            self.decoder.layers = nn.ModuleList([layer])
+
+    monkeypatch.setattr(kernels, "flash_attn_func", fake_flash_attention)
+    model = Model()
+    attention = model.decoder.layers[0].self_attention
+    original_core = attention.core_attention
+    hidden_states = torch.randn(5, 2, 12, requires_grad=True)
+    expected = F.linear(hidden_states, attention.linear_proj.weight)
+
+    assert kernels.apply_tp1_batch_major_attention(model) == 1
+    assert kernels.apply_tp1_batch_major_attention(model) == 0
+    actual, bias = attention(hidden_states)
+
+    assert bias is None
+    assert actual.shape == hidden_states.shape
+    torch.testing.assert_close(actual, expected)
+    actual.sum().backward()
+    assert hidden_states.grad is not None
+    assert "_slideformer_tp1_batch_major_original_core_attention" not in attention._modules
+
+    assert kernels.restore_tp1_batch_major_attention(model) == 1
+    assert attention.core_attention is original_core
+
+
 def test_disabled_kernel_policy_does_not_patch_model() -> None:
     model = ToyMegatronModel()
     config = replace(MegatronSlideFormerConfig(), kernel_policy="off")
@@ -426,6 +535,7 @@ def test_disabled_kernel_policy_does_not_patch_model() -> None:
     report = apply_kernel_policy(model, config)
 
     assert report["attention"]["effective"] == "megatron"
+    assert report["qkv_layout"]["effective"] == "megatron_sequence_major"
     assert report["mlp"]["effective"] == "megatron"
     assert report["loss"]["effective"] == "megatron"
 
