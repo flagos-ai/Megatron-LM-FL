@@ -214,6 +214,7 @@ def test_deepseek_d0_probe_derivative_preserves_the_guide_model_and_parallel_con
     assert runner["node_rank"] == "${oc.decode:${oc.env:NODE_RANK}}"
     assert runner["master_addr"] == "${oc.env:MASTER_ADDR}"
     assert runner["master_port"] == "${oc.decode:${oc.env:MASTER_PORT}}"
+    assert experiment["envs"]["NCCL_NVLS_ENABLE"] == 0
 
     assert system["tensor_model_parallel_size"] == 1
     assert system["pipeline_model_parallel_size"] == 2
