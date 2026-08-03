@@ -29,6 +29,7 @@ from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_capacity_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_flex_deepep_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_flex_hybridep_probe_contract  # noqa: E402
+from tests.test_utils.runners import moe_recompute_fp8_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_shared_expert_overlap_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_shared_expert_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
@@ -588,6 +589,27 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _ep_events("alltoall"),
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "ep2-recompute": manifest.TraceProfile(
+        "ep2-recompute",
+        2,
+        _ep_capacity_drop_events(),
+        moe_recompute_fp8_probe_contract.validate_ep2_recompute,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "ep2-fp8": manifest.TraceProfile(
+        "ep2-fp8",
+        2,
+        _ep_capacity_drop_events(),
+        moe_recompute_fp8_probe_contract.validate_ep2_fp8,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "ep2-fp8-recompute": manifest.TraceProfile(
+        "ep2-fp8-recompute",
+        2,
+        _ep_capacity_drop_events(),
+        moe_recompute_fp8_probe_contract.validate_ep2_fp8_recompute,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "ep2-alltoall-capacity-drop": manifest.TraceProfile(
         "ep2-alltoall-capacity-drop",
         2,
@@ -893,6 +915,9 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_pp2_overlap_timeline_smoke": "pp2-overlap-timeline",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
+    "flagscale_single_node_ep2_recompute_smoke": "ep2-recompute",
+    "flagscale_single_node_ep2_fp8_smoke": "ep2-fp8",
+    "flagscale_single_node_ep2_fp8_recompute_smoke": "ep2-fp8-recompute",
     "flagscale_single_node_ep2_capacity_drop_smoke": (
         "ep2-alltoall-capacity-drop"
     ),
@@ -1017,6 +1042,9 @@ def _ep_dispatcher(profile: manifest.TraceProfile, requested: str | None) -> str
         return requested
     if "alltoall" in profile.name or profile.name in {
         "ep2-fine-grained",
+        "ep2-recompute",
+        "ep2-fp8",
+        "ep2-fp8-recompute",
         "te-moe-router-cuda-graph",
     }:
         return "alltoall"

@@ -17,6 +17,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import moe_capacity_probe_contract
 from tests.test_utils.runners import moe_flex_deepep_probe_contract
 from tests.test_utils.runners import moe_flex_hybridep_probe_contract
+from tests.test_utils.runners import moe_recompute_fp8_probe_contract
 from tests.test_utils.runners import moe_shared_expert_overlap_probe_contract
 from tests.test_utils.runners import moe_shared_expert_probe_contract
 from tests.test_utils.runners import p2p_probe_contract
@@ -45,6 +46,11 @@ _CONFIG_PROFILE_CASES = {
         "pp2-overlap-timeline"
     ),
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
+    "flagscale_single_node_ep2_recompute_smoke.yaml": "ep2-recompute",
+    "flagscale_single_node_ep2_fp8_smoke.yaml": "ep2-fp8",
+    "flagscale_single_node_ep2_fp8_recompute_smoke.yaml": (
+        "ep2-fp8-recompute"
+    ),
     "flagscale_single_node_ep2_capacity_drop_smoke.yaml": (
         "ep2-alltoall-capacity-drop"
     ),
@@ -836,6 +842,116 @@ def test_ep2_capacity_drop_profile_only_enables_unpadded_token_dropping() -> Non
         "drop_rate",
     } <= set(requirements["moe-router"].fields)
     assert "capacity_factor" in requirements["moe-dispatch"].fields
+
+
+@pytest.mark.parametrize(
+    ("config_name", "profile_name", "recompute", "fp8", "contract"),
+    (
+        (
+            "flagscale_single_node_ep2_recompute_smoke.yaml",
+            "ep2-recompute",
+            True,
+            False,
+            moe_recompute_fp8_probe_contract.validate_ep2_recompute,
+        ),
+        (
+            "flagscale_single_node_ep2_fp8_smoke.yaml",
+            "ep2-fp8",
+            False,
+            True,
+            moe_recompute_fp8_probe_contract.validate_ep2_fp8,
+        ),
+        (
+            "flagscale_single_node_ep2_fp8_recompute_smoke.yaml",
+            "ep2-fp8-recompute",
+            True,
+            True,
+            moe_recompute_fp8_probe_contract.validate_ep2_fp8_recompute,
+        ),
+    ),
+)
+def test_ep2_recompute_fp8_profiles_only_enable_the_selected_route(
+    config_name: str,
+    profile_name: str,
+    recompute: bool,
+    fp8: bool,
+    contract,
+) -> None:
+    baseline = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_ep2_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    selected = yaml.safe_load((_FIXTURES / config_name).read_text(encoding="utf-8"))
+    baseline["experiment"]["exp_name"] = selected["experiment"]["exp_name"]
+    if recompute:
+        baseline["train"]["system"].update(
+            {
+                "recompute_granularity": "selective",
+                "recompute_modules": ["moe"],
+            }
+        )
+    if fp8:
+        baseline["train"]["system"]["precision"].update(
+            {"fp8_format": "hybrid", "fp8_recipe": "delayed"}
+        )
+
+    assert selected == baseline
+
+    # FlagScale runner_train merges these three groups and recursively flattens
+    # leaf names, replacing underscores with dashes.
+    flattened: list[str] = []
+
+    def flatten(values: dict[str, object]) -> None:
+        for key, value in values.items():
+            option = f"--{key.replace('_', '-')}"
+            if isinstance(value, dict):
+                flatten(value)
+            elif isinstance(value, list):
+                flattened.extend((option, *(str(item) for item in value)))
+            elif isinstance(value, bool):
+                if value:
+                    flattened.append(option)
+            else:
+                flattened.extend((option, str(value)))
+
+    for group in ("system", "model", "data"):
+        flatten(selected["train"][group])
+
+    if recompute:
+        assert "--recompute-granularity" in flattened
+        assert flattened[flattened.index("--recompute-granularity") + 1] == "selective"
+        assert "--recompute-modules" in flattened
+        assert flattened[flattened.index("--recompute-modules") + 1] == "moe"
+    else:
+        assert "--recompute-granularity" not in flattened
+        assert "--recompute-modules" not in flattened
+    if fp8:
+        assert "--fp8-format" in flattened
+        assert flattened[flattened.index("--fp8-format") + 1] == "hybrid"
+        assert "--fp8-recipe" in flattened
+        assert flattened[flattened.index("--fp8-recipe") + 1] == "delayed"
+    else:
+        assert "--fp8-format" not in flattened
+        assert "--fp8-recipe" not in flattened
+    assert "--fp8" not in flattened
+
+    profile = gate.PROFILES[profile_name]
+    assert profile.rank_count == 2
+    assert profile.contract is contract
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    assert gate._ep_dispatcher(profile, None) == "alltoall"
+    assert {
+        "moe-router",
+        "moe-dispatch",
+        "moe-experts",
+        "moe-combine",
+        "ep-alltoall-dispatch",
+        "ep-alltoall-combine",
+    } == {requirement.name for requirement in profile.events}
 
 
 def test_ep2_shared_expert_profile_only_enables_nonoverlap_shared_compute() -> None:
