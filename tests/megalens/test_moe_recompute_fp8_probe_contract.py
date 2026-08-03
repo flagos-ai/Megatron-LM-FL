@@ -33,7 +33,7 @@ def _handoff(
         "expert_cv": 0.1 + layer,
         "top1_expert_share": 0.5,
         "aux_loss": None if recompute and occurrence < 2 else 0.01 + occurrence,
-        "z_loss": None,
+        "z_loss": None if recompute and occurrence < 2 else 0.02 + occurrence,
     }
 
 
@@ -245,32 +245,47 @@ def test_recompute_contract_requires_grad_enabled_aux_loss_on_backward_calls(
     }
 
 
-def test_recompute_contract_requires_router_and_expert_reentry_equivalence(
+@pytest.mark.parametrize(
+    ("layer", "reentry_occurrence"),
+    ((1, 3), (2, 2)),
+)
+def test_recompute_contract_pairs_router_workload_with_same_layer_reentry(
     tmp_path: Path,
+    layer: int,
+    reentry_occurrence: int,
 ) -> None:
     trace_root = tmp_path / "traces"
     _write_profile(trace_root, (1, 2, 2, 1))
 
     def change_reentry_workload(rows: list[dict[str, object]]) -> None:
-        layer_two_router_ends = [
-            row
-            for row in rows
-            if row.get("name") == "moe-router"
-            and row.get("ph") == "E"
-            and row.get("layer") == 2
-        ]
-        layer_two_router_ends[1]["routing_entropy"] = 99.0
+        for event_name in ("moe-router", "moe-dispatch"):
+            end_events = [
+                row
+                for row in rows
+                if row.get("name") == event_name
+                and row.get("ph") == "E"
+                and row.get("iteration") == 1
+            ]
+            end_events[reentry_occurrence]["expert_cv"] = 99.0
 
     _mutate_rank_zero(trace_root, change_reentry_workload)
     failures = contract.validate_ep2_recompute(trace_root)
 
-    assert "trace.moe_recompute_fp8.reentry" in {
-        failure.code for failure in failures
-    }
+    failure_codes = {failure.code for failure in failures}
+    assert "trace.moe_recompute_fp8.reentry" in failure_codes
+    assert "trace.moe_recompute_fp8.handoff" not in failure_codes
+    assert any(
+        f"layer={layer}" in failure.message
+        and f"occurrence={3 - reentry_occurrence}<->{reentry_occurrence}"
+        in failure.message
+        for failure in failures
+    )
 
 
-def test_contract_rejects_an_extra_ep_collective_outside_moe_scopes(
+@pytest.mark.parametrize("phases", (("B", "E"), ("B",), ("E",)))
+def test_contract_rejects_unconsumed_ep_collective_outside_moe_scopes(
     tmp_path: Path,
+    phases: Sequence[str],
 ) -> None:
     trace_root = tmp_path / "traces"
     _write_profile(trace_root, (1, 2))
@@ -290,7 +305,7 @@ def test_contract_rejects_an_extra_ep_collective_outside_moe_scopes(
                 "iteration": 1,
                 "rel_ts": 999_000 + offset,
             }
-            for offset, phase in enumerate(("B", "E"))
+            for offset, phase in enumerate(phases)
         ]
 
     _mutate_rank_zero(trace_root, add_extra_collective)

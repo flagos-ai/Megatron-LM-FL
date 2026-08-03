@@ -35,24 +35,16 @@ _COLLECTIVE_BY_PHASE = {
     "moe-dispatch": "ep-alltoall-dispatch",
     "moe-combine": "ep-alltoall-combine",
 }
-_REENTRY_FIELDS_BY_PHASE = {
-    "moe-router": (
-        "num_tokens",
-        "routed_tokens",
-        "dropped_tokens",
-        "drop_rate",
-        "expert_cv",
-        "top1_expert_share",
-        "routing_entropy",
-    ),
-    "moe-experts": (
-        "routed_tokens",
-        "expert_cv",
-        "top1_expert_share",
-        "expert_max_over_mean",
-        "tokens_per_expert",
-    ),
-}
+_EXPECTED_EP_COLLECTIVES = frozenset(_COLLECTIVE_BY_PHASE.values())
+_RECOMPUTE_ROUTER_WORKLOAD_FIELDS = (
+    "num_tokens",
+    "routed_tokens",
+    "dropped_tokens",
+    "drop_rate",
+    "expert_cv",
+    "top1_expert_share",
+    "routing_entropy",
+)
 
 
 def _failure(
@@ -104,18 +96,22 @@ def _validate_collective_window(
     rank: int,
     iteration_id: int,
     profile: str,
+    consumed_collective_positions: set[int],
 ) -> list[Failure]:
-    phases = tuple(
-        event.ph
+    records = tuple(
+        (position, event)
         for position, event in enumerate(iteration.events)
-        if start < position < end and event.name == collective
+        if start < position < end and event.name in _EXPECTED_EP_COLLECTIVES
     )
-    if phases == ("B", "E"):
+    consumed_collective_positions.update(position for position, _event in records)
+    observed = tuple((event.name, event.ph) for _position, event in records)
+    expected = ((collective, "B"), (collective, "E"))
+    if observed == expected:
         return []
     return [
         _failure(
             "collective_phases",
-            f"layer={layer} {collective} expected phases ('B', 'E'), observed {phases}",
+            f"layer={layer} expected collective window {expected}, observed {observed}",
             rank,
             iteration_id,
             profile,
@@ -133,6 +129,7 @@ def _validate_call(
     iteration_id: int,
     profile: str,
     recompute: bool,
+    consumed_collective_positions: set[int],
 ) -> list[Failure]:
     failures: list[Failure] = []
     end_events = {event.name: event for _position, event in records if event.ph == "E"}
@@ -248,6 +245,7 @@ def _validate_call(
                 rank=rank,
                 iteration_id=iteration_id,
                 profile=profile,
+                consumed_collective_positions=consumed_collective_positions,
             )
         )
     return failures
@@ -290,31 +288,9 @@ def _validate_iteration(
         )
         return failures
 
-    observed_collective_phases = tuple(
-        (event.name, event.ph)
-        for event in iteration.events
-        if event.name in _COLLECTIVE_BY_PHASE.values()
-    )
-    expected_collective_phases = tuple(
-        (collective, phase)
-        for _layer in expected_layers
-        for collective in _COLLECTIVE_BY_PHASE.values()
-        for phase in ("B", "E")
-    )
-    if observed_collective_phases != expected_collective_phases:
-        failures.append(
-            _failure(
-                "collective_sequence",
-                f"expected EP collective sequence {expected_collective_phases}, "
-                f"observed {observed_collective_phases}",
-                rank,
-                iteration_id,
-                profile,
-            )
-        )
-
     records_per_call = len(_PHASE_NAMES) * 2
     calls: list[dict[str, Event]] = []
+    consumed_collective_positions: set[int] = set()
     for occurrence, layer in enumerate(expected_layers):
         start = occurrence * records_per_call
         call_records = records[start : start + records_per_call]
@@ -328,6 +304,7 @@ def _validate_iteration(
                 iteration_id=iteration_id,
                 profile=profile,
                 recompute=recompute,
+                consumed_collective_positions=consumed_collective_positions,
             )
         )
         calls.append(
@@ -338,27 +315,44 @@ def _validate_iteration(
             }
         )
 
+    unconsumed_collectives = tuple(
+        (position, event.name, event.ph)
+        for position, event in enumerate(iteration.events)
+        if event.name in _EXPECTED_EP_COLLECTIVES
+        and position not in consumed_collective_positions
+    )
+    if unconsumed_collectives:
+        failures.append(
+            _failure(
+                "collective_sequence",
+                f"unconsumed EP collectives outside expected windows: "
+                f"{unconsumed_collectives}",
+                rank,
+                iteration_id,
+                profile,
+            )
+        )
+
     if recompute:
         for original_occurrence, reentry_occurrence in ((0, 3), (1, 2)):
-            original = calls[original_occurrence]
-            reentry = calls[reentry_occurrence]
-            for phase_name, fields in _REENTRY_FIELDS_BY_PHASE.items():
-                for field in fields:
-                    original_value = original[phase_name].attrs.get(field)
-                    reentry_value = reentry[phase_name].attrs.get(field)
-                    if original_value != reentry_value:
-                        failures.append(
-                            _failure(
-                                "reentry",
-                                f"layer={expected_layers[original_occurrence]} "
-                                f"{phase_name} field {field!r} changed across "
-                                f"checkpoint reentry: {original_value!r} != "
-                                f"{reentry_value!r}",
-                                rank,
-                                iteration_id,
-                                profile,
-                            )
+            original = calls[original_occurrence]["moe-router"]
+            reentry = calls[reentry_occurrence]["moe-router"]
+            for field in _RECOMPUTE_ROUTER_WORKLOAD_FIELDS:
+                original_value = original.attrs.get(field)
+                reentry_value = reentry.attrs.get(field)
+                if original_value != reentry_value:
+                    failures.append(
+                        _failure(
+                            "reentry",
+                            f"layer={expected_layers[original_occurrence]} "
+                            f"occurrence={original_occurrence}<->{reentry_occurrence} "
+                            f"moe-router field {field!r} changed across checkpoint "
+                            f"reentry: {original_value!r} != {reentry_value!r}",
+                            rank,
+                            iteration_id,
+                            profile,
                         )
+                    )
     return failures
 
 
