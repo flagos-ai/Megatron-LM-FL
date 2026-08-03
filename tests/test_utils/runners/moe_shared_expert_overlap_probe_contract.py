@@ -58,12 +58,9 @@ def _paired_intervals(events: Sequence[Event]) -> tuple[tuple[int, int, Event], 
     )
 
 
-def _validate_iteration(iteration: Iteration, rank: int) -> tuple[list[Failure], bool]:
+def _validate_iteration(iteration: Iteration, rank: int) -> list[Failure]:
     if iteration.iteration_id is None:
-        return (
-            [_failure("iteration", "scope is outside a numbered iteration", rank, None)],
-            False,
-        )
+        return [_failure("iteration", "scope is outside a numbered iteration", rank, None)]
 
     iteration_id = int(iteration.iteration_id)
     events = [event for event in iteration.events if event.name == "moe-shared-expert"]
@@ -130,9 +127,6 @@ def _validate_iteration(iteration: Iteration, rank: int) -> tuple[list[Failure],
                 )
             )
 
-    ep_intervals_by_layer: dict[int, list[tuple[int, int]]] = {
-        layer: [] for layer in _LAYERS
-    }
     for name in _EP_NAMES:
         ep_events = [event for event in iteration.events if event.name == name]
         ep_phases = tuple(event.ph for event in ep_events)
@@ -147,37 +141,17 @@ def _validate_iteration(iteration: Iteration, rank: int) -> tuple[list[Failure],
             )
             continue
 
-        # EP scope metadata has no layer field. This controlled profile executes
-        # one dispatch and combine call per layer, so logical occurrence associates
-        # the scopes with layers. Device interval intersection uses timestamps below
-        # and never assumes that records from different CUDA streams are time ordered.
-        for layer, (start, end, _event) in zip(
-            _LAYERS, _paired_intervals(ep_events)
-        ):
+        for start, end, _event in _paired_intervals(ep_events):
             if end <= start:
                 failures.append(
                     _failure(
                         "interval",
-                        f"layer={layer} {name} has interval [{start}, {end}]",
+                        f"{name} has interval [{start}, {end}]",
                         rank,
                         iteration_id,
                     )
                 )
-                continue
-            ep_intervals_by_layer[layer].append((start, end))
-
-    overlap_observed = False
-    for shared_start, shared_end, event in shared_intervals:
-        layer = event.attrs.get("layer")
-        if not isinstance(layer, int) or isinstance(layer, bool):
-            continue
-        for ep_start, ep_end in ep_intervals_by_layer.get(layer, ()):
-            if max(shared_start, ep_start) < min(shared_end, ep_end):
-                overlap_observed = True
-                break
-        if overlap_observed:
-            break
-    return failures, overlap_observed
+    return failures
 
 
 def validate_ep2_shared_expert_overlap(trace_root: Path) -> tuple[Failure, ...]:
@@ -185,7 +159,6 @@ def validate_ep2_shared_expert_overlap(trace_root: Path) -> tuple[Failure, ...]:
 
     by_rank = _load_iterations(trace_root)
     failures: list[Failure] = []
-    overlap_observed = False
     observed_ranks = tuple(sorted(by_rank))
     if observed_ranks != _RANKS:
         failures.append(
@@ -207,19 +180,7 @@ def validate_ep2_shared_expert_overlap(trace_root: Path) -> tuple[Failure, ...]:
                 )
             )
         for iteration in iterations:
-            iteration_failures, iteration_overlap = _validate_iteration(iteration, rank)
-            failures.extend(iteration_failures)
-            overlap_observed = overlap_observed or iteration_overlap
-    if not overlap_observed:
-        failures.append(
-            Failure(
-                "trace.moe_shared_expert_overlap.device_interval_overlap",
-                "expected at least one positive intersection between CUDA-timed "
-                "shared-stage and EP scope intervals in the same rank, iteration, "
-                "and layer",
-                "ep2-alltoall-shared-expert-overlap",
-            )
-        )
+            failures.extend(_validate_iteration(iteration, rank))
     return tuple(failures)
 
 

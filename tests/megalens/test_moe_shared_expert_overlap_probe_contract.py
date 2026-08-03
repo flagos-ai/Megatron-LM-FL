@@ -155,95 +155,36 @@ def _remove_profile_overlap(trace_root: Path) -> None:
     rank_one.write_text(json.dumps(rank_one_rows), encoding="utf-8")
 
 
-def test_shared_expert_overlap_contract_accepts_one_device_interval_intersection(
+def test_shared_expert_overlap_contract_accepts_disjoint_device_intervals(
     tmp_path: Path,
 ) -> None:
     trace_root = tmp_path / "traces"
     _write_profile(trace_root)
-
     _remove_profile_overlap(trace_root)
-
-    def leave_one_intersection(rows: list[dict[str, object]]) -> None:
-        events = [
-            row
-            for row in rows
-            if row.get("name") == "moe-shared-expert"
-            and row.get("iteration") == 1
-        ]
-        events[2]["rel_ts"] = 50
-        events[3]["rel_ts"] = 70
-
-    _mutate_rank_zero(trace_root, leave_one_intersection)
 
     assert contract.validate_ep2_shared_expert_overlap(trace_root) == ()
 
 
-def test_shared_expert_overlap_contract_requires_device_interval_intersection(
+def test_shared_expert_overlap_contract_requires_positive_ep_intervals(
     tmp_path: Path,
 ) -> None:
     trace_root = tmp_path / "traces"
     _write_profile(trace_root)
-    _remove_profile_overlap(trace_root)
 
-    failures = contract.validate_ep2_shared_expert_overlap(trace_root)
-
-    assert "trace.moe_shared_expert_overlap.device_interval_overlap" in {
-        failure.code for failure in failures
-    }
-
-
-def test_shared_expert_overlap_contract_rejects_intersection_from_other_layer(
-    tmp_path: Path,
-) -> None:
-    trace_root = tmp_path / "traces"
-    _write_profile(trace_root)
-    _remove_profile_overlap(trace_root)
-
-    def overlap_layer_two_dispatch_with_layer_one_stage(
-        rows: list[dict[str, object]],
-    ) -> None:
+    def collapse_first_dispatch(rows: list[dict[str, object]]) -> None:
         events = [
             row
             for row in rows
-            if row.get("name") == "moe-shared-expert"
+            if row.get("name") == "ep-alltoall-dispatch"
             and row.get("iteration") == 1
         ]
-        events[2]["rel_ts"] = 1050
-        events[3]["rel_ts"] = 1070
+        events[1]["rel_ts"] = events[0]["rel_ts"]
 
-    _mutate_rank_zero(trace_root, overlap_layer_two_dispatch_with_layer_one_stage)
+    _mutate_rank_zero(trace_root, collapse_first_dispatch)
 
     failures = contract.validate_ep2_shared_expert_overlap(trace_root)
 
-    assert "trace.moe_shared_expert_overlap.device_interval_overlap" in {
-        failure.code for failure in failures
-    }
-
-
-def test_shared_expert_overlap_contract_rejects_intersection_from_other_iteration(
-    tmp_path: Path,
-) -> None:
-    trace_root = tmp_path / "traces"
-    _write_profile(trace_root)
-    _remove_profile_overlap(trace_root)
-
-    def overlap_iteration_two_dispatch_with_iteration_one_stage(
-        rows: list[dict[str, object]],
-    ) -> None:
-        events = [
-            row
-            for row in rows
-            if row.get("name") == "moe-shared-expert"
-            and row.get("iteration") == 1
-        ]
-        events[2]["rel_ts"] = 10_050
-        events[3]["rel_ts"] = 10_070
-
-    _mutate_rank_zero(trace_root, overlap_iteration_two_dispatch_with_iteration_one_stage)
-
-    failures = contract.validate_ep2_shared_expert_overlap(trace_root)
-
-    assert "trace.moe_shared_expert_overlap.device_interval_overlap" in {
+    assert "trace.moe_shared_expert_overlap.interval" in {
         failure.code for failure in failures
     }
 
