@@ -29,9 +29,9 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
     metadata = {
         "comm_type": "ep-deepep",
         "dispatcher": "flex",
-        "group_size": 8,
+        "group_size": 4,
         "ep_size": 4,
-        "tp_size": 2,
+        "tp_size": 1,
         "data_bytes": 16384,
     }
     for iteration in (1, 2):
@@ -123,7 +123,7 @@ def test_flex_deepep_contract_requires_source_metadata_and_actual_group(
     def change_metadata(rows: list[dict[str, object]]) -> None:
         primitive = _first_dispatch_end(rows)
         primitive["comm_type"] = "ep-alltoall"
-        primitive["group_size"] = 4
+        primitive["group_size"] = 8
 
     _mutate_rank_zero(trace_root, change_metadata)
 

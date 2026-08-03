@@ -934,6 +934,8 @@ def test_tp2_ep4_flex_deepep_profile_selects_the_fused_source_route() -> None:
             "tp_size",
         } <= set(requirements[name].fields)
     assert gate._ep_dispatcher(profile, None) == "flex"
+    assert flex_deepep["train"]["system"]["tensor_model_parallel_size"] == 2
+    assert flex_deepep["train"]["system"]["expert_tensor_parallel_size"] == 1
     data_parallel_size = 8 // flex_deepep["train"]["system"][
         "tensor_model_parallel_size"
     ]

@@ -21,9 +21,11 @@ _PHASES = ("B", "E", "B", "E")
 _TOPOLOGY = {
     "comm_type": "ep-deepep",
     "dispatcher": "flex",
-    "group_size": 8,
+    # Flex reports the expert TP domain. This profile keeps expert TP at 1
+    # while model TP is 2, so the DeepEP group contains the four EP ranks.
+    "group_size": 4,
     "ep_size": 4,
-    "tp_size": 2,
+    "tp_size": 1,
 }
 _ASYNC_EVENTS = frozenset(
     {
