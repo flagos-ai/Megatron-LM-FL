@@ -68,6 +68,10 @@ def test_dual_node_probe_profile_contract(topology: str, optimizer: str) -> None
     assert runner["rdzv_backend"] == "static"
     assert runner["rdzv_endpoint"] == "${oc.env:MASTER_ADDR}:${oc.env:MASTER_PORT}"
     assert environment["CUDA_VISIBLE_DEVICES"] == visible_devices
+    if topology == "dp16":
+        assert environment["NCCL_NVLS_ENABLE"] == 0
+    else:
+        assert "NCCL_NVLS_ENABLE" not in environment
     assert profile["hydra"]["run"]["dir"].endswith(
         "/hydra/node_${oc.env:NODE_RANK}"
     )
