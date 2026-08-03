@@ -1,10 +1,12 @@
 # G7.9 automatic Probe validation derivative of the FlagOS DeepSeek guide D0.
 # It keeps the guide model, PP2/DP8/EP4 topology, data, and tokenizer contract.
 # The foreground test action, two iterations, iteration-2 torch_dist checkpoint,
-# vendor TE, disabled FlagGems, NCCL, and portable cloud rendezvous isolate Probe
-# validation from the guide's operator and site-network environment. V3.2 real
-# guide training restores the supplied run length, checkpoint format, FlagOS
-# operator backends, FlagCX, network settings, and published baseline comparison.
+# vendor TE, disabled FlagGems, and NCCL isolate Probe validation from the guide's
+# operator and site-network environment. Each node consumes this profile with its
+# own NODE_RANK and shared MASTER_ADDR/MASTER_PORT; CloudTrainRunner generates the
+# corresponding 2-node torchrun command. V3.2 real guide training restores the
+# supplied run length, checkpoint format, FlagOS operator backends, FlagCX, network
+# settings, and published baseline comparison.
 experiment:
   exp_name: megalens-g7-9-deepseek-d0-bf16
   seed: 42
@@ -78,6 +80,7 @@ train:
     transformer_impl: transformer_engine
     te_fl_prefer: vendor
     enable_flag_gems: false
+    attention_backend: unfused
     num_layers: 27
     hidden_size: 2048
     num_attention_heads: 16

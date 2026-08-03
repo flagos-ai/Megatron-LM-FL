@@ -19,10 +19,12 @@ from megatron.megalens.trace_aggregate import (
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
 DEFAULT_MICROBATCHES_PER_ITERATION = 64
+D0_RANK_ORDER = "tp-cp-ep-dp-pp"
 
 _RANKS = tuple(range(16))
 _ITERATIONS = (1, 2)
 _DATA_PARALLEL_SIZE = 8
+_EXPERT_MODEL_PARALLEL_SIZE = 4
 _MODEL_SCOPE_NAMES = frozenset(
     ("forward-step", "decoder", "decoder-postprocess", "output_layer", "loss")
 )
@@ -332,18 +334,6 @@ def _validate_moe_call(
         region=region,
         layer=layer,
     )
-    _validate_field(
-        failures,
-        combine,
-        "num_tokens",
-        4096,
-        rank=rank,
-        iteration=iteration,
-        microbatch=microbatch,
-        region=region,
-        layer=layer,
-    )
-
     for field in _ROUTER_HANDOFF_FIELDS:
         router_value = router.attrs.get(field)
         dispatch_value = dispatch.attrs.get(field)
@@ -395,12 +385,44 @@ def _validate_moe_call(
             for value in tokens_per_expert
         )
     )
-    if not valid_counts or sum(tokens_per_expert) != routed_tokens:
+    valid_routed_tokens = (
+        isinstance(routed_tokens, int)
+        and not isinstance(routed_tokens, bool)
+        and routed_tokens >= 0
+    )
+    expert_token_total = sum(tokens_per_expert) if valid_counts else None
+    if (
+        not valid_counts
+        or not valid_routed_tokens
+        or expert_token_total != routed_tokens
+    ):
         failures.append(
             _failure(
                 "expert_workload",
                 f"layer={layer} tokens_per_expert must contain 16 non-negative counts "
-                "whose sum equals routed_tokens",
+                "whose sum equals a non-negative routed_tokens value",
+                rank=rank,
+                iteration=iteration,
+                microbatch=microbatch,
+                region=region,
+            )
+        )
+
+    combine_num_tokens = combine.attrs.get("num_tokens")
+    if (
+        not isinstance(combine_num_tokens, int)
+        or isinstance(combine_num_tokens, bool)
+        or combine_num_tokens < 0
+        or not valid_routed_tokens
+        or combine_num_tokens != routed_tokens
+        or combine_num_tokens != expert_token_total
+    ):
+        failures.append(
+            _failure(
+                "combine_workload",
+                f"layer={layer} Combine num_tokens={combine_num_tokens!r} must equal "
+                f"Experts routed_tokens={routed_tokens!r} and "
+                f"sum(tokens_per_expert)={expert_token_total!r}",
                 rank=rank,
                 iteration=iteration,
                 microbatch=microbatch,
@@ -442,12 +464,19 @@ def _validate_moe_call(
                 layer=layer,
             )
         data_bytes = collective.attrs.get("data_bytes")
-        if not isinstance(data_bytes, int) or isinstance(data_bytes, bool) or data_bytes <= 0:
+        valid_data_bytes = isinstance(data_bytes, int) and not isinstance(data_bytes, bool)
+        if collective_name == "ep-alltoall-combine" and routed_tokens == 0:
+            valid_data_bytes = valid_data_bytes and data_bytes == 0
+            expected_data_bytes = "zero for an empty local expert workload"
+        else:
+            valid_data_bytes = valid_data_bytes and data_bytes > 0
+            expected_data_bytes = "a positive integer"
+        if not valid_data_bytes:
             failures.append(
                 _failure(
                     "collective_bytes",
                     f"layer={layer} {collective_name} data_bytes="
-                    f"{collective.attrs.get('data_bytes')!r}, expected a positive integer",
+                    f"{data_bytes!r}, expected {expected_data_bytes}",
                     rank=rank,
                     iteration=iteration,
                     microbatch=microbatch,
@@ -614,6 +643,106 @@ def _validate_iteration(
     return failures
 
 
+def _collect_moe_workloads(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> Mapping[tuple[int, int], tuple[int, int]]:
+    """Return unique per-microbatch Router/Experts assignment totals."""
+
+    spans, scope_failures = _pair_model_scopes(iteration, rank=rank)
+    if scope_failures:
+        return {}
+
+    workloads: dict[tuple[int, int], dict[str, int]] = defaultdict(dict)
+    duplicate_keys: set[tuple[int, int]] = set()
+    forward_spans = sorted(spans.get("forward-step", ()), key=lambda span: span.begin_index)
+    for microbatch, forward in enumerate(forward_spans):
+        for event in iteration.events[forward.begin_index + 1 : forward.end_index]:
+            if event.ph != "E" or event.name not in ("moe-router", "moe-experts"):
+                continue
+            layer = event.attrs.get("layer")
+            field = "routed_tokens"
+            value = event.attrs.get(field)
+            if (
+                not isinstance(layer, int)
+                or isinstance(layer, bool)
+                or not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+            ):
+                continue
+            key = (microbatch, layer)
+            if event.name in workloads[key]:
+                duplicate_keys.add(key)
+                continue
+            workloads[key][event.name] = value
+
+    return {
+        key: (values["moe-router"], values["moe-experts"])
+        for key, values in workloads.items()
+        if key not in duplicate_keys
+        and "moe-router" in values
+        and "moe-experts" in values
+    }
+
+
+def _validate_ep_workload_conservation(
+    by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
+    *,
+    microbatches_per_iteration: int,
+) -> list[Failure]:
+    """Require routed assignments to be conserved within every D0 EP4 group."""
+
+    workloads: dict[tuple[int, int], Mapping[tuple[int, int], tuple[int, int]]] = {}
+    for rank, (_shard_rank, iterations) in by_rank.items():
+        for iteration in iterations:
+            if iteration.iteration_id is None:
+                continue
+            workloads[(rank, int(iteration.iteration_id))] = _collect_moe_workloads(
+                iteration,
+                rank=rank,
+            )
+
+    failures: list[Failure] = []
+    expert_data_replicas = _DATA_PARALLEL_SIZE // _EXPERT_MODEL_PARALLEL_SIZE
+    for pipeline_rank in (0, 1):
+        expected_layers = _MAIN_LAYERS[pipeline_rank] + _MTP_LAYERS[pipeline_rank]
+        stage_base = pipeline_rank * _DATA_PARALLEL_SIZE
+        for expert_data_rank in range(expert_data_replicas):
+            group_base = stage_base + expert_data_rank * _EXPERT_MODEL_PARALLEL_SIZE
+            group_ranks = tuple(
+                range(group_base, group_base + _EXPERT_MODEL_PARALLEL_SIZE)
+            )
+            for iteration in _ITERATIONS:
+                for microbatch in range(microbatches_per_iteration):
+                    for layer in expected_layers:
+                        group_values = [
+                            workloads.get((rank, iteration), {}).get((microbatch, layer))
+                            for rank in group_ranks
+                        ]
+                        if any(value is None for value in group_values):
+                            # The per-rank structural contract reports the missing or
+                            # malformed call; conservation only evaluates complete groups.
+                            continue
+                        router_total = sum(value[0] for value in group_values if value is not None)
+                        experts_total = sum(value[1] for value in group_values if value is not None)
+                        if router_total == experts_total:
+                            continue
+                        failures.append(
+                            _failure(
+                                "ep_conservation",
+                                f"EP group {group_ranks} layer={layer} Router routed_tokens "
+                                f"total={router_total}, Experts routed_tokens "
+                                f"total={experts_total}",
+                                rank=group_ranks[0],
+                                iteration=iteration,
+                                microbatch=microbatch,
+                            )
+                        )
+    return failures
+
+
 def validate_deepseek_d0_trace(
     trace_root: Path,
     *,
@@ -640,6 +769,9 @@ def validate_deepseek_d0_trace(
         if loaded is None:
             continue
         shard_rank, iterations = loaded
+        # D0 relies on Megatron's target-side default tp-cp-ep-dp-pp rank order.
+        # With TP=CP=1, PP is the slowest-varying axis and each PP stage owns
+        # eight consecutive data-parallel ranks.
         pipeline_rank = global_rank // _DATA_PARALLEL_SIZE
         data_rank = global_rank % _DATA_PARALLEL_SIZE
         expected_coordinates = (data_rank, pipeline_rank, 0)
@@ -672,7 +804,17 @@ def validate_deepseek_d0_trace(
                     microbatches_per_iteration=microbatches_per_iteration,
                 )
             )
+    failures.extend(
+        _validate_ep_workload_conservation(
+            by_rank,
+            microbatches_per_iteration=microbatches_per_iteration,
+        )
+    )
     return tuple(failures)
 
 
-__all__ = ["DEFAULT_MICROBATCHES_PER_ITERATION", "validate_deepseek_d0_trace"]
+__all__ = [
+    "D0_RANK_ORDER",
+    "DEFAULT_MICROBATCHES_PER_ITERATION",
+    "validate_deepseek_d0_trace",
+]

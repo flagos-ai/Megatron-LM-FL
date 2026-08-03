@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import json
+import inspect
 from pathlib import Path
 from typing import Any, Callable
 
 import yaml
 
+from megatron.core import parallel_state
 from tests.test_utils.runners import deepseek_d0_probe_contract as contract
 from tests.test_utils.runners import run_flagscale_megalens as single_node_gate
 
@@ -116,11 +118,11 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
             "moe-experts",
             "E",
             iteration,
-            routed_tokens=1536,
+            routed_tokens=24576,
             expert_cv=0.0,
             top1_expert_share=0.0625,
             expert_max_over_mean=1.0,
-            tokens_per_expert=[96] * 16,
+            tokens_per_expert=[1536] * 16,
             **topology,
         )
         event("moe-combine", "B", iteration)
@@ -131,7 +133,7 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
             "E",
             iteration,
             dispatcher="alltoall",
-            num_tokens=4096,
+            num_tokens=24576,
             **topology,
         )
 
@@ -237,12 +239,30 @@ def test_deepseek_d0_probe_derivative_preserves_the_guide_model_and_parallel_con
     }
     assert system["trace"] == "${oc.decode:${oc.env:MEGALENS_GATE_TRACE,false}}"
     assert system["trace_mode"] == 1
+    assert system["trace_interval"] == 1
+    assert system["continuous_trace_iterations"] == 1
     assert system["trace_granularity"] == "full"
     assert system["trace_cupti_kernels"] == "off"
+    assert system["checkpoint"] == {
+        "save_interval": 2,
+        "load": None,
+        "ckpt_format": "torch_dist",
+    }
+    assert experiment["save_steps"] == 2
+    assert experiment["load"] is None
+    assert experiment["ckpt_format"] == "torch_dist"
+    assert contract.D0_RANK_ORDER == "tp-cp-ep-dp-pp"
+    assert (
+        inspect.signature(parallel_state.initialize_model_parallel)
+        .parameters["order"]
+        .default
+        == contract.D0_RANK_ORDER
+    )
 
     assert model["num_layers"] == 27
     assert model["hidden_size"] == 2048
     assert model["multi_latent_attention"] is True
+    assert model["attention_backend"] == "unfused"
     assert model["kv_lora_rank"] == 512
     assert model["moe_layer_freq"] == "[0]+[1]*26"
     assert model["num_experts"] == 64
@@ -324,8 +344,8 @@ def test_deepseek_d0_contract_keeps_target_mtp_layer_one_in_postprocess(
     _write_profile(trace_root)
 
     # MixedPara baseline builds the inner MTP Transformer layer without the target's
-    # explicit MTP numbering path. Under this PP2 split it can inherit the last-stage
-    # offset and report layer 14. The target architecture reports MTP layer 1, and its
+    # explicit MTP numbering path. Under this D0 PP2 split it inherits the last-stage
+    # offset and reports layer 14. The target architecture reports MTP layer 1, and its
     # decoder-postprocess parent distinguishes it from the main decoder layers.
     def apply_mixedpara_pp_offset(rows: list[dict[str, object]]) -> None:
         in_postprocess = False
@@ -371,3 +391,135 @@ def test_deepseek_d0_contract_requires_ep4_router_dispatch_handoff(
     assert "trace.deepseek_d0.router_handoff" in {
         failure.code for failure in failures
     }
+
+
+def test_deepseek_d0_contract_relates_combine_to_the_local_expert_workload(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(trace_root)
+
+    def change_combine_num_tokens(rows: list[dict[str, object]]) -> None:
+        combine = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-combine"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        combine["num_tokens"] = 24575
+
+    _mutate_rank(trace_root, 0, change_combine_num_tokens)
+    failures = contract.validate_deepseek_d0_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d0.combine_workload" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d0_contract_conserves_assignments_across_each_ep4_group(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(trace_root)
+
+    def reduce_consistent_local_workload(rows: list[dict[str, object]]) -> None:
+        experts = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-experts"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        experts["routed_tokens"] = 24575
+        experts["tokens_per_expert"] = [1535] + [1536] * 15
+        combine = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-combine"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        combine["num_tokens"] = 24575
+
+    _mutate_rank(trace_root, 0, reduce_consistent_local_workload)
+    failures = contract.validate_deepseek_d0_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d0.ep_conservation" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d0_contract_accepts_a_zero_token_local_expert_rank(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(trace_root)
+
+    def set_local_workload(
+        rows: list[dict[str, object]],
+        *,
+        routed_tokens: int,
+        tokens_per_expert: list[int],
+        combine_data_bytes: int,
+    ) -> None:
+        experts = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-experts"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        experts["routed_tokens"] = routed_tokens
+        experts["tokens_per_expert"] = tokens_per_expert
+        combine = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-combine"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        combine["num_tokens"] = routed_tokens
+        collective = next(
+            row
+            for row in rows
+            if row.get("name") == "ep-alltoall-combine"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        collective["data_bytes"] = combine_data_bytes
+
+    _mutate_rank(
+        trace_root,
+        0,
+        lambda rows: set_local_workload(
+            rows,
+            routed_tokens=0,
+            tokens_per_expert=[0] * 16,
+            combine_data_bytes=0,
+        ),
+    )
+    _mutate_rank(
+        trace_root,
+        1,
+        lambda rows: set_local_workload(
+            rows,
+            routed_tokens=49152,
+            tokens_per_expert=[3072] * 16,
+            combine_data_bytes=1048576,
+        ),
+    )
+
+    assert (
+        contract.validate_deepseek_d0_trace(
+            trace_root,
+            microbatches_per_iteration=_TEST_MICROBATCHES,
+        )
+        == ()
+    )
