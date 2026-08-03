@@ -2,33 +2,47 @@
 
 from __future__ import annotations
 
-import json
+from copy import deepcopy
 import inspect
+import json
 from pathlib import Path
 from typing import Any, Callable
 
+import pytest
 import yaml
 
 from megatron.core import parallel_state
 from tests.test_utils.runners import deepseek_d0_probe_contract as contract
 from tests.test_utils.runners import run_flagscale_megalens as single_node_gate
 
-_FIXTURE = (
+_DP8_FIXTURE = (
     Path(__file__).parent
     / "fixtures"
     / "flagscale_dual_node_deepseek_d0_bf16.yaml"
 )
+_DP4_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "flagscale_dual_node_deepseek_d0_dp4_mock.yaml"
+)
 _TEST_MICROBATCHES = 1
+_D0_DP8_DATA_PARALLEL_SIZE = 8
+_D0_DP4_DATA_PARALLEL_SIZE = 4
 
 
-def _load_config() -> dict[str, Any]:
-    with _FIXTURE.open(encoding="utf-8") as stream:
+def _load_config(path: Path = _DP8_FIXTURE) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as stream:
         return yaml.safe_load(stream)
 
 
-def _write_rank_trace(trace_root: Path, rank: int) -> None:
-    pipeline_rank = rank // 8
-    data_rank = rank % 8
+def _write_rank_trace(
+    trace_root: Path,
+    rank: int,
+    *,
+    data_parallel_size: int = _D0_DP8_DATA_PARALLEL_SIZE,
+) -> None:
+    pipeline_rank = rank // data_parallel_size
+    data_rank = rank % data_parallel_size
     main_layers = tuple(range(2, 14)) if pipeline_rank == 0 else tuple(range(14, 28))
     timestamp = 0
     rows: list[dict[str, object]] = []
@@ -178,18 +192,28 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
-def _write_profile(trace_root: Path) -> None:
-    for rank in range(16):
-        _write_rank_trace(trace_root, rank)
+def _write_profile(
+    trace_root: Path,
+    *,
+    data_parallel_size: int = _D0_DP8_DATA_PARALLEL_SIZE,
+) -> None:
+    for rank in range(2 * data_parallel_size):
+        _write_rank_trace(
+            trace_root,
+            rank,
+            data_parallel_size=data_parallel_size,
+        )
 
 
 def _mutate_rank(
     trace_root: Path,
     rank: int,
     mutate: Callable[[list[dict[str, object]]], None],
+    *,
+    data_parallel_size: int = _D0_DP8_DATA_PARALLEL_SIZE,
 ) -> None:
-    pipeline_rank = rank // 8
-    data_rank = rank % 8
+    pipeline_rank = rank // data_parallel_size
+    data_rank = rank % data_parallel_size
     path = trace_root / (
         f"benchmark-global-{rank}-data-{data_rank}-"
         f"pipeline-{pipeline_rank}-tensor-0.json"
@@ -199,7 +223,7 @@ def _mutate_rank(
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
-def test_deepseek_d0_probe_derivative_preserves_the_guide_model_and_parallel_contract() -> None:
+def test_deepseek_d0_probe_profile_preserves_the_guide_model_and_parallel_contract() -> None:
     config = _load_config()
     experiment = config["experiment"]
     runner = experiment["runner"]
@@ -252,6 +276,7 @@ def test_deepseek_d0_probe_derivative_preserves_the_guide_model_and_parallel_con
     assert experiment["save_steps"] == 2
     assert experiment["load"] is None
     assert experiment["ckpt_format"] == "torch_dist"
+    assert "legacy_tokenizer" not in data["tokenizer"]
     assert contract.D0_RANK_ORDER == "tp-cp-ep-dp-pp"
     assert (
         inspect.signature(parallel_state.initialize_model_parallel)
@@ -296,8 +321,47 @@ def test_deepseek_d0_probe_derivative_preserves_the_guide_model_and_parallel_con
     assert "mock_data" not in data
 
 
+def test_deepseek_d0_dp4_mock_profile_has_only_the_reviewed_derivation() -> None:
+    guide = _load_config()
+    derived = _load_config(_DP4_FIXTURE)
+    expected = deepcopy(guide)
+    expected_experiment = expected["experiment"]
+    expected_experiment["exp_name"] = "megalens-g7-9-deepseek-d0-dp4-mock"
+    expected_experiment["runner"]["nproc_per_node"] = 4
+    expected_experiment["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    expected["train"]["system"]["num_workers"] = 0
+    expected["train"]["model"]["global_batch_size"] = 4
+    expected_data = expected["train"]["data"]
+    expected_data.pop("data_path")
+    expected_data["mock_data"] = True
+    expected_data["data_cache_path"] = (
+        "${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/data-cache"
+    )
+
+    assert derived == expected
+
+    derived_runner = derived["experiment"]["runner"]
+    derived_system = derived["train"]["system"]
+    derived_model = derived["train"]["model"]
+
+    world_size = derived_runner["nnodes"] * derived_runner["nproc_per_node"]
+    data_parallel_size = world_size // (
+        derived_system["tensor_model_parallel_size"]
+        * derived_system["pipeline_model_parallel_size"]
+        * derived_system["context_parallel_size"]
+    )
+    assert data_parallel_size == _D0_DP4_DATA_PARALLEL_SIZE
+    assert data_parallel_size // derived_system["expert_model_parallel_size"] == 1
+    assert (
+        derived_model["global_batch_size"]
+        // (derived_model["micro_batch_size"] * data_parallel_size)
+        == _TEST_MICROBATCHES
+    )
+
+
 def test_deepseek_d0_profile_is_not_registered_with_the_single_node_docker_runner() -> None:
-    assert _FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
+    assert _DP8_FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
+    assert _DP4_FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
 
 
 def test_deepseek_d0_contract_accepts_the_exact_pp2_ep4_trace(tmp_path: Path) -> None:
@@ -311,6 +375,35 @@ def test_deepseek_d0_contract_accepts_the_exact_pp2_ep4_trace(tmp_path: Path) ->
         )
         == ()
     )
+
+
+def test_deepseek_d0_contract_accepts_the_dp4_automatic_derivative(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(
+        trace_root,
+        data_parallel_size=_D0_DP4_DATA_PARALLEL_SIZE,
+    )
+
+    assert (
+        contract.validate_deepseek_d0_trace(
+            trace_root,
+            microbatches_per_iteration=_TEST_MICROBATCHES,
+            data_parallel_size=_D0_DP4_DATA_PARALLEL_SIZE,
+        )
+        == ()
+    )
+
+
+def test_deepseek_d0_contract_rejects_unreviewed_data_parallel_sizes(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="must be 4 or 8"):
+        contract.validate_deepseek_d0_trace(
+            tmp_path,
+            data_parallel_size=12,
+        )
 
 
 def test_deepseek_d0_contract_requires_shared_expert_per_moe_call(

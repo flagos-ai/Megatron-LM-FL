@@ -19,12 +19,13 @@ from megatron.megalens.trace_aggregate import (
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
 DEFAULT_MICROBATCHES_PER_ITERATION = 64
+DEFAULT_DATA_PARALLEL_SIZE = 8
 D0_RANK_ORDER = "tp-cp-ep-dp-pp"
 
-_RANKS = tuple(range(16))
 _ITERATIONS = (1, 2)
-_DATA_PARALLEL_SIZE = 8
+_PIPELINE_MODEL_PARALLEL_SIZE = 2
 _EXPERT_MODEL_PARALLEL_SIZE = 4
+_SUPPORTED_DATA_PARALLEL_SIZES = frozenset((4, DEFAULT_DATA_PARALLEL_SIZE))
 _MODEL_SCOPE_NAMES = frozenset(
     ("forward-step", "decoder", "decoder-postprocess", "output_layer", "loss")
 )
@@ -691,6 +692,7 @@ def _validate_ep_workload_conservation(
     by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
     *,
     microbatches_per_iteration: int,
+    data_parallel_size: int,
 ) -> list[Failure]:
     """Require routed assignments to be conserved within every D0 EP4 group."""
 
@@ -705,10 +707,10 @@ def _validate_ep_workload_conservation(
             )
 
     failures: list[Failure] = []
-    expert_data_replicas = _DATA_PARALLEL_SIZE // _EXPERT_MODEL_PARALLEL_SIZE
+    expert_data_replicas = data_parallel_size // _EXPERT_MODEL_PARALLEL_SIZE
     for pipeline_rank in (0, 1):
         expected_layers = _MAIN_LAYERS[pipeline_rank] + _MTP_LAYERS[pipeline_rank]
-        stage_base = pipeline_rank * _DATA_PARALLEL_SIZE
+        stage_base = pipeline_rank * data_parallel_size
         for expert_data_rank in range(expert_data_replicas):
             group_base = stage_base + expert_data_rank * _EXPERT_MODEL_PARALLEL_SIZE
             group_ranks = tuple(
@@ -747,33 +749,39 @@ def validate_deepseek_d0_trace(
     trace_root: Path,
     *,
     microbatches_per_iteration: int = DEFAULT_MICROBATCHES_PER_ITERATION,
+    data_parallel_size: int = DEFAULT_DATA_PARALLEL_SIZE,
 ) -> tuple[Failure, ...]:
-    """Validate the guide D0 PP2/DP8/EP4 MoE, shared-expert, and MTP trace."""
+    """Validate a D0 PP2/EP4 MoE, shared-expert, and MTP trace."""
 
     if microbatches_per_iteration < 1:
         raise ValueError("microbatches_per_iteration must be positive")
+    if data_parallel_size not in _SUPPORTED_DATA_PARALLEL_SIZES:
+        raise ValueError("data_parallel_size must be 4 or 8 for a reviewed D0 profile")
     by_rank = _load_iterations(trace_root)
     failures: list[Failure] = []
+    expected_ranks = tuple(
+        range(_PIPELINE_MODEL_PARALLEL_SIZE * data_parallel_size)
+    )
     observed_ranks = tuple(sorted(by_rank))
-    if observed_ranks != _RANKS:
+    if observed_ranks != expected_ranks:
         failures.append(
             Failure(
                 "trace.deepseek_d0.ranks",
-                f"expected ranks {_RANKS}, observed {observed_ranks}",
+                f"expected ranks {expected_ranks}, observed {observed_ranks}",
                 "deepseek-d0",
             )
         )
 
-    for global_rank in _RANKS:
+    for global_rank in expected_ranks:
         loaded = by_rank.get(global_rank)
         if loaded is None:
             continue
         shard_rank, iterations = loaded
         # D0 relies on Megatron's target-side default tp-cp-ep-dp-pp rank order.
         # With TP=CP=1, PP is the slowest-varying axis and each PP stage owns
-        # eight consecutive data-parallel ranks.
-        pipeline_rank = global_rank // _DATA_PARALLEL_SIZE
-        data_rank = global_rank % _DATA_PARALLEL_SIZE
+        # data_parallel_size consecutive data-parallel ranks.
+        pipeline_rank = global_rank // data_parallel_size
+        data_rank = global_rank % data_parallel_size
         expected_coordinates = (data_rank, pipeline_rank, 0)
         observed_coordinates = (shard_rank.data, shard_rank.pipeline, shard_rank.tensor)
         if observed_coordinates != expected_coordinates:
@@ -808,6 +816,7 @@ def validate_deepseek_d0_trace(
         _validate_ep_workload_conservation(
             by_rank,
             microbatches_per_iteration=microbatches_per_iteration,
+            data_parallel_size=data_parallel_size,
         )
     )
     return tuple(failures)
@@ -815,6 +824,7 @@ def validate_deepseek_d0_trace(
 
 __all__ = [
     "D0_RANK_ORDER",
+    "DEFAULT_DATA_PARALLEL_SIZE",
     "DEFAULT_MICROBATCHES_PER_ITERATION",
     "validate_deepseek_d0_trace",
 ]
