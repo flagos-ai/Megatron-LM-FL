@@ -15,6 +15,7 @@ from tests.test_utils.runners import dualpipev_probe_contract
 from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import moe_capacity_probe_contract
+from tests.test_utils.runners import moe_flex_deepep_probe_contract
 from tests.test_utils.runners import moe_shared_expert_probe_contract
 from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
@@ -47,6 +48,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_ep2_shared_expert_smoke.yaml": (
         "ep2-alltoall-shared-expert"
+    ),
+    "flagscale_single_node_tp2_ep4_flex_deepep_smoke.yaml": (
+        "tp2-ep4-flex-deepep"
     ),
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke.yaml": (
@@ -867,6 +871,75 @@ def test_ep2_shared_expert_profile_only_enables_nonoverlap_shared_compute() -> N
         "ep-alltoall-combine",
     } == set(requirements)
     assert {"layer", "ep_size"} <= set(requirements["moe-shared-expert"].fields)
+
+
+def test_tp2_ep4_flex_deepep_profile_selects_the_fused_source_route() -> None:
+    baseline = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_ep2_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    flex_deepep = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_ep4_flex_deepep_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = flex_deepep["experiment"]["exp_name"]
+    baseline["experiment"]["runner"]["nproc_per_node"] = 8
+    baseline["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1,2,3,4,5,6,7"
+    baseline["train"]["system"].update(
+        {
+            "tensor_model_parallel_size": 2,
+            "expert_model_parallel_size": 4,
+            "sequence_parallel": True,
+        }
+    )
+    baseline["train"]["model"].update(
+        {
+            "num_experts": 8,
+            "moe_router_dtype": "fp32",
+            "moe_flex_dispatcher_backend": "deepep",
+            "global_batch_size": 4,
+        }
+    )
+
+    assert flex_deepep == baseline
+    profile = gate.PROFILES["tp2-ep4-flex-deepep"]
+    assert profile.rank_count == 8
+    assert (
+        profile.contract
+        is moe_flex_deepep_probe_contract.validate_tp2_ep4_flex_deepep
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    requirements = {requirement.name: requirement for requirement in profile.events}
+    assert {
+        "moe-router",
+        "moe-dispatch",
+        "moe-experts",
+        "moe-combine",
+        "ep-alltoall-dispatch",
+        "ep-alltoall-combine",
+    } == set(requirements)
+    for name in ("ep-alltoall-dispatch", "ep-alltoall-combine"):
+        assert requirements[name].phase == "E"
+        assert {
+            "comm_type",
+            "dispatcher",
+            "data_bytes",
+            "group_size",
+            "ep_size",
+            "tp_size",
+        } <= set(requirements[name].fields)
+    assert gate._ep_dispatcher(profile, None) == "flex"
+    data_parallel_size = 8 // flex_deepep["train"]["system"][
+        "tensor_model_parallel_size"
+    ]
+    assert flex_deepep["train"]["model"]["global_batch_size"] == (
+        flex_deepep["train"]["model"]["micro_batch_size"] * data_parallel_size
+    )
 
 
 def test_dualpipev_profile_is_the_minimal_supported_ep2_route() -> None:

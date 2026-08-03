@@ -27,6 +27,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: 
 from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
 from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_capacity_probe_contract  # noqa: E402
+from tests.test_utils.runners import moe_flex_deepep_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_shared_expert_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
@@ -110,6 +111,7 @@ _EP_COMMON_EVENTS = (
     *_events("moe-experts", "moe-combine"),
 )
 _EP_ROUTE_FIELDS = (*_COMMON_FIELDS, "comm_type", "dispatcher", "group_size")
+_EP_FLEX_ROUTE_FIELDS = (*_EP_ROUTE_FIELDS, "data_bytes", "ep_size", "tp_size")
 _DP_FIELDS = (
     *_COMMON_FIELDS,
     "op",
@@ -354,6 +356,14 @@ def _ep_shared_expert_events() -> tuple[manifest.EventRequirement, ...]:
     )
 
 
+def _ep_flex_deepep_events() -> tuple[manifest.EventRequirement, ...]:
+    return (
+        *_EP_COMMON_EVENTS,
+        manifest.EventRequirement("ep-alltoall-dispatch", _EP_FLEX_ROUTE_FIELDS, "E"),
+        manifest.EventRequirement("ep-alltoall-combine", _EP_FLEX_ROUTE_FIELDS, "E"),
+    )
+
+
 def _dp_events(profile: str) -> tuple[manifest.EventRequirement, ...]:
     names = (
         ("dp-allreduce",)
@@ -577,6 +587,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         2,
         _ep_shared_expert_events(),
         moe_shared_expert_probe_contract.validate_ep2_shared_expert,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "tp2-ep4-flex-deepep": manifest.TraceProfile(
+        "tp2-ep4-flex-deepep",
+        8,
+        _ep_flex_deepep_events(),
+        moe_flex_deepep_probe_contract.validate_tp2_ep4_flex_deepep,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
     "ep2-allgather": manifest.TraceProfile(
@@ -855,6 +872,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_ep2_shared_expert_smoke": (
         "ep2-alltoall-shared-expert"
     ),
+    "flagscale_single_node_tp2_ep4_flex_deepep_smoke": (
+        "tp2-ep4-flex-deepep"
+    ),
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke": (
         "pp2-dp2-ep2-dualpipev"
@@ -969,6 +989,8 @@ def _ep_dispatcher(profile: manifest.TraceProfile, requested: str | None) -> str
         return "alltoall"
     if "allgather" in profile.name:
         return "allgather"
+    if profile.name == "tp2-ep4-flex-deepep":
+        return "flex"
     return None
 
 
