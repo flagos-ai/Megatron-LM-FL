@@ -642,11 +642,44 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _dp_events("standard-ddp"),
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "dp8-standard-ddp-overlap": manifest.TraceProfile(
+        "dp8-standard-ddp-overlap",
+        8,
+        (
+            *_dp_events("standard-ddp"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_standard_overlap,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "dp8-distopt": manifest.TraceProfile(
         "dp8-distopt",
         8,
         _dp_events("distopt"),
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "dp8-distopt-overlap": manifest.TraceProfile(
+        "dp8-distopt-overlap",
+        8,
+        (
+            *_dp_events("distopt"),
+            manifest.EventRequirement(
+                "dp-grad-sync-complete",
+                (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+                "B",
+            ),
+            manifest.EventRequirement(
+                "dp-param-sync-complete",
+                (*_COMMON_FIELDS, "operation_id", "completion_kind"),
+                "B",
+            ),
+        ),
+        dp_probe_contract.validate_dp_distopt_overlap,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "te-attn-cuda-graph": manifest.TraceProfile(
         "te-attn-cuda-graph",
@@ -767,7 +800,11 @@ _CONFIG_PROFILES = {
         "dp4-distopt-multi-instance-overlap"
     ),
     "flagscale_single_node_dp8_standard_smoke": "dp8-standard-ddp",
+    "flagscale_single_node_dp8_standard_overlap_smoke": (
+        "dp8-standard-ddp-overlap"
+    ),
     "flagscale_single_node_dp8_distopt_smoke": "dp8-distopt",
+    "flagscale_single_node_dp8_distopt_overlap_smoke": "dp8-distopt-overlap",
     "flagscale_single_node_te_cuda_graph_attn_smoke": "te-attn-cuda-graph",
     "flagscale_single_node_te_cuda_graph_moe_router_smoke": (
         "te-moe-router-cuda-graph"

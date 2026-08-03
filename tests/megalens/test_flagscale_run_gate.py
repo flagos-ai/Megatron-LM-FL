@@ -62,7 +62,13 @@ _CONFIG_PROFILE_CASES = {
         "dp4-distopt-multi-instance-overlap"
     ),
     "flagscale_single_node_dp8_standard_smoke.yaml": "dp8-standard-ddp",
+    "flagscale_single_node_dp8_standard_overlap_smoke.yaml": (
+        "dp8-standard-ddp-overlap"
+    ),
     "flagscale_single_node_dp8_distopt_smoke.yaml": "dp8-distopt",
+    "flagscale_single_node_dp8_distopt_overlap_smoke.yaml": (
+        "dp8-distopt-overlap"
+    ),
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
     "flagscale_single_node_te_cuda_graph_moe_router_smoke.yaml": (
         "te-moe-router-cuda-graph"
@@ -1071,9 +1077,23 @@ def test_pp2_batched_steady_profile_only_adds_a_second_microbatch() -> None:
             {"overlap_grad_reduce": True, "overlap_param_gather": True},
             dp_probe_contract.validate_dp_distopt_overlap,
         ),
+        (
+            "flagscale_single_node_dp8_standard_smoke.yaml",
+            "flagscale_single_node_dp8_standard_overlap_smoke.yaml",
+            "dp8-standard-ddp-overlap",
+            {"overlap_grad_reduce": True},
+            dp_probe_contract.validate_dp_standard_overlap,
+        ),
+        (
+            "flagscale_single_node_dp8_distopt_smoke.yaml",
+            "flagscale_single_node_dp8_distopt_overlap_smoke.yaml",
+            "dp8-distopt-overlap",
+            {"overlap_grad_reduce": True, "overlap_param_gather": True},
+            dp_probe_contract.validate_dp_distopt_overlap,
+        ),
     ),
 )
-def test_dp2_overlap_profiles_only_enable_the_selected_overlap_route(
+def test_dp_overlap_profiles_only_enable_the_selected_overlap_route(
     baseline_name: str,
     overlap_name: str,
     profile_name: str,
@@ -1090,7 +1110,9 @@ def test_dp2_overlap_profiles_only_enable_the_selected_overlap_route(
     baseline["train"]["system"].update(changes)
 
     assert overlap == baseline
-    assert gate.PROFILES[profile_name].contract is contract
+    profile = gate.PROFILES[profile_name]
+    assert profile.rank_count == overlap["experiment"]["runner"]["nproc_per_node"]
+    assert profile.contract is contract
 
 
 def test_dp4_multi_instance_profile_only_expands_the_dp_overlap_topology() -> None:
