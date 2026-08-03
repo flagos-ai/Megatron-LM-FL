@@ -1541,15 +1541,17 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
                 self._comm_manager.dispatched_probs,
             )
 
-        if self.config.moe_flex_dispatcher_backend != "deepep":
-            return _dispatch_body()
-
+        comm_type = (
+            "ep-hybridep"
+            if self.config.moe_flex_dispatcher_backend == "hybridep"
+            else "ep-deepep"
+        )
         dispatch_gate = prepare_trace_scope("ep-alltoall-dispatch")
         dispatch_context = (
             ep_collective_trace_context(
                 self,
                 (hidden_states,),
-                comm_type="ep-deepep",
+                comm_type=comm_type,
                 dispatcher_name="flex",
                 group=self.tp_ep_group,
             )
@@ -1605,15 +1607,17 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         Returns:
             Combined tokens after fused un-permutation and communication.
         """
-        if self.config.moe_flex_dispatcher_backend != "deepep":
-            return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
-
+        comm_type = (
+            "ep-hybridep"
+            if self.config.moe_flex_dispatcher_backend == "hybridep"
+            else "ep-deepep"
+        )
         combine_gate = prepare_trace_scope("ep-alltoall-combine")
         combine_context = (
             ep_collective_trace_context(
                 self,
                 (hidden_states,),
-                comm_type="ep-deepep",
+                comm_type=comm_type,
                 dispatcher_name="flex",
                 group=self.tp_ep_group,
             )

@@ -774,18 +774,78 @@ def test_closed_flex_deepep_gates_skip_context_and_preserve_manager_calls(
     assert sink.records == []
 
 
-def test_flex_hybridep_remains_outside_the_deepep_source_contract(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_flex_hybridep_dispatch_uses_a_distinct_backend_contract() -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations, backend="hybridep")
+    hidden_states = torch.arange(12, dtype=torch.bfloat16).reshape(3, 4)
+
+    output = MoEFlexTokenDispatcher.token_dispatch(
+        owner, hidden_states, async_finish=False, allocate_on_comm_stream=True
+    )
+
+    assert output == (manager.dispatched_hidden, manager.dispatched_probs)
+    assert sink.records == [
+        {
+            "name": "ep-alltoall-dispatch",
+            "attrs": {
+                "comm_type": "ep-hybridep",
+                "dispatcher": "flex",
+                "data_bytes": hidden_states.numel() * hidden_states.element_size(),
+                "group_size": 6,
+                "ep_size": 3,
+                "tp_size": 2,
+            },
+        }
+    ]
+    assert operations == [("dispatch", ("ep-alltoall-dispatch",), hidden_states, False, True)]
+
+
+def test_flex_hybridep_combine_preserves_arguments_return_and_backend_contract() -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    operations: list[tuple[Any, ...]] = []
+    owner, manager = _flex_owner(sink, operations, backend="hybridep")
+    hidden_states = torch.arange(8, dtype=torch.float32).reshape(2, 4)
+
+    output = MoEFlexTokenDispatcher.token_combine(
+        owner, hidden_states, async_finish=True, allocate_on_comm_stream=False
+    )
+
+    assert output is manager.combined_hidden
+    assert sink.records == [
+        {
+            "name": "ep-alltoall-combine",
+            "attrs": {
+                "comm_type": "ep-hybridep",
+                "dispatcher": "flex",
+                "data_bytes": hidden_states.numel() * hidden_states.element_size(),
+                "group_size": 6,
+                "ep_size": 3,
+                "tp_size": 2,
+            },
+        }
+    ]
+    assert operations == [("combine", ("ep-alltoall-combine",), hidden_states, True, False)]
+
+
+@pytest.mark.parametrize("gate_mode", ["null", "disabled", "suppressed"])
+def test_closed_flex_hybridep_gates_skip_context_and_preserve_manager_calls(
+    monkeypatch: pytest.MonkeyPatch, gate_mode: str
+) -> None:
+    sink = _RecordingSink(enabled=gate_mode != "disabled")
+    if gate_mode != "null":
+        install_trace_sink(
+            sink, suppress_scope=(lambda: True) if gate_mode == "suppressed" else None
+        )
     operations: list[tuple[Any, ...]] = []
     owner, manager = _flex_owner(sink, operations, backend="hybridep")
     hidden_states = torch.ones((2, 3))
     monkeypatch.setattr(
         token_dispatcher_module,
         "ep_collective_trace_context",
-        lambda *args, **kwargs: pytest.fail("HybridEP reused the DeepEP field contract"),
+        lambda *args, **kwargs: pytest.fail("closed HybridEP gate constructed context"),
     )
 
     dispatched = MoEFlexTokenDispatcher.token_dispatch(owner, hidden_states)
@@ -794,10 +854,11 @@ def test_flex_hybridep_remains_outside_the_deepep_source_contract(
     assert dispatched == (manager.dispatched_hidden, manager.dispatched_probs)
     assert combined is manager.combined_hidden
     assert [operation[0] for operation in operations] == ["dispatch", "combine"]
-    assert sink.gate_calls == []
+    assert all(operation[1] == () for operation in operations)
     assert sink.records == []
 
 
+@pytest.mark.parametrize("backend", ["deepep", "hybridep"])
 @pytest.mark.parametrize(
     ("method", "event_name"),
     [
@@ -805,13 +866,13 @@ def test_flex_hybridep_remains_outside_the_deepep_source_contract(
         (MoEFlexTokenDispatcher.token_combine, "ep-alltoall-combine"),
     ],
 )
-def test_flex_deepep_errors_close_scope_and_preserve_exception_identity(
-    method, event_name: str
+def test_flex_backend_errors_close_scope_and_preserve_exception_identity(
+    method, event_name: str, backend: str
 ) -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
     operations: list[tuple[Any, ...]] = []
-    owner, manager = _flex_owner(sink, operations)
+    owner, manager = _flex_owner(sink, operations, backend=backend)
     error = RuntimeError("fused EP failed")
     manager.error = error
 
@@ -823,7 +884,7 @@ def test_flex_deepep_errors_close_scope_and_preserve_exception_identity(
     assert sink.active == []
 
 
-def test_flex_deepep_probe_markers_and_public_signatures_remain_stable() -> None:
+def test_flex_probe_markers_and_public_signatures_remain_stable() -> None:
     assert (
         getattr(MoEFlexTokenDispatcher.token_dispatch, "__megatron_trace_event__", None)
         == "ep-alltoall-dispatch"
