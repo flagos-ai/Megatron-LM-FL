@@ -27,6 +27,7 @@ def _write_collective_trace(
     include_sp_sync: bool = True,
     include_embedding_sync: bool = False,
     nest_sp_in_all_grads: bool = False,
+    include_te_model_scopes: bool = False,
 ) -> None:
     rows: list[dict[str, object]] = []
     timestamp = 0
@@ -140,6 +141,14 @@ def _write_collective_trace(
                 "iteration": iteration,
             }
         )
+        if include_te_model_scopes:
+            for _layer in (1, 2):
+                event("transformer_layer", "B")
+                event("attention", "B")
+                event("attention", "E")
+                event("MLP.forward", "B")
+                event("MLP.forward", "E")
+                event("transformer_layer", "E")
         if cross_all_gather_scopes:
             event(
                 "tp-all-gather-first",
@@ -360,6 +369,37 @@ def test_tp2_sp_linear_contract_rejects_allreduce_route(tmp_path: Path) -> None:
     failures = tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path)
 
     assert "trace.tp_linear.route" in {failure.code for failure in failures}
+
+
+def test_tp2_sp_te_linear_contract_accepts_the_mcore_visible_boundary(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+            include_te_model_scopes=True,
+        )
+
+    assert tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path) == ()
+
+
+def test_tp2_sp_te_linear_contract_requires_the_outer_te_model_scopes(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path)
+
+    assert "trace.tp_te.scope_count" in {failure.code for failure in failures}
 
 
 def test_tp2_no_sp_linear_contract_accepts_allreduce(tmp_path: Path) -> None:

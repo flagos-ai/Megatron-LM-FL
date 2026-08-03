@@ -3,7 +3,7 @@
 
 from __future__ import annotations
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence
@@ -32,6 +32,9 @@ _NO_SP_GQA_COLLECTIVES = frozenset(
 )
 _LINEAR_EVENTS = frozenset(
     ("tp-linear-async-launch", "tp-linear-async-complete")
+)
+_TE_LINEAR_BOUNDARY_EVENTS = _LINEAR_EVENTS | frozenset(
+    ("transformer_layer", "attention", "MLP.forward")
 )
 _LINEAR_ROUTE_SPECS = {
     "all-gather": {
@@ -1186,6 +1189,72 @@ def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
         validate_tp2_gqa_collective_hierarchy,
         validate_tp2_sp_linear_lifecycle,
         validate_tp2_sp_final_grad_sync,
+    )
+    return tuple(
+        failure
+        for validator in validators
+        for failure in validator(trace_root)
+    )
+
+
+def _validate_tp2_sp_te_linear_boundary(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the MCore-visible boundary around the controlled TE Linear route."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    expected_counts = {
+        "transformer_layer": 2,
+        "attention": 2,
+        "MLP.forward": 2,
+        "tp-linear-async-launch": 2,
+        "tp-linear-async-complete": 2,
+    }
+    expected_routes = Counter(("all-gather", "reduce-scatter"))
+
+    for rank in (0, 1):
+        for iteration in by_rank.get(rank, ()):
+            iteration_id = int(iteration.iteration_id)
+            spans, pairing_failures = _pair_spans(
+                iteration,
+                _TE_LINEAR_BOUNDARY_EVENTS,
+                rank=rank,
+            )
+            failures.extend(pairing_failures)
+            for name, expected in expected_counts.items():
+                observed = len(spans.get(name, ()))
+                if observed != expected:
+                    failures.append(
+                        _failure(
+                            "trace.tp_te.scope_count",
+                            f"event {name!r} has {observed} span(s), expected {expected}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+
+            routes = Counter(
+                str(span.begin.attrs.get("collective_op"))
+                for span in spans.get("tp-linear-async-launch", ())
+            )
+            if routes != expected_routes:
+                failures.append(
+                    _failure(
+                        "trace.tp_te.linear_routes",
+                        f"MCore-visible Linear routes are {dict(routes)}, "
+                        f"expected {dict(expected_routes)}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+    return tuple(failures)
+
+
+def validate_tp2_sp_te_linear_profile(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate TE model scopes plus the TP/SP operations visible at MCore boundaries."""
+
+    validators = (
+        validate_tp2_sp_profile,
+        _validate_tp2_sp_te_linear_boundary,
     )
     return tuple(
         failure

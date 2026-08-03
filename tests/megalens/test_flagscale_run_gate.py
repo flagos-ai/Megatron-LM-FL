@@ -30,6 +30,7 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
+    "flagscale_single_node_tp2_sp_te_linear_smoke.yaml": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
@@ -1674,6 +1675,49 @@ def test_tp2_sp_profile_only_selects_the_local_tp_routes() -> None:
         )
     )
     assert gate._profile_from_arguments(args).name == "tp2-sp-local"
+
+
+def test_tp2_sp_te_linear_profile_only_switches_the_transformer_implementation() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_local_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    te_linear = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_te_linear_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = te_linear["experiment"]["exp_name"]
+    baseline["train"]["model"]["transformer_impl"] = "transformer_engine"
+
+    assert te_linear == baseline
+
+    profile = gate.PROFILES["tp2-sp-te-linear"]
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == {
+        "transformer_layer",
+        "attention",
+        "MLP.forward",
+        "tp-all-gather-first",
+        "tp-all-gather-last",
+        "tp-reduce-scatter",
+        "tp-reduce-scatter-last",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+    }
+    assert profile.contract is tp_probe_contract.validate_tp2_sp_te_linear_profile
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    assert (
+        gate._CONFIG_PROFILES["flagscale_single_node_tp2_sp_te_linear_smoke"]
+        == "tp2-sp-te-linear"
+    )
 
 
 def test_tp2_local_allreduce_profile_only_disables_sequence_parallel() -> None:

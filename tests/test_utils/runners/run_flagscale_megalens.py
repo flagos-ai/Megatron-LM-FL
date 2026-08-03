@@ -138,6 +138,57 @@ _TP_ALLREDUCE_FIELDS = (
     "timing_phase",
     "payload_role",
 )
+_TP2_SP_EVENTS = (
+    *(
+        manifest.EventRequirement(
+            name,
+            _TP_COLLECTIVE_FIELDS,
+            "B",
+        )
+        for name in (
+            "tp-all-gather-first",
+            "tp-all-gather-last",
+            "tp-reduce-scatter",
+            "tp-reduce-scatter-last",
+        )
+    ),
+    manifest.EventRequirement(
+        "tp-linear-async-launch",
+        (*_COMMON_FIELDS, "operation_id", "collective_op", "launch_site"),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "tp-linear-async-complete",
+        (
+            *_COMMON_FIELDS,
+            "operation_id",
+            "collective_op",
+            "completion_kind",
+        ),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "grad-sync",
+        (*_COMMON_FIELDS, "schedule", "timing_phase"),
+        "B",
+    ),
+    manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
+    manifest.EventRequirement(
+        "sp-layernorm-allreduce",
+        (
+            *_COMMON_FIELDS,
+            "data_bytes",
+            "group_size",
+            "reduce_op",
+            "grad_bucket",
+        ),
+        "B",
+    ),
+)
+_TP2_SP_TE_LINEAR_EVENTS = (
+    *_TP2_SP_EVENTS,
+    *_events("transformer_layer", "attention", "MLP.forward"),
+)
 _DUALPIPEV_PHASE_FIELDS = (
     *_COMMON_FIELDS,
     "current_microbatch",
@@ -414,54 +465,15 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "tp2-sp-local": manifest.TraceProfile(
         "tp2-sp-local",
         2,
-        (
-            *(
-                manifest.EventRequirement(
-                    name,
-                    _TP_COLLECTIVE_FIELDS,
-                    "B",
-                )
-                for name in (
-                    "tp-all-gather-first",
-                    "tp-all-gather-last",
-                    "tp-reduce-scatter",
-                    "tp-reduce-scatter-last",
-                )
-            ),
-            manifest.EventRequirement(
-                "tp-linear-async-launch",
-                (*_COMMON_FIELDS, "operation_id", "collective_op", "launch_site"),
-                "B",
-            ),
-            manifest.EventRequirement(
-                "tp-linear-async-complete",
-                (
-                    *_COMMON_FIELDS,
-                    "operation_id",
-                    "collective_op",
-                    "completion_kind",
-                ),
-                "B",
-            ),
-            manifest.EventRequirement(
-                "grad-sync",
-                (*_COMMON_FIELDS, "schedule", "timing_phase"),
-                "B",
-            ),
-            manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
-            manifest.EventRequirement(
-                "sp-layernorm-allreduce",
-                (
-                    *_COMMON_FIELDS,
-                    "data_bytes",
-                    "group_size",
-                    "reduce_op",
-                    "grad_bucket",
-                ),
-                "B",
-            ),
-        ),
+        _TP2_SP_EVENTS,
         tp_probe_contract.validate_tp2_sp_profile,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "tp2-sp-te-linear": manifest.TraceProfile(
+        "tp2-sp-te-linear",
+        2,
+        _TP2_SP_TE_LINEAR_EVENTS,
+        tp_probe_contract.validate_tp2_sp_te_linear_profile,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
@@ -905,6 +917,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
+    "flagscale_single_node_tp2_sp_te_linear_smoke": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",
