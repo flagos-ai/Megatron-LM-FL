@@ -1,3 +1,5 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 from __future__ import annotations
 
 from contextlib import contextmanager
@@ -223,17 +225,13 @@ def apply_tp1_batch_major_attention(model: nn.Module) -> int:
             getattr(attention, "attn_mask_type", AttnMaskType.causal),
         )
         replacement = TP1BatchMajorFlashAttentionCore(
-            config,
-            getattr(attention, "layer_number", index + 1),
-            mask_type,
+            config, getattr(attention, "layer_number", index + 1), mask_type
         )
         replacement.train(core_attention.training)
         attention._slideformer_tp1_batch_major_original_forward = attention.forward
         # Bypass Module.__setattr__: keeping the replaced, parameterless TE core
         # for restoration must not register a second checkpoint submodule.
-        attention.__dict__["_slideformer_tp1_batch_major_original_core_attention"] = (
-            core_attention
-        )
+        attention.__dict__["_slideformer_tp1_batch_major_original_core_attention"] = core_attention
         attention.core_attention = replacement
         attention.forward = MethodType(_tp1_batch_major_attention_forward, attention)
         patched += 1
@@ -634,9 +632,7 @@ def legacy_fused_linear_cross_entropy(
 
 
 def apply_kernel_policy(model: nn.Module, config, *, runtime_args=None) -> dict[str, Any]:
-    enable_tp1_layout = (
-        config.kernel_policy != "off" and config.qkv_layout_backend != "megatron"
-    )
+    enable_tp1_layout = config.kernel_policy != "off" and config.qkv_layout_backend != "megatron"
     if config.qkv_layout_backend == "auto" and config.attention_backend == "megatron":
         enable_tp1_layout = False
     report: dict[str, Any] = {
@@ -644,9 +640,7 @@ def apply_kernel_policy(model: nn.Module, config, *, runtime_args=None) -> dict[
         "attention": {"requested": config.attention_backend, "effective": "megatron"},
         "qkv_layout": {
             "requested": config.qkv_layout_backend,
-            "effective": (
-                "pending_engine" if enable_tp1_layout else "megatron_sequence_major"
-            ),
+            "effective": ("pending_engine" if enable_tp1_layout else "megatron_sequence_major"),
         },
         "mlp": {"requested": config.mlp_backend, "effective": "megatron"},
         "loss": {"requested": config.loss_backend, "effective": "megatron"},

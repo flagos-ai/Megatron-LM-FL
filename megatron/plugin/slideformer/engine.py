@@ -1,3 +1,5 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 from __future__ import annotations
 
 import os
@@ -19,15 +21,15 @@ from megatron.plugin.slideformer.checkpoint import (
     MegatronSlidingCheckpoint,
     slideformer_slot_checkpoint,
 )
+from megatron.plugin.slideformer.kernels import (
+    apply_tp1_batch_major_attention,
+    restore_tp1_batch_major_attention,
+)
 from megatron.plugin.slideformer.layer_adam import LayerAdam
 from megatron.plugin.slideformer.layout import (
     MegatronDecoderLayout,
     assert_trainable_parameter_coverage,
     resolve_megatron_decoder_layout,
-)
-from megatron.plugin.slideformer.kernels import (
-    apply_tp1_batch_major_attention,
-    restore_tp1_batch_major_attention,
 )
 
 
@@ -106,9 +108,7 @@ class MegatronSlideFormerEngineConfig:
 
     def __post_init__(self) -> None:
         if self.qkv_layout_backend not in {"auto", "tp1_batch_major", "megatron"}:
-            raise ValueError(
-                "qkv_layout_backend must be 'auto', 'tp1_batch_major', or 'megatron'"
-            )
+            raise ValueError("qkv_layout_backend must be 'auto', 'tp1_batch_major', or 'megatron'")
         if self.activation_backend not in {"checkpoint", "slideformer-slot"}:
             raise ValueError("activation_backend must be 'checkpoint' or 'slideformer-slot'")
         if self.activation_backend == "slideformer-slot" and not self.activation_offload:
@@ -1466,8 +1466,7 @@ class MegatronSlideFormerEngine:
         if self.config.qkv_layout_backend != "megatron":
             patched_layers = apply_tp1_batch_major_attention(model)
             self.qkv_layout_report.update(
-                effective="tp1_batch_major_attention",
-                patched_layers=patched_layers,
+                effective="tp1_batch_major_attention", patched_layers=patched_layers
             )
             kernel_report = getattr(self.layout.model, "_slideformer_kernel_report", None)
             if isinstance(kernel_report, dict):

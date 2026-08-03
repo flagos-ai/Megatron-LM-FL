@@ -1,3 +1,5 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 from __future__ import annotations
 
 import os
@@ -196,9 +198,7 @@ class MegatronSlideFormerConfig:
             not in {"0", "false", "no", "off"},
             kernel_policy=os.getenv("MEGATRON_SLIDEFORMER_KERNEL_POLICY", "auto"),
             attention_backend=os.getenv("MEGATRON_SLIDEFORMER_ATTENTION_BACKEND", "auto"),
-            qkv_layout_backend=os.getenv(
-                "MEGATRON_SLIDEFORMER_QKV_LAYOUT_BACKEND", "auto"
-            ),
+            qkv_layout_backend=os.getenv("MEGATRON_SLIDEFORMER_QKV_LAYOUT_BACKEND", "auto"),
             mlp_backend=os.getenv("MEGATRON_SLIDEFORMER_MLP_BACKEND", "auto"),
             split_swiglu_threshold_gib=float(
                 os.getenv("MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB", "0.5")

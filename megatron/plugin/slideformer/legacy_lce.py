@@ -1,3 +1,4 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # Copyright 2024 LinkedIn Corporation
 # SPDX-License-Identifier: BSD-2-Clause
 #

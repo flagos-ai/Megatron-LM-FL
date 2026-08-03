@@ -230,7 +230,7 @@ int ds_adam_step(int optimizer_id,
                  torch::Tensor& exp_avg,
                  torch::Tensor& exp_avg_sq)
 {
-    // 所有tensor必须是contiguous
+    // All tensors must be contiguous.
     TORCH_CHECK(params.is_contiguous(), "params must be contiguous");
     TORCH_CHECK(grads.is_contiguous(), "grads must be contiguous");
     TORCH_CHECK(exp_avg.is_contiguous(), "exp_avg must be contiguous");
@@ -241,7 +241,7 @@ int ds_adam_step(int optimizer_id,
     opt->IncrementStep(step, beta1, beta2);
     opt->update_state(lr, epsilon, weight_decay, bias_correction);
 
-    // 获取数据指针（在GIL保护下）
+    // Acquire data pointers while the GIL is held.
     void* params_ptr = params.data_ptr();
     void* grads_ptr = grads.data_ptr();
     void* exp_avg_ptr = exp_avg.data_ptr();
@@ -260,7 +260,7 @@ int ds_adam_step(int optimizer_id,
                                  " is not supported on current hardware"s);
     }
 
-    // 释放GIL，允许主线程继续执行Python代码（包括CUDA kernel提交）
+    // Release the GIL so the main thread can continue submitting CUDA work.
     {
         py::gil_scoped_release release;
         it->second(opt, params_ptr, grads_ptr, exp_avg_ptr, exp_avg_sq_ptr, param_size);

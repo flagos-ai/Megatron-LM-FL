@@ -75,6 +75,7 @@ training = [
 slideformer = [
     "flash-attn>=2.8,<3",
     "liger-kernel>=0.7,<0.9",
+    "ninja>=1.11",
 ]
 
 ### 'mlm' group is deprecated. please use 'training' instead ###
@@ -206,6 +207,13 @@ transformer-engine = { git = "https://github.com/NVIDIA/TransformerEngine.git", 
 nemo-run = { git = "https://github.com/NVIDIA-NeMo/Run.git", rev = "01a9a8ba360f7b2908728ad0516e0ad9d936966d" }
 emerging_optimizers = { git = "https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git", rev = "v0.1.0" }
 nvidia-resiliency-ext = { git = "https://github.com/NVIDIA/nvidia-resiliency-ext.git", rev = "15a851565a4ce846c04431ecb0cf09903ab4837e" }
+
+[tool.setuptools.package-data]
+"megatron.plugin.slideformer" = [
+    "NOTICE",
+    "layer_adam/csrc/*.cpp",
+    "layer_adam/csrc/*.h",
+]
 
 [tool.isort]
 profile = "black"                                                          # black-compatible

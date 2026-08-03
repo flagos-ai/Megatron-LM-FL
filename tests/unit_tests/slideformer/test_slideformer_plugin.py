@@ -1,3 +1,5 @@
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 from __future__ import annotations
 
 import tempfile
@@ -449,9 +451,7 @@ def test_tp1_batch_major_flash_attention_avoids_sequence_major_clone(monkeypatch
     torch.testing.assert_close(query.grad, torch.ones_like(query))
 
 
-def test_tp1_batch_major_attention_preserves_megatron_boundary_and_restores(
-    monkeypatch,
-) -> None:
+def test_tp1_batch_major_attention_preserves_megatron_boundary_and_restores(monkeypatch) -> None:
     def fake_flash_attention(query, key, value, **kwargs):
         del key, value, kwargs
         return query.contiguous()
@@ -482,11 +482,7 @@ def test_tp1_batch_major_attention_preserves_megatron_boundary_and_restores(
             self.linear_proj = TupleProjection(12, 12, bias=False)
 
         def get_query_key_value_tensors(
-            self,
-            hidden_states,
-            key_value_states=None,
-            output_gate=False,
-            split_qkv=True,
+            self, hidden_states, key_value_states=None, output_gate=False, split_qkv=True
         ):
             del key_value_states, output_gate, split_qkv
             sequence, batch, _ = hidden_states.shape

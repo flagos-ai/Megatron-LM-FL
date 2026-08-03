@@ -2,13 +2,14 @@ SlideFormer plugin for Megatron-LM-FL
 Copyright 2025-2026 The SlideFormer Authors
 
 This plugin adapts the single-GPU offload design from SlideFormer, licensed
-under the Apache License 2.0.
+under the Apache License 2.0. The initial port was based on SlideFormer commit
+debb9c533e012c7102cf5e5a47d591eb4631eac2.
 Canonical source: https://github.com/RegiaYoung/SlideFormer
 
-The LayerAdam extension includes components derived from Microsoft DeepSpeed,
-licensed under the Apache License 2.0, and NVIDIA Apex. Original copyright,
-license, and commit provenance notices are retained in the corresponding
-source files.
+The CPU LayerAdam extension includes components derived from Microsoft
+DeepSpeed under the Apache License 2.0. Original copyright and license notices
+are retained in the corresponding source files. Unused CUDA FusedAdam/Apex
+components from the reference tree are not included in this plugin.
 
 The Legacy fused linear cross-entropy implementation is derived from LinkedIn
 Liger Kernel under the BSD 2-Clause License. Its source header retains the
