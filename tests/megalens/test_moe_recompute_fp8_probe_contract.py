@@ -21,11 +21,16 @@ def _topology(layer: int) -> dict[str, object]:
     }
 
 
-def _handoff(occurrence: int, *, recompute: bool) -> dict[str, object]:
+def _handoff(
+    layer: int,
+    occurrence: int,
+    *,
+    recompute: bool,
+) -> dict[str, object]:
     return {
         "dropped_tokens": 0,
         "drop_rate": 0.0,
-        "expert_cv": 0.1 + occurrence,
+        "expert_cv": 0.1 + layer,
         "top1_expert_share": 0.5,
         "aux_loss": None if recompute and occurrence < 2 else 0.01 + occurrence,
         "z_loss": None,
@@ -60,7 +65,7 @@ def _write_rank_trace(trace_root: Path, rank: int, layers: Sequence[int]) -> Non
         )
         for occurrence, layer in enumerate(layers):
             topology = _topology(layer)
-            handoff = _handoff(occurrence, recompute=recompute)
+            handoff = _handoff(layer, occurrence, recompute=recompute)
             event("moe-router", "B", iteration)
             event(
                 "moe-router",
@@ -236,6 +241,62 @@ def test_recompute_contract_requires_grad_enabled_aux_loss_on_backward_calls(
     failures = contract.validate_ep2_recompute(trace_root)
 
     assert "trace.moe_recompute_fp8.aux_loss_mode" in {
+        failure.code for failure in failures
+    }
+
+
+def test_recompute_contract_requires_router_and_expert_reentry_equivalence(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(trace_root, (1, 2, 2, 1))
+
+    def change_reentry_workload(rows: list[dict[str, object]]) -> None:
+        layer_two_router_ends = [
+            row
+            for row in rows
+            if row.get("name") == "moe-router"
+            and row.get("ph") == "E"
+            and row.get("layer") == 2
+        ]
+        layer_two_router_ends[1]["routing_entropy"] = 99.0
+
+    _mutate_rank_zero(trace_root, change_reentry_workload)
+    failures = contract.validate_ep2_recompute(trace_root)
+
+    assert "trace.moe_recompute_fp8.reentry" in {
+        failure.code for failure in failures
+    }
+
+
+def test_contract_rejects_an_extra_ep_collective_outside_moe_scopes(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(trace_root, (1, 2))
+
+    def add_extra_collective(rows: list[dict[str, object]]) -> None:
+        iteration_end = next(
+            index
+            for index, row in enumerate(rows)
+            if row.get("name") == "iteration"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        rows[iteration_end:iteration_end] = [
+            {
+                "name": "ep-alltoall-dispatch",
+                "ph": phase,
+                "iteration": 1,
+                "rel_ts": 999_000 + offset,
+            }
+            for offset, phase in enumerate(("B", "E"))
+        ]
+
+    _mutate_rank_zero(trace_root, add_extra_collective)
+    failures = contract.validate_ep2_fp8(trace_root)
+
+    assert "trace.moe_recompute_fp8.collective_sequence" in {
         failure.code for failure in failures
     }
 

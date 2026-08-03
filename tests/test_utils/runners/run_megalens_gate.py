@@ -103,6 +103,7 @@ def _profile_checks(
             "tests/megalens/test_sp_layernorm_allreduce_observability.py",
             "tests/megalens/test_embedding_grads_allreduce_observability.py",
             "tests/megalens/test_moe_phase_observability.py",
+            "tests/megalens/test_moe_recompute_fp8_probe_contract.py",
             "tests/megalens/test_moe_capacity_probe_contract.py",
             "tests/megalens/test_moe_flex_deepep_probe_contract.py",
             "tests/megalens/test_moe_flex_hybridep_probe_contract.py",

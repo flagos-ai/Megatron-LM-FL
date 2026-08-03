@@ -35,6 +35,24 @@ _COLLECTIVE_BY_PHASE = {
     "moe-dispatch": "ep-alltoall-dispatch",
     "moe-combine": "ep-alltoall-combine",
 }
+_REENTRY_FIELDS_BY_PHASE = {
+    "moe-router": (
+        "num_tokens",
+        "routed_tokens",
+        "dropped_tokens",
+        "drop_rate",
+        "expert_cv",
+        "top1_expert_share",
+        "routing_entropy",
+    ),
+    "moe-experts": (
+        "routed_tokens",
+        "expert_cv",
+        "top1_expert_share",
+        "expert_max_over_mean",
+        "tokens_per_expert",
+    ),
+}
 
 
 def _failure(
@@ -272,13 +290,38 @@ def _validate_iteration(
         )
         return failures
 
+    observed_collective_phases = tuple(
+        (event.name, event.ph)
+        for event in iteration.events
+        if event.name in _COLLECTIVE_BY_PHASE.values()
+    )
+    expected_collective_phases = tuple(
+        (collective, phase)
+        for _layer in expected_layers
+        for collective in _COLLECTIVE_BY_PHASE.values()
+        for phase in ("B", "E")
+    )
+    if observed_collective_phases != expected_collective_phases:
+        failures.append(
+            _failure(
+                "collective_sequence",
+                f"expected EP collective sequence {expected_collective_phases}, "
+                f"observed {observed_collective_phases}",
+                rank,
+                iteration_id,
+                profile,
+            )
+        )
+
     records_per_call = len(_PHASE_NAMES) * 2
+    calls: list[dict[str, Event]] = []
     for occurrence, layer in enumerate(expected_layers):
         start = occurrence * records_per_call
+        call_records = records[start : start + records_per_call]
         failures.extend(
             _validate_call(
                 iteration,
-                records[start : start + records_per_call],
+                call_records,
                 layer=layer,
                 occurrence=occurrence,
                 rank=rank,
@@ -287,6 +330,35 @@ def _validate_iteration(
                 recompute=recompute,
             )
         )
+        calls.append(
+            {
+                event.name: event
+                for _position, event in call_records
+                if event.ph == "E"
+            }
+        )
+
+    if recompute:
+        for original_occurrence, reentry_occurrence in ((0, 3), (1, 2)):
+            original = calls[original_occurrence]
+            reentry = calls[reentry_occurrence]
+            for phase_name, fields in _REENTRY_FIELDS_BY_PHASE.items():
+                for field in fields:
+                    original_value = original[phase_name].attrs.get(field)
+                    reentry_value = reentry[phase_name].attrs.get(field)
+                    if original_value != reentry_value:
+                        failures.append(
+                            _failure(
+                                "reentry",
+                                f"layer={expected_layers[original_occurrence]} "
+                                f"{phase_name} field {field!r} changed across "
+                                f"checkpoint reentry: {original_value!r} != "
+                                f"{reentry_value!r}",
+                                rank,
+                                iteration_id,
+                                profile,
+                            )
+                        )
     return failures
 
 
