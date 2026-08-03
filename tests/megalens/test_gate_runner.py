@@ -56,7 +56,9 @@ def test_cpu_profile_wires_static_contract_before_cpu_tests() -> None:
         "tests/megalens/test_moe_capacity_probe_contract.py",
         "tests/megalens/test_moe_flex_deepep_probe_contract.py",
         "tests/megalens/test_moe_flex_hybridep_probe_contract.py",
+        "tests/megalens/test_moe_shared_expert_overlap_probe_contract.py",
         "tests/megalens/test_moe_shared_expert_probe_contract.py",
+        "tests/megalens/test_shared_expert_overlap_observability.py",
         "tests/megalens/test_bridge_observability.py",
         "tests/megalens/test_mimo_pretrain_probe_contract.py",
     } <= set(checks[1].argv)

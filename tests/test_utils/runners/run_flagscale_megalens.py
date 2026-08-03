@@ -29,6 +29,7 @@ from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_capacity_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_flex_deepep_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_flex_hybridep_probe_contract  # noqa: E402
+from tests.test_utils.runners import moe_shared_expert_overlap_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_shared_expert_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
@@ -357,6 +358,17 @@ def _ep_shared_expert_events() -> tuple[manifest.EventRequirement, ...]:
     )
 
 
+def _ep_shared_expert_overlap_events() -> tuple[manifest.EventRequirement, ...]:
+    return (
+        *_ep_events("alltoall"),
+        manifest.EventRequirement(
+            "moe-shared-expert",
+            (*_COMMON_FIELDS, "layer", "ep_size", "stage"),
+            "E",
+        ),
+    )
+
+
 def _ep_flex_events() -> tuple[manifest.EventRequirement, ...]:
     return (
         *_EP_COMMON_EVENTS,
@@ -588,6 +600,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         2,
         _ep_shared_expert_events(),
         moe_shared_expert_probe_contract.validate_ep2_shared_expert,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "ep2-alltoall-shared-expert-overlap": manifest.TraceProfile(
+        "ep2-alltoall-shared-expert-overlap",
+        2,
+        _ep_shared_expert_overlap_events(),
+        moe_shared_expert_overlap_probe_contract.validate_ep2_shared_expert_overlap,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
     "tp2-ep4-flex-deepep": manifest.TraceProfile(
@@ -879,6 +898,9 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_ep2_shared_expert_smoke": (
         "ep2-alltoall-shared-expert"
+    ),
+    "flagscale_single_node_ep2_shared_expert_overlap_smoke": (
+        "ep2-alltoall-shared-expert-overlap"
     ),
     "flagscale_single_node_tp2_ep4_flex_deepep_smoke": (
         "tp2-ep4-flex-deepep"

@@ -17,6 +17,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import moe_capacity_probe_contract
 from tests.test_utils.runners import moe_flex_deepep_probe_contract
 from tests.test_utils.runners import moe_flex_hybridep_probe_contract
+from tests.test_utils.runners import moe_shared_expert_overlap_probe_contract
 from tests.test_utils.runners import moe_shared_expert_probe_contract
 from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
@@ -49,6 +50,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_ep2_shared_expert_smoke.yaml": (
         "ep2-alltoall-shared-expert"
+    ),
+    "flagscale_single_node_ep2_shared_expert_overlap_smoke.yaml": (
+        "ep2-alltoall-shared-expert-overlap"
     ),
     "flagscale_single_node_tp2_ep4_flex_deepep_smoke.yaml": (
         "tp2-ep4-flex-deepep"
@@ -875,6 +879,47 @@ def test_ep2_shared_expert_profile_only_enables_nonoverlap_shared_compute() -> N
         "ep-alltoall-combine",
     } == set(requirements)
     assert {"layer", "ep_size"} <= set(requirements["moe-shared-expert"].fields)
+
+
+def test_ep2_shared_expert_overlap_profile_only_enables_overlap() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_ep2_shared_expert_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    overlap = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_ep2_shared_expert_overlap_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = overlap["experiment"]["exp_name"]
+    baseline["train"]["model"]["moe_shared_expert_overlap"] = True
+
+    assert overlap == baseline
+    profile = gate.PROFILES["ep2-alltoall-shared-expert-overlap"]
+    assert profile.rank_count == 2
+    assert (
+        profile.contract
+        is moe_shared_expert_overlap_probe_contract.validate_ep2_shared_expert_overlap
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    requirements = {requirement.name: requirement for requirement in profile.events}
+    assert {
+        "moe-router",
+        "moe-dispatch",
+        "moe-experts",
+        "moe-shared-expert",
+        "moe-combine",
+        "ep-alltoall-dispatch",
+        "ep-alltoall-combine",
+    } == set(requirements)
+    assert {"layer", "ep_size", "stage"} <= set(
+        requirements["moe-shared-expert"].fields
+    )
 
 
 def test_tp2_ep4_flex_deepep_profile_selects_the_fused_source_route() -> None:
