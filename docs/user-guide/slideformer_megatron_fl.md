@@ -4,11 +4,9 @@
 
 ## Summary
 
-This change ports the single-GPU training design from the
-[SlideFormer paper](https://arxiv.org/abs/2603.16428) and
-[reference implementation](https://github.com/RegiaYoung/SlideFormer) from a
-PyTorch + Hugging Face runtime to Megatron-LM-FL + Megatron Core + Transformer
-Engine (TE).
+This change ports the single-GPU training design from the SlideFormer paper
+and reference implementation from a PyTorch + Hugging Face runtime to
+Megatron-LM-FL + Megatron Core + Transformer Engine (TE).
 
 The implementation keeps the SlideFormer invariants:
 
