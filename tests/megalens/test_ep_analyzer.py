@@ -20,9 +20,9 @@ _SOURCE_BASELINE = "12fb7169ce30fdb62b50f86b41afa09336a523ea"
 _SOURCE_SHA256 = "981a664d36dd26cedfe1efb8c695d743690219016df0d539ff65c4fb082855fd"
 _SOURCE_LINE_COUNT = 2613
 _SOURCE_BYTE_COUNT = 103_314
-_ADAPTED_SHA256 = "818edf956ec5ecaa6cd65411051d9f434c12e65ddc836ee618c535dfd701635a"
-_ADAPTED_LINE_COUNT = 2738
-_ADAPTED_BYTE_COUNT = 107_931
+_ADAPTED_SHA256 = "60cd39d857e8094ec19b34c85de2a04a3457c49f6207644d7edf4dabf40460cf"
+_ADAPTED_LINE_COUNT = 2733
+_ADAPTED_BYTE_COUNT = 107_499
 
 
 def _span(
@@ -733,6 +733,28 @@ def test_ep_overlap_uses_interval_union_and_exact_source_severity() -> None:
             "severity": "OK",
         }
     ]
+
+
+def test_ep_overlap_zero_report_keeps_stream_and_kernel_causes_unknown(
+    tmp_path: Path,
+) -> None:
+    rows = EPAnalyzer(
+        _loader(
+            _span("ep-alltoall-dispatch", 0, 50),
+            _span("moe-shared-expert", 100, 50),
+        )
+    ).analyze_ep_overlap()
+    report_path = tmp_path / "ep-overlap-zero.txt"
+    logger = ep_module._ReportLogger(str(report_path), "test")
+
+    ep_module._write_ep_overlap_report(rows, logger)
+    report = report_path.read_text(encoding="utf-8")
+
+    assert "captured EP communication and expert-computation intervals did not intersect" in report
+    assert "cannot identify CUDA stream placement or physical kernel concurrency" in report
+    assert "Check event coverage, stream dependencies, and a device timeline" in report
+    assert "run sequentially on the same CUDA stream" not in report
+    assert "Add --overlap-moe-expert-parallel-comm" not in report
 
 
 def test_token_drop_and_router_health_keep_source_thresholds() -> None:

@@ -537,13 +537,10 @@ class EPAnalyzer:
                     "overlap_ratio": (
                         round(ratio, 4) if ratio is not None else None
                     ),
-                    # NOTE: overlap_ratio=0.0 does NOT always mean "no overlap attempted".
-                    # When --overlap-moe-expert-parallel-comm is False (Megatron default),
-                    # comm and comp run sequentially on the same CUDA stream even if
-                    # --moe-shared-expert-overlap is True; the latter only schedules
-                    # shared-expert work before waiting on the All-to-All but does NOT
-                    # use a separate CUDA stream. True GPU-level overlap requires
-                    # --overlap-moe-expert-parallel-comm to be enabled.
+                    # overlap_ratio only describes intersections between the captured
+                    # communication and computation intervals.  It does not identify
+                    # CUDA stream placement, physical kernel concurrency, or the
+                    # configuration responsible for a zero intersection.
                     "severity": severity,
                 })
 
@@ -2043,14 +2040,12 @@ def _write_ep_overlap_report(
             )
             if mean_ratio == 0.0:
                 logger.log(
-                    "            [ROOT CAUSE] overlap_ratio=0.0 indicates comm and comp "
-                    "run sequentially on the same CUDA stream.\n"
-                    "            If --moe-shared-expert-overlap is enabled but "
-                    "--overlap-moe-expert-parallel-comm is NOT, shared-expert work\n"
-                    "            is scheduled before the All-to-All barrier but on the "
-                    "same stream, giving zero true GPU parallelism.\n"
-                    "            [ACTION] Add --overlap-moe-expert-parallel-comm to "
-                    "enable a dedicated communication CUDA stream for All-to-All."
+                    "            [BOUNDARY] overlap_ratio=0.0 means the captured EP "
+                    "communication and expert-computation intervals did not intersect.\n"
+                    "            This metric alone cannot identify CUDA stream placement "
+                    "or physical kernel concurrency.\n"
+                    "            [ACTION] Check event coverage, stream dependencies, and "
+                    "a device timeline before changing overlap settings."
                 )
             else:
                 logger.log(
