@@ -25,8 +25,10 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.observability import (
     ROUTER_WORKLOAD_SLOTS,
+    collect_router_assignment_fields,
     collect_router_loss_fields,
     dispatch_fields_requested,
+    observe_router_assignments_before_drop,
     observe_router_loss,
     publish_dispatch_fields,
     router_trace_context,
@@ -737,6 +739,13 @@ class TopKRouter(Router):
                 router_replay=self.router_replay,
             )
 
+        # Preserve the source pre-drop assignment count only for an accepted eager trace call.
+        if (
+            self.config.moe_expert_capacity_factor is not None
+            and not self.config.moe_pad_expert_input_to_capacity
+        ):
+            observe_router_assignments_before_drop(routing_map)
+
         # Apply token dropping to probs and routing_map.
         if self.config.moe_expert_capacity_factor is not None:
             probs, routing_map = apply_router_token_dropping(
@@ -834,7 +843,10 @@ class TopKRouter(Router):
                     logits, padding_mask=padding_mask, input_ids=input_ids
                 )
             else:
-                with collect_router_loss_fields() as router_loss_fields:
+                with (
+                    collect_router_assignment_fields() as router_assignment_fields,
+                    collect_router_loss_fields() as router_loss_fields,
+                ):
                     probs, routing_map = self.routing(
                         logits, padding_mask=padding_mask, input_ids=input_ids
                     )
@@ -843,6 +855,9 @@ class TopKRouter(Router):
                     routing_map,
                     capacity_factor=self.config.moe_expert_capacity_factor,
                     pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+                    routed_tokens_before_drop=(
+                        router_assignment_fields.routed_tokens_before_drop()
+                    ),
                 )
                 fields.update(router_loss_fields.fields())
                 publish_dispatch_fields(fields)

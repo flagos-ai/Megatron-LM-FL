@@ -93,6 +93,26 @@ _ACTIVE_ROUTER_LOSS_COLLECTOR: ContextVar[_RouterLossCollector | None] = Context
 )
 
 
+class _RouterAssignmentCollector:
+    """Capture the pre-drop assignment count for one router invocation."""
+
+    __slots__ = ("_routed_tokens_before_drop",)
+
+    def __init__(self) -> None:
+        self._routed_tokens_before_drop: int | None = None
+
+    def observe(self, routing_map: torch.Tensor) -> None:
+        self._routed_tokens_before_drop = int(routing_map.detach().sum().item())
+
+    def routed_tokens_before_drop(self) -> int | None:
+        return self._routed_tokens_before_drop
+
+
+_ACTIVE_ROUTER_ASSIGNMENT_COLLECTOR: ContextVar[_RouterAssignmentCollector | None] = ContextVar(
+    "megatron_moe_router_assignment_collector", default=None
+)
+
+
 class _DispatchFieldCollector:
     """Capture one router payload for the matching dispatch invocation."""
 
@@ -132,6 +152,17 @@ def collect_router_loss_fields() -> Iterator[_RouterLossCollector]:
         yield collector
     finally:
         _ACTIVE_ROUTER_LOSS_COLLECTOR.reset(token)
+
+
+@contextmanager
+def collect_router_assignment_fields() -> Iterator[_RouterAssignmentCollector]:
+    """Bind pre-drop assignment evidence to one accepted router invocation."""
+    collector = _RouterAssignmentCollector()
+    token = _ACTIVE_ROUTER_ASSIGNMENT_COLLECTOR.set(collector)
+    try:
+        yield collector
+    finally:
+        _ACTIVE_ROUTER_ASSIGNMENT_COLLECTOR.reset(token)
 
 
 @contextmanager
@@ -183,6 +214,19 @@ def observe_router_loss(name: str, value: torch.Tensor, coefficient: float = 1.0
         return
 
     collector.observe(name, value, coefficient)
+
+
+def observe_router_assignments_before_drop(routing_map: torch.Tensor) -> None:
+    """Record pre-drop assignments only while eager Router fields are requested."""
+    collector = _ACTIVE_ROUTER_ASSIGNMENT_COLLECTOR.get()
+    if collector is None:
+        return
+
+    is_compiling = getattr(getattr(torch, "compiler", None), "is_compiling", None)
+    if callable(is_compiling) and is_compiling():
+        return
+
+    collector.observe(routing_map)
 
 
 def _ep_size(owner: Any) -> int:
@@ -280,6 +324,7 @@ def router_workload(
     *,
     capacity_factor: float | None,
     pad_to_capacity: bool,
+    routed_tokens_before_drop: int | None = None,
 ) -> dict[str, int | float | None]:
     """Summarize post-capacity token-to-expert assignments for one router call."""
     num_tokens = int(routing_map.shape[0])
@@ -304,8 +349,19 @@ def router_workload(
             expert_cv = 0.0
             top1_expert_share = 0.0
 
-        dropped_tokens = 0 if capacity_factor is None else None
-        drop_rate = 0.0 if capacity_factor is None else None
+        if capacity_factor is None:
+            dropped_tokens = 0
+            drop_rate = 0.0
+        elif routed_tokens_before_drop is None:
+            dropped_tokens = None
+            drop_rate = None
+        else:
+            dropped_tokens = max(0, routed_tokens_before_drop - routed_tokens)
+            drop_rate = (
+                dropped_tokens / routed_tokens_before_drop
+                if routed_tokens_before_drop > 0
+                else 0.0
+            )
 
     routing_entropy = 0.0
     detached_probs = probs.detach().float()
@@ -368,6 +424,7 @@ __all__ = [
     "ROUTER_WORKLOAD_SLOTS",
     "bind_dispatch_fields",
     "capture_dispatch_fields",
+    "collect_router_assignment_fields",
     "collect_router_loss_fields",
     "combine_trace_context",
     "current_dispatch_fields",
@@ -376,6 +433,7 @@ __all__ = [
     "ep_collective_trace_context",
     "expert_workload",
     "experts_trace_context",
+    "observe_router_assignments_before_drop",
     "observe_router_loss",
     "publish_dispatch_fields",
     "router_trace_context",

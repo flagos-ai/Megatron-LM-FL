@@ -20,9 +20,11 @@ from megatron.core.transformer.moe.observability import (
     DISPATCH_ROUTER_FIELDS,
     EXPERT_WORKLOAD_SLOTS,
     ROUTER_WORKLOAD_SLOTS,
+    collect_router_assignment_fields,
     collect_router_loss_fields,
     dispatch_fields_requested,
     expert_workload,
+    observe_router_assignments_before_drop,
     observe_router_loss,
     publish_dispatch_fields,
     router_trace_context,
@@ -239,6 +241,7 @@ def _router_fixture(
     routing_error: BaseException | None = None,
     loss_observations: Sequence[tuple[str, torch.Tensor]] = (),
     losses_require_grad: bool = False,
+    routed_tokens_before_drop: int | None = None,
 ) -> tuple[SimpleNamespace, torch.Tensor, torch.Tensor, torch.Tensor]:
     input_tensor = torch.arange(12, dtype=torch.float32).reshape(2, 2, 3)
     logits = torch.arange(16, dtype=torch.float32).reshape(2, 2, 4)
@@ -263,6 +266,10 @@ def _router_fixture(
         if not losses_require_grad or torch.is_grad_enabled():
             for name, value in loss_observations:
                 observe_router_loss(name, value)
+        if routed_tokens_before_drop is not None:
+            observe_router_assignments_before_drop(
+                torch.ones(routed_tokens_before_drop, dtype=torch.bool)
+            )
         if routing_error is not None:
             raise routing_error
         return probs, routing_map
@@ -751,6 +758,45 @@ def test_disabled_z_loss_paths_and_trace_off_skip_scalar_materialization(
     assert compiler_collector.fields() == {"aux_loss": None, "z_loss": None}
 
 
+def test_assignment_collection_skips_trace_off_and_compiler_paths(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NoMaterialize:
+        def detach(self):
+            pytest.fail("inactive assignment collection materialized a routing map")
+
+    observe_router_assignments_before_drop(_NoMaterialize())  # type: ignore[arg-type]
+
+    with collect_router_assignment_fields() as compiler_collector:
+        monkeypatch.setattr(torch.compiler, "is_compiling", lambda: True)
+        observe_router_assignments_before_drop(_NoMaterialize())  # type: ignore[arg-type]
+
+    assert compiler_collector.routed_tokens_before_drop() is None
+
+
+def test_assignment_collection_is_nested_and_exception_safe() -> None:
+    with collect_router_assignment_fields() as outer:
+        observe_router_assignments_before_drop(torch.ones(8, dtype=torch.bool))
+        with collect_router_assignment_fields() as inner:
+            observe_router_assignments_before_drop(torch.ones(5, dtype=torch.bool))
+        observe_router_assignments_before_drop(torch.ones(8, dtype=torch.bool))
+
+    assert outer.routed_tokens_before_drop() == 8
+    assert inner.routed_tokens_before_drop() == 5
+
+    error = RuntimeError("assignment collection failed")
+    with pytest.raises(RuntimeError) as raised:
+        with collect_router_assignment_fields():
+            observe_router_assignments_before_drop(torch.ones(3, dtype=torch.bool))
+            raise error
+    assert raised.value is error
+
+    observe_router_assignments_before_drop(torch.ones(2, dtype=torch.bool))
+    with collect_router_assignment_fields() as fresh:
+        pass
+    assert fresh.routed_tokens_before_drop() is None
+
+
 def test_enabled_disabled_enabled_router_calls_do_not_reuse_loss_values() -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
@@ -845,15 +891,91 @@ def test_pad_to_capacity_keeps_assignment_workload_unknown(monkeypatch: pytest.M
         _apply_expert_bias=lambda routing_map, padding_mask=None: None,
     )
 
-    probs, padded_routing_map = TopKRouter.routing(router, torch.ones((4, 1, 4)))
+    with collect_router_assignment_fields() as collector:
+        probs, padded_routing_map = TopKRouter.routing(router, torch.ones((4, 1, 4)))
     fields = router_workload(probs, padded_routing_map, capacity_factor=1.0, pad_to_capacity=True)
 
+    assert collector.routed_tokens_before_drop() is None
     assert int(padded_routing_map.sum().item()) == 8
     assert fields["routed_tokens"] is None
     assert fields["dropped_tokens"] is None
     assert fields["drop_rate"] is None
     assert fields["expert_cv"] is None
     assert fields["top1_expert_share"] is None
+
+
+def test_capacity_drop_uses_invocation_local_pre_drop_assignment_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    probs_before_drop = torch.tensor(
+        [[0.9, 0.8, 0.0, 0.0], [0.7, 0.6, 0.0, 0.0], [0.5, 0.4, 0.0, 0.0], [0.3, 0.2, 0.0, 0.0]]
+    )
+    routing_map_before_drop = probs_before_drop > 0
+    routing_map_after_drop = routing_map_before_drop.clone()
+    routing_map_after_drop[1:, 1] = False
+    probs_after_drop = probs_before_drop * routing_map_after_drop
+    monkeypatch.setattr(
+        router_module,
+        "topk_routing_with_score_function",
+        lambda *args, **kwargs: (probs_before_drop, routing_map_before_drop),
+    )
+    monkeypatch.setattr(
+        router_module,
+        "apply_router_token_dropping",
+        lambda *args, **kwargs: (probs_after_drop, routing_map_after_drop),
+    )
+    config = SimpleNamespace(
+        num_moe_experts=4,
+        moe_router_pre_softmax=False,
+        moe_router_num_groups=None,
+        moe_router_group_topk=None,
+        moe_router_topk_scaling_factor=None,
+        moe_router_fusion=False,
+        moe_expert_capacity_factor=1.0,
+        moe_token_drop_policy="probs",
+        moe_pad_expert_input_to_capacity=False,
+        moe_router_force_load_balancing=False,
+        moe_router_force_biased=None,
+    )
+    router = SimpleNamespace(
+        config=config,
+        ep_group=[_Group(2)],
+        layer_number=7,
+        topk=2,
+        score_function="softmax",
+        expert_bias=None,
+        router_replay=None,
+        is_hash_layer=False,
+        routing_type="none",
+        training=False,
+        _maintain_float32_expert_bias=lambda: None,
+        apply_input_jitter=lambda input_tensor: input_tensor,
+        gating=lambda input_tensor: torch.ones((4, 1, 4)),
+        apply_z_loss=lambda logits, padding_mask=None: logits,
+        _apply_expert_bias=lambda routing_map, padding_mask=None: None,
+    )
+    router.routing = MethodType(TopKRouter.routing, router)
+
+    probs, routing_map = TopKRouter.forward(router, torch.ones((4, 1, 4)))
+    fields = _event_fields(sink.records[0])
+
+    assert probs is probs_after_drop
+    assert routing_map is routing_map_after_drop
+    assert fields["routed_tokens"] == 5
+    assert fields["dropped_tokens"] == 3
+    assert fields["drop_rate"] == pytest.approx(0.375)
+
+    empty_fields = router_workload(
+        torch.empty((0, 4)),
+        torch.empty((0, 4), dtype=torch.bool),
+        capacity_factor=1.0,
+        pad_to_capacity=False,
+        routed_tokens_before_drop=0,
+    )
+    assert empty_fields["dropped_tokens"] == 0
+    assert empty_fields["drop_rate"] == 0.0
 
 
 def test_shared_expert_emits_source_fields_around_only_the_module_call() -> None:
@@ -1092,6 +1214,7 @@ def test_router_handoff_populates_dispatch_when_only_dispatch_event_is_enabled()
     router, input_tensor, probs, routing_map = _router_fixture(
         sink,
         events,
+        routed_tokens_before_drop=8,
         loss_observations=[
             ("load_balancing_loss", torch.tensor(1.25)),
             ("z_loss", torch.tensor(0.75)),
@@ -1124,8 +1247,8 @@ def test_router_handoff_populates_dispatch_when_only_dispatch_event_is_enabled()
     assert dispatch_fields is not None
     assert set(dispatch_fields) == set(DISPATCH_ROUTER_FIELDS)
     assert dispatch_fields == {
-        "dropped_tokens": None,
-        "drop_rate": None,
+        "dropped_tokens": 2,
+        "drop_rate": pytest.approx(0.25),
         "expert_cv": pytest.approx(math.sqrt(1.25) / 1.5),
         "top1_expert_share": pytest.approx(0.5),
         "aux_loss": pytest.approx(1.25),
@@ -1441,6 +1564,7 @@ def test_closed_gate_skips_all_moe_metadata_and_workload(
 
     for name in ("router_trace_context", "router_workload"):
         monkeypatch.setattr(router_module, name, fail)
+    monkeypatch.setattr(router_module, "collect_router_assignment_fields", fail)
     monkeypatch.setattr(router_module, "collect_router_loss_fields", fail)
     for name in (
         "dispatch_trace_context",
