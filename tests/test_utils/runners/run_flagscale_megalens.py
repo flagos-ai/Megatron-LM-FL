@@ -27,6 +27,7 @@ from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: 
 from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
 from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_capacity_probe_contract  # noqa: E402
+from tests.test_utils.runners import moe_shared_expert_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
 from tests.test_utils.runners import training_run_contract  # noqa: E402
@@ -342,6 +343,17 @@ def _ep_capacity_drop_events() -> tuple[manifest.EventRequirement, ...]:
     )
 
 
+def _ep_shared_expert_events() -> tuple[manifest.EventRequirement, ...]:
+    return (
+        *_ep_events("alltoall"),
+        manifest.EventRequirement(
+            "moe-shared-expert",
+            (*_COMMON_FIELDS, "layer", "ep_size"),
+            "E",
+        ),
+    )
+
+
 def _dp_events(profile: str) -> tuple[manifest.EventRequirement, ...]:
     names = (
         ("dp-allreduce",)
@@ -558,6 +570,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         2,
         _ep_capacity_drop_events(),
         moe_capacity_probe_contract.validate_ep2_capacity_drop,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "ep2-alltoall-shared-expert": manifest.TraceProfile(
+        "ep2-alltoall-shared-expert",
+        2,
+        _ep_shared_expert_events(),
+        moe_shared_expert_probe_contract.validate_ep2_shared_expert,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
     "ep2-allgather": manifest.TraceProfile(
@@ -832,6 +851,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
     "flagscale_single_node_ep2_capacity_drop_smoke": (
         "ep2-alltoall-capacity-drop"
+    ),
+    "flagscale_single_node_ep2_shared_expert_smoke": (
+        "ep2-alltoall-shared-expert"
     ),
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke": (

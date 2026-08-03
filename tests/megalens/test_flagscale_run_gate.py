@@ -15,6 +15,7 @@ from tests.test_utils.runners import dualpipev_probe_contract
 from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import moe_capacity_probe_contract
+from tests.test_utils.runners import moe_shared_expert_probe_contract
 from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
 from tests.test_utils.runners import tp_probe_contract
@@ -43,6 +44,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_ep2_smoke.yaml": "ep2-alltoall",
     "flagscale_single_node_ep2_capacity_drop_smoke.yaml": (
         "ep2-alltoall-capacity-drop"
+    ),
+    "flagscale_single_node_ep2_shared_expert_smoke.yaml": (
+        "ep2-alltoall-shared-expert"
     ),
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke.yaml": (
@@ -820,6 +824,49 @@ def test_ep2_capacity_drop_profile_only_enables_unpadded_token_dropping() -> Non
         "drop_rate",
     } <= set(requirements["moe-router"].fields)
     assert "capacity_factor" in requirements["moe-dispatch"].fields
+
+
+def test_ep2_shared_expert_profile_only_enables_nonoverlap_shared_compute() -> None:
+    baseline = yaml.safe_load(
+        (_FIXTURES / "flagscale_single_node_ep2_smoke.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    shared_expert = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_ep2_shared_expert_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = shared_expert["experiment"]["exp_name"]
+    baseline["train"]["model"].update(
+        {
+            "moe_shared_expert_intermediate_size": 256,
+            "moe_shared_expert_overlap": False,
+        }
+    )
+
+    assert shared_expert == baseline
+    profile = gate.PROFILES["ep2-alltoall-shared-expert"]
+    assert profile.rank_count == 2
+    assert (
+        profile.contract
+        is moe_shared_expert_probe_contract.validate_ep2_shared_expert
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    requirements = {requirement.name: requirement for requirement in profile.events}
+    assert {
+        "moe-router",
+        "moe-dispatch",
+        "moe-experts",
+        "moe-shared-expert",
+        "moe-combine",
+        "ep-alltoall-dispatch",
+        "ep-alltoall-combine",
+    } == set(requirements)
+    assert {"layer", "ep_size"} <= set(requirements["moe-shared-expert"].fields)
 
 
 def test_dualpipev_profile_is_the_minimal_supported_ep2_route() -> None:
