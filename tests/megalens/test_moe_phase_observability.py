@@ -838,6 +838,137 @@ def test_checkpoint_style_no_grad_then_recompute_uses_per_invocation_loss() -> N
     assert _event_fields(sink.records[1])["z_loss"] == pytest.approx(0.5)
 
 
+@pytest.mark.parametrize("mode", ["torch", "fp8"])
+def test_moe_layer_checkpoint_reentry_keeps_phase_and_dispatch_state_local(
+    monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    sink = _RecordingSink()
+    install_trace_sink(sink)
+    events: list[tuple[Any, ...]] = []
+    router, hidden_states, probs, _ = _router_fixture(
+        sink,
+        events,
+        loss_observations=[
+            ("load_balancing_loss", torch.tensor(1.5)),
+            ("z_loss", torch.tensor(0.5)),
+        ],
+        losses_require_grad=True,
+    )
+    layer, dispatcher, _ = _layer_fixture(sink, events)
+    layer.training = True
+    layer.attn_tp_group = _Group(1)
+    layer.moe_layer_recompute = True
+    layer.fwd_execution_map = {"route", "expert_compute", "postprocess"}
+    vars(layer.config).update(
+        sequence_parallel=False,
+        log_moe_overload_factor=False,
+        fp8=mode == "fp8",
+        fp4=False,
+    )
+
+    def route(
+        self: Any,
+        actual_hidden_states: torch.Tensor,
+        padding_mask: torch.Tensor | None = None,
+        input_ids: torch.Tensor | None = None,
+    ):
+        return TopKRouter.forward(router, actual_hidden_states, padding_mask, input_ids)
+
+    def preprocess(
+        self: Any,
+        actual_hidden_states: torch.Tensor,
+        actual_probs: torch.Tensor,
+        actual_routing_map: torch.Tensor,
+    ):
+        return actual_hidden_states, actual_probs
+
+    layer.route = MethodType(route, layer)
+    layer.preprocess = MethodType(preprocess, layer)
+    layer.shared_experts_compute = MethodType(lambda self, actual_hidden_states: None, layer)
+    phase_methods = (
+        "_route_for_dispatch",
+        "dispatch",
+        "_dispatch_with_fields",
+        "routed_experts_compute",
+    )
+    for name in phase_methods:
+        setattr(layer, name, MethodType(getattr(MoELayer, name), layer))
+
+    checkpoint_calls: list[str] = []
+    phase_runs: list[tuple[bool, list[str]]] = []
+
+    def run_checkpoint(function: Any, function_args: tuple[Any, ...]):
+        assert function_args == (hidden_states, None, None)
+        with torch.no_grad():
+            start = len(sink.records)
+            initial_forward = function(*function_args)
+            phase_runs.append((False, [record["name"] for record in sink.records[start:]]))
+        with torch.enable_grad():
+            start = len(sink.records)
+            function(*function_args)
+            phase_runs.append((True, [record["name"] for record in sink.records[start:]]))
+        return initial_forward
+
+    if mode == "torch":
+
+        def checkpoint(function: Any, distribute_saved_activations: bool, *function_args: Any):
+            checkpoint_calls.append("torch")
+            assert distribute_saved_activations is False
+            return run_checkpoint(function, function_args)
+
+        monkeypatch.setattr(moe_layer_module.tensor_parallel, "checkpoint", checkpoint)
+    else:
+        def te_checkpoint(
+            function: Any,
+            distribute_saved_activations: bool,
+            rng_tracker_getter: Any,
+            actual_tp_group: Any,
+            *function_args: Any,
+        ):
+            checkpoint_calls.append("fp8")
+            assert distribute_saved_activations is False
+            return run_checkpoint(function, function_args)
+
+        monkeypatch.setattr(moe_layer_module, "te_checkpoint", te_checkpoint)
+        monkeypatch.setattr(
+            moe_layer_module.parallel_state, "get_tensor_model_parallel_group", lambda: object()
+        )
+
+    output, mlp_bias = MoELayer.forward(layer, hidden_states)
+
+    assert output is dispatcher.postprocessed_output
+    assert mlp_bias is None
+    assert checkpoint_calls == [mode]
+
+    phases = ["moe-router", "moe-dispatch", "moe-experts", "moe-combine"]
+    assert phase_runs == [(False, phases), (True, phases)]
+    records_by_invocation = [sink.records[:4], sink.records[4:8]]
+
+    for invocation, expected_losses in zip(
+        records_by_invocation,
+        [
+            {"aux_loss": None, "z_loss": None},
+            {"aux_loss": pytest.approx(1.5), "z_loss": pytest.approx(0.5)},
+        ],
+    ):
+        router_record, dispatch_record, _, _ = invocation
+        router_fields = _event_fields(router_record)
+        dispatch_fields = _event_fields(dispatch_record)
+        assert {name: router_fields[name] for name in DISPATCH_ROUTER_FIELDS} == {
+            name: dispatch_fields[name] for name in DISPATCH_ROUTER_FIELDS
+        }
+        assert {name: router_fields[name] for name in expected_losses} == expected_losses
+        assert {name: dispatch_fields[name] for name in expected_losses} == expected_losses
+
+    assert not dispatch_fields_requested()
+    MoELayer.dispatch(layer, hidden_states, probs)
+    assert {
+        name: _event_fields(sink.records[-1])[name] for name in DISPATCH_ROUTER_FIELDS
+    } == {name: None for name in DISPATCH_ROUTER_FIELDS}
+    assert sink.active == []
+    assert not dispatch_fields_requested()
+
+
 @pytest.mark.parametrize("group_container", ["direct", "list"])
 def test_router_topology_uses_production_process_group_adapter(group_container: str) -> None:
     group = _Group(2)
