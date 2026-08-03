@@ -881,7 +881,7 @@ def test_ep2_shared_expert_profile_only_enables_nonoverlap_shared_compute() -> N
     assert {"layer", "ep_size"} <= set(requirements["moe-shared-expert"].fields)
 
 
-def test_ep2_shared_expert_overlap_profile_only_enables_overlap() -> None:
+def test_ep2_shared_expert_overlap_profile_enables_multi_connection_overlap() -> None:
     baseline = yaml.safe_load(
         (
             _FIXTURES / "flagscale_single_node_ep2_shared_expert_smoke.yaml"
@@ -894,6 +894,7 @@ def test_ep2_shared_expert_overlap_profile_only_enables_overlap() -> None:
         ).read_text(encoding="utf-8")
     )
     baseline["experiment"]["exp_name"] = overlap["experiment"]["exp_name"]
+    baseline["experiment"]["envs"]["CUDA_DEVICE_MAX_CONNECTIONS"] = 8
     baseline["train"]["model"]["moe_shared_expert_overlap"] = True
 
     assert overlap == baseline
