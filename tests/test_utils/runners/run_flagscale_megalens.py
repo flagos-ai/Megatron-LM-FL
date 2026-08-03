@@ -26,6 +26,7 @@ from tests.test_utils.runners import gpt_probe_contract  # noqa: E402
 from tests.test_utils.runners import megalens_run_manifest as manifest  # noqa: E402
 from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
 from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
+from tests.test_utils.runners import moe_capacity_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
 from tests.test_utils.runners import training_run_contract  # noqa: E402
@@ -301,6 +302,46 @@ def _ep_events(
     return (*_EP_COMMON_EVENTS, *route_events, *scheduler)
 
 
+def _ep_capacity_drop_events() -> tuple[manifest.EventRequirement, ...]:
+    base_events = _ep_events("alltoall")
+    return (
+        manifest.EventRequirement(
+            "moe-router",
+            (
+                *_COMMON_FIELDS,
+                "layer",
+                "ep_size",
+                "num_experts",
+                "num_local_experts",
+                "router_topk",
+                "num_tokens",
+                "routed_tokens",
+                "dropped_tokens",
+                "drop_rate",
+                "expert_cv",
+                "top1_expert_share",
+                "routing_entropy",
+                "aux_loss",
+                "z_loss",
+            ),
+            "E",
+        ),
+        manifest.EventRequirement(
+            "moe-dispatch",
+            (
+                *base_events[1].fields,
+                "ep_size",
+                "num_experts",
+                "num_local_experts",
+                "router_topk",
+                "capacity_factor",
+            ),
+            "E",
+        ),
+        *base_events[2:],
+    )
+
+
 def _dp_events(profile: str) -> tuple[manifest.EventRequirement, ...]:
     names = (
         ("dp-allreduce",)
@@ -511,6 +552,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         2,
         _ep_events("alltoall"),
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "ep2-alltoall-capacity-drop": manifest.TraceProfile(
+        "ep2-alltoall-capacity-drop",
+        2,
+        _ep_capacity_drop_events(),
+        moe_capacity_probe_contract.validate_ep2_capacity_drop,
+        training_run_contract.validate_two_iteration_checkpoint,
     ),
     "ep2-allgather": manifest.TraceProfile(
         "ep2-allgather",
@@ -782,6 +830,9 @@ _CONFIG_PROFILES = {
     ),
     "flagscale_single_node_pp2_overlap_timeline_smoke": "pp2-overlap-timeline",
     "flagscale_single_node_ep2_smoke": "ep2-alltoall",
+    "flagscale_single_node_ep2_capacity_drop_smoke": (
+        "ep2-alltoall-capacity-drop"
+    ),
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke": (
         "pp2-dp2-ep2-dualpipev"
