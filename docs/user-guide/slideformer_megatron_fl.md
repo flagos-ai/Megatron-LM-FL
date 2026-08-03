@@ -32,6 +32,17 @@ The validated scope is dense decoder-only GPT models with
 `TP=PP=DP=EP=1` and one microbatch. Multi-GPU training is intentionally out
 of scope for this PR.
 
+### Upstream references
+
+- Paper: [SlideFormer (arXiv:2603.16428)](https://arxiv.org/abs/2603.16428)
+- Reference implementation:
+  [RegiaYoung/SlideFormer](https://github.com/RegiaYoung/SlideFormer)
+
+The paper defines the layer-sliding training design. The repository is the
+behavioral and implementation reference for this port; the exact baseline
+revision used by the acceptance runs is recorded in the performance protocol
+below and in `megatron/plugin/slideformer/NOTICE`.
+
 ## Repository boundary
 
 Megatron-LM-FL is the owner of the SlideFormer engine:
