@@ -205,6 +205,12 @@ class BaseMoELayer(MegatronModule, ABC):
         """Set the layer number for the MoE layer."""
         self.layer_number = layer_number
         self.router.set_layer_number(layer_number)
+        if self.shared_expert_overlap and self.shared_experts is not None:
+            setattr(
+                self.shared_experts,
+                "_shared_expert_trace_identity",
+                (self.layer_number, int(utils.get_pg_size(self.ep_group))),
+            )
 
 
 class MoELayer(BaseMoELayer):
@@ -331,6 +337,11 @@ class MoELayer(BaseMoELayer):
                 gate=self.config.moe_shared_expert_gate,
             )
             if self.shared_expert_overlap:
+                setattr(
+                    self.shared_experts,
+                    "_shared_expert_trace_identity",
+                    (self.layer_number, int(utils.get_pg_size(self.ep_group))),
+                )
                 self.token_dispatcher.set_shared_experts(self.shared_experts)
 
         # Inference-optimized mode setup
