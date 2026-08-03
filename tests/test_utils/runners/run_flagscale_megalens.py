@@ -28,6 +28,7 @@ from tests.test_utils.runners import mimo_probe_contract  # noqa: E402
 from tests.test_utils.runners import mimo_pretrain_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_capacity_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_flex_deepep_probe_contract  # noqa: E402
+from tests.test_utils.runners import moe_flex_hybridep_probe_contract  # noqa: E402
 from tests.test_utils.runners import moe_shared_expert_probe_contract  # noqa: E402
 from tests.test_utils.runners import p2p_probe_contract  # noqa: E402
 from tests.test_utils.runners import tp_probe_contract  # noqa: E402
@@ -356,7 +357,7 @@ def _ep_shared_expert_events() -> tuple[manifest.EventRequirement, ...]:
     )
 
 
-def _ep_flex_deepep_events() -> tuple[manifest.EventRequirement, ...]:
+def _ep_flex_events() -> tuple[manifest.EventRequirement, ...]:
     return (
         *_EP_COMMON_EVENTS,
         manifest.EventRequirement("ep-alltoall-dispatch", _EP_FLEX_ROUTE_FIELDS, "E"),
@@ -592,8 +593,15 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "tp2-ep4-flex-deepep": manifest.TraceProfile(
         "tp2-ep4-flex-deepep",
         8,
-        _ep_flex_deepep_events(),
+        _ep_flex_events(),
         moe_flex_deepep_probe_contract.validate_tp2_ep4_flex_deepep,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "tp2-ep4-flex-hybridep": manifest.TraceProfile(
+        "tp2-ep4-flex-hybridep",
+        8,
+        _ep_flex_events(),
+        moe_flex_hybridep_probe_contract.validate_tp2_ep4_flex_hybridep,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
     "ep2-allgather": manifest.TraceProfile(
@@ -875,6 +883,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_tp2_ep4_flex_deepep_smoke": (
         "tp2-ep4-flex-deepep"
     ),
+    "flagscale_single_node_tp2_ep4_flex_hybridep_smoke": (
+        "tp2-ep4-flex-hybridep"
+    ),
     "flagscale_single_node_ep2_fine_grained_smoke": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke": (
         "pp2-dp2-ep2-dualpipev"
@@ -989,7 +1000,7 @@ def _ep_dispatcher(profile: manifest.TraceProfile, requested: str | None) -> str
         return "alltoall"
     if "allgather" in profile.name:
         return "allgather"
-    if profile.name == "tp2-ep4-flex-deepep":
+    if profile.name in {"tp2-ep4-flex-deepep", "tp2-ep4-flex-hybridep"}:
         return "flex"
     return None
 

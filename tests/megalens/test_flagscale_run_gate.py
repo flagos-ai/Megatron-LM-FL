@@ -16,6 +16,7 @@ from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners import megalens_run_manifest as manifest
 from tests.test_utils.runners import moe_capacity_probe_contract
 from tests.test_utils.runners import moe_flex_deepep_probe_contract
+from tests.test_utils.runners import moe_flex_hybridep_probe_contract
 from tests.test_utils.runners import moe_shared_expert_probe_contract
 from tests.test_utils.runners import p2p_probe_contract
 from tests.test_utils.runners import run_flagscale_megalens as gate
@@ -51,6 +52,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_tp2_ep4_flex_deepep_smoke.yaml": (
         "tp2-ep4-flex-deepep"
+    ),
+    "flagscale_single_node_tp2_ep4_flex_hybridep_smoke.yaml": (
+        "tp2-ep4-flex-hybridep"
     ),
     "flagscale_single_node_ep2_fine_grained_smoke.yaml": "ep2-fine-grained",
     "flagscale_single_node_pp2_dp2_ep2_dualpipev_smoke.yaml": (
@@ -942,6 +946,44 @@ def test_tp2_ep4_flex_deepep_profile_selects_the_fused_source_route() -> None:
     assert flex_deepep["train"]["model"]["global_batch_size"] == (
         flex_deepep["train"]["model"]["micro_batch_size"] * data_parallel_size
     )
+
+
+def test_tp2_ep4_flex_hybridep_profile_only_changes_backend_and_jit_environment() -> None:
+    flex_deepep = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_ep4_flex_deepep_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    flex_hybridep = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_ep4_flex_hybridep_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    flex_deepep["experiment"]["exp_name"] = flex_hybridep["experiment"]["exp_name"]
+    flex_deepep["experiment"]["cmds"]["before_start"] = flex_hybridep["experiment"][
+        "cmds"
+    ]["before_start"]
+    flex_deepep["train"]["model"]["moe_flex_dispatcher_backend"] = "hybridep"
+
+    assert flex_hybridep == flex_deepep
+    assert flex_hybridep["experiment"]["cmds"]["before_start"].endswith(
+        "source /workspace/Megatron-LM-FL/docker/common/hybridep-cu128-env.sh"
+    )
+    assert flex_hybridep["train"]["model"]["moe_router_dtype"] == "fp32"
+    assert "moe_enable_deepep" not in flex_hybridep["train"]["model"]
+
+    profile = gate.PROFILES["tp2-ep4-flex-hybridep"]
+    assert profile.rank_count == 8
+    assert (
+        profile.contract
+        is moe_flex_hybridep_probe_contract.validate_tp2_ep4_flex_hybridep
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    assert profile.events == gate.PROFILES["tp2-ep4-flex-deepep"].events
+    assert gate._ep_dispatcher(profile, None) == "flex"
 
 
 def test_dualpipev_profile_is_the_minimal_supported_ep2_route() -> None:

@@ -105,6 +105,7 @@ def _profile_checks(
             "tests/megalens/test_moe_phase_observability.py",
             "tests/megalens/test_moe_capacity_probe_contract.py",
             "tests/megalens/test_moe_flex_deepep_probe_contract.py",
+            "tests/megalens/test_moe_flex_hybridep_probe_contract.py",
             "tests/megalens/test_moe_shared_expert_probe_contract.py",
             "tests/megalens/test_ep_primitive_observability.py",
             "tests/megalens/test_pipeline_schedule_observability.py",
