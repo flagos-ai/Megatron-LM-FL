@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from tests.test_utils.runners.megalens_run_manifest import Failure
@@ -32,6 +33,42 @@ def validate_two_iteration_checkpoint(
                 "run.training.checkpoint",
                 "training iteration 2 torch_dist checkpoint has no common state",
                 str(common_state),
+            )
+        )
+    return tuple(failures)
+
+
+_TRANSFORMER_ENGINE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*transformer_impl\s+\.+\s+transformer_engine\s*$",
+    re.MULTILINE,
+)
+
+
+def validate_two_iteration_transformer_engine_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the parsed Transformer Engine model selection."""
+
+    failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    if _TRANSFORMER_ENGINE_ARGUMENT.search(log_text) is None:
+        failures.append(
+            Failure(
+                "run.training.transformer_impl",
+                "Megatron did not report transformer_impl=transformer_engine",
+                str(launcher_log),
             )
         )
     return tuple(failures)

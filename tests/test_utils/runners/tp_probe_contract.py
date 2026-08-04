@@ -1232,6 +1232,50 @@ def _validate_tp2_sp_te_linear_boundary(trace_root: Path) -> tuple[Failure, ...]
                         )
                     )
 
+            layers = spans.get("transformer_layer", ())
+            attention = spans.get("attention", ())
+            mlp = spans.get("MLP.forward", ())
+            for layer in layers:
+                layer_attention = tuple(
+                    span
+                    for span in attention
+                    if span.parent_begin_position == layer.begin_position
+                )
+                layer_mlp = tuple(
+                    span
+                    for span in mlp
+                    if span.parent_begin_position == layer.begin_position
+                )
+                if len(layer_attention) != 1 or len(layer_mlp) != 1:
+                    failures.append(
+                        _failure(
+                            "trace.tp_te.scope_hierarchy",
+                            "each transformer layer must directly contain one "
+                            "attention and one MLP scope",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                    continue
+                attention_span = layer_attention[0]
+                mlp_span = layer_mlp[0]
+                if not (
+                    layer.begin_position
+                    < attention_span.begin_position
+                    < attention_span.end_position
+                    < mlp_span.begin_position
+                    < mlp_span.end_position
+                    < layer.end_position
+                ):
+                    failures.append(
+                        _failure(
+                            "trace.tp_te.scope_hierarchy",
+                            "transformer layer scopes must follow attention then MLP",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+
             routes = Counter(
                 str(span.begin.attrs.get("collective_op"))
                 for span in spans.get("tp-linear-async-launch", ())

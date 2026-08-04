@@ -474,7 +474,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         2,
         _TP2_SP_TE_LINEAR_EVENTS,
         tp_probe_contract.validate_tp2_sp_te_linear_profile,
-        training_run_contract.validate_two_iteration_checkpoint,
+        training_run_contract.validate_two_iteration_transformer_engine_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",

@@ -1243,6 +1243,38 @@ def test_training_contract_requires_the_terminal_checkpoint(
     )
 
 
+def test_transformer_engine_training_contract_requires_the_parsed_model_route(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "[default0]:  transformer_impl ................................ local\n",
+        encoding="utf-8",
+    )
+
+    failures = (
+        training_run_contract.validate_two_iteration_transformer_engine_checkpoint(
+            tmp_path, False
+        )
+    )
+    assert {failure.code for failure in failures} == {
+        "run.training.transformer_impl"
+    }
+
+    launcher_log.write_text(
+        "[default0]:  transformer_impl ................................ "
+        "transformer_engine\n",
+        encoding="utf-8",
+    )
+    assert (
+        training_run_contract.validate_two_iteration_transformer_engine_checkpoint(
+            tmp_path, False
+        )
+        == ()
+    )
+
+
 def test_legacy_pp2_training_contract_requires_both_pipeline_stages(
     tmp_path: Path,
 ) -> None:
@@ -1297,6 +1329,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "mimo-train8-fanin",
         "mimo-train8-fanout",
         "pp2-dp2-distopt-force-sync",
+        "tp2-sp-te-linear",
     }
 
     for name, profile in gate.PROFILES.items():
@@ -1712,7 +1745,7 @@ def test_tp2_sp_te_linear_profile_only_switches_the_transformer_implementation()
     assert profile.contract is tp_probe_contract.validate_tp2_sp_te_linear_profile
     assert (
         profile.run_contract
-        is training_run_contract.validate_two_iteration_checkpoint
+        is training_run_contract.validate_two_iteration_transformer_engine_checkpoint
     )
     assert (
         gate._CONFIG_PROFILES["flagscale_single_node_tp2_sp_te_linear_smoke"]

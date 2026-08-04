@@ -28,6 +28,7 @@ def _write_collective_trace(
     include_embedding_sync: bool = False,
     nest_sp_in_all_grads: bool = False,
     include_te_model_scopes: bool = False,
+    reverse_te_model_scopes: bool = False,
 ) -> None:
     rows: list[dict[str, object]] = []
     timestamp = 0
@@ -144,10 +145,14 @@ def _write_collective_trace(
         if include_te_model_scopes:
             for _layer in (1, 2):
                 event("transformer_layer", "B")
-                event("attention", "B")
-                event("attention", "E")
-                event("MLP.forward", "B")
-                event("MLP.forward", "E")
+                model_scopes = (
+                    ("MLP.forward", "attention")
+                    if reverse_te_model_scopes
+                    else ("attention", "MLP.forward")
+                )
+                for name in model_scopes:
+                    event(name, "B")
+                    event(name, "E")
                 event("transformer_layer", "E")
         if cross_all_gather_scopes:
             event(
@@ -400,6 +405,26 @@ def test_tp2_sp_te_linear_contract_requires_the_outer_te_model_scopes(
     failures = tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path)
 
     assert "trace.tp_te.scope_count" in {failure.code for failure in failures}
+
+
+def test_tp2_sp_te_linear_contract_requires_attention_before_mlp(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+            include_te_model_scopes=True,
+            reverse_te_model_scopes=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path)
+
+    assert "trace.tp_te.scope_hierarchy" in {
+        failure.code for failure in failures
+    }
 
 
 def test_tp2_no_sp_linear_contract_accepts_allreduce(tmp_path: Path) -> None:
