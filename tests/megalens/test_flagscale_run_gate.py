@@ -1088,6 +1088,11 @@ def test_tp2_ep4_flex_deepep_profile_selects_the_fused_source_route() -> None:
         "moe-combine",
         "ep-alltoall-dispatch",
         "ep-alltoall-combine",
+        "tp-all-gather-first",
+        "tp-reduce-scatter",
+        "tp-allreduce",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
     } == set(requirements)
     for name in ("ep-alltoall-dispatch", "ep-alltoall-combine"):
         assert requirements[name].phase == "E"
@@ -1099,6 +1104,12 @@ def test_tp2_ep4_flex_deepep_profile_selects_the_fused_source_route() -> None:
             "ep_size",
             "tp_size",
         } <= set(requirements[name].fields)
+    for name in ("tp-all-gather-first", "tp-reduce-scatter", "tp-allreduce"):
+        assert {"data_bytes", "group_size"} <= set(requirements[name].fields)
+    for name in ("tp-linear-async-launch", "tp-linear-async-complete"):
+        assert {"operation_id", "collective_op"} <= set(
+            requirements[name].fields
+        )
     assert gate._ep_dispatcher(profile, None) == "flex"
     assert flex_deepep["train"]["system"]["tensor_model_parallel_size"] == 2
     assert flex_deepep["train"]["system"]["expert_tensor_parallel_size"] == 1
@@ -1144,7 +1155,18 @@ def test_tp2_ep4_flex_hybridep_profile_only_changes_backend_and_jit_environment(
         profile.run_contract
         is training_run_contract.validate_two_iteration_checkpoint
     )
-    assert profile.events == gate.PROFILES["tp2-ep4-flex-deepep"].events
+    hybrid_events = {requirement.name for requirement in profile.events}
+    deepep_events = {
+        requirement.name
+        for requirement in gate.PROFILES["tp2-ep4-flex-deepep"].events
+    }
+    assert deepep_events - hybrid_events == {
+        "tp-all-gather-first",
+        "tp-reduce-scatter",
+        "tp-allreduce",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+    }
     assert gate._ep_dispatcher(profile, None) == "flex"
 
 

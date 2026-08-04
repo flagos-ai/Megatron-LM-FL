@@ -189,6 +189,20 @@ _TP2_SP_TE_LINEAR_EVENTS = (
     *_TP2_SP_EVENTS,
     *_events("transformer_layer", "attention", "MLP.forward"),
 )
+_TP2_EP4_MODEL_EVENTS = (
+    *(
+        requirement
+        for requirement in _TP2_SP_EVENTS
+        if requirement.name
+        in {
+            "tp-all-gather-first",
+            "tp-reduce-scatter",
+            "tp-linear-async-launch",
+            "tp-linear-async-complete",
+        }
+    ),
+    manifest.EventRequirement("tp-allreduce", _TP_ALLREDUCE_FIELDS, "B"),
+)
 _DUALPIPEV_PHASE_FIELDS = (
     *_COMMON_FIELDS,
     "current_microbatch",
@@ -646,7 +660,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "tp2-ep4-flex-deepep": manifest.TraceProfile(
         "tp2-ep4-flex-deepep",
         8,
-        _ep_flex_events(),
+        (*_ep_flex_events(), *_TP2_EP4_MODEL_EVENTS),
         moe_flex_deepep_probe_contract.validate_tp2_ep4_flex_deepep,
         training_run_contract.validate_two_iteration_checkpoint,
     ),

@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""TP/SP trace contracts for the controlled local Transformer profile."""
+"""TP/SP trace contracts for controlled Transformer and MoE profiles."""
 
 from __future__ import annotations
 
@@ -99,6 +99,24 @@ _FINAL_SYNC_EVENTS = frozenset(
         "embedding-grads-allreduce",
     )
 )
+_TP2_EP4_FLEX_DIRECT_SPECS = {
+    "tp-reduce-scatter": (
+        1,
+        {"op": "reduce-scatter", "dim": "first"},
+    ),
+    "tp-allreduce": (
+        2,
+        {
+            "op": "all_reduce",
+            "timing_phase": "collective_call",
+            "payload_role": "inplace_input_output",
+        },
+    ),
+    "tp-all-gather-first": (
+        2,
+        {"op": "all-gather", "dim": "first"},
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -1195,6 +1213,154 @@ def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
         for validator in validators
         for failure in validator(trace_root)
     )
+
+
+def _validate_tp2_ep4_flex_iteration(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[list[Failure], set[str]]:
+    """Validate the model-TP domain in the fixed TP2/ETP1/EP4 workload."""
+
+    iteration_id = int(iteration.iteration_id)
+    failures: list[Failure] = []
+    spans, pairing_failures = _pair_spans(
+        iteration,
+        _TP2_EP4_FLEX_DIRECT_SPECS,
+        rank=rank,
+    )
+    failures.extend(pairing_failures)
+    expected_coordinates = (rank // 2, 0, rank % 2)
+    expected_peer = [rank ^ 1]
+    for name, (expected_count, expected_fields) in (
+        _TP2_EP4_FLEX_DIRECT_SPECS.items()
+    ):
+        direct_spans = spans.get(name, ())
+        if len(direct_spans) != expected_count:
+            failures.append(
+                _failure(
+                    "trace.tp_ep.collective_count",
+                    f"event {name!r} has {len(direct_spans)} span(s), "
+                    f"expected {expected_count}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        for span in direct_spans:
+            failures.extend(
+                _field_failures(
+                    span.begin,
+                    {**expected_fields, "group_size": 2},
+                    code="trace.tp_ep.collective_field",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            data_bytes = span.begin.attrs.get("data_bytes")
+            if (
+                not isinstance(data_bytes, int)
+                or isinstance(data_bytes, bool)
+                or data_bytes <= 0
+            ):
+                failures.append(
+                    _failure(
+                        "trace.tp_ep.collective_field",
+                        f"event {name!r} has invalid data_bytes={data_bytes!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            coordinates = (
+                span.begin.rank.data,
+                span.begin.rank.pipeline,
+                span.begin.rank.tensor,
+            )
+            if coordinates != expected_coordinates:
+                failures.append(
+                    _failure(
+                        "trace.tp_ep.coordinates",
+                        f"event {name!r} uses coordinates {coordinates}, "
+                        f"expected {expected_coordinates}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            if span.end.attrs.get("group") != expected_peer:
+                failures.append(
+                    _failure(
+                        "trace.tp_ep.collective_group",
+                        f"event {name!r} has peer group="
+                        f"{span.end.attrs.get('group')!r}, expected {expected_peer!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+
+    linear_failures, operation_ids = _validate_linear_lifecycle(
+        iteration,
+        rank=rank,
+        expected_routes=_SP_LINEAR_ROUTES,
+    )
+    failures.extend(linear_failures)
+    if len(operation_ids) != 2:
+        failures.append(
+            _failure(
+                "trace.tp_ep.linear_count",
+                f"model-TP Linear lifecycle has {len(operation_ids)} operation(s), "
+                "expected 2",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return failures, operation_ids
+
+
+def validate_tp2_ep4_flex_tp_domain(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate model TP2 for the fixed ETP1×EP4 Flex profile."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    expected_ranks = tuple(range(8))
+    if tuple(sorted(by_rank)) != expected_ranks:
+        failures.append(
+            Failure(
+                "trace.tp_ep.ranks",
+                f"expected ranks {expected_ranks}, observed {tuple(sorted(by_rank))}",
+                "tp2-etp1-ep4-flex",
+            )
+        )
+
+    for rank in expected_ranks:
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.tp_ep.iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        rank_operation_ids: set[str] = set()
+        for iteration in iterations:
+            iteration_failures, operation_ids = _validate_tp2_ep4_flex_iteration(
+                iteration,
+                rank=rank,
+            )
+            failures.extend(iteration_failures)
+            duplicates = rank_operation_ids & operation_ids
+            if duplicates:
+                failures.append(
+                    _failure(
+                        "trace.tp_linear.operation_id",
+                        f"operation IDs repeat across iterations: {sorted(duplicates)}",
+                        rank=rank,
+                        iteration=int(iteration.iteration_id),
+                    )
+                )
+            rank_operation_ids.update(operation_ids)
+    return tuple(failures)
 
 
 def _validate_tp2_sp_te_linear_boundary(trace_root: Path) -> tuple[Failure, ...]:

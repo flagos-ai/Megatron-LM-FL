@@ -12,6 +12,7 @@ from megatron.megalens.trace_aggregate import (
     collect_benchmark_files,
     read_benchmark_file,
 )
+from tests.test_utils.runners import tp_probe_contract
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
 _RANKS = tuple(range(8))
@@ -44,6 +45,16 @@ _ASYNC_FIELDS = frozenset(
         "wait_role",
     }
 )
+_MOE_ROUTE_SEQUENCE = (
+    ("moe-dispatch", "B"),
+    ("ep-alltoall-dispatch", "B"),
+    ("ep-alltoall-dispatch", "E"),
+    ("moe-dispatch", "E"),
+    ("moe-combine", "B"),
+    ("ep-alltoall-combine", "B"),
+    ("ep-alltoall-combine", "E"),
+    ("moe-combine", "E"),
+) * 2
 
 
 def _failure(code: str, message: str, rank: int, iteration: int | None) -> Failure:
@@ -164,6 +175,26 @@ def _validate_iteration(iteration: Iteration, rank: int) -> list[Failure]:
                 iteration_id,
             )
         )
+    moe_route_sequence = tuple(
+        (event.name, event.ph)
+        for event in iteration.events
+        if event.name in {
+            "moe-dispatch",
+            "moe-combine",
+            "ep-alltoall-dispatch",
+            "ep-alltoall-combine",
+        }
+    )
+    if moe_route_sequence != _MOE_ROUTE_SEQUENCE:
+        failures.append(
+            _failure(
+                "scope_order",
+                f"expected MoE route sequence {_MOE_ROUTE_SEQUENCE}, "
+                f"observed {moe_route_sequence}",
+                rank,
+                iteration_id,
+            )
+        )
     for name in _PRIMITIVES:
         failures.extend(
             _validate_primitive(
@@ -177,7 +208,7 @@ def _validate_iteration(iteration: Iteration, rank: int) -> list[Failure]:
 
 
 def validate_tp2_ep4_flex_deepep(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate two fused DeepEP dispatch/combine calls per iteration and rank."""
+    """Validate fused DeepEP plus the separate model-TP domain."""
 
     by_rank = _load_iterations(trace_root)
     failures: list[Failure] = []
@@ -203,6 +234,7 @@ def validate_tp2_ep4_flex_deepep(trace_root: Path) -> tuple[Failure, ...]:
             )
         for iteration in iterations:
             failures.extend(_validate_iteration(iteration, rank))
+    failures.extend(tp_probe_contract.validate_tp2_ep4_flex_tp_domain(trace_root))
     return tuple(failures)
 
 
