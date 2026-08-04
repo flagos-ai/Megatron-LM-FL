@@ -490,6 +490,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         tp_probe_contract.validate_tp2_sp_te_linear_profile,
         training_run_contract.validate_two_iteration_transformer_engine_checkpoint,
     ),
+    "tp2-sp-te-userbuffer": manifest.TraceProfile(
+        "tp2-sp-te-userbuffer",
+        2,
+        _TP2_SP_TE_LINEAR_EVENTS,
+        tp_probe_contract.validate_tp2_sp_te_linear_profile,
+        training_run_contract.validate_two_iteration_transformer_engine_userbuffer_checkpoint,
+    ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",
         2,
@@ -932,6 +939,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
     "flagscale_single_node_tp2_sp_te_linear_smoke": "tp2-sp-te-linear",
+    "flagscale_single_node_tp2_sp_te_userbuffer_smoke": "tp2-sp-te-userbuffer",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",

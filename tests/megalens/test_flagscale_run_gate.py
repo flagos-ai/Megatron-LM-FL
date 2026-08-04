@@ -31,6 +31,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
     "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
     "flagscale_single_node_tp2_sp_te_linear_smoke.yaml": "tp2-sp-te-linear",
+    "flagscale_single_node_tp2_sp_te_userbuffer_smoke.yaml": (
+        "tp2-sp-te-userbuffer"
+    ),
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
@@ -1297,6 +1300,39 @@ def test_transformer_engine_training_contract_requires_the_parsed_model_route(
     )
 
 
+def test_userbuffer_training_contract_requires_the_parsed_overlap_route(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "[default0]:  transformer_impl ................................ "
+        "transformer_engine\n"
+        "[default0]:  tp_comm_overlap ................................ False\n",
+        encoding="utf-8",
+    )
+
+    failures = training_run_contract.validate_two_iteration_transformer_engine_userbuffer_checkpoint(
+        tmp_path, False
+    )
+    assert {failure.code for failure in failures} == {
+        "run.training.tp_comm_overlap"
+    }
+
+    launcher_log.write_text(
+        "[default0]:  transformer_impl ................................ "
+        "transformer_engine\n"
+        "[default0]:  tp_comm_overlap ................................ True\n",
+        encoding="utf-8",
+    )
+    assert (
+        training_run_contract.validate_two_iteration_transformer_engine_userbuffer_checkpoint(
+            tmp_path, False
+        )
+        == ()
+    )
+
+
 def test_legacy_pp2_training_contract_requires_both_pipeline_stages(
     tmp_path: Path,
 ) -> None:
@@ -1352,6 +1388,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "mimo-train8-fanout",
         "pp2-dp2-distopt-force-sync",
         "tp2-sp-te-linear",
+        "tp2-sp-te-userbuffer",
     }
 
     for name, profile in gate.PROFILES.items():
@@ -1772,6 +1809,39 @@ def test_tp2_sp_te_linear_profile_only_switches_the_transformer_implementation()
     assert (
         gate._CONFIG_PROFILES["flagscale_single_node_tp2_sp_te_linear_smoke"]
         == "tp2-sp-te-linear"
+    )
+
+
+def test_tp2_sp_te_userbuffer_profile_only_enables_tp_overlap() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_te_linear_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    userbuffer = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_te_userbuffer_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = userbuffer["experiment"]["exp_name"]
+    baseline["train"]["system"]["tp_comm_overlap"] = True
+
+    assert userbuffer == baseline
+
+    profile = gate.PROFILES["tp2-sp-te-userbuffer"]
+    te_linear_profile = gate.PROFILES["tp2-sp-te-linear"]
+    assert profile.rank_count == 2
+    assert profile.events == te_linear_profile.events
+    assert profile.contract is tp_probe_contract.validate_tp2_sp_te_linear_profile
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_transformer_engine_userbuffer_checkpoint
+    )
+    assert (
+        gate._CONFIG_PROFILES[
+            "flagscale_single_node_tp2_sp_te_userbuffer_smoke"
+        ]
+        == "tp2-sp-te-userbuffer"
     )
 
 

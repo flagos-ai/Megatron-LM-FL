@@ -42,6 +42,10 @@ _TRANSFORMER_ENGINE_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*transformer_impl\s+\.+\s+transformer_engine\s*$",
     re.MULTILINE,
 )
+_TP_COMM_OVERLAP_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*tp_comm_overlap\s+\.+\s+True\s*$",
+    re.MULTILINE,
+)
 
 
 def validate_two_iteration_transformer_engine_checkpoint(
@@ -68,6 +72,31 @@ def validate_two_iteration_transformer_engine_checkpoint(
             Failure(
                 "run.training.transformer_impl",
                 "Megatron did not report transformer_impl=transformer_engine",
+                str(launcher_log),
+            )
+        )
+    return tuple(failures)
+
+
+def validate_two_iteration_transformer_engine_userbuffer_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal TE training with tensor-parallel UserBuffer enabled."""
+
+    failures = list(
+        validate_two_iteration_transformer_engine_checkpoint(run_root, trace_enabled)
+    )
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return tuple(failures)
+
+    if _TP_COMM_OVERLAP_ARGUMENT.search(log_text) is None:
+        failures.append(
+            Failure(
+                "run.training.tp_comm_overlap",
+                "Megatron did not report tp_comm_overlap=True",
                 str(launcher_log),
             )
         )
