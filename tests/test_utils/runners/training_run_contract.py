@@ -83,6 +83,64 @@ def validate_two_iteration_transformer_engine_checkpoint(
     return tuple(failures)
 
 
+_QWEN3_TP2_SP_ARGUMENTS = (
+    ("tensor_model_parallel_size", "2"),
+    ("pipeline_model_parallel_size", "1"),
+    ("context_parallel_size", "1"),
+    ("sequence_parallel", "True"),
+    ("num_layers", "28"),
+    ("hidden_size", "1024"),
+    ("ffn_hidden_size", "3072"),
+    ("num_attention_heads", "16"),
+    ("num_query_groups", "8"),
+    ("seq_length", "4096"),
+    ("micro_batch_size", "4"),
+    ("global_batch_size", "4"),
+    ("train_iters", "2"),
+    ("tokenizer_type", "QwenTokenizerFS"),
+    ("use_distributed_optimizer", "True"),
+    ("overlap_grad_reduce", "True"),
+    ("overlap_param_gather", "True"),
+    ("te_fl_prefer", "vendor"),
+    ("enable_flag_gems", "False"),
+    ("distributed_backend", "nccl"),
+    ("mock_data", "False"),
+)
+
+
+def validate_two_iteration_qwen3_tp2_sp_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the parsed Qwen3 TP2/SP L3 configuration."""
+
+    failures = list(
+        validate_two_iteration_transformer_engine_checkpoint(
+            run_root, trace_enabled
+        )
+    )
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return tuple(failures)
+
+    for name, value in _QWEN3_TP2_SP_ARGUMENTS:
+        argument = re.compile(
+            rf"^\[[^]]+\]:\s*{re.escape(name)}\s+\.+\s+"
+            rf"{re.escape(value)}\s*$",
+            re.MULTILINE,
+        )
+        if argument.search(log_text) is None:
+            failures.append(
+                Failure(
+                    "run.training.qwen3_argument",
+                    f"Megatron did not report {name}={value}",
+                    str(launcher_log),
+                )
+            )
+    return tuple(failures)
+
+
 def _validate_two_iteration_transformer_engine_cp_checkpoint(
     run_root: Path, trace_enabled: bool, *, context_parallel_size: int
 ) -> tuple[Failure, ...]:

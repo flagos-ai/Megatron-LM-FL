@@ -40,6 +40,8 @@ from tests.test_utils.runners import training_run_contract  # noqa: E402
 CONTAINER_SOURCE_ROOT = "/workspace/Megatron-LM-FL"
 CONTAINER_RUN_ROOT = "/artifacts/run"
 CONTAINER_CHECKPOINT_LOAD_ROOT = "/artifacts/load/checkpoints"
+CONTAINER_QWEN3_DATA_ROOT = "/inputs/qwen3-data"
+CONTAINER_QWEN3_TOKENIZER_ROOT = "/inputs/qwen3-tokenizer"
 
 _COMMON_FIELDS = ("g_rk", "dp_rk", "pp_rk", "tp_rk")
 
@@ -218,6 +220,26 @@ _TP2_SP_TE_OP_FUSER_EVENTS = (
         "_forward_attention",
         "attention",
         "_forward_mlp",
+    ),
+)
+_QWEN3_TP2_SP_EVENTS = (
+    *_events(
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+    ),
+    *(
+        requirement
+        for requirement in _TP2_SP_EVENTS
+        if requirement.name
+        not in {"tp-all-gather-last", "tp-reduce-scatter-last"}
     ),
 )
 _TP2_EP4_MODEL_EVENTS = (
@@ -548,6 +570,16 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _TP2_SP_TE_OP_FUSER_EVENTS,
         tp_probe_contract.validate_tp2_sp_te_op_fuser_profile,
         training_run_contract.validate_two_iteration_transformer_engine_op_fuser_checkpoint,
+    ),
+    "qwen3-enron-tp2-sp": manifest.TraceProfile(
+        "qwen3-enron-tp2-sp",
+        2,
+        _QWEN3_TP2_SP_EVENTS,
+        _contracts(
+            gpt_probe_contract.validate_qwen3_tp2_eager_phases,
+            tp_probe_contract.validate_qwen3_tp2_sp_profile,
+        ),
+        training_run_contract.validate_two_iteration_qwen3_tp2_sp_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",
@@ -995,6 +1027,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_tp2_sp_te_linear_smoke": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke": "tp2-sp-te-userbuffer",
     "flagscale_single_node_tp2_sp_te_op_fuser_smoke": "tp2-sp-te-op-fuser",
+    "flagscale_single_node_qwen3_enron_tp2_sp": "qwen3-enron-tp2-sp",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",
@@ -1157,6 +1190,8 @@ def _docker_command(
     flagscale_training_overlay: Path | None,
     dataset_helper_overlay: Path | None = None,
     checkpoint_load_root: Path | None = None,
+    qwen3_data_prefix: Path | None = None,
+    qwen3_tokenizer_root: Path | None = None,
 ) -> tuple[str, ...]:
     overlay = ()
     if flagscale_training_overlay is not None:
@@ -1177,6 +1212,21 @@ def _docker_command(
         checkpoint_overlay = (
             "--volume",
             f"{checkpoint_load_root}:{CONTAINER_CHECKPOINT_LOAD_ROOT}:ro",
+        )
+    qwen3_inputs = ()
+    if qwen3_data_prefix is not None and qwen3_tokenizer_root is not None:
+        container_data_prefix = (
+            f"{CONTAINER_QWEN3_DATA_ROOT}/{qwen3_data_prefix.name}"
+        )
+        qwen3_inputs = (
+            "--volume",
+            f"{qwen3_data_prefix.parent}:{CONTAINER_QWEN3_DATA_ROOT}:ro",
+            "--volume",
+            f"{qwen3_tokenizer_root}:{CONTAINER_QWEN3_TOKENIZER_ROOT}:ro",
+            "--env",
+            f"MEGALENS_QWEN3_DATA_PATH={container_data_prefix}",
+            "--env",
+            f"MEGALENS_QWEN3_TOKENIZER_PATH={CONTAINER_QWEN3_TOKENIZER_ROOT}",
         )
     dispatcher = ()
     if ep_dispatcher is not None:
@@ -1213,6 +1263,7 @@ def _docker_command(
         f"{source_root}:{CONTAINER_SOURCE_ROOT}:ro",
         *dataset_overlay,
         *checkpoint_overlay,
+        *qwen3_inputs,
         *overlay,
         "--env",
         f"MEGALENS_GATE_CONTAINER_RUN_DIR={CONTAINER_RUN_ROOT}",
@@ -1337,6 +1388,16 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--flagscale-training-overlay", type=Path)
     parser.add_argument("--checkpoint-load-root", type=Path)
     parser.add_argument(
+        "--qwen3-data-prefix",
+        type=Path,
+        help="host path prefix for the Qwen3 indexed .bin/.idx dataset",
+    )
+    parser.add_argument(
+        "--qwen3-tokenizer-root",
+        type=Path,
+        help="host directory containing the Qwen tokenizer files",
+    )
+    parser.add_argument(
         "--controller-revision",
         help="accepted for compatibility; the manifest records the mounted source HEAD",
     )
@@ -1381,6 +1442,27 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.error(str(error))
 
     profile = _profile_from_arguments(args)
+    qwen3_data_prefix = None
+    qwen3_tokenizer_root = None
+    if profile.name == "qwen3-enron-tp2-sp":
+        if args.qwen3_data_prefix is None:
+            parser.error("--qwen3-data-prefix is required for the Qwen3 profile")
+        if args.qwen3_tokenizer_root is None:
+            parser.error("--qwen3-tokenizer-root is required for the Qwen3 profile")
+        qwen3_data_prefix = args.qwen3_data_prefix.resolve()
+        missing_dataset_files = tuple(
+            Path(f"{qwen3_data_prefix}{suffix}")
+            for suffix in (".bin", ".idx")
+            if not Path(f"{qwen3_data_prefix}{suffix}").is_file()
+        )
+        if missing_dataset_files:
+            parser.error(
+                "Qwen3 dataset prefix is missing indexed files: "
+                + ", ".join(str(path) for path in missing_dataset_files)
+            )
+        qwen3_tokenizer_root = args.qwen3_tokenizer_root.resolve()
+        if not qwen3_tokenizer_root.is_dir():
+            parser.error("--qwen3-tokenizer-root must be a directory")
     run_dir = args.run_dir.resolve()
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -1412,6 +1494,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         flagscale_training_overlay=overlay,
         dataset_helper_overlay=dataset_helper_overlay,
         checkpoint_load_root=checkpoint_load_root,
+        qwen3_data_prefix=qwen3_data_prefix,
+        qwen3_tokenizer_root=qwen3_tokenizer_root,
     )
     environment = os.environ.copy()
     environment.update(

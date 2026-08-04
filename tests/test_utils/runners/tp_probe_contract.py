@@ -30,6 +30,12 @@ _NO_SP_GQA_COLLECTIVES = frozenset(
         "tp-reduce-scatter-last",
     )
 )
+_QWEN3_SP_COLLECTIVES = frozenset(
+    ("tp-all-gather-first", "tp-reduce-scatter")
+)
+_QWEN3_FORBIDDEN_LAST_DIM_COLLECTIVES = frozenset(
+    ("tp-all-gather-last", "tp-reduce-scatter-last")
+)
 _LINEAR_EVENTS = frozenset(
     ("tp-linear-async-launch", "tp-linear-async-complete")
 )
@@ -315,6 +321,7 @@ def _validate_collective_hierarchy(
     rank: int,
     required_names: frozenset[str],
     forbidden_names: frozenset[str] = frozenset(),
+    expected_counts: Mapping[str, int] | None = None,
 ) -> list[Failure]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _COLLECTIVE_SPECS, rank=rank)
@@ -338,6 +345,19 @@ def _validate_collective_hierarchy(
                     iteration=iteration_id,
                 )
             )
+    if expected_counts is not None:
+        for name, expected_count in expected_counts.items():
+            observed_count = len(spans.get(name, ()))
+            if observed_count != expected_count:
+                failures.append(
+                    _failure(
+                        "trace.tp.collective_count",
+                        f"event {name!r} has {observed_count} complete span(s), "
+                        f"expected {expected_count}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
     for name in _COLLECTIVE_SPECS:
         for span in spans.get(name, ()):
             failures.extend(
@@ -859,6 +879,7 @@ def _validate_tp2_gqa_collective_hierarchy(
     required_names: frozenset[str],
     forbidden_names: frozenset[str],
     profile_name: str,
+    expected_counts: Mapping[str, int] | None = None,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -904,6 +925,7 @@ def _validate_tp2_gqa_collective_hierarchy(
                     rank=rank,
                     required_names=required_names,
                     forbidden_names=forbidden_names,
+                    expected_counts=expected_counts,
                 )
             )
     return tuple(failures)
@@ -931,11 +953,31 @@ def validate_tp2_gqa_no_sp_collective_hierarchy(
     )
 
 
+def validate_qwen3_tp2_sp_collective_hierarchy(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP2."""
+
+    return _validate_tp2_gqa_collective_hierarchy(
+        trace_root,
+        required_names=_QWEN3_SP_COLLECTIVES,
+        forbidden_names=_QWEN3_FORBIDDEN_LAST_DIM_COLLECTIVES,
+        profile_name="qwen3-tp2-sp",
+        expected_counts={
+            "tp-all-gather-first": 2,
+            "tp-all-gather-last": 0,
+            "tp-reduce-scatter": 1,
+            "tp-reduce-scatter-last": 0,
+        },
+    )
+
+
 def _validate_tp2_linear_lifecycle(
     trace_root: Path,
     *,
     expected_routes: frozenset[str],
     profile_name: str,
+    expected_operation_count: int | None = None,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -968,6 +1010,19 @@ def _validate_tp2_linear_lifecycle(
                 expected_routes=expected_routes,
             )
             failures.extend(iteration_failures)
+            if (
+                expected_operation_count is not None
+                and len(operation_ids) != expected_operation_count
+            ):
+                failures.append(
+                    _failure(
+                        "trace.tp_linear.event_count",
+                        f"linear lifecycle has {len(operation_ids)} operation(s), "
+                        f"expected {expected_operation_count}",
+                        rank=rank,
+                        iteration=int(iteration.iteration_id),
+                    )
+                )
             duplicates = rank_operation_ids & operation_ids
             if duplicates:
                 failures.append(
@@ -996,6 +1051,35 @@ def validate_tp2_local_allreduce_lifecycle(trace_root: Path) -> tuple[Failure, .
         expected_routes=_ALLREDUCE_LINEAR_ROUTES,
         profile_name="tp2-local-allreduce",
     )
+
+
+def validate_qwen3_tp2_sp_linear_lifecycle(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP2/SP."""
+
+    return _validate_tp2_linear_lifecycle(
+        trace_root,
+        expected_routes=_SP_LINEAR_ROUTES,
+        profile_name="qwen3-tp2-sp",
+        expected_operation_count=2,
+    )
+
+
+def _validate_qwen3_tp2_sp_absences(trace_root: Path) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    for rank, iterations in _load_iterations(trace_root).items():
+        for iteration in iterations:
+            if any(event.name == "tp-allreduce" for event in iteration.events):
+                failures.append(
+                    _failure(
+                        "trace.tp.collective_count",
+                        "Qwen3 TP2/SP must not use the non-SP TP all-reduce route",
+                        rank=rank,
+                        iteration=int(iteration.iteration_id),
+                    )
+                )
+    return tuple(failures)
 
 
 def _validate_tp2_final_grad_sync(
@@ -1216,6 +1300,22 @@ def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
         validate_tp2_gqa_collective_hierarchy,
         validate_tp2_sp_linear_lifecycle,
         validate_tp2_sp_final_grad_sync,
+    )
+    return tuple(
+        failure
+        for validator in validators
+        for failure in validator(trace_root)
+    )
+
+
+def validate_qwen3_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the fixed Qwen3-0.6B TP2/SP communication boundary."""
+
+    validators = (
+        validate_qwen3_tp2_sp_collective_hierarchy,
+        validate_qwen3_tp2_sp_linear_lifecycle,
+        validate_tp2_sp_final_grad_sync,
+        _validate_qwen3_tp2_sp_absences,
     )
     return tuple(
         failure

@@ -39,6 +39,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_tp2_sp_te_op_fuser_smoke.yaml": (
         "tp2-sp-te-op-fuser"
     ),
+    "flagscale_single_node_qwen3_enron_tp2_sp.yaml": (
+        "qwen3-enron-tp2-sp"
+    ),
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
@@ -173,6 +176,7 @@ def _write_gpt_phase_trace(
     rank: int,
     pipeline_rank: int,
     include_postprocess: bool,
+    tensor_rank: int = 0,
     eager_layers: int = 0,
     include_optimizer: bool = False,
     include_optimizer_postprocess: bool = True,
@@ -195,7 +199,7 @@ def _write_gpt_phase_trace(
                 "g_rk": rank,
                 "dp_rk": 0,
                 "pp_rk": pipeline_rank,
-                "tp_rk": 0,
+                "tp_rk": tensor_rank,
                 **attrs,
             }
         )
@@ -523,7 +527,8 @@ def _write_gpt_phase_trace(
 
     path = (
         trace_root
-        / f"benchmark-global-{rank}-data-0-pipeline-{pipeline_rank}-tensor-0.json"
+        / f"benchmark-global-{rank}-data-0-pipeline-{pipeline_rank}-"
+        f"tensor-{tensor_rank}.json"
     )
     path.write_text(json.dumps(rows), encoding="utf-8")
 
@@ -1305,6 +1310,48 @@ def test_transformer_engine_training_contract_requires_the_parsed_model_route(
     )
 
 
+def test_qwen3_training_contract_requires_the_reviewed_model_and_topology(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    arguments = (
+        ("transformer_impl", "transformer_engine"),
+        *training_run_contract._QWEN3_TP2_SP_ARGUMENTS,
+    )
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "\n".join(
+            f"[default0]:  {name} ................................ {value}"
+            for name, value in arguments
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        training_run_contract.validate_two_iteration_qwen3_tp2_sp_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        "\n".join(
+            f"[default0]:  {name} ................................ "
+            f"{27 if name == 'num_layers' else value}"
+            for name, value in arguments
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_qwen3_tp2_sp_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert "run.training.qwen3_argument" in {
+        failure.code for failure in failures
+    }
+
+
 def test_userbuffer_training_contract_requires_the_parsed_overlap_route(
     tmp_path: Path,
 ) -> None:
@@ -1431,6 +1478,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-linear",
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
+        "qwen3-enron-tp2-sp",
     }
 
     for name, profile in gate.PROFILES.items():
@@ -1939,6 +1987,79 @@ def test_tp2_sp_te_op_fuser_profile_only_selects_the_controlled_spec() -> None:
     )
 
 
+def test_qwen3_enron_tp2_sp_profile_preserves_the_reviewed_l3_boundary() -> None:
+    payload = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_qwen3_enron_tp2_sp.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    system = payload["train"]["system"]
+    model = payload["train"]["model"]
+    data = payload["train"]["data"]
+
+    assert payload["action"] == "test"
+    assert payload["experiment"]["runner"]["nproc_per_node"] == 2
+    assert payload["experiment"]["ckpt_format"] == "torch_dist"
+    assert system["tensor_model_parallel_size"] == 2
+    assert system["pipeline_model_parallel_size"] == 1
+    assert system["context_parallel_size"] == 1
+    assert system["sequence_parallel"] is True
+    assert system["distributed_backend"] == "nccl"
+    assert system["use_distributed_optimizer"] is True
+    assert system["overlap_grad_reduce"] is True
+    assert system["overlap_param_gather"] is True
+    assert model["transformer_impl"] == "transformer_engine"
+    assert model["te_fl_prefer"] == "vendor"
+    assert model["enable_flag_gems"] is False
+    assert model["attention_backend"] == "flash"
+    assert (
+        model["num_layers"],
+        model["hidden_size"],
+        model["ffn_hidden_size"],
+    ) == (28, 1024, 3072)
+    assert (model["num_attention_heads"], model["num_query_groups"]) == (16, 8)
+    assert (model["seq_length"], model["micro_batch_size"]) == (4096, 4)
+    assert (model["global_batch_size"], model["train_iters"]) == (4, 2)
+    assert model["init_method_std"] == 0.006
+    assert "train_samples" not in model
+    assert data["data_path"] == "${oc.env:MEGALENS_QWEN3_DATA_PATH}"
+    assert data["tokenizer"]["tokenizer_path"] == (
+        "${oc.env:MEGALENS_QWEN3_TOKENIZER_PATH}"
+    )
+    assert data["tokenizer"]["tokenizer_type"] == "QwenTokenizerFS"
+    assert data["tokenizer"]["vocab_size"] == 151851
+    assert "legacy_tokenizer" not in data["tokenizer"]
+    assert "mock_data" not in data
+
+    profile = gate.PROFILES["qwen3-enron-tp2-sp"]
+    assert profile.rank_count == 2
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_qwen3_tp2_sp_checkpoint
+    )
+    assert gate._CONFIG_PROFILES["flagscale_single_node_qwen3_enron_tp2_sp"] == (
+        "qwen3-enron-tp2-sp"
+    )
+    assert {requirement.name for requirement in profile.events} == {
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+        "tp-all-gather-first",
+        "tp-reduce-scatter",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+    }
+
+
 def test_tp2_local_allreduce_profile_only_disables_sequence_parallel() -> None:
     baseline = yaml.safe_load(
         (
@@ -2077,6 +2198,43 @@ def test_gpt_eager_profile_rejects_an_incomplete_layer_sequence(
     assert [failure.evidence for failure in failures] == [
         "rank=0 iteration=1",
         "rank=0 iteration=2",
+    ]
+
+
+def test_qwen3_tp2_profile_requires_28_eager_layers_on_both_ranks(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "qwen3-tp2"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=0,
+            tensor_rank=rank,
+            include_postprocess=True,
+            eager_layers=28,
+        )
+
+    assert gpt_probe_contract.validate_qwen3_tp2_eager_phases(trace_root) == ()
+
+    incomplete_root = tmp_path / "qwen3-tp2-incomplete"
+    for rank in (0, 1):
+        _write_gpt_phase_trace(
+            incomplete_root,
+            rank=rank,
+            pipeline_rank=0,
+            tensor_rank=rank,
+            include_postprocess=True,
+            eager_layers=27 if rank == 1 else 28,
+        )
+
+    failures = gpt_probe_contract.validate_qwen3_tp2_eager_phases(
+        incomplete_root
+    )
+    assert {failure.code for failure in failures} == {"trace.gpt.eager_layers"}
+    assert [failure.evidence for failure in failures] == [
+        "rank=1 iteration=1",
+        "rank=1 iteration=2",
     ]
 
 
@@ -2670,3 +2828,41 @@ def test_docker_command_mounts_checkpoint_input_read_only(tmp_path: Path) -> Non
     assert (
         f"{checkpoint_root.resolve()}:{gate.CONTAINER_CHECKPOINT_LOAD_ROOT}:ro"
     ) in command
+
+
+def test_docker_command_mounts_qwen3_inputs_read_only(tmp_path: Path) -> None:
+    data_root = tmp_path / "dataset"
+    data_root.mkdir()
+    data_prefix = data_root / "enron_emails_demo_text_document_qwen"
+    Path(f"{data_prefix}.bin").write_bytes(b"tokens")
+    Path(f"{data_prefix}.idx").write_bytes(b"index")
+    tokenizer_root = tmp_path / "qwentokenizer"
+    tokenizer_root.mkdir()
+
+    command = gate._docker_command(
+        run_dir=tmp_path,
+        config_name="qwen3-enron",
+        mode="trace-on",
+        image="example/flagscale:dev",
+        source_root=gate._REPOSITORY_ROOT,
+        rdzv_port=12345,
+        ep_dispatcher=None,
+        flagscale_training_overlay=None,
+        qwen3_data_prefix=data_prefix,
+        qwen3_tokenizer_root=tokenizer_root,
+    )
+
+    assert (
+        f"{data_root.resolve()}:{gate.CONTAINER_QWEN3_DATA_ROOT}:ro"
+    ) in command
+    assert (
+        f"{tokenizer_root.resolve()}:{gate.CONTAINER_QWEN3_TOKENIZER_ROOT}:ro"
+    ) in command
+    assert (
+        "MEGALENS_QWEN3_DATA_PATH="
+        f"{gate.CONTAINER_QWEN3_DATA_ROOT}/{data_prefix.name}"
+    ) in command
+    assert (
+        f"MEGALENS_QWEN3_TOKENIZER_PATH={gate.CONTAINER_QWEN3_TOKENIZER_ROOT}"
+        in command
+    )

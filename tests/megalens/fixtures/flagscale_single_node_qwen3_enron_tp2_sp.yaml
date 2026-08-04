@@ -1,0 +1,121 @@
+experiment:
+  exp_name: megalens-g5-5-qwen3-enron-tp2-sp
+  seed: 42
+  save_steps: 2
+  load: null
+  exp_dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}
+  ckpt_format: torch_dist
+  task:
+    type: train
+    backend: megatron
+    entrypoint: flagscale/train/megatron/train_gpt.py
+  runner:
+    per_node_task: false
+    no_shared_fs: false
+    rdzv_backend: static
+    rdzv_endpoint: ${oc.env:MEGALENS_GATE_RDZV_ENDPOINT}
+    hostfile: null
+    nproc_per_node: 2
+    redirects: 0
+    tee: 3
+  cmds:
+    before_start: source /root/miniconda3/bin/activate flagscale-train
+  envs:
+    CUDA_VISIBLE_DEVICES: "0,1"
+    CUDA_DEVICE_MAX_CONNECTIONS: 1
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO: "0"
+action: test
+train:
+  system:
+    no_shared_fs: false
+    num_workers: 1
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    distributed_backend: nccl
+    disable_bias_linear: true
+    reset_position_ids: true
+    reset_attention_mask: true
+    qk_layernorm: true
+    sequence_parallel: true
+    use_distributed_optimizer: true
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    finetune: false
+    trace: ${oc.decode:${oc.env:MEGALENS_GATE_TRACE,false}}
+    trace_mode: 1
+    trace_dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/traces
+    hardware_monitor: false
+    trace_interval: 1
+    continuous_trace_iterations: 1
+    trace_granularity: full
+    trace_cupti_kernels: "off"
+    precision:
+      bf16: true
+      attention_softmax_in_fp32: true
+      accumulate_allreduce_grads_in_fp32: true
+    logging:
+      log_interval: 1
+      log_throughput: true
+      log_params_norm: true
+      log_num_zeros_in_grad: true
+    checkpoint:
+      save_interval: 2
+      load: null
+      ckpt_format: torch_dist
+  model:
+    transformer_impl: transformer_engine
+    te_fl_prefer: vendor
+    enable_flag_gems: false
+    attention_backend: flash
+    num_layers: 28
+    hidden_size: 1024
+    ffn_hidden_size: 3072
+    kv_channels: 128
+    num_attention_heads: 16
+    group_query_attention: true
+    num_query_groups: 8
+    seq_length: 4096
+    max_position_embeddings: 40960
+    norm_epsilon: 1.0e-6
+    use_rotary_position_embeddings: true
+    rotary_base: 1000000
+    swiglu: true
+    normalization: RMSNorm
+    init_method_std: 0.006
+    attention_dropout: 0.0
+    hidden_dropout: 0.0
+    clip_grad: 1.0
+    position_embedding_type: rope
+    untie_embeddings_and_output_weights: false
+    no_position_embedding: true
+    no_rope_fusion: true
+    seed: ${experiment.seed}
+    micro_batch_size: 4
+    global_batch_size: 4
+    train_iters: 2
+    eval_iters: 0
+    eval_interval: 10000
+    optimizer:
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      lr_scheduler:
+        lr: 3.0e-3
+        min_lr: 3.0e-4
+        lr_decay_iters: 2
+        lr_warmup_fraction: 0.01
+        lr_decay_style: cosine
+  data:
+    data_path: ${oc.env:MEGALENS_QWEN3_DATA_PATH}
+    split: 1
+    no_mmap_bin_files: true
+    data_cache_path: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/data-cache
+    tokenizer:
+      tokenizer_type: QwenTokenizerFS
+      tokenizer_path: ${oc.env:MEGALENS_QWEN3_TOKENIZER_PATH}
+      vocab_size: 151851
+      make_vocab_size_divisible_by: 64
+hydra:
+  run:
+    dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/hydra

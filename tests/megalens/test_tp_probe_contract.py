@@ -20,6 +20,7 @@ def _write_collective_trace(
     omit_nested_reduce_scatter: bool = False,
     cross_all_gather_scopes: bool = False,
     include_first_all_gather: bool = True,
+    include_last_dim_collectives: bool = True,
     include_linear_lifecycle: bool = False,
     include_linear_allreduce: bool = False,
     mismatched_linear_completion: bool = False,
@@ -192,18 +193,22 @@ def _write_collective_trace(
             if include_first_all_gather:
                 collective("tp-all-gather-first", op="all-gather", dim="first")
                 collective("tp-all-gather-first", op="all-gather", dim="first")
-            collective("tp-all-gather-last", op="all-gather", dim="last")
-        event(
-            "tp-reduce-scatter-last",
-            "B",
-            op="reduce-scatter",
-            dim="last",
-            data_bytes=32768,
-            group_size=2,
-        )
-        if not omit_nested_reduce_scatter:
+            if include_last_dim_collectives:
+                collective("tp-all-gather-last", op="all-gather", dim="last")
+        if include_last_dim_collectives:
+            event(
+                "tp-reduce-scatter-last",
+                "B",
+                op="reduce-scatter",
+                dim="last",
+                data_bytes=32768,
+                group_size=2,
+            )
+            if not omit_nested_reduce_scatter:
+                collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
+            event("tp-reduce-scatter-last", "E", group=[tp_peer_rank])
+        elif not omit_nested_reduce_scatter:
             collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
-        event("tp-reduce-scatter-last", "E", group=[tp_peer_rank])
         if include_linear_lifecycle:
             linear_lifecycle(
                 operation_id=f"tp-linear:{rank}:{iteration}:all-gather",
@@ -684,3 +689,36 @@ def test_tp2_sp_profile_contract_combines_all_three_boundaries(
         )
 
     assert tp_probe_contract.validate_tp2_sp_profile(tmp_path) == ()
+
+
+def test_qwen3_tp2_sp_contract_accepts_only_first_dimension_gqa_collectives(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_last_dim_collectives=False,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    assert tp_probe_contract.validate_qwen3_tp2_sp_profile(tmp_path) == ()
+
+
+def test_qwen3_tp2_sp_contract_rejects_last_dimension_gqa_collectives(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_qwen3_tp2_sp_profile(tmp_path)
+
+    assert "trace.tp.collective_count" in {
+        failure.code for failure in failures
+    }
