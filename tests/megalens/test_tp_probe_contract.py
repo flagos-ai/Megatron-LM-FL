@@ -29,6 +29,8 @@ def _write_collective_trace(
     nest_sp_in_all_grads: bool = False,
     include_te_model_scopes: bool = False,
     reverse_te_model_scopes: bool = False,
+    include_te_op_fuser_scopes: bool = False,
+    include_op_fuser_mlp_scope: bool = False,
 ) -> None:
     rows: list[dict[str, object]] = []
     timestamp = 0
@@ -153,6 +155,19 @@ def _write_collective_trace(
                 for name in model_scopes:
                     event(name, "B")
                     event(name, "E")
+                event("transformer_layer", "E")
+        if include_te_op_fuser_scopes:
+            for _layer in (1, 2):
+                event("transformer_layer", "B")
+                event("_forward_attention", "B")
+                event("attention", "B")
+                event("attention", "E")
+                event("_forward_attention", "E")
+                event("_forward_mlp", "B")
+                if include_op_fuser_mlp_scope:
+                    event("MLP.forward", "B")
+                    event("MLP.forward", "E")
+                event("_forward_mlp", "E")
                 event("transformer_layer", "E")
         if cross_all_gather_scopes:
             event(
@@ -423,6 +438,41 @@ def test_tp2_sp_te_linear_contract_requires_attention_before_mlp(
     failures = tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path)
 
     assert "trace.tp_te.scope_hierarchy" in {
+        failure.code for failure in failures
+    }
+
+
+def test_tp2_sp_te_op_fuser_contract_accepts_the_baseline_outer_scopes(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+            include_te_op_fuser_scopes=True,
+        )
+
+    assert tp_probe_contract.validate_tp2_sp_te_op_fuser_profile(tmp_path) == ()
+
+
+def test_tp2_sp_te_op_fuser_contract_rejects_mcore_mlp_scope(
+    tmp_path: Path,
+) -> None:
+    for rank in (0, 1):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+            include_te_op_fuser_scopes=True,
+            include_op_fuser_mlp_scope=True,
+        )
+
+    failures = tp_probe_contract.validate_tp2_sp_te_op_fuser_profile(tmp_path)
+
+    assert "trace.tp_te_op_fuser.scope_count" in {
         failure.code for failure in failures
     }
 

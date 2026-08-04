@@ -34,6 +34,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke.yaml": (
         "tp2-sp-te-userbuffer"
     ),
+    "flagscale_single_node_tp2_sp_te_op_fuser_smoke.yaml": (
+        "tp2-sp-te-op-fuser"
+    ),
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
@@ -1333,6 +1336,40 @@ def test_userbuffer_training_contract_requires_the_parsed_overlap_route(
     )
 
 
+def test_op_fuser_training_contract_requires_the_controlled_spec(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "[default0]:  transformer_impl ................................ "
+        "transformer_engine\n"
+        "[default0]:  spec ........................................... None\n",
+        encoding="utf-8",
+    )
+
+    failures = training_run_contract.validate_two_iteration_transformer_engine_op_fuser_checkpoint(
+        tmp_path, False
+    )
+    assert {failure.code for failure in failures} == {
+        "run.training.te_op_fuser_spec"
+    }
+
+    launcher_log.write_text(
+        "[default0]:  transformer_impl ................................ "
+        "transformer_engine\n"
+        "[default0]:  spec ........................................... "
+        "['tests.test_utils.runners.te_op_fuser_spec', 'te_op_fuser_spec']\n",
+        encoding="utf-8",
+    )
+    assert (
+        training_run_contract.validate_two_iteration_transformer_engine_op_fuser_checkpoint(
+            tmp_path, False
+        )
+        == ()
+    )
+
+
 def test_legacy_pp2_training_contract_requires_both_pipeline_stages(
     tmp_path: Path,
 ) -> None:
@@ -1389,6 +1426,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "pp2-dp2-distopt-force-sync",
         "tp2-sp-te-linear",
         "tp2-sp-te-userbuffer",
+        "tp2-sp-te-op-fuser",
     }
 
     for name, profile in gate.PROFILES.items():
@@ -1842,6 +1880,58 @@ def test_tp2_sp_te_userbuffer_profile_only_enables_tp_overlap() -> None:
             "flagscale_single_node_tp2_sp_te_userbuffer_smoke"
         ]
         == "tp2-sp-te-userbuffer"
+    )
+
+
+def test_tp2_sp_te_op_fuser_profile_only_selects_the_controlled_spec() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_te_linear_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    op_fuser = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_sp_te_op_fuser_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    baseline["experiment"]["exp_name"] = op_fuser["experiment"]["exp_name"]
+    baseline["train"]["model"]["spec"] = [
+        "tests.test_utils.runners.te_op_fuser_spec",
+        "te_op_fuser_spec",
+    ]
+
+    assert op_fuser == baseline
+
+    profile = gate.PROFILES["tp2-sp-te-op-fuser"]
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == {
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "tp-all-gather-first",
+        "tp-all-gather-last",
+        "tp-reduce-scatter",
+        "tp-reduce-scatter-last",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+    }
+    assert "MLP.forward" not in {
+        requirement.name for requirement in profile.events
+    }
+    assert profile.contract is tp_probe_contract.validate_tp2_sp_te_op_fuser_profile
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_transformer_engine_op_fuser_checkpoint
+    )
+    assert (
+        gate._CONFIG_PROFILES[
+            "flagscale_single_node_tp2_sp_te_op_fuser_smoke"
+        ]
+        == "tp2-sp-te-op-fuser"
     )
 
 

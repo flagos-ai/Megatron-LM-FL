@@ -189,6 +189,15 @@ _TP2_SP_TE_LINEAR_EVENTS = (
     *_TP2_SP_EVENTS,
     *_events("transformer_layer", "attention", "MLP.forward"),
 )
+_TP2_SP_TE_OP_FUSER_EVENTS = (
+    *_TP2_SP_EVENTS,
+    *_events(
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+    ),
+)
 _TP2_EP4_MODEL_EVENTS = (
     *(
         requirement
@@ -496,6 +505,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _TP2_SP_TE_LINEAR_EVENTS,
         tp_probe_contract.validate_tp2_sp_te_linear_profile,
         training_run_contract.validate_two_iteration_transformer_engine_userbuffer_checkpoint,
+    ),
+    "tp2-sp-te-op-fuser": manifest.TraceProfile(
+        "tp2-sp-te-op-fuser",
+        2,
+        _TP2_SP_TE_OP_FUSER_EVENTS,
+        tp_probe_contract.validate_tp2_sp_te_op_fuser_profile,
+        training_run_contract.validate_two_iteration_transformer_engine_op_fuser_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",
@@ -940,6 +956,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
     "flagscale_single_node_tp2_sp_te_linear_smoke": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke": "tp2-sp-te-userbuffer",
+    "flagscale_single_node_tp2_sp_te_op_fuser_smoke": "tp2-sp-te-op-fuser",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",

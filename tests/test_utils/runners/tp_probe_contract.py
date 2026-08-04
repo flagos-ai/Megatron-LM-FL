@@ -36,6 +36,15 @@ _LINEAR_EVENTS = frozenset(
 _TE_LINEAR_BOUNDARY_EVENTS = _LINEAR_EVENTS | frozenset(
     ("transformer_layer", "attention", "MLP.forward")
 )
+_TE_OP_FUSER_BOUNDARY_EVENTS = _LINEAR_EVENTS | frozenset(
+    (
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+    )
+)
 _LINEAR_ROUTE_SPECS = {
     "all-gather": {
         "dim": "first",
@@ -1465,6 +1474,137 @@ def validate_tp2_sp_te_linear_profile(trace_root: Path) -> tuple[Failure, ...]:
     validators = (
         validate_tp2_sp_profile,
         _validate_tp2_sp_te_linear_boundary,
+    )
+    return tuple(
+        failure
+        for validator in validators
+        for failure in validator(trace_root)
+    )
+
+
+def _validate_tp2_sp_te_op_fuser_boundary(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the outer scopes retained when TEFusedMLP replaces MCore MLP."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    expected_counts = {
+        "transformer_layer": 2,
+        "_forward_attention": 2,
+        "attention": 2,
+        "_forward_mlp": 2,
+        "MLP.forward": 0,
+        "tp-linear-async-launch": 2,
+        "tp-linear-async-complete": 2,
+    }
+    expected_routes = Counter(("all-gather", "reduce-scatter"))
+
+    for rank in (0, 1):
+        for iteration in by_rank.get(rank, ()):
+            iteration_id = int(iteration.iteration_id)
+            spans, pairing_failures = _pair_spans(
+                iteration,
+                _TE_OP_FUSER_BOUNDARY_EVENTS,
+                rank=rank,
+            )
+            failures.extend(pairing_failures)
+            for name, expected in expected_counts.items():
+                observed = len(spans.get(name, ()))
+                if observed != expected:
+                    failures.append(
+                        _failure(
+                            "trace.tp_te_op_fuser.scope_count",
+                            f"event {name!r} has {observed} span(s), expected {expected}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+
+            layers = spans.get("transformer_layer", ())
+            attention_outer = spans.get("_forward_attention", ())
+            attention = spans.get("attention", ())
+            mlp = spans.get("_forward_mlp", ())
+            for layer in layers:
+                layer_attention_outer = tuple(
+                    span
+                    for span in attention_outer
+                    if span.parent_begin_position == layer.begin_position
+                )
+                layer_mlp = tuple(
+                    span
+                    for span in mlp
+                    if span.parent_begin_position == layer.begin_position
+                )
+                if len(layer_attention_outer) != 1 or len(layer_mlp) != 1:
+                    failures.append(
+                        _failure(
+                            "trace.tp_te_op_fuser.scope_hierarchy",
+                            "each transformer layer must directly contain one outer "
+                            "attention scope and one outer MLP scope",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                    continue
+                attention_outer_span = layer_attention_outer[0]
+                inner_attention = tuple(
+                    span
+                    for span in attention
+                    if span.parent_begin_position == attention_outer_span.begin_position
+                )
+                if len(inner_attention) != 1:
+                    failures.append(
+                        _failure(
+                            "trace.tp_te_op_fuser.scope_hierarchy",
+                            "each outer attention scope must directly contain one attention scope",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                    continue
+                attention_span = inner_attention[0]
+                mlp_span = layer_mlp[0]
+                if not (
+                    layer.begin_position
+                    < attention_outer_span.begin_position
+                    < attention_span.begin_position
+                    < attention_span.end_position
+                    < attention_outer_span.end_position
+                    < mlp_span.begin_position
+                    < mlp_span.end_position
+                    < layer.end_position
+                ):
+                    failures.append(
+                        _failure(
+                            "trace.tp_te_op_fuser.scope_hierarchy",
+                            "transformer layer scopes must follow outer attention then outer MLP",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+
+            routes = Counter(
+                str(span.begin.attrs.get("collective_op"))
+                for span in spans.get("tp-linear-async-launch", ())
+            )
+            if routes != expected_routes:
+                failures.append(
+                    _failure(
+                        "trace.tp_te_op_fuser.linear_routes",
+                        f"MCore-visible Linear routes are {dict(routes)}, "
+                        f"expected {dict(expected_routes)}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+    return tuple(failures)
+
+
+def validate_tp2_sp_te_op_fuser_profile(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate TE op-fuser outer scopes plus MCore-visible TP/SP operations."""
+
+    validators = (
+        validate_tp2_sp_profile,
+        _validate_tp2_sp_te_op_fuser_boundary,
     )
     return tuple(
         failure

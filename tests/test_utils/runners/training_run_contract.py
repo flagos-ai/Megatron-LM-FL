@@ -46,6 +46,11 @@ _TP_COMM_OVERLAP_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*tp_comm_overlap\s+\.+\s+True\s*$",
     re.MULTILINE,
 )
+_TE_OP_FUSER_SPEC_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*spec\s+\.+\s+"
+    r"\['tests\.test_utils\.runners\.te_op_fuser_spec',\s*'te_op_fuser_spec'\]\s*$",
+    re.MULTILINE,
+)
 
 
 def validate_two_iteration_transformer_engine_checkpoint(
@@ -97,6 +102,31 @@ def validate_two_iteration_transformer_engine_userbuffer_checkpoint(
             Failure(
                 "run.training.tp_comm_overlap",
                 "Megatron did not report tp_comm_overlap=True",
+                str(launcher_log),
+            )
+        )
+    return tuple(failures)
+
+
+def validate_two_iteration_transformer_engine_op_fuser_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal TE training with the controlled op-fuser spec selected."""
+
+    failures = list(
+        validate_two_iteration_transformer_engine_checkpoint(run_root, trace_enabled)
+    )
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return tuple(failures)
+
+    if _TE_OP_FUSER_SPEC_ARGUMENT.search(log_text) is None:
+        failures.append(
+            Failure(
+                "run.training.te_op_fuser_spec",
+                "Megatron did not report the controlled TE op-fuser spec",
                 str(launcher_log),
             )
         )
