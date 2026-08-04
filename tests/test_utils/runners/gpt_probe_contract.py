@@ -394,12 +394,23 @@ def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
+def validate_gpt_cp_dp1_eager_phases(
+    trace_root: Path, *, context_parallel_size: int
+) -> tuple[Failure, ...]:
+    """Validate DP1 CP ranks sharing one complete two-layer GPT stage."""
+
+    ranks = range(context_parallel_size)
+    return _validate_gpt_model_phases(
+        trace_root,
+        expected_pipeline_ranks={rank: 0 for rank in ranks},
+        postprocess_ranks=frozenset(ranks),
+        eager_layers_by_rank={rank: 2 for rank in ranks},
+    )
+
+
 def validate_gpt_cp2_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
     """Validate two CP ranks sharing one complete two-layer GPT stage."""
 
-    return _validate_gpt_model_phases(
-        trace_root,
-        expected_pipeline_ranks={0: 0, 1: 0},
-        postprocess_ranks=frozenset((0, 1)),
-        eager_layers_by_rank={0: 2, 1: 2},
+    return validate_gpt_cp_dp1_eager_phases(
+        trace_root, context_parallel_size=2
     )

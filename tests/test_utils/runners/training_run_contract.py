@@ -42,10 +42,6 @@ _TRANSFORMER_ENGINE_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*transformer_impl\s+\.+\s+transformer_engine\s*$",
     re.MULTILINE,
 )
-_CONTEXT_PARALLEL_SIZE_2_ARGUMENT = re.compile(
-    r"^\[[^]]+\]:\s*context_parallel_size\s+\.+\s+2\s*$",
-    re.MULTILINE,
-)
 _TP_COMM_OVERLAP_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*tp_comm_overlap\s+\.+\s+True\s*$",
     re.MULTILINE,
@@ -87,11 +83,9 @@ def validate_two_iteration_transformer_engine_checkpoint(
     return tuple(failures)
 
 
-def validate_two_iteration_transformer_engine_cp2_checkpoint(
-    run_root: Path, trace_enabled: bool
+def _validate_two_iteration_transformer_engine_cp_checkpoint(
+    run_root: Path, trace_enabled: bool, *, context_parallel_size: int
 ) -> tuple[Failure, ...]:
-    """Require terminal TE training with context parallel size two selected."""
-
     failures = list(
         validate_two_iteration_transformer_engine_checkpoint(run_root, trace_enabled)
     )
@@ -101,15 +95,41 @@ def validate_two_iteration_transformer_engine_cp2_checkpoint(
     except (OSError, UnicodeError):
         return tuple(failures)
 
-    if _CONTEXT_PARALLEL_SIZE_2_ARGUMENT.search(log_text) is None:
+    context_parallel_argument = re.compile(
+        rf"^\[[^]]+\]:\s*context_parallel_size\s+\.+\s+"
+        rf"{context_parallel_size}\s*$",
+        re.MULTILINE,
+    )
+    if context_parallel_argument.search(log_text) is None:
         failures.append(
             Failure(
                 "run.training.context_parallel_size",
-                "Megatron did not report context_parallel_size=2",
+                "Megatron did not report "
+                f"context_parallel_size={context_parallel_size}",
                 str(launcher_log),
             )
         )
     return tuple(failures)
+
+
+def validate_two_iteration_transformer_engine_cp2_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal TE training with context parallel size two selected."""
+
+    return _validate_two_iteration_transformer_engine_cp_checkpoint(
+        run_root, trace_enabled, context_parallel_size=2
+    )
+
+
+def validate_two_iteration_transformer_engine_cp4_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal TE training with context parallel size four selected."""
+
+    return _validate_two_iteration_transformer_engine_cp_checkpoint(
+        run_root, trace_enabled, context_parallel_size=4
+    )
 
 
 def validate_two_iteration_transformer_engine_userbuffer_checkpoint(

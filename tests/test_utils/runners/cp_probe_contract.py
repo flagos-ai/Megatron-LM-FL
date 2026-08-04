@@ -110,6 +110,7 @@ def _validate_dp_cp_group(
     iteration: Iteration,
     *,
     rank: int,
+    context_parallel_size: int,
 ) -> tuple[list[Failure], str | None, int | None]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_dp_scopes(iteration, rank=rank)
@@ -132,7 +133,8 @@ def _validate_dp_cp_group(
         failures.append(
             _failure(
                 "trace.cp.dp_route",
-                f"CP2 standard DDP observed forbidden events {forbidden}",
+                f"CP{context_parallel_size} standard DDP observed "
+                f"forbidden events {forbidden}",
                 rank=rank,
                 iteration=iteration_id,
             )
@@ -170,7 +172,7 @@ def _validate_dp_cp_group(
         "completion_included": False,
         "op": "all_reduce",
         "group_role": "data_parallel",
-        "group_size": 2,
+        "group_size": context_parallel_size,
         "n_buckets": 1,
         "operation_id_scope": "rank_local",
         "overlap_enabled": False,
@@ -178,7 +180,9 @@ def _validate_dp_cp_group(
         "stage": "main_bucket_allreduce",
         "timing_phase": "collective_call",
     }
-    expected_peer = [1 - rank]
+    expected_peer = [
+        peer for peer in range(context_parallel_size) if peer != rank
+    ]
     span = allreduces[0]
     for field, expected in expected_begin.items():
         observed = span.begin.attrs.get(field, "<missing>")
@@ -247,20 +251,25 @@ def _validate_dp_cp_group(
     return failures, operation_id, data_bytes
 
 
-def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate existing GPT and DP probes while CP2 is active."""
-
-    failures = list(gpt_probe_contract.validate_gpt_cp2_eager_phases(trace_root))
+def _validate_te_dp1_coexistence(
+    trace_root: Path, *, context_parallel_size: int
+) -> tuple[Failure, ...]:
+    failures = list(
+        gpt_probe_contract.validate_gpt_cp_dp1_eager_phases(
+            trace_root, context_parallel_size=context_parallel_size
+        )
+    )
     by_rank = _load_iterations(trace_root)
     payload_sizes: dict[tuple[int, int], int] = {}
-    expected_ranks = (0, 1)
+    expected_ranks = tuple(range(context_parallel_size))
     observed_ranks = tuple(sorted(by_rank))
     if observed_ranks != expected_ranks:
         failures.append(
             Failure(
                 "trace.cp.ranks",
-                f"CP2 contract expects ranks [0, 1], observed {list(observed_ranks)}",
-                "cp2-te-coexistence",
+                f"CP{context_parallel_size} contract expects ranks "
+                f"{list(expected_ranks)}, observed {list(observed_ranks)}",
+                f"cp{context_parallel_size}-te-coexistence",
             )
         )
 
@@ -279,6 +288,39 @@ def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
             )
         for iteration in iterations:
             iteration_id = int(iteration.iteration_id)
+            cp_events = sorted(
+                {
+                    event.name
+                    for event in iteration.events
+                    if event.name.startswith(("cp-", "cp_"))
+                }
+            )
+            if cp_events:
+                failures.append(
+                    _failure(
+                        "trace.cp.unexpected_event",
+                        f"trace contains CP-specific events {cp_events}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            cp_fields = sorted(
+                {
+                    field
+                    for event in iteration.events
+                    for field in event.attrs
+                    if field.startswith("cp_")
+                }
+            )
+            if cp_fields:
+                failures.append(
+                    _failure(
+                        "trace.cp.unexpected_field",
+                        f"trace contains CP-specific fields {cp_fields}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
             observed_coordinates = {
                 (
                     event.rank.global_rank,
@@ -300,7 +342,9 @@ def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
                     )
                 )
             iteration_failures, operation_id, data_bytes = _validate_dp_cp_group(
-                iteration, rank=rank
+                iteration,
+                rank=rank,
+                context_parallel_size=context_parallel_size,
             )
             failures.extend(iteration_failures)
             if data_bytes is not None:
@@ -325,3 +369,15 @@ def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
             )
         )
     return tuple(failures)
+
+
+def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate existing GPT and DP probes for TP1/PP1/CP2/DP1."""
+
+    return _validate_te_dp1_coexistence(trace_root, context_parallel_size=2)
+
+
+def validate_cp4_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate existing GPT and DP probes for TP1/PP1/CP4/DP1."""
+
+    return _validate_te_dp1_coexistence(trace_root, context_parallel_size=4)

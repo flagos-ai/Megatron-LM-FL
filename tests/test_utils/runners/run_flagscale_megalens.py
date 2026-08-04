@@ -124,7 +124,7 @@ _DP_FIELDS = (
     "operation_id",
     "payload_role",
 )
-_CP2_TE_EVENTS = (
+_CP_TE_EVENTS = (
     *_events(
         "forward-step",
         "decoder",
@@ -510,9 +510,16 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "cp2-te": manifest.TraceProfile(
         "cp2-te",
         2,
-        _CP2_TE_EVENTS,
+        _CP_TE_EVENTS,
         cp_probe_contract.validate_cp2_te_coexistence,
         training_run_contract.validate_two_iteration_transformer_engine_cp2_checkpoint,
+    ),
+    "cp4-te": manifest.TraceProfile(
+        "cp4-te",
+        4,
+        _CP_TE_EVENTS,
+        cp_probe_contract.validate_cp4_te_coexistence,
+        training_run_contract.validate_two_iteration_transformer_engine_cp4_checkpoint,
     ),
     "tp2-sp-local": manifest.TraceProfile(
         "tp2-sp-local",
@@ -983,6 +990,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_cp2_te_smoke": "cp2-te",
+    "flagscale_single_node_cp4_te_smoke": "cp4-te",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
     "flagscale_single_node_tp2_sp_te_linear_smoke": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke": "tp2-sp-te-userbuffer",
