@@ -1,0 +1,327 @@
+# Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+"""CP coexistence contracts for controlled GPT training profiles."""
+
+from __future__ import annotations
+
+import re
+from collections import defaultdict
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Mapping, Sequence
+
+from megatron.megalens.trace_aggregate import (
+    Event,
+    Iteration,
+    collect_benchmark_files,
+    read_benchmark_file,
+)
+from tests.test_utils.runners import gpt_probe_contract
+from tests.test_utils.runners.megalens_run_manifest import Failure
+
+
+@dataclass(frozen=True)
+class _Span:
+    begin: Event
+    end: Event
+    begin_position: int
+    end_position: int
+    parent_begin_position: int | None
+
+
+_DP_SCOPE_NAMES = frozenset(("grad-sync", "all-grads-sync", "dp-allreduce"))
+_FORBIDDEN_DP_EVENTS = frozenset(
+    ("dp-grad-sync-complete", "dp-reduce-scatter", "dp-param-all-gather")
+)
+_INFRASTRUCTURE_FIELDS = frozenset(
+    ("dev", "iteration", "g_rk", "dp_rk", "pp_rk", "tp_rk")
+)
+_OPERATION_ID_PATTERN = re.compile(r"^dp:allreduce:[1-9]\d*$")
+
+
+def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
+    by_rank: dict[int, Sequence[Iteration]] = {}
+    for rank, content in collect_benchmark_files(trace_root):
+        if rank.global_rank is None:
+            raise ValueError(f"trace shard {rank} has no global rank")
+        if rank.global_rank in by_rank:
+            raise ValueError(f"duplicate trace shard for global rank {rank.global_rank}")
+        by_rank[rank.global_rank] = tuple(read_benchmark_file(rank, content))
+    return by_rank
+
+
+def _failure(code: str, message: str, *, rank: int, iteration: int) -> Failure:
+    return Failure(code, message, f"rank={rank} iteration={iteration}")
+
+
+def _pair_dp_scopes(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
+    pending: list[tuple[str, int, Event, int | None]] = []
+    spans: dict[str, list[_Span]] = defaultdict(list)
+    failures: list[Failure] = []
+    iteration_id = int(iteration.iteration_id)
+
+    for position, event in enumerate(iteration.events):
+        if event.name not in _DP_SCOPE_NAMES:
+            continue
+        if event.ph == "B":
+            parent_position = pending[-1][1] if pending else None
+            pending.append((event.name, position, event, parent_position))
+        elif event.ph == "E":
+            if not pending or pending[-1][0] != event.name:
+                failures.append(
+                    _failure(
+                        "trace.cp.dp_sync_pairing",
+                        f"event {event.name!r} does not close the active DP scope",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+                continue
+            name, begin_position, begin, parent_position = pending.pop()
+            spans[name].append(
+                _Span(begin, event, begin_position, position, parent_position)
+            )
+        else:
+            failures.append(
+                _failure(
+                    "trace.cp.dp_sync_phase",
+                    f"event {event.name!r} uses unsupported phase {event.ph!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    if pending:
+        failures.append(
+            _failure(
+                "trace.cp.dp_sync_pairing",
+                f"DP sync scopes have {len(pending)} unmatched begin record(s)",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return spans, failures
+
+
+def _validate_dp_cp_group(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[list[Failure], str | None, int | None]:
+    iteration_id = int(iteration.iteration_id)
+    spans, failures = _pair_dp_scopes(iteration, rank=rank)
+    for name in _DP_SCOPE_NAMES:
+        observed = len(spans.get(name, ()))
+        if observed != 1:
+            failures.append(
+                _failure(
+                    "trace.cp.dp_sync_count",
+                    f"event {name!r} has {observed} span(s), expected 1",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    forbidden = sorted(
+        {event.name for event in iteration.events} & _FORBIDDEN_DP_EVENTS
+    )
+    if forbidden:
+        failures.append(
+            _failure(
+                "trace.cp.dp_route",
+                f"CP2 standard DDP observed forbidden events {forbidden}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+
+    grad_sync = spans.get("grad-sync", ())
+    all_grads_sync = spans.get("all-grads-sync", ())
+    allreduces = spans.get("dp-allreduce", ())
+    if len(grad_sync) == len(all_grads_sync) == len(allreduces) == 1:
+        if all_grads_sync[0].parent_begin_position != grad_sync[0].begin_position:
+            failures.append(
+                _failure(
+                    "trace.cp.dp_sync_hierarchy",
+                    "all-grads-sync must be a direct child of grad-sync",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        if allreduces[0].parent_begin_position != all_grads_sync[0].begin_position:
+            failures.append(
+                _failure(
+                    "trace.cp.dp_sync_hierarchy",
+                    "dp-allreduce must be a direct child of all-grads-sync",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    if len(allreduces) != 1:
+        return failures, None, None
+
+    expected_begin = {
+        "api_async_op": False,
+        "async_op": False,
+        "completion_included": False,
+        "op": "all_reduce",
+        "group_role": "data_parallel",
+        "group_size": 2,
+        "n_buckets": 1,
+        "operation_id_scope": "rank_local",
+        "overlap_enabled": False,
+        "payload_role": "gradient_bucket",
+        "stage": "main_bucket_allreduce",
+        "timing_phase": "collective_call",
+    }
+    expected_peer = [1 - rank]
+    span = allreduces[0]
+    for field, expected in expected_begin.items():
+        observed = span.begin.attrs.get(field, "<missing>")
+        if observed != expected:
+            failures.append(
+                _failure(
+                    "trace.cp.dp_route",
+                    f"dp-allreduce has {field}={observed!r}, expected {expected!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    data_bytes = span.begin.attrs.get("data_bytes")
+    if (
+        not isinstance(data_bytes, int)
+        or isinstance(data_bytes, bool)
+        or data_bytes <= 0
+    ):
+        failures.append(
+            _failure(
+                "trace.cp.dp_allreduce_payload",
+                f"dp-allreduce has invalid data_bytes={data_bytes!r}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        data_bytes = None
+
+    operation_id = span.begin.attrs.get("operation_id")
+    if not isinstance(operation_id, str) or _OPERATION_ID_PATTERN.fullmatch(
+        operation_id
+    ) is None:
+        failures.append(
+            _failure(
+                "trace.cp.dp_operation_id",
+                f"dp-allreduce has invalid rank-local operation_id={operation_id!r}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+        operation_id = None
+
+    end_fields = set(span.end.attrs) - _INFRASTRUCTURE_FIELDS
+    if "group" in span.begin.attrs or end_fields != {"group"}:
+        failures.append(
+            _failure(
+                "trace.cp.dp_cp_group",
+                "dp-allreduce must record group only on its end; "
+                f"observed begin={span.begin.attrs.get('group', '<absent>')!r}, "
+                f"end fields={sorted(end_fields)}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    if span.end.attrs.get("group") != expected_peer:
+        failures.append(
+            _failure(
+                "trace.cp.dp_cp_group",
+                f"dp-allreduce peer group is {span.end.attrs.get('group')!r}, "
+                f"expected {expected_peer!r}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return failures, operation_id, data_bytes
+
+
+def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate existing GPT and DP probes while CP2 is active."""
+
+    failures = list(gpt_probe_contract.validate_gpt_cp2_eager_phases(trace_root))
+    by_rank = _load_iterations(trace_root)
+    payload_sizes: dict[tuple[int, int], int] = {}
+    expected_ranks = (0, 1)
+    observed_ranks = tuple(sorted(by_rank))
+    if observed_ranks != expected_ranks:
+        failures.append(
+            Failure(
+                "trace.cp.ranks",
+                f"CP2 contract expects ranks [0, 1], observed {list(observed_ranks)}",
+                "cp2-te-coexistence",
+            )
+        )
+
+    for rank in expected_ranks:
+        iterations = by_rank.get(rank, ())
+        operation_ids: set[str] = set()
+        iteration_ids = tuple(item.iteration_id for item in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.cp.iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        for iteration in iterations:
+            iteration_id = int(iteration.iteration_id)
+            observed_coordinates = {
+                (
+                    event.rank.global_rank,
+                    event.rank.data,
+                    event.rank.pipeline,
+                    event.rank.tensor,
+                )
+                for event in iteration.events
+            }
+            expected_coordinates = {(rank, 0, 0, 0)}
+            if observed_coordinates != expected_coordinates:
+                failures.append(
+                    _failure(
+                        "trace.cp.coordinates",
+                        f"events use rank coordinates {sorted(observed_coordinates)}, "
+                        f"expected {sorted(expected_coordinates)}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            iteration_failures, operation_id, data_bytes = _validate_dp_cp_group(
+                iteration, rank=rank
+            )
+            failures.extend(iteration_failures)
+            if data_bytes is not None:
+                payload_sizes[(rank, iteration_id)] = data_bytes
+            if operation_id is not None:
+                if operation_id in operation_ids:
+                    failures.append(
+                        _failure(
+                            "trace.cp.dp_operation_id",
+                            f"operation_id={operation_id!r} repeats across iterations",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                operation_ids.add(operation_id)
+    if len(set(payload_sizes.values())) > 1:
+        failures.append(
+            Failure(
+                "trace.cp.dp_payload_consistency",
+                "dp-allreduce data_bytes differ across CP ranks or iterations",
+                str(dict(sorted(payload_sizes.items()))),
+            )
+        )
+    return tuple(failures)

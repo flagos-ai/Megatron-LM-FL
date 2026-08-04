@@ -29,6 +29,7 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
+    "flagscale_single_node_cp2_te_smoke.yaml": "cp2-te",
     "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
     "flagscale_single_node_tp2_sp_te_linear_smoke.yaml": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke.yaml": (
@@ -1424,6 +1425,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "mimo-train8-fanin",
         "mimo-train8-fanout",
         "pp2-dp2-distopt-force-sync",
+        "cp2-te",
         "tp2-sp-te-linear",
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",

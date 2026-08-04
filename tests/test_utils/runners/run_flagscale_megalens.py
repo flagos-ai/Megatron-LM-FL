@@ -19,6 +19,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 
 from tests.test_utils.runners import bridge_probe_contract  # noqa: E402
 from tests.test_utils.runners import combined_1f1b_probe_contract  # noqa: E402
+from tests.test_utils.runners import cp_probe_contract  # noqa: E402
 from tests.test_utils.runners import dp_probe_contract  # noqa: E402
 from tests.test_utils.runners import dualpipev_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
@@ -122,6 +123,27 @@ _DP_FIELDS = (
     "group_size",
     "operation_id",
     "payload_role",
+)
+_CP2_TE_EVENTS = (
+    *_events(
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+        "grad-sync",
+        "all-grads-sync",
+    ),
+    manifest.EventRequirement(
+        "dp-allreduce",
+        (*_DP_FIELDS, "group_role", "stage"),
+        "B",
+    ),
 )
 _TP_COLLECTIVE_FIELDS = (
     *_COMMON_FIELDS,
@@ -484,6 +506,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         ),
         gpt_probe_contract.validate_gpt_pp1_eager_phases,
         training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "cp2-te": manifest.TraceProfile(
+        "cp2-te",
+        2,
+        _CP2_TE_EVENTS,
+        cp_probe_contract.validate_cp2_te_coexistence,
+        training_run_contract.validate_two_iteration_transformer_engine_cp2_checkpoint,
     ),
     "tp2-sp-local": manifest.TraceProfile(
         "tp2-sp-local",
@@ -953,6 +982,7 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
 _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
+    "flagscale_single_node_cp2_te_smoke": "cp2-te",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",
     "flagscale_single_node_tp2_sp_te_linear_smoke": "tp2-sp-te-linear",
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke": "tp2-sp-te-userbuffer",
