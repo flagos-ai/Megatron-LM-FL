@@ -56,7 +56,7 @@ train:
   model:
     transformer_impl: transformer_engine
     spec:
-      - tests.test_utils.runners.te_op_fuser_spec
+      - megalens_te_op_fuser_spec
       - te_op_fuser_spec
     no_gradient_accumulation_fusion: true
     num_layers: 2

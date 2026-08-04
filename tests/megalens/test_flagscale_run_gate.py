@@ -1359,7 +1359,7 @@ def test_op_fuser_training_contract_requires_the_controlled_spec(
         "[default0]:  transformer_impl ................................ "
         "transformer_engine\n"
         "[default0]:  spec ........................................... "
-        "['tests.test_utils.runners.te_op_fuser_spec', 'te_op_fuser_spec']\n",
+        "['megalens_te_op_fuser_spec', 'te_op_fuser_spec']\n",
         encoding="utf-8",
     )
     assert (
@@ -1896,7 +1896,7 @@ def test_tp2_sp_te_op_fuser_profile_only_selects_the_controlled_spec() -> None:
     )
     baseline["experiment"]["exp_name"] = op_fuser["experiment"]["exp_name"]
     baseline["train"]["model"]["spec"] = [
-        "tests.test_utils.runners.te_op_fuser_spec",
+        "megalens_te_op_fuser_spec",
         "te_op_fuser_spec",
     ]
 

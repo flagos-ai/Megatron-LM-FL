@@ -48,7 +48,7 @@ _TP_COMM_OVERLAP_ARGUMENT = re.compile(
 )
 _TE_OP_FUSER_SPEC_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*spec\s+\.+\s+"
-    r"\['tests\.test_utils\.runners\.te_op_fuser_spec',\s*'te_op_fuser_spec'\]\s*$",
+    r"\['megalens_te_op_fuser_spec',\s*'te_op_fuser_spec'\]\s*$",
     re.MULTILINE,
 )
 
