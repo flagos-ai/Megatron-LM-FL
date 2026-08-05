@@ -194,9 +194,17 @@ def test_deepseek_run_contract_accepts_the_fixed_terminal_configuration(
     )
 
 
-def _write_rank_trace(trace_root: Path, rank: int) -> None:
-    pipeline_rank = rank // 4
-    stage_rank = rank % 4
+def _write_rank_trace(
+    trace_root: Path,
+    rank: int,
+    *,
+    model_data_parallel_size: int = 2,
+    microbatches_per_iteration: int = 2,
+    include_dp_groups: bool = False,
+) -> None:
+    stage_size = 2 * model_data_parallel_size
+    pipeline_rank = rank // stage_size
+    stage_rank = rank % stage_size
     tensor_rank = stage_rank % 2
     data_rank = stage_rank // 2
     main_layers = tuple(range(2, 14)) if pipeline_rank == 0 else tuple(range(14, 28))
@@ -391,11 +399,120 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
             error_type=None,
         )
 
+    def dp_collective(
+        iteration: int,
+        name: str,
+        role: str,
+        group: tuple[int, ...],
+    ) -> tuple[str, str]:
+        is_reduce_scatter = name == "dp-reduce-scatter"
+        operation_id = f"dp:{name}:{role}:{rank}:{iteration}"
+        route_fields = (
+            {}
+            if is_reduce_scatter
+            else {"optimizer_kind": "distributed"}
+        )
+        event(
+            name,
+            "B",
+            iteration,
+            api_async_op=True,
+            async_op=True,
+            completion_included=False,
+            data_bytes=32768,
+            group_role="intra_optimizer_instance",
+            group_size=len(group),
+            n_buckets=1,
+            op="reduce_scatter" if is_reduce_scatter else "all_gather",
+            operation_id=operation_id,
+            operation_id_scope="rank_local",
+            overlap_enabled=True,
+            payload_role=(
+                "gradient_bucket" if is_reduce_scatter else "parameter_bucket"
+            ),
+            stage=(
+                "intra_instance_reduce_scatter"
+                if is_reduce_scatter
+                else "distributed_optimizer_param_allgather"
+            ),
+            timing_phase="async_dispatch",
+            **route_fields,
+        )
+        event(
+            name,
+            "E",
+            iteration,
+            group=[peer for peer in group if peer != rank],
+        )
+        return operation_id, (
+            "intra_instance_reduce_scatter"
+            if is_reduce_scatter
+            else "distributed_optimizer_param_allgather"
+        )
+
+    def dp_completion(
+        iteration: int,
+        name: str,
+        operation_id: str,
+        stage: str,
+    ) -> None:
+        is_grad = name == "dp-reduce-scatter"
+        completion_name = (
+            "dp-grad-sync-complete" if is_grad else "dp-param-sync-complete"
+        )
+        completion_fields = (
+            {
+                "force_all_reduce": False,
+                "num_distributed_optimizer_instances": 1,
+                "operations": [
+                    {
+                        "event_name": name,
+                        "operation_id": operation_id,
+                        "stage": stage,
+                    }
+                ],
+                "use_distributed_optimizer": True,
+            }
+            if is_grad
+            else {"operation_id": operation_id}
+        )
+        event(
+            completion_name,
+            "B",
+            iteration,
+            completion_guarantee="current_stream_after_wait",
+            completion_included=True,
+            completion_kind="work_wait",
+            completion_site=(
+                "finish_grad_sync" if is_grad else "finish_param_sync"
+            ),
+            host_blocking_guaranteed=False,
+            launch_observed=True,
+            op="wait",
+            operation_count=1,
+            operation_ids=[operation_id],
+            operation_id_scope="rank_local",
+            stage=(
+                "gradient_collective_completion"
+                if is_grad
+                else "parameter_allgather_completion"
+            ),
+            timing_phase="stream_dependency",
+            **completion_fields,
+        )
+        event(
+            completion_name,
+            "E",
+            iteration,
+            completed=True,
+            error_type=None,
+        )
+
     for iteration in (1, 2):
         rows.append(
             {"name": "iteration", "ph": "B", "pad_before": 0, "iteration": iteration}
         )
-        for _microbatch in range(2):
+        for _microbatch in range(microbatches_per_iteration):
             event("forward-step", "B", iteration)
             event("decoder", "B", iteration)
             for layer in main_layers:
@@ -410,7 +527,9 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
                 event("loss", "E", iteration)
             event("decoder-postprocess", "E", iteration)
             event("forward-step", "E", iteration)
-        ep_group = range(pipeline_rank * 4, pipeline_rank * 4 + 4)
+        stage_base = pipeline_rank * stage_size
+        ep_group_base = stage_base + (stage_rank // 4) * 4
+        ep_group = range(ep_group_base, ep_group_base + 4)
         collective(
             iteration,
             "tp-all-gather-first",
@@ -428,7 +547,7 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
             )
         collective(iteration, "tp-reduce-scatter", "reduce-scatter")
         if pipeline_rank == 1:
-            for occurrence in range(4):
+            for occurrence in range(2 * microbatches_per_iteration):
                 linear(iteration, "all-gather", occurrence)
                 linear(iteration, "reduce-scatter", occurrence)
         event(
@@ -458,7 +577,31 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
             group_size=2,
             embedding_kind="word",
         )
-        event("embedding-grads-allreduce", "E", iteration, group=[rank ^ 4])
+        embedding_peer = rank + stage_size if pipeline_rank == 0 else rank - stage_size
+        event("embedding-grads-allreduce", "E", iteration, group=[embedding_peer])
+        if include_dp_groups:
+            model_group = tuple(
+                stage_base + tensor_rank + data * 2
+                for data in range(model_data_parallel_size)
+            )
+            expert_data_parallel_size = stage_size // 4
+            expert_rank = stage_rank % 4
+            expert_group = tuple(
+                stage_base + expert_rank + data * 4
+                for data in range(expert_data_parallel_size)
+            )
+            for name in ("dp-reduce-scatter", "dp-param-all-gather"):
+                for role, group in (
+                    ("model-dp", model_group),
+                    ("expert-dp", expert_group),
+                ):
+                    operation_id, stage = dp_collective(
+                        iteration,
+                        name,
+                        role,
+                        group,
+                    )
+                    dp_completion(iteration, name, operation_id, stage)
         event("grad-sync", "E", iteration)
         rows.append(
             {
@@ -535,3 +678,102 @@ def test_deepseek_tp2_sp_contract_requires_mtp_last_gather_on_the_last_stage(
     assert "trace.deepseek_tp2_sp.tp_collective_count" in {
         failure.code for failure in failures
     }
+
+
+def _write_deepseek_d1_etp1_trace(trace_root: Path) -> None:
+    for rank in range(contract.D1_WORLD_SIZE):
+        _write_rank_trace(
+            trace_root,
+            rank,
+            model_data_parallel_size=contract.D1_MODEL_DATA_PARALLEL_SIZE,
+            microbatches_per_iteration=contract.D1_MICROBATCHES_PER_ITERATION,
+            include_dp_groups=True,
+        )
+
+
+def test_deepseek_d1_etp1_contract_accepts_the_fixed_l3_trace(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp1_trace(trace_root)
+
+    assert contract.validate_deepseek_d1_tp2_sp_etp1_trace(trace_root) == ()
+
+
+def test_deepseek_d1_etp1_contract_keeps_ep4_replicas_independent(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp1_trace(trace_root)
+
+    for rank, data_rank, delta in ((0, 0, -1), (4, 2, 1)):
+        path = trace_root / (
+            f"benchmark-global-{rank}-data-{data_rank}-pipeline-0-tensor-0.json"
+        )
+        rows = json.loads(path.read_text(encoding="utf-8"))
+        experts = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-experts" and row.get("ph") == "E"
+        )
+        experts["tokens_per_expert"][0] += delta
+        experts["routed_tokens"] += delta
+        combine = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-combine" and row.get("ph") == "E"
+        )
+        combine["num_tokens"] += delta
+        path.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp1_trace(trace_root)
+    conservation_failures = [
+        failure
+        for failure in failures
+        if failure.code == "trace.deepseek_tp2_sp.ep_conservation"
+    ]
+
+    assert len(conservation_failures) == 2
+
+
+def test_deepseek_d1_etp1_contract_rejects_wrong_expert_dp_peer(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp1_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    expert_reduce_scatter = next(
+        row
+        for row in rows
+        if row.get("name") == "dp-reduce-scatter"
+        and row.get("ph") == "E"
+        and row.get("group") == [4]
+    )
+    expert_reduce_scatter["group"] = [2]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp1_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dp_group" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp1_contract_requires_dp_work_completion(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp1_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    rows = [row for row in rows if row.get("name") != "dp-grad-sync-complete"]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp1_trace(trace_root)
+
+    assert "trace.dp.event_count" in {failure.code for failure in failures}
