@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""Exact offline Trace contract for the FlagOS DeepSeek D0 profile."""
+"""Exact offline Trace contracts for the FlagOS DeepSeek D0/D2 profiles."""
 
 from __future__ import annotations
 
@@ -16,16 +16,28 @@ from megatron.megalens.trace_aggregate import (
     collect_benchmark_files,
     read_benchmark_file,
 )
+from tests.test_utils.runners import dp_probe_contract
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
 DEFAULT_MICROBATCHES_PER_ITERATION = 64
 DEFAULT_DATA_PARALLEL_SIZE = 8
+D2_DATA_PARALLEL_SIZE = 8
+D2_EXPERT_MODEL_PARALLEL_SIZE = 8
 D0_RANK_ORDER = "tp-cp-ep-dp-pp"
 
 _ITERATIONS = (1, 2)
 _PIPELINE_MODEL_PARALLEL_SIZE = 2
-_EXPERT_MODEL_PARALLEL_SIZE = 4
+_D0_EXPERT_MODEL_PARALLEL_SIZE = 4
 _SUPPORTED_DATA_PARALLEL_SIZES = frozenset((4, DEFAULT_DATA_PARALLEL_SIZE))
+_REVIEWED_DP_EP_TOPOLOGIES = frozenset(
+    (
+        (4, _D0_EXPERT_MODEL_PARALLEL_SIZE),
+        (DEFAULT_DATA_PARALLEL_SIZE, _D0_EXPERT_MODEL_PARALLEL_SIZE),
+        (D2_DATA_PARALLEL_SIZE, D2_EXPERT_MODEL_PARALLEL_SIZE),
+    )
+)
+_NUM_EXPERTS = 64
+_EXPERT_TENSOR_PARALLEL_SIZE = 1
 _MODEL_SCOPE_NAMES = frozenset(
     ("forward-step", "decoder", "decoder-postprocess", "output_layer", "loss")
 )
@@ -61,11 +73,6 @@ _MAIN_LAYERS = {
     1: tuple(range(14, 28)),
 }
 _MTP_LAYERS = {0: (), 1: (1,)}
-_TOPOLOGY_FIELDS = {
-    "ep_size": 4,
-    "num_experts": 64,
-    "num_local_experts": 16,
-}
 _ROUTER_HANDOFF_FIELDS = (
     "dropped_tokens",
     "drop_rate",
@@ -73,6 +80,20 @@ _ROUTER_HANDOFF_FIELDS = (
     "top1_expert_share",
     "aux_loss",
     "z_loss",
+)
+_DP_GROUP_ROUTES = {
+    "dp-reduce-scatter": "reduce_scatter",
+    "dp-param-all-gather": "all_gather",
+}
+_DP_COMPLETION_EVENTS = frozenset(("dp-grad-sync-complete", "dp-param-sync-complete"))
+_DP_LIFECYCLE_EVENTS = frozenset(_DP_GROUP_ROUTES) | _DP_COMPLETION_EVENTS
+_ETP_TP_COLLECTIVES = frozenset(
+    (
+        "tp-all-gather-first",
+        "tp-all-gather-last",
+        "tp-reduce-scatter",
+        "tp-reduce-scatter-last",
+    )
 )
 
 
@@ -217,6 +238,7 @@ def _validate_field(
 def _validate_moe_call(
     records: Sequence[Event],
     *,
+    expert_model_parallel_size: int,
     layer: int,
     rank: int,
     iteration: int,
@@ -230,6 +252,7 @@ def _validate_moe_call(
     dispatch = end_events["moe-dispatch"]
     experts = end_events["moe-experts"]
     combine = end_events["moe-combine"]
+    num_local_experts = _NUM_EXPERTS // expert_model_parallel_size
 
     for event in (shared, router, dispatch, experts, combine):
         _validate_field(
@@ -247,7 +270,7 @@ def _validate_moe_call(
             failures,
             event,
             "ep_size",
-            4,
+            expert_model_parallel_size,
             rank=rank,
             iteration=iteration,
             microbatch=microbatch,
@@ -255,7 +278,11 @@ def _validate_moe_call(
             layer=layer,
         )
     for event in (router, dispatch, experts, combine):
-        for field, expected in _TOPOLOGY_FIELDS.items():
+        for field, expected in (
+            ("ep_size", expert_model_parallel_size),
+            ("num_experts", _NUM_EXPERTS),
+            ("num_local_experts", num_local_experts),
+        ):
             _validate_field(
                 failures,
                 event,
@@ -361,7 +388,11 @@ def _validate_moe_call(
                     region=region,
                 )
             )
-    for field, expected in (("dropped_tokens", 0), ("drop_rate", 0.0), ("z_loss", None)):
+    for field, expected in (
+        ("dropped_tokens", 0),
+        ("drop_rate", 0.0),
+        ("z_loss", None),
+    ):
         _validate_field(
             failures,
             router,
@@ -391,7 +422,7 @@ def _validate_moe_call(
     routed_tokens = experts.attrs.get("routed_tokens")
     valid_counts = (
         isinstance(tokens_per_expert, list)
-        and len(tokens_per_expert) == 16
+        and len(tokens_per_expert) == num_local_experts
         and all(
             isinstance(value, int) and not isinstance(value, bool) and value >= 0
             for value in tokens_per_expert
@@ -411,7 +442,8 @@ def _validate_moe_call(
         failures.append(
             _failure(
                 "expert_workload",
-                f"layer={layer} tokens_per_expert must contain 16 non-negative counts "
+                f"layer={layer} tokens_per_expert must contain "
+                f"{num_local_experts} non-negative counts "
                 "whose sum equals a non-negative routed_tokens value",
                 rank=rank,
                 iteration=iteration,
@@ -441,28 +473,71 @@ def _validate_moe_call(
                 region=region,
             )
         )
-    for field in ("expert_cv", "top1_expert_share", "expert_max_over_mean"):
-        if not _is_finite_number(experts.attrs.get(field)):
-            failures.append(
-                _failure(
-                    "expert_metric",
-                    f"layer={layer} Experts field {field!r}="
-                    f"{experts.attrs.get(field)!r}, expected a finite number",
-                    rank=rank,
-                    iteration=iteration,
-                    microbatch=microbatch,
-                    region=region,
+    if (
+        expert_model_parallel_size == D2_EXPERT_MODEL_PARALLEL_SIZE
+        and valid_counts
+        and valid_routed_tokens
+        and expert_token_total == routed_tokens
+    ):
+        if routed_tokens > 0:
+            mean_tokens = routed_tokens / len(tokens_per_expert)
+            variance = sum(
+                (value - mean_tokens) ** 2 for value in tokens_per_expert
+            ) / len(tokens_per_expert)
+            max_tokens = max(tokens_per_expert)
+            expected_metrics = {
+                "expert_cv": math.sqrt(variance) / mean_tokens,
+                "top1_expert_share": max_tokens / routed_tokens,
+                "expert_max_over_mean": max_tokens / mean_tokens,
+            }
+        else:
+            expected_metrics = {
+                "expert_cv": 0.0,
+                "top1_expert_share": 0.0,
+                "expert_max_over_mean": 0.0,
+            }
+        for field, expected in expected_metrics.items():
+            observed = experts.attrs.get(field)
+            if not _is_finite_number(observed) or not math.isclose(
+                float(observed),
+                expected,
+                rel_tol=1e-6,
+                abs_tol=1e-8,
+            ):
+                failures.append(
+                    _failure(
+                        "expert_metric",
+                        f"layer={layer} Experts field {field!r}={observed!r}, "
+                        f"expected {expected!r} from tokens_per_expert",
+                        rank=rank,
+                        iteration=iteration,
+                        microbatch=microbatch,
+                        region=region,
+                    )
                 )
-            )
+    else:
+        for field in ("expert_cv", "top1_expert_share", "expert_max_over_mean"):
+            if not _is_finite_number(experts.attrs.get(field)):
+                failures.append(
+                    _failure(
+                        "expert_metric",
+                        f"layer={layer} Experts field {field!r}="
+                        f"{experts.attrs.get(field)!r}, expected a finite number",
+                        rank=rank,
+                        iteration=iteration,
+                        microbatch=microbatch,
+                        region=region,
+                    )
+                )
 
     for collective_name in ("ep-alltoall-dispatch", "ep-alltoall-combine"):
         collective = end_events[collective_name]
         for field, expected in (
             ("comm_type", "ep-alltoall"),
             ("dispatcher", "alltoall"),
-            ("group_size", 4),
-            ("ep_size", 4),
-            ("tp_size", 1),
+            ("group_size", expert_model_parallel_size),
+            ("ep_size", expert_model_parallel_size),
+            ("tp_size", _EXPERT_TENSOR_PARALLEL_SIZE),
         ):
             _validate_field(
                 failures,
@@ -476,7 +551,9 @@ def _validate_moe_call(
                 layer=layer,
             )
         data_bytes = collective.attrs.get("data_bytes")
-        valid_data_bytes = isinstance(data_bytes, int) and not isinstance(data_bytes, bool)
+        valid_data_bytes = isinstance(data_bytes, int) and not isinstance(
+            data_bytes, bool
+        )
         if collective_name == "ep-alltoall-combine" and routed_tokens == 0:
             valid_data_bytes = valid_data_bytes and data_bytes == 0
             expected_data_bytes = "zero for an empty local expert workload"
@@ -502,6 +579,7 @@ def _validate_moe_region(
     iteration: Iteration,
     span: _Span,
     *,
+    expert_model_parallel_size: int,
     expected_layers: Sequence[int],
     rank: int,
     microbatch: int,
@@ -531,6 +609,7 @@ def _validate_moe_region(
         failures.extend(
             _validate_moe_call(
                 records[start : start + records_per_call],
+                expert_model_parallel_size=expert_model_parallel_size,
                 layer=layer,
                 rank=rank,
                 iteration=iteration_id,
@@ -554,6 +633,7 @@ def _validate_iteration(
     rank: int,
     pipeline_rank: int,
     microbatches_per_iteration: int,
+    expert_model_parallel_size: int,
 ) -> list[Failure]:
     if iteration.iteration_id is None:
         return [
@@ -579,7 +659,11 @@ def _validate_iteration(
         "loss": microbatches_per_iteration if pipeline_rank == 1 else 0,
     }
     for name, expected in expected_counts.items():
-        observed = (phase_counts[(name, "B")], phase_counts[(name, "E")], len(spans.get(name, ())))
+        observed = (
+            phase_counts[(name, "B")],
+            phase_counts[(name, "E")],
+            len(spans.get(name, ())),
+        )
         if observed != (expected, expected, expected):
             failures.append(
                 _failure(
@@ -591,7 +675,9 @@ def _validate_iteration(
                 )
             )
 
-    forward_spans = sorted(spans.get("forward-step", ()), key=lambda span: span.begin_index)
+    forward_spans = sorted(
+        spans.get("forward-step", ()), key=lambda span: span.begin_index
+    )
     for microbatch, forward in enumerate(forward_spans):
         decoder = _contained(spans.get("decoder", ()), forward)
         postprocess = _contained(spans.get("decoder-postprocess", ()), forward)
@@ -621,6 +707,7 @@ def _validate_iteration(
             _validate_moe_region(
                 iteration,
                 decoder[0],
+                expert_model_parallel_size=expert_model_parallel_size,
                 expected_layers=_MAIN_LAYERS[pipeline_rank],
                 rank=rank,
                 microbatch=microbatch,
@@ -631,6 +718,7 @@ def _validate_iteration(
             _validate_moe_region(
                 iteration,
                 postprocess[0],
+                expert_model_parallel_size=expert_model_parallel_size,
                 expected_layers=_MTP_LAYERS[pipeline_rank],
                 rank=rank,
                 microbatch=microbatch,
@@ -640,7 +728,10 @@ def _validate_iteration(
         output_layers = _contained(spans.get("output_layer", ()), postprocess[0])
         losses = _contained(spans.get("loss", ()), postprocess[0])
         expected_postprocess = 1 if pipeline_rank == 1 else 0
-        if len(output_layers) != expected_postprocess or len(losses) != expected_postprocess:
+        if (
+            len(output_layers) != expected_postprocess
+            or len(losses) != expected_postprocess
+        ):
             failures.append(
                 _failure(
                     "postprocess_tree",
@@ -668,7 +759,9 @@ def _collect_moe_workloads(
 
     workloads: dict[tuple[int, int], dict[str, int]] = defaultdict(dict)
     duplicate_keys: set[tuple[int, int]] = set()
-    forward_spans = sorted(spans.get("forward-step", ()), key=lambda span: span.begin_index)
+    forward_spans = sorted(
+        spans.get("forward-step", ()), key=lambda span: span.begin_index
+    )
     for microbatch, forward in enumerate(forward_spans):
         for event in iteration.events[forward.begin_index + 1 : forward.end_index]:
             if event.ph != "E" or event.name not in ("moe-router", "moe-experts"):
@@ -704,8 +797,9 @@ def _validate_ep_workload_conservation(
     *,
     microbatches_per_iteration: int,
     data_parallel_size: int,
+    expert_model_parallel_size: int,
 ) -> list[Failure]:
-    """Require routed assignments to be conserved within every D0 EP4 group."""
+    """Require routed assignments to be conserved within every reviewed EP group."""
 
     workloads: dict[tuple[int, int], Mapping[tuple[int, int], tuple[int, int]]] = {}
     for rank, (_shard_rank, iterations) in by_rank.items():
@@ -718,28 +812,34 @@ def _validate_ep_workload_conservation(
             )
 
     failures: list[Failure] = []
-    expert_data_replicas = data_parallel_size // _EXPERT_MODEL_PARALLEL_SIZE
+    expert_data_replicas = data_parallel_size // expert_model_parallel_size
     for pipeline_rank in (0, 1):
         expected_layers = _MAIN_LAYERS[pipeline_rank] + _MTP_LAYERS[pipeline_rank]
         stage_base = pipeline_rank * data_parallel_size
         for expert_data_rank in range(expert_data_replicas):
-            group_base = stage_base + expert_data_rank * _EXPERT_MODEL_PARALLEL_SIZE
+            group_base = stage_base + expert_data_rank * expert_model_parallel_size
             group_ranks = tuple(
-                range(group_base, group_base + _EXPERT_MODEL_PARALLEL_SIZE)
+                range(group_base, group_base + expert_model_parallel_size)
             )
             for iteration in _ITERATIONS:
                 for microbatch in range(microbatches_per_iteration):
                     for layer in expected_layers:
                         group_values = [
-                            workloads.get((rank, iteration), {}).get((microbatch, layer))
+                            workloads.get((rank, iteration), {}).get(
+                                (microbatch, layer)
+                            )
                             for rank in group_ranks
                         ]
                         if any(value is None for value in group_values):
                             # The per-rank structural contract reports the missing or
                             # malformed call; conservation only evaluates complete groups.
                             continue
-                        router_total = sum(value[0] for value in group_values if value is not None)
-                        experts_total = sum(value[1] for value in group_values if value is not None)
+                        router_total = sum(
+                            value[0] for value in group_values if value is not None
+                        )
+                        experts_total = sum(
+                            value[1] for value in group_values if value is not None
+                        )
                         if router_total == experts_total:
                             continue
                         failures.append(
@@ -756,30 +856,424 @@ def _validate_ep_workload_conservation(
     return failures
 
 
-def validate_deepseek_d0_trace(
+def _d2_failure(
+    code: str,
+    message: str,
+    *,
+    rank: int,
+    iteration: int | None,
+) -> Failure:
+    evidence = f"rank={rank}"
+    if iteration is not None:
+        evidence += f" iteration={iteration}"
+    return Failure(f"trace.deepseek_d2.{code}", message, evidence)
+
+
+def _pair_dp_scopes(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
+    open_scopes: list[tuple[int, Event]] = []
+    spans: dict[str, list[_Span]] = defaultdict(list)
+    failures: list[Failure] = []
+    iteration_id = (
+        None if iteration.iteration_id is None else int(iteration.iteration_id)
+    )
+
+    for index, event in enumerate(iteration.events):
+        if event.name not in _DP_LIFECYCLE_EVENTS:
+            continue
+        if event.ph == "B":
+            if open_scopes:
+                active = open_scopes[-1][1]
+                failures.append(
+                    _d2_failure(
+                        "dp_group_nesting",
+                        f"event {event.name!r} begins while DP lifecycle scope "
+                        f"{active.name!r} is active; DP route and completion "
+                        "scopes must not overlap or nest",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            open_scopes.append((index, event))
+            continue
+        if event.ph != "E" or not open_scopes:
+            failures.append(
+                _d2_failure(
+                    "dp_group_nesting",
+                    f"event {event.name!r} has unmatched phase {event.ph!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+        if open_scopes[-1][1].name != event.name:
+            failures.append(
+                _d2_failure(
+                    "dp_group_nesting",
+                    f"event {event.name!r} closes while DP lifecycle scope "
+                    f"{open_scopes[-1][1].name!r} is active",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+        begin_index, begin = open_scopes.pop()
+        spans[event.name].append(_Span(begin_index, index, begin, event))
+
+    for _index, event in open_scopes:
+        failures.append(
+            _d2_failure(
+                "dp_group_nesting",
+                f"event {event.name!r} has no matching end",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return {name: tuple(items) for name, items in spans.items()}, failures
+
+
+def _validate_d2_dp_groups(
+    by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
+) -> list[Failure]:
+    """Require D2 DistOpt events to expose model-DP8 and expert-DP1 groups."""
+
+    failures: list[Failure] = []
+    expected_roles = frozenset(("model-dp", "expert-dp"))
+    for rank, (_shard, iterations) in by_rank.items():
+        pipeline_rank = rank // D2_DATA_PARALLEL_SIZE
+        stage_base = pipeline_rank * D2_DATA_PARALLEL_SIZE
+        stage_rank = rank - stage_base
+        expert_rank = stage_rank % D2_EXPERT_MODEL_PARALLEL_SIZE
+        expected_groups = {
+            "model-dp": tuple(range(stage_base, stage_base + D2_DATA_PARALLEL_SIZE)),
+            "expert-dp": (stage_base + expert_rank,),
+        }
+        observed_roles: dict[str, set[str]] = {name: set() for name in _DP_GROUP_ROUTES}
+        dispatch_ends: dict[str, tuple[int, int]] = {}
+        duplicate_operation_ids: set[str] = set()
+        completions: list[tuple[str, tuple[int, int], int | None, str]] = []
+        for iteration_order, iteration in enumerate(iterations):
+            iteration_id = (
+                None if iteration.iteration_id is None else int(iteration.iteration_id)
+            )
+            iteration_roles: dict[str, set[str]] = {
+                name: set() for name in _DP_GROUP_ROUTES
+            }
+            spans, pairing_failures = _pair_dp_scopes(iteration, rank=rank)
+            failures.extend(pairing_failures)
+            for name, expected_op in _DP_GROUP_ROUTES.items():
+                for span in spans.get(name, ()):
+                    operation_id = span.begin.attrs.get("operation_id")
+                    if isinstance(operation_id, str):
+                        if operation_id in dispatch_ends:
+                            duplicate_operation_ids.add(operation_id)
+                        else:
+                            dispatch_ends[operation_id] = (
+                                iteration_order,
+                                span.end_index,
+                            )
+                    group_size = span.begin.attrs.get("group_size")
+                    peers = span.end.attrs.get("group")
+                    matched_role = None
+                    for role, group in expected_groups.items():
+                        expected_peers = [peer for peer in group if peer != rank]
+                        if group_size == len(group) and peers == expected_peers:
+                            matched_role = role
+                            break
+                    if matched_role is None:
+                        failures.append(
+                            _d2_failure(
+                                "dp_group",
+                                f"event {name!r} has group_size={group_size!r} and "
+                                f"peer group={peers!r}; expected model-DP8 or "
+                                "expert-DP1 membership",
+                                rank=rank,
+                                iteration=iteration_id,
+                            )
+                        )
+                        continue
+                    observed_roles[name].add(matched_role)
+                    iteration_roles[name].add(matched_role)
+                    for field_name, expected in (
+                        ("group_role", "intra_optimizer_instance"),
+                        ("op", expected_op),
+                    ):
+                        if span.begin.attrs.get(field_name) != expected:
+                            failures.append(
+                                _d2_failure(
+                                    "dp_field",
+                                    f"event {name!r} has {field_name}="
+                                    f"{span.begin.attrs.get(field_name)!r}, expected "
+                                    f"{expected!r}",
+                                    rank=rank,
+                                    iteration=iteration_id,
+                                )
+                            )
+                    for field_name in ("data_bytes", "n_buckets"):
+                        value = span.begin.attrs.get(field_name)
+                        if (
+                            not isinstance(value, int)
+                            or isinstance(value, bool)
+                            or value <= 0
+                        ):
+                            failures.append(
+                                _d2_failure(
+                                    "dp_field",
+                                    f"event {name!r} has invalid "
+                                    f"{field_name}={value!r}",
+                                    rank=rank,
+                                    iteration=iteration_id,
+                                )
+                            )
+            for name in _DP_COMPLETION_EVENTS:
+                for span in spans.get(name, ()):
+                    operation_ids = span.begin.attrs.get("operation_ids")
+                    if not isinstance(operation_ids, list):
+                        continue
+                    completions.extend(
+                        (
+                            operation_id,
+                            (iteration_order, span.begin_index),
+                            iteration_id,
+                            span.begin.name,
+                        )
+                        for operation_id in operation_ids
+                        if isinstance(operation_id, str)
+                    )
+            if iteration_roles["dp-reduce-scatter"] != expected_roles:
+                failures.append(
+                    _d2_failure(
+                        "dp_group_count",
+                        "event 'dp-reduce-scatter' must cover model-DP8 and "
+                        "expert-DP1 in each iteration",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+        for (
+            operation_id,
+            completion_position,
+            iteration_id,
+            completion_name,
+        ) in completions:
+            dispatch_end = dispatch_ends.get(operation_id)
+            if dispatch_end is None or operation_id in duplicate_operation_ids:
+                continue
+            if completion_position <= dispatch_end:
+                failures.append(
+                    _d2_failure(
+                        "dp_completion_order",
+                        f"event {completion_name!r} for operation_id="
+                        f"{operation_id!r} begins at {completion_position}, before "
+                        f"the dispatch span ends at {dispatch_end}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+        for name, roles in observed_roles.items():
+            if name == "dp-reduce-scatter":
+                continue
+            if roles != expected_roles:
+                failures.append(
+                    _d2_failure(
+                        "dp_group_count",
+                        f"event {name!r} must cover model-DP8 and expert-DP1 "
+                        "across the two-iteration window",
+                        rank=rank,
+                        iteration=None,
+                    )
+                )
+    return failures
+
+
+def _validate_d2_etp1(
+    by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
+) -> list[Failure]:
+    """Require EP8 metadata gathers and reject ETP dispatcher TP work."""
+
+    failures: list[Failure] = []
+    for rank, (_shard, iterations) in by_rank.items():
+        pipeline_rank = rank // D2_DATA_PARALLEL_SIZE
+        stage_base = pipeline_rank * D2_DATA_PARALLEL_SIZE
+        metadata_group = tuple(
+            range(stage_base, stage_base + D2_EXPERT_MODEL_PARALLEL_SIZE)
+        )
+        metadata_peers = [peer for peer in metadata_group if peer != rank]
+        for iteration in iterations:
+            iteration_id = (
+                None if iteration.iteration_id is None else int(iteration.iteration_id)
+            )
+            events = iteration.events
+            starts = [
+                index
+                for index, event in enumerate(events)
+                if event.name == "moe-shared-expert" and event.ph == "B"
+            ]
+            ends = [
+                index
+                for index, event in enumerate(events)
+                if event.name == "moe-combine" and event.ph == "E"
+            ]
+            consumed_collectives: set[int] = set()
+            for start, end in zip(starts, ends):
+                collective_rows = [
+                    (index, event)
+                    for index, event in enumerate(events[start : end + 1], start)
+                    if event.name in _ETP_TP_COLLECTIVES
+                ]
+                observed_sequence = tuple(
+                    (event.name, event.ph) for _index, event in collective_rows
+                )
+                if observed_sequence != (
+                    ("tp-all-gather-first", "B"),
+                    ("tp-all-gather-first", "E"),
+                ):
+                    failures.append(
+                        _d2_failure(
+                            "etp_collective",
+                            "each ETP1 MoE call must contain exactly one TP×EP "
+                            "metadata AllGather and no dispatcher TP collective",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                    continue
+                (begin_index, begin), (end_index, end_event) = collective_rows
+                consumed_collectives.update((begin_index, end_index))
+                router_end = next(
+                    (
+                        index
+                        for index in range(start, end + 1)
+                        if events[index].name == "moe-router"
+                        and events[index].ph == "E"
+                    ),
+                    None,
+                )
+                dispatch_begin = next(
+                    (
+                        index
+                        for index in range(start, end + 1)
+                        if events[index].name == "moe-dispatch"
+                        and events[index].ph == "B"
+                    ),
+                    None,
+                )
+                if (
+                    router_end is None
+                    or dispatch_begin is None
+                    or not (router_end < begin_index < end_index < dispatch_begin)
+                ):
+                    failures.append(
+                        _d2_failure(
+                            "metadata_collective",
+                            "TP×EP metadata AllGather must remain between Router "
+                            "and Dispatch",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                for field, expected in (
+                    ("op", "all-gather"),
+                    ("dim", "first"),
+                    ("group_size", D2_EXPERT_MODEL_PARALLEL_SIZE),
+                ):
+                    if begin.attrs.get(field) != expected:
+                        failures.append(
+                            _d2_failure(
+                                "metadata_collective",
+                                f"metadata AllGather field {field!r}="
+                                f"{begin.attrs.get(field)!r}, expected {expected!r}",
+                                rank=rank,
+                                iteration=iteration_id,
+                            )
+                        )
+                data_bytes = begin.attrs.get("data_bytes")
+                if (
+                    not isinstance(data_bytes, int)
+                    or isinstance(data_bytes, bool)
+                    or data_bytes <= 0
+                ):
+                    failures.append(
+                        _d2_failure(
+                            "metadata_collective",
+                            f"metadata AllGather has invalid data_bytes={data_bytes!r}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                if "split_sizes" in begin.attrs:
+                    failures.append(
+                        _d2_failure(
+                            "etp_collective",
+                            "ETP1 metadata AllGather must not carry dispatcher "
+                            "split_sizes",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                if end_event.attrs.get("group") != metadata_peers:
+                    failures.append(
+                        _d2_failure(
+                            "metadata_collective",
+                            f"metadata AllGather peer group="
+                            f"{end_event.attrs.get('group')!r}, expected "
+                            f"{metadata_peers!r}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+            unconsumed = sorted(
+                {
+                    event.name
+                    for index, event in enumerate(events)
+                    if event.name in _ETP_TP_COLLECTIVES
+                    and index not in consumed_collectives
+                }
+            )
+            if unconsumed:
+                failures.append(
+                    _d2_failure(
+                        "etp_collective",
+                        f"ETP1 trace contains unexpected TP collectives {unconsumed!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+    return failures
+
+
+def _validate_deepseek_trace(
     trace_root: Path,
     *,
-    microbatches_per_iteration: int = DEFAULT_MICROBATCHES_PER_ITERATION,
-    data_parallel_size: int = DEFAULT_DATA_PARALLEL_SIZE,
+    microbatches_per_iteration: int,
+    data_parallel_size: int,
+    expert_model_parallel_size: int,
+    require_d2_contract: bool,
 ) -> tuple[Failure, ...]:
-    """Validate a D0 PP2/EP4 MoE, shared-expert, and MTP trace."""
-
-    if microbatches_per_iteration < 1:
-        raise ValueError("microbatches_per_iteration must be positive")
-    if data_parallel_size not in _SUPPORTED_DATA_PARALLEL_SIZES:
-        raise ValueError("data_parallel_size must be 4 or 8 for a reviewed D0 profile")
+    if (
+        data_parallel_size,
+        expert_model_parallel_size,
+    ) not in _REVIEWED_DP_EP_TOPOLOGIES:
+        raise ValueError(
+            "data/expert parallel sizes do not match a reviewed D0/D2 topology"
+        )
     by_rank = _load_iterations(trace_root)
     failures: list[Failure] = []
-    expected_ranks = tuple(
-        range(_PIPELINE_MODEL_PARALLEL_SIZE * data_parallel_size)
-    )
+    expected_ranks = tuple(range(_PIPELINE_MODEL_PARALLEL_SIZE * data_parallel_size))
     observed_ranks = tuple(sorted(by_rank))
     if observed_ranks != expected_ranks:
         failures.append(
             Failure(
-                "trace.deepseek_d0.ranks",
+                (
+                    "trace.deepseek_d2.ranks"
+                    if require_d2_contract
+                    else "trace.deepseek_d0.ranks"
+                ),
                 f"expected ranks {expected_ranks}, observed {observed_ranks}",
-                "deepseek-d0",
+                "deepseek-d2" if require_d2_contract else "deepseek-d0",
             )
         )
 
@@ -788,7 +1282,7 @@ def validate_deepseek_d0_trace(
         if loaded is None:
             continue
         shard_rank, iterations = loaded
-        # D0 relies on Megatron's target-side default tp-cp-ep-dp-pp rank order.
+        # D0/D2 rely on Megatron's target-side default tp-cp-ep-dp-pp rank order.
         # With TP=CP=1, PP is the slowest-varying axis and each PP stage owns
         # data_parallel_size consecutive data-parallel ranks.
         pipeline_rank = global_rank // data_parallel_size
@@ -821,6 +1315,7 @@ def validate_deepseek_d0_trace(
                     rank=global_rank,
                     pipeline_rank=pipeline_rank,
                     microbatches_per_iteration=microbatches_per_iteration,
+                    expert_model_parallel_size=expert_model_parallel_size,
                 )
             )
     failures.extend(
@@ -828,14 +1323,71 @@ def validate_deepseek_d0_trace(
             by_rank,
             microbatches_per_iteration=microbatches_per_iteration,
             data_parallel_size=data_parallel_size,
+            expert_model_parallel_size=expert_model_parallel_size,
         )
     )
+    if require_d2_contract:
+        failures = [
+            Failure(
+                failure.code.replace("trace.deepseek_d0.", "trace.deepseek_d2.", 1),
+                failure.message,
+                failure.evidence,
+            )
+            for failure in failures
+        ]
+        failures.extend(_validate_d2_etp1(by_rank))
+        failures.extend(_validate_d2_dp_groups(by_rank))
     return tuple(failures)
+
+
+def validate_deepseek_d0_trace(
+    trace_root: Path,
+    *,
+    microbatches_per_iteration: int = DEFAULT_MICROBATCHES_PER_ITERATION,
+    data_parallel_size: int = DEFAULT_DATA_PARALLEL_SIZE,
+) -> tuple[Failure, ...]:
+    """Validate the reviewed D0 PP2/EP4 MoE, shared-expert, and MTP trace."""
+
+    if microbatches_per_iteration < 1:
+        raise ValueError("microbatches_per_iteration must be positive")
+    if data_parallel_size not in _SUPPORTED_DATA_PARALLEL_SIZES:
+        raise ValueError("data_parallel_size must be 4 or 8 for a reviewed D0 profile")
+    return _validate_deepseek_trace(
+        trace_root,
+        microbatches_per_iteration=microbatches_per_iteration,
+        data_parallel_size=data_parallel_size,
+        expert_model_parallel_size=_D0_EXPERT_MODEL_PARALLEL_SIZE,
+        require_d2_contract=False,
+    )
+
+
+def validate_deepseek_d2_trace(
+    trace_root: Path,
+    *,
+    microbatches_per_iteration: int = DEFAULT_MICROBATCHES_PER_ITERATION,
+) -> tuple[Failure, ...]:
+    """Validate D2 PP2/DP8/EP8/ETP1/expert-DP1 and DistOpt lifecycle."""
+
+    if microbatches_per_iteration < 1:
+        raise ValueError("microbatches_per_iteration must be positive")
+    return (
+        *_validate_deepseek_trace(
+            trace_root,
+            microbatches_per_iteration=microbatches_per_iteration,
+            data_parallel_size=D2_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D2_EXPERT_MODEL_PARALLEL_SIZE,
+            require_d2_contract=True,
+        ),
+        *dp_probe_contract.validate_dp_distopt_overlap(trace_root),
+    )
 
 
 __all__ = [
     "D0_RANK_ORDER",
+    "D2_DATA_PARALLEL_SIZE",
+    "D2_EXPERT_MODEL_PARALLEL_SIZE",
     "DEFAULT_DATA_PARALLEL_SIZE",
     "DEFAULT_MICROBATCHES_PER_ITERATION",
     "validate_deepseek_d0_trace",
+    "validate_deepseek_d2_trace",
 ]
