@@ -20,6 +20,7 @@ if str(_REPOSITORY_ROOT) not in sys.path:
 from tests.test_utils.runners import bridge_probe_contract  # noqa: E402
 from tests.test_utils.runners import combined_1f1b_probe_contract  # noqa: E402
 from tests.test_utils.runners import cp_probe_contract  # noqa: E402
+from tests.test_utils.runners import deepseek_tp2_sp_probe_contract  # noqa: E402
 from tests.test_utils.runners import dp_probe_contract  # noqa: E402
 from tests.test_utils.runners import dualpipev_probe_contract  # noqa: E402
 from tests.test_utils.runners import generate_bert_smoke_inputs  # noqa: E402
@@ -42,6 +43,7 @@ CONTAINER_RUN_ROOT = "/artifacts/run"
 CONTAINER_CHECKPOINT_LOAD_ROOT = "/artifacts/load/checkpoints"
 CONTAINER_QWEN3_DATA_ROOT = "/inputs/qwen3-data"
 CONTAINER_QWEN3_TOKENIZER_ROOT = "/inputs/qwen3-tokenizer"
+CONTAINER_DEEPSEEK_TOKENIZER_ROOT = "/inputs/deepseek-tokenizer"
 
 _COMMON_FIELDS = ("g_rk", "dp_rk", "pp_rk", "tp_rk")
 
@@ -240,6 +242,20 @@ _QWEN3_TP_SP_EVENTS = (
         for requirement in _TP2_SP_EVENTS
         if requirement.name
         not in {"tp-all-gather-last", "tp-reduce-scatter-last"}
+    ),
+)
+_DEEPSEEK_TP2_SP_MODEL_EVENTS = (
+    *_events(
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+    ),
+    *(
+        requirement
+        for requirement in _TP2_SP_EVENTS
+        if requirement.name != "tp-reduce-scatter-last"
     ),
 )
 _TP2_EP4_MODEL_EVENTS = (
@@ -600,6 +616,21 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             tp_probe_contract.validate_qwen3_tp8_sp_profile,
         ),
         training_run_contract.validate_two_iteration_qwen3_tp8_sp_checkpoint,
+    ),
+    "deepseek-tp2-sp-mock": manifest.TraceProfile(
+        "deepseek-tp2-sp-mock",
+        8,
+        (
+            *_DEEPSEEK_TP2_SP_MODEL_EVENTS,
+            *_ep_capacity_drop_events(),
+            manifest.EventRequirement(
+                "moe-shared-expert",
+                (*_COMMON_FIELDS, "layer", "ep_size"),
+                "E",
+            ),
+        ),
+        deepseek_tp2_sp_probe_contract.validate_deepseek_tp2_sp_trace,
+        training_run_contract.validate_two_iteration_deepseek_tp2_sp_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",
@@ -1050,6 +1081,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_qwen3_enron_tp2_sp": "qwen3-enron-tp2-sp",
     "flagscale_single_node_qwen3_enron_tp4_sp": "qwen3-enron-tp4-sp",
     "flagscale_single_node_qwen3_enron_tp8_sp": "qwen3-enron-tp8-sp",
+    "flagscale_single_node_deepseek_tp2_sp_mock": "deepseek-tp2-sp-mock",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",
@@ -1214,6 +1246,7 @@ def _docker_command(
     checkpoint_load_root: Path | None = None,
     qwen3_data_prefix: Path | None = None,
     qwen3_tokenizer_root: Path | None = None,
+    deepseek_tokenizer_root: Path | None = None,
 ) -> tuple[str, ...]:
     overlay = ()
     if flagscale_training_overlay is not None:
@@ -1249,6 +1282,15 @@ def _docker_command(
             f"MEGALENS_QWEN3_DATA_PATH={container_data_prefix}",
             "--env",
             f"MEGALENS_QWEN3_TOKENIZER_PATH={CONTAINER_QWEN3_TOKENIZER_ROOT}",
+        )
+    deepseek_inputs = ()
+    if deepseek_tokenizer_root is not None:
+        deepseek_inputs = (
+            "--volume",
+            f"{deepseek_tokenizer_root}:{CONTAINER_DEEPSEEK_TOKENIZER_ROOT}:ro",
+            "--env",
+            "MEGALENS_DEEPSEEK_TOKENIZER_PATH="
+            f"{CONTAINER_DEEPSEEK_TOKENIZER_ROOT}",
         )
     dispatcher = ()
     if ep_dispatcher is not None:
@@ -1286,6 +1328,7 @@ def _docker_command(
         *dataset_overlay,
         *checkpoint_overlay,
         *qwen3_inputs,
+        *deepseek_inputs,
         *overlay,
         "--env",
         f"MEGALENS_GATE_CONTAINER_RUN_DIR={CONTAINER_RUN_ROOT}",
@@ -1420,6 +1463,11 @@ def _parser() -> argparse.ArgumentParser:
         help="host directory containing the Qwen tokenizer files",
     )
     parser.add_argument(
+        "--deepseek-tokenizer-root",
+        type=Path,
+        help="host directory containing the DeepSeek Qwen tokenizer files",
+    )
+    parser.add_argument(
         "--controller-revision",
         help="accepted for compatibility; the manifest records the mounted source HEAD",
     )
@@ -1466,6 +1514,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile = _profile_from_arguments(args)
     qwen3_data_prefix = None
     qwen3_tokenizer_root = None
+    deepseek_tokenizer_root = None
     if profile.name in {
         "qwen3-enron-tp2-sp",
         "qwen3-enron-tp4-sp",
@@ -1489,6 +1538,14 @@ def main(argv: Sequence[str] | None = None) -> int:
         qwen3_tokenizer_root = args.qwen3_tokenizer_root.resolve()
         if not qwen3_tokenizer_root.is_dir():
             parser.error("--qwen3-tokenizer-root must be a directory")
+    if profile.name == "deepseek-tp2-sp-mock":
+        if args.deepseek_tokenizer_root is None:
+            parser.error(
+                "--deepseek-tokenizer-root is required for the DeepSeek profile"
+            )
+        deepseek_tokenizer_root = args.deepseek_tokenizer_root.resolve()
+        if not deepseek_tokenizer_root.is_dir():
+            parser.error("--deepseek-tokenizer-root must be a directory")
     run_dir = args.run_dir.resolve()
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
@@ -1522,6 +1579,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         checkpoint_load_root=checkpoint_load_root,
         qwen3_data_prefix=qwen3_data_prefix,
         qwen3_tokenizer_root=qwen3_tokenizer_root,
+        deepseek_tokenizer_root=deepseek_tokenizer_root,
     )
     environment = os.environ.copy()
     environment.update(

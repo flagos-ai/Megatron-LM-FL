@@ -48,6 +48,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_qwen3_enron_tp8_sp.yaml": (
         "qwen3-enron-tp8-sp"
     ),
+    "flagscale_single_node_deepseek_tp2_sp_mock.yaml": (
+        "deepseek-tp2-sp-mock"
+    ),
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
@@ -1569,6 +1572,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "qwen3-enron-tp2-sp",
         "qwen3-enron-tp4-sp",
         "qwen3-enron-tp8-sp",
+        "deepseek-tp2-sp-mock",
     }
 
     for name, profile in gate.PROFILES.items():

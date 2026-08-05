@@ -189,6 +189,74 @@ def validate_two_iteration_qwen3_tp8_sp_checkpoint(
     )
 
 
+_DEEPSEEK_TP2_SP_ARGUMENTS = (
+    ("tensor_model_parallel_size", "2"),
+    ("pipeline_model_parallel_size", "2"),
+    ("decoder_first_pipeline_num_layers", "13"),
+    ("context_parallel_size", "1"),
+    ("expert_model_parallel_size", "4"),
+    ("expert_tensor_parallel_size", "1"),
+    ("sequence_parallel", "True"),
+    ("num_layers", "27"),
+    ("hidden_size", "2048"),
+    ("ffn_hidden_size", "11264"),
+    ("moe_ffn_hidden_size", "1408"),
+    ("num_attention_heads", "16"),
+    ("num_query_groups", "16"),
+    ("multi_latent_attention", "True"),
+    ("num_experts", "64"),
+    ("moe_router_topk", "6"),
+    ("moe_shared_expert_intermediate_size", "2816"),
+    ("moe_token_dispatcher_type", "alltoall"),
+    ("mtp_num_layers", "1"),
+    ("seq_length", "4096"),
+    ("micro_batch_size", "1"),
+    ("global_batch_size", "4"),
+    ("train_iters", "2"),
+    ("tokenizer_type", "QwenTokenizerFS"),
+    ("use_distributed_optimizer", "True"),
+    ("overlap_grad_reduce", "True"),
+    ("overlap_param_gather", "True"),
+    ("te_fl_prefer", "vendor"),
+    ("enable_flag_gems", "False"),
+    ("distributed_backend", "nccl"),
+    ("mock_data", "True"),
+)
+
+
+def validate_two_iteration_deepseek_tp2_sp_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require the terminal checkpoint and fixed DeepSeek TP2/SP arguments."""
+
+    failures = list(
+        validate_two_iteration_transformer_engine_checkpoint(
+            run_root, trace_enabled
+        )
+    )
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        return tuple(failures)
+
+    for name, value in _DEEPSEEK_TP2_SP_ARGUMENTS:
+        argument = re.compile(
+            rf"^\[[^]]+\]:\s*{re.escape(name)}\s+\.+\s+"
+            rf"{re.escape(value)}\s*$",
+            re.MULTILINE,
+        )
+        if argument.search(log_text) is None:
+            failures.append(
+                Failure(
+                    "run.training.deepseek_argument",
+                    f"Megatron did not report {name}={value}",
+                    str(launcher_log),
+                )
+            )
+    return tuple(failures)
+
+
 def _validate_two_iteration_transformer_engine_cp_checkpoint(
     run_root: Path, trace_enabled: bool, *, context_parallel_size: int
 ) -> tuple[Failure, ...]:
