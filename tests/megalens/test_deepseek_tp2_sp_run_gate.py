@@ -115,6 +115,7 @@ def test_deepseek_tp2_sp_profile_is_selected_by_the_fixture() -> None:
         "tp-all-gather-first",
         "tp-all-gather-last",
         "tp-reduce-scatter",
+        "tp-allreduce",
         "tp-linear-async-launch",
         "tp-linear-async-complete",
         "grad-sync",
@@ -246,6 +247,17 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
         event("moe-shared-expert", "E", iteration, layer=layer, ep_size=4)
         event("moe-router", "B", iteration)
         event(
+            "tp-allreduce",
+            "B",
+            iteration,
+            op="all_reduce",
+            data_bytes=512,
+            group_size=2,
+            timing_phase="collective_call",
+            payload_role="inplace_input_output",
+        )
+        event("tp-allreduce", "E", iteration, group=[rank ^ 1])
+        event(
             "moe-router",
             "E",
             iteration,
@@ -314,8 +326,8 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
         )
         event(name, "E", iteration, group=peers if peers is not None else [rank ^ 1])
 
-    def linear(iteration: int, route: str) -> None:
-        operation_id = f"tp-linear:{rank}:{iteration}:{route}"
+    def linear(iteration: int, route: str, occurrence: int) -> None:
+        operation_id = f"tp-linear:{rank}:{iteration}:{route}:{occurrence}"
         is_gather = route == "all-gather"
         attrs = {
             "operation_id": operation_id,
@@ -415,8 +427,10 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
                 dim="last",
             )
         collective(iteration, "tp-reduce-scatter", "reduce-scatter")
-        linear(iteration, "all-gather")
-        linear(iteration, "reduce-scatter")
+        if pipeline_rank == 1:
+            for occurrence in range(4):
+                linear(iteration, "all-gather", occurrence)
+                linear(iteration, "reduce-scatter", occurrence)
         event(
             "grad-sync",
             "B",
@@ -436,6 +450,15 @@ def _write_rank_trace(trace_root: Path, rank: int) -> None:
             grad_bucket="sum",
         )
         event("sp-layernorm-allreduce", "E", iteration, group=[rank ^ 1])
+        event(
+            "embedding-grads-allreduce",
+            "B",
+            iteration,
+            data_bytes=622329856,
+            group_size=2,
+            embedding_kind="word",
+        )
+        event("embedding-grads-allreduce", "E", iteration, group=[rank ^ 4])
         event("grad-sync", "E", iteration)
         rows.append(
             {

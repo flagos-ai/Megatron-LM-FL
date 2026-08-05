@@ -257,6 +257,7 @@ _DEEPSEEK_TP2_SP_MODEL_EVENTS = (
         for requirement in _TP2_SP_EVENTS
         if requirement.name != "tp-reduce-scatter-last"
     ),
+    manifest.EventRequirement("tp-allreduce", _TP_ALLREDUCE_FIELDS, "B"),
 )
 _TP2_EP4_MODEL_EVENTS = (
     *(

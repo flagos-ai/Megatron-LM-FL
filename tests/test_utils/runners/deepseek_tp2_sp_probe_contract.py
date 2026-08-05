@@ -734,13 +734,99 @@ def _validate_tp_iteration(iteration: Iteration, *, rank: int) -> list[Failure]:
                 iteration=iteration_id,
             )
         )
-    linear_failures, _operation_ids = tp_probe_contract._validate_linear_lifecycle(
+    allreduce_spans, allreduce_failures = _pair_scopes(
         iteration,
+        ("tp-allreduce",),
         rank=rank,
-        expected_routes=tp_probe_contract._SP_LINEAR_ROUTES,
-        tensor_parallel_size=TENSOR_MODEL_PARALLEL_SIZE,
+        code="tp_allreduce_nesting",
     )
-    failures.extend(linear_failures)
+    failures.extend(allreduce_failures)
+    expected_allreduce_count = MICROBATCHES_PER_ITERATION * (
+        len(_MAIN_LAYERS[pipeline_rank]) + len(_MTP_LAYERS[pipeline_rank])
+    )
+    observed_allreduce_spans = allreduce_spans.get("tp-allreduce", ())
+    if len(observed_allreduce_spans) != expected_allreduce_count:
+        failures.append(
+            _failure(
+                "tp_allreduce_count",
+                f"tp-allreduce has {len(observed_allreduce_spans)} complete spans, "
+                f"expected {expected_allreduce_count}",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    for span in observed_allreduce_spans:
+        for field_name, expected in (
+            ("op", "all_reduce"),
+            ("data_bytes", 512),
+            ("group_size", TENSOR_MODEL_PARALLEL_SIZE),
+            ("timing_phase", "collective_call"),
+            ("payload_role", "inplace_input_output"),
+        ):
+            if span.begin.attrs.get(field_name) != expected:
+                failures.append(
+                    _failure(
+                        "tp_allreduce_field",
+                        f"tp-allreduce has {field_name}="
+                        f"{span.begin.attrs.get(field_name)!r}, expected {expected!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+        if span.end.attrs.get("group") != [peer]:
+            failures.append(
+                _failure(
+                    "tp_allreduce_group",
+                    f"tp-allreduce has peer group={span.end.attrs.get('group')!r}, "
+                    f"expected {[peer]!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    if pipeline_rank == PIPELINE_MODEL_PARALLEL_SIZE - 1:
+        linear_failures, _operation_ids = (
+            tp_probe_contract._validate_linear_lifecycle(
+                iteration,
+                rank=rank,
+                expected_routes=tp_probe_contract._SP_LINEAR_ROUTES,
+                tensor_parallel_size=TENSOR_MODEL_PARALLEL_SIZE,
+            )
+        )
+        failures.extend(linear_failures)
+        linear_route_counts = Counter(
+            event.attrs.get("collective_op")
+            for event in iteration.events
+            if event.name == "tp-linear-async-launch" and event.ph == "B"
+        )
+        expected_linear_route_counts = Counter(
+            {"all-gather": 4, "reduce-scatter": 4}
+        )
+        if linear_route_counts != expected_linear_route_counts:
+            failures.append(
+                _failure(
+                    "tp_linear_count",
+                    f"local Linear launch routes are {dict(linear_route_counts)}, "
+                    f"expected {dict(expected_linear_route_counts)}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    else:
+        unexpected_linear_events = [
+            event
+            for event in iteration.events
+            if event.name
+            in ("tp-linear-async-launch", "tp-linear-async-complete")
+        ]
+        if unexpected_linear_events:
+            failures.append(
+                _failure(
+                    "tp_linear_stage",
+                    "local Linear lifecycle events must be absent before the MTP stage",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
     sync_failures, _sp_bytes, _embedding_bytes = (
         tp_probe_contract._validate_final_grad_sync(
             iteration,
@@ -748,7 +834,7 @@ def _validate_tp_iteration(iteration: Iteration, *, rank: int) -> list[Failure]:
             schedule="non-interleaved-1f1b",
             expect_sp_layernorm=True,
             tp_peers=(peer,),
-            embedding_peer=None,
+            embedding_peer=rank ^ _STAGE_SIZE,
         )
     )
     failures.extend(sync_failures)
