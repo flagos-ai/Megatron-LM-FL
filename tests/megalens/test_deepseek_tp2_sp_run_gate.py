@@ -201,12 +201,34 @@ def _write_rank_trace(
     model_data_parallel_size: int = 2,
     microbatches_per_iteration: int = 2,
     include_dp_groups: bool = False,
+    expert_tensor_parallel_size: int = 1,
 ) -> None:
     stage_size = 2 * model_data_parallel_size
     pipeline_rank = rank // stage_size
     stage_rank = rank % stage_size
     tensor_rank = stage_rank % 2
     data_rank = stage_rank // 2
+    expert_tensor_rank = stage_rank % expert_tensor_parallel_size
+    expert_data_parallel_size = stage_size // (
+        contract.EXPERT_MODEL_PARALLEL_SIZE * expert_tensor_parallel_size
+    )
+    expert_data_rank = stage_rank // (
+        contract.EXPERT_MODEL_PARALLEL_SIZE * expert_tensor_parallel_size
+    )
+    tp_ep_group_base = (
+        pipeline_rank * stage_size
+        + expert_data_rank
+        * contract.EXPERT_MODEL_PARALLEL_SIZE
+        * expert_tensor_parallel_size
+    )
+    tp_ep_group = tuple(
+        range(
+            tp_ep_group_base,
+            tp_ep_group_base
+            + contract.EXPERT_MODEL_PARALLEL_SIZE
+            * expert_tensor_parallel_size,
+        )
+    )
     main_layers = tuple(range(2, 14)) if pipeline_rank == 0 else tuple(range(14, 28))
     rows: list[dict[str, object]] = []
     timestamp = 0
@@ -243,13 +265,13 @@ def _write_rank_trace(
             "aux_loss": 0.02,
             "z_loss": None,
         }
-        collective = {
+        ep_collective = {
             "comm_type": "ep-alltoall",
             "dispatcher": "alltoall",
             "data_bytes": 1048576,
             "group_size": 4,
             "ep_size": 4,
-            "tp_size": 1,
+            "tp_size": expert_tensor_parallel_size,
         }
         event("moe-shared-expert", "B", iteration)
         event("moe-shared-expert", "E", iteration, layer=layer, ep_size=4)
@@ -276,9 +298,17 @@ def _write_rank_trace(
             **topology,
             **handoff,
         )
+        collective(
+            iteration,
+            "tp-all-gather-first",
+            "all-gather",
+            group_size=len(tp_ep_group),
+            peers=[peer for peer in tp_ep_group if peer != rank],
+            data_bytes=512,
+        )
         event("moe-dispatch", "B", iteration)
         event("ep-alltoall-dispatch", "B", iteration)
-        event("ep-alltoall-dispatch", "E", iteration, **collective)
+        event("ep-alltoall-dispatch", "E", iteration, **ep_collective)
         event(
             "moe-dispatch",
             "E",
@@ -290,21 +320,26 @@ def _write_rank_trace(
             **topology,
             **handoff,
         )
+        if expert_tensor_parallel_size > 1:
+            for _ in range(2):
+                expert_tp_collective(iteration, "tp-all-gather-first", "all-gather")
         event("moe-experts", "B", iteration)
         event(
             "moe-experts",
             "E",
             iteration,
-            routed_tokens=12288,
+            routed_tokens=12288 * expert_tensor_parallel_size,
             expert_cv=0.0,
             top1_expert_share=0.0625,
             expert_max_over_mean=1.0,
-            tokens_per_expert=[768] * 16,
+            tokens_per_expert=[768 * expert_tensor_parallel_size] * 16,
             **topology,
         )
+        if expert_tensor_parallel_size > 1:
+            expert_tp_collective(iteration, "tp-reduce-scatter", "reduce-scatter")
         event("moe-combine", "B", iteration)
         event("ep-alltoall-combine", "B", iteration)
-        event("ep-alltoall-combine", "E", iteration, **collective)
+        event("ep-alltoall-combine", "E", iteration, **ep_collective)
         event(
             "moe-combine",
             "E",
@@ -322,17 +357,31 @@ def _write_rank_trace(
         dim: str = "first",
         group_size: int = 2,
         peers: list[int] | None = None,
+        data_bytes: int = 32768,
+        split_sizes: list[int] | None = None,
     ) -> None:
+        split_fields = {} if split_sizes is None else {"split_sizes": split_sizes}
         event(
             name,
             "B",
             iteration,
             op=op,
             dim=dim,
-            data_bytes=32768,
+            data_bytes=data_bytes,
             group_size=group_size,
+            **split_fields,
         )
         event(name, "E", iteration, group=peers if peers is not None else [rank ^ 1])
+
+    def expert_tp_collective(iteration: int, name: str, op: str) -> None:
+        collective(
+            iteration,
+            name,
+            op,
+            group_size=expert_tensor_parallel_size,
+            peers=[rank ^ 1],
+            split_sizes=[12288, 12288],
+        )
 
     def linear(iteration: int, route: str, occurrence: int) -> None:
         operation_id = f"tp-linear:{rank}:{iteration}:{route}:{occurrence}"
@@ -528,15 +577,18 @@ def _write_rank_trace(
             event("decoder-postprocess", "E", iteration)
             event("forward-step", "E", iteration)
         stage_base = pipeline_rank * stage_size
-        ep_group_base = stage_base + (stage_rank // 4) * 4
-        ep_group = range(ep_group_base, ep_group_base + 4)
-        collective(
-            iteration,
-            "tp-all-gather-first",
-            "all-gather",
-            group_size=4,
-            peers=[peer for peer in ep_group if peer != rank],
-        )
+        if expert_tensor_parallel_size > 1:
+            moe_calls = microbatches_per_iteration * (
+                len(main_layers) + (1 if pipeline_rank == 1 else 0)
+            )
+            for _ in range(moe_calls):
+                expert_tp_collective(
+                    iteration, "tp-all-gather-first", "all-gather"
+                )
+                for _ in range(2):
+                    expert_tp_collective(
+                        iteration, "tp-reduce-scatter", "reduce-scatter"
+                    )
         collective(iteration, "tp-all-gather-first", "all-gather")
         if pipeline_rank == 1:
             collective(
@@ -584,10 +636,16 @@ def _write_rank_trace(
                 stage_base + tensor_rank + data * 2
                 for data in range(model_data_parallel_size)
             )
-            expert_data_parallel_size = stage_size // 4
-            expert_rank = stage_rank % 4
+            expert_rank = (
+                stage_rank // expert_tensor_parallel_size
+            ) % contract.EXPERT_MODEL_PARALLEL_SIZE
             expert_group = tuple(
-                stage_base + expert_rank + data * 4
+                stage_base
+                + expert_tensor_rank
+                + expert_tensor_parallel_size * expert_rank
+                + data
+                * expert_tensor_parallel_size
+                * contract.EXPERT_MODEL_PARALLEL_SIZE
                 for data in range(expert_data_parallel_size)
             )
             for name in ("dp-reduce-scatter", "dp-param-all-gather"):
@@ -691,6 +749,20 @@ def _write_deepseek_d1_etp1_trace(trace_root: Path) -> None:
         )
 
 
+def _write_deepseek_d1_etp2_trace(trace_root: Path) -> None:
+    for rank in range(contract.D1_ETP2_WORLD_SIZE):
+        _write_rank_trace(
+            trace_root,
+            rank,
+            model_data_parallel_size=contract.D1_ETP2_MODEL_DATA_PARALLEL_SIZE,
+            microbatches_per_iteration=(
+                contract.D1_ETP2_MICROBATCHES_PER_ITERATION
+            ),
+            include_dp_groups=True,
+            expert_tensor_parallel_size=2,
+        )
+
+
 def test_deepseek_d1_etp1_contract_accepts_the_fixed_l3_trace(
     tmp_path: Path,
 ) -> None:
@@ -698,6 +770,351 @@ def test_deepseek_d1_etp1_contract_accepts_the_fixed_l3_trace(
     _write_deepseek_d1_etp1_trace(trace_root)
 
     assert contract.validate_deepseek_d1_tp2_sp_etp1_trace(trace_root) == ()
+
+
+def test_deepseek_d1_etp2_contract_accepts_the_fixed_l3_trace(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+
+    assert contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root) == ()
+
+
+def test_deepseek_d1_etp2_topology_uses_the_reviewed_rank_groups() -> None:
+    topology = contract._D1_ETP2_TOPOLOGY
+    ranks = range(contract.D1_ETP2_WORLD_SIZE)
+
+    assert {topology.tp_ep_group(rank) for rank in ranks} == {
+        tuple(range(8)),
+        tuple(range(8, 16)),
+    }
+    assert {topology.expert_tensor_parallel_group(rank) for rank in ranks} == {
+        (rank, rank + 1) for rank in range(0, 16, 2)
+    }
+    assert {topology.expert_model_parallel_group(rank) for rank in ranks} == {
+        (0, 2, 4, 6),
+        (1, 3, 5, 7),
+        (8, 10, 12, 14),
+        (9, 11, 13, 15),
+    }
+    assert {topology.model_data_parallel_group(rank) for rank in ranks} == {
+        (0, 2, 4, 6),
+        (1, 3, 5, 7),
+        (8, 10, 12, 14),
+        (9, 11, 13, 15),
+    }
+    assert {topology.expert_data_parallel_group(rank) for rank in ranks} == {
+        (rank,) for rank in ranks
+    }
+
+
+def test_deepseek_d1_etp2_contract_requires_etp2_dispatch_and_metadata(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    dispatch = next(
+        row
+        for row in rows
+        if row.get("name") == "ep-alltoall-dispatch" and row.get("ph") == "E"
+    )
+    dispatch["tp_size"] = 1
+    metadata_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.get("name") == "tp-all-gather-first"
+        and row.get("ph") == "B"
+        and row.get("group_size") == 8
+        and "split_sizes" not in row
+    )
+    del rows[metadata_index : metadata_index + 2]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+    codes = {failure.code for failure in failures}
+
+    assert "trace.deepseek_tp2_sp.field" in codes
+    assert "trace.deepseek_tp2_sp.tp_collective_count" in codes
+
+
+def test_deepseek_d1_etp2_contract_requires_dispatcher_tp_work(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    dispatcher_collective = next(
+        row
+        for row in rows
+        if row.get("name") == "tp-all-gather-first"
+        and row.get("ph") == "B"
+        and "split_sizes" in row
+    )
+    dispatcher_collective.pop("split_sizes")
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dispatcher_tp_count" in {
+        failure.code for failure in failures
+    }
+
+
+@pytest.mark.parametrize("invalid_split_sizes", ["invalid", [], [1], [1, True]])
+def test_deepseek_d1_etp2_contract_rejects_invalid_dispatcher_split_sizes(
+    tmp_path: Path,
+    invalid_split_sizes: object,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    dispatcher_collective = next(
+        row
+        for row in rows
+        if row.get("name") == "tp-all-gather-first"
+        and row.get("ph") == "B"
+        and "split_sizes" in row
+    )
+    dispatcher_collective["split_sizes"] = invalid_split_sizes
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dispatcher_tp_field" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp2_contract_rejects_zero_dispatcher_token_splits(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    first_call_collectives = [
+        row
+        for row in rows
+        if row.get("ph") == "B" and "split_sizes" in row
+    ][:3]
+    assert len(first_call_collectives) == 3
+    for row in first_call_collectives:
+        row["split_sizes"] = [0, 0]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dispatcher_tp_split" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp2_contract_requires_one_split_list_per_moe_call(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    dispatcher_collective = next(
+        row
+        for row in rows
+        if row.get("ph") == "B" and "split_sizes" in row
+    )
+    dispatcher_collective["split_sizes"] = [12287, 12289]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dispatcher_tp_split" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp2_contract_keeps_dispatcher_tp_at_moe_boundaries(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    dispatcher_index = next(
+        index
+        for index, row in enumerate(rows)
+        if row.get("name") == "tp-all-gather-first"
+        and row.get("ph") == "B"
+        and "split_sizes" in row
+    )
+    split_sizes = rows[dispatcher_index].pop("split_sizes")
+    model_collective = next(
+        row
+        for index, row in reversed(tuple(enumerate(rows)))
+        if index != dispatcher_index
+        and row.get("name") == "tp-all-gather-first"
+        and row.get("ph") == "B"
+        and row.get("group_size") == 2
+        and "split_sizes" not in row
+    )
+    model_collective["split_sizes"] = split_sizes
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dispatcher_tp_order" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp2_contract_requires_equal_etp_peer_workloads(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_one = trace_root / (
+        "benchmark-global-1-data-0-pipeline-0-tensor-1.json"
+    )
+    rows = json.loads(rank_one.read_text(encoding="utf-8"))
+    experts = next(
+        row
+        for row in rows
+        if row.get("name") == "moe-experts" and row.get("ph") == "E"
+    )
+    experts["tokens_per_expert"][0] += 1
+    experts["tokens_per_expert"][1] -= 1
+    rank_one.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.etp_workload" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp2_contract_requires_combine_conservation(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_one = trace_root / (
+        "benchmark-global-1-data-0-pipeline-0-tensor-1.json"
+    )
+    rows = json.loads(rank_one.read_text(encoding="utf-8"))
+    combine = next(
+        row
+        for row in rows
+        if row.get("name") == "moe-combine" and row.get("ph") == "E"
+    )
+    combine["num_tokens"] += 1
+    rank_one.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+    codes = {failure.code for failure in failures}
+
+    assert "trace.deepseek_tp2_sp.combine_conservation" in codes
+    assert "trace.deepseek_tp2_sp.etp_combine_conservation" in codes
+
+
+def test_deepseek_d1_etp2_contract_rejects_wrong_expert_dp_singleton_peer(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    expert_reduce_scatter = next(
+        row
+        for row in rows
+        if row.get("name") == "dp-reduce-scatter"
+        and row.get("ph") == "E"
+        and row.get("group") == []
+    )
+    expert_reduce_scatter["group"] = [1]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dp_group" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d1_etp2_contract_requires_dp_work_completion(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    rows = [row for row in rows if row.get("name") != "dp-grad-sync-complete"]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.dp.event_count" in {failure.code for failure in failures}
+
+
+def test_deepseek_d1_etp2_contract_requires_expert_dp_rs_each_iteration(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_deepseek_d1_etp2_trace(trace_root)
+    rank_zero = trace_root / (
+        "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    )
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    dispatch_end = next(
+        index
+        for index, row in enumerate(rows)
+        if row.get("iteration") == 2
+        and row.get("name") == "dp-reduce-scatter"
+        and row.get("ph") == "E"
+        and row.get("group") == []
+    )
+    dispatch_begin = dispatch_end - 1
+    operation_id = rows[dispatch_begin]["operation_id"]
+    completion_begin = next(
+        index
+        for index, row in enumerate(rows)
+        if row.get("iteration") == 2
+        and row.get("name") == "dp-grad-sync-complete"
+        and row.get("ph") == "B"
+        and operation_id in row.get("operation_ids", [])
+    )
+    removed = {
+        dispatch_begin,
+        dispatch_end,
+        completion_begin,
+        completion_begin + 1,
+    }
+    rows = [row for index, row in enumerate(rows) if index not in removed]
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = contract.validate_deepseek_d1_tp2_sp_etp2_trace(trace_root)
+
+    assert "trace.deepseek_tp2_sp.dp_group_count" in {
+        failure.code for failure in failures
+    }
 
 
 def test_deepseek_d1_etp1_contract_keeps_ep4_replicas_independent(

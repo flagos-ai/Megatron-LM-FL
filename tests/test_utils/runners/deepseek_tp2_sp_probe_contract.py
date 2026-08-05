@@ -28,10 +28,11 @@ EXPERT_TENSOR_PARALLEL_SIZE = 1
 
 
 @dataclass(frozen=True)
-class _ETP1Topology:
+class _DeepSeekTopology:
     profile_name: str
     world_size: int
     model_data_parallel_size: int
+    expert_tensor_parallel_size: int
     expert_data_parallel_size: int
     microbatches_per_iteration: int
 
@@ -39,8 +40,14 @@ class _ETP1Topology:
         stage_size = self.world_size // PIPELINE_MODEL_PARALLEL_SIZE
         if stage_size != TENSOR_MODEL_PARALLEL_SIZE * self.model_data_parallel_size:
             raise ValueError("world size does not match TP2/PP2/model-DP topology")
-        if stage_size != EXPERT_MODEL_PARALLEL_SIZE * self.expert_data_parallel_size:
-            raise ValueError("world size does not match PP2/EP4/ETP1/expert-DP topology")
+        if self.expert_tensor_parallel_size < 1:
+            raise ValueError("expert tensor parallel size must be positive")
+        if stage_size != (
+            self.expert_tensor_parallel_size
+            * EXPERT_MODEL_PARALLEL_SIZE
+            * self.expert_data_parallel_size
+        ):
+            raise ValueError("world size does not match PP2/EP4/ETP/expert-DP topology")
         if self.microbatches_per_iteration < 1:
             raise ValueError("microbatches per iteration must be positive")
 
@@ -51,12 +58,36 @@ class _ETP1Topology:
     def pipeline_rank(self, rank: int) -> int:
         return rank // self.stage_size
 
-    def ep_group(self, rank: int) -> tuple[int, ...]:
+    @property
+    def tp_ep_size(self) -> int:
+        return self.expert_tensor_parallel_size * EXPERT_MODEL_PARALLEL_SIZE
+
+    def tp_ep_group(self, rank: int) -> tuple[int, ...]:
         stage_base = self.pipeline_rank(rank) * self.stage_size
         stage_rank = rank - stage_base
-        replica = stage_rank // EXPERT_MODEL_PARALLEL_SIZE
-        group_base = stage_base + replica * EXPERT_MODEL_PARALLEL_SIZE
-        return tuple(range(group_base, group_base + EXPERT_MODEL_PARALLEL_SIZE))
+        replica = stage_rank // self.tp_ep_size
+        group_base = stage_base + replica * self.tp_ep_size
+        return tuple(range(group_base, group_base + self.tp_ep_size))
+
+    def expert_tensor_parallel_group(self, rank: int) -> tuple[int, ...]:
+        group = self.tp_ep_group(rank)
+        group_rank = rank - group[0]
+        group_base = group[0] + (
+            group_rank // self.expert_tensor_parallel_size
+        ) * self.expert_tensor_parallel_size
+        return tuple(
+            range(group_base, group_base + self.expert_tensor_parallel_size)
+        )
+
+    def expert_model_parallel_group(self, rank: int) -> tuple[int, ...]:
+        group = self.tp_ep_group(rank)
+        expert_tensor_rank = (rank - group[0]) % self.expert_tensor_parallel_size
+        return tuple(
+            group[0]
+            + expert_tensor_rank
+            + expert_rank * self.expert_tensor_parallel_size
+            for expert_rank in range(EXPERT_MODEL_PARALLEL_SIZE)
+        )
 
     def model_data_parallel_group(self, rank: int) -> tuple[int, ...]:
         stage_base = self.pipeline_rank(rank) * self.stage_size
@@ -68,9 +99,9 @@ class _ETP1Topology:
 
     def expert_data_parallel_group(self, rank: int) -> tuple[int, ...]:
         stage_base = self.pipeline_rank(rank) * self.stage_size
-        expert_rank = (rank - stage_base) % EXPERT_MODEL_PARALLEL_SIZE
+        expert_parallel_rank = (rank - stage_base) % self.tp_ep_size
         return tuple(
-            stage_base + expert_rank + data_rank * EXPERT_MODEL_PARALLEL_SIZE
+            stage_base + expert_parallel_rank + data_rank * self.tp_ep_size
             for data_rank in range(self.expert_data_parallel_size)
         )
 
@@ -80,18 +111,28 @@ class _ETP1Topology:
         return rank - self.stage_size
 
 
-_SINGLE_NODE_TOPOLOGY = _ETP1Topology(
+_SINGLE_NODE_TOPOLOGY = _DeepSeekTopology(
     profile_name="deepseek-tp2-sp-mock",
     world_size=8,
     model_data_parallel_size=2,
+    expert_tensor_parallel_size=1,
     expert_data_parallel_size=1,
     microbatches_per_iteration=2,
 )
-_D1_ETP1_TOPOLOGY = _ETP1Topology(
+_D1_ETP1_TOPOLOGY = _DeepSeekTopology(
     profile_name="deepseek-d1-tp2-sp-etp1-mock",
     world_size=16,
     model_data_parallel_size=4,
+    expert_tensor_parallel_size=1,
     expert_data_parallel_size=2,
+    microbatches_per_iteration=1,
+)
+_D1_ETP2_TOPOLOGY = _DeepSeekTopology(
+    profile_name="deepseek-d1-tp2-sp-etp2-mock",
+    world_size=16,
+    model_data_parallel_size=4,
+    expert_tensor_parallel_size=2,
+    expert_data_parallel_size=1,
     microbatches_per_iteration=1,
 )
 
@@ -103,6 +144,14 @@ D1_WORLD_SIZE = _D1_ETP1_TOPOLOGY.world_size
 D1_MODEL_DATA_PARALLEL_SIZE = _D1_ETP1_TOPOLOGY.model_data_parallel_size
 D1_EXPERT_DATA_PARALLEL_SIZE = _D1_ETP1_TOPOLOGY.expert_data_parallel_size
 D1_MICROBATCHES_PER_ITERATION = _D1_ETP1_TOPOLOGY.microbatches_per_iteration
+D1_ETP2_WORLD_SIZE = _D1_ETP2_TOPOLOGY.world_size
+D1_ETP2_MODEL_DATA_PARALLEL_SIZE = _D1_ETP2_TOPOLOGY.model_data_parallel_size
+D1_ETP2_EXPERT_DATA_PARALLEL_SIZE = (
+    _D1_ETP2_TOPOLOGY.expert_data_parallel_size
+)
+D1_ETP2_MICROBATCHES_PER_ITERATION = (
+    _D1_ETP2_TOPOLOGY.microbatches_per_iteration
+)
 
 _ITERATIONS = (1, 2)
 _TOKENS_PER_ROUTER = 4096 // TENSOR_MODEL_PARALLEL_SIZE
@@ -168,6 +217,14 @@ class _Span:
     end_index: int
     begin: Event
     end: Event
+
+
+@dataclass(frozen=True)
+class _Workload:
+    router_routed_tokens: int
+    experts_routed_tokens: int
+    combine_tokens: int
+    tokens_per_expert: tuple[int, ...]
 
 
 def _failure(
@@ -307,6 +364,7 @@ def _validate_moe_call(
     iteration: int,
     microbatch: int,
     region: str,
+    topology: _DeepSeekTopology,
 ) -> list[Failure]:
     failures: list[Failure] = []
     end_events = {event.name: event for event in records if event.ph == "E"}
@@ -493,20 +551,29 @@ def _validate_moe_call(
             )
         )
     combine_tokens = combine.attrs.get("num_tokens")
-    if (
-        not isinstance(combine_tokens, int)
-        or isinstance(combine_tokens, bool)
-        or combine_tokens < 0
-        or not valid_routed
-        or combine_tokens != routed_tokens
-        or combine_tokens != expert_total
-    ):
+    valid_combine = (
+        isinstance(combine_tokens, int)
+        and not isinstance(combine_tokens, bool)
+        and combine_tokens >= 0
+    )
+    if topology.expert_tensor_parallel_size == 1:
+        valid_combine = (
+            valid_combine
+            and valid_routed
+            and combine_tokens == routed_tokens
+            and combine_tokens == expert_total
+        )
+    if not valid_combine:
+        expectation = (
+            f"equal Experts routed_tokens={routed_tokens!r} and local count "
+            f"sum={expert_total!r}"
+            if topology.expert_tensor_parallel_size == 1
+            else "be a non-negative integer; ETP2 conservation is checked across ranks"
+        )
         failures.append(
             _failure(
                 "combine_workload",
-                f"layer={layer} Combine num_tokens={combine_tokens!r} must equal "
-                f"Experts routed_tokens={routed_tokens!r} and local count sum="
-                f"{expert_total!r}",
+                f"layer={layer} Combine num_tokens={combine_tokens!r} must {expectation}",
                 rank=rank,
                 iteration=iteration,
                 microbatch=microbatch,
@@ -536,7 +603,7 @@ def _validate_moe_call(
             ("dispatcher", "alltoall"),
             ("group_size", EXPERT_MODEL_PARALLEL_SIZE),
             ("ep_size", EXPERT_MODEL_PARALLEL_SIZE),
-            ("tp_size", EXPERT_TENSOR_PARALLEL_SIZE),
+            ("tp_size", topology.expert_tensor_parallel_size),
         ):
             _field(
                 failures,
@@ -577,6 +644,7 @@ def _validate_moe_region(
     rank: int,
     microbatch: int,
     region: str,
+    topology: _DeepSeekTopology,
 ) -> list[Failure]:
     records = [
         event
@@ -610,6 +678,7 @@ def _validate_moe_region(
                 iteration=iteration_id,
                 microbatch=microbatch,
                 region=region,
+                topology=topology,
             )
         )
     return failures
@@ -620,7 +689,7 @@ def _validate_model_iteration(
     *,
     rank: int,
     pipeline_rank: int,
-    topology: _ETP1Topology,
+    topology: _DeepSeekTopology,
 ) -> list[Failure]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_scopes(
@@ -688,6 +757,7 @@ def _validate_model_iteration(
                 rank=rank,
                 microbatch=microbatch,
                 region="decoder",
+                topology=topology,
             )
         )
         failures.extend(
@@ -698,6 +768,7 @@ def _validate_model_iteration(
                 rank=rank,
                 microbatch=microbatch,
                 region="decoder-postprocess",
+                topology=topology,
             )
         )
         output = _contained(spans.get("output_layer", ()), postprocess[0])
@@ -718,11 +789,178 @@ def _validate_model_iteration(
     return failures
 
 
+def _valid_split_sizes(value: object, expected_size: int) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == expected_size
+        and all(
+            isinstance(size, int) and not isinstance(size, bool) and size >= 0
+            for size in value
+        )
+    )
+
+
+def _validate_moe_tp_positions(
+    iteration: Iteration,
+    spans: Mapping[str, Sequence[_Span]],
+    *,
+    rank: int,
+    topology: _DeepSeekTopology,
+) -> list[Failure]:
+    """Check source-stable forward dispatcher collectives at their MoE boundaries."""
+
+    pipeline_rank = topology.pipeline_rank(rank)
+    expected_calls = topology.microbatches_per_iteration * (
+        len(_MAIN_LAYERS[pipeline_rank]) + len(_MTP_LAYERS[pipeline_rank])
+    )
+    records = [
+        (index, event)
+        for index, event in enumerate(iteration.events)
+        if event.name in _MOE_NAMES
+    ]
+    records_per_call = len(_MOE_CALL_SEQUENCE)
+    expected_sequence = _MOE_CALL_SEQUENCE * expected_calls
+    if tuple((event.name, event.ph) for _index, event in records) != expected_sequence:
+        return []
+
+    iteration_id = int(iteration.iteration_id)
+    tp_ep_peers = [
+        peer for peer in topology.tp_ep_group(rank) if peer != rank
+    ]
+    expert_tp_peers = [
+        peer
+        for peer in topology.expert_tensor_parallel_group(rank)
+        if peer != rank
+    ]
+    expert_tensor_rank = rank - topology.expert_tensor_parallel_group(rank)[0]
+    failures: list[Failure] = []
+    for occurrence in range(expected_calls):
+        call = records[
+            occurrence * records_per_call : (occurrence + 1) * records_per_call
+        ]
+        positions = {
+            (event.name, event.ph): index for index, event in call
+        }
+        call_events = {
+            (event.name, event.ph): event for _index, event in call
+        }
+        layer = next(
+            event.attrs.get("layer")
+            for _index, event in call
+            if event.name == "moe-router" and event.ph == "E"
+        )
+        router_end = positions[("moe-router", "E")]
+        dispatch_begin = positions[("moe-dispatch", "B")]
+        dispatch_end = positions[("moe-dispatch", "E")]
+        experts_begin = positions[("moe-experts", "B")]
+        experts_end = positions[("moe-experts", "E")]
+        combine_begin = positions[("moe-combine", "B")]
+
+        metadata = [
+            span
+            for span in spans.get("tp-all-gather-first", ())
+            if router_end < span.begin_index
+            and span.end_index < dispatch_begin
+            and "split_sizes" not in span.begin.attrs
+            and span.begin.attrs.get("group_size") == topology.tp_ep_size
+            and span.end.attrs.get("group") == tp_ep_peers
+        ]
+        if len(metadata) != 1:
+            failures.append(
+                _failure(
+                    "metadata_tp_order",
+                    f"MoE call {occurrence} layer={layer!r} has {len(metadata)} "
+                    "metadata gathers between Router and Dispatch, expected 1",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+        if topology.expert_tensor_parallel_size == 1:
+            continue
+        forward_gathers = [
+            span
+            for span in spans.get("tp-all-gather-first", ())
+            if dispatch_end < span.begin_index
+            and span.end_index < experts_begin
+            and span.begin.attrs.get("group_size")
+            == topology.expert_tensor_parallel_size
+            and span.end.attrs.get("group") == expert_tp_peers
+            and _valid_split_sizes(
+                span.begin.attrs.get("split_sizes"),
+                topology.expert_tensor_parallel_size,
+            )
+        ]
+        forward_reduce_scatters = [
+            span
+            for span in spans.get("tp-reduce-scatter", ())
+            if experts_end < span.begin_index
+            and span.end_index < combine_begin
+            and span.begin.attrs.get("group_size")
+            == topology.expert_tensor_parallel_size
+            and span.end.attrs.get("group") == expert_tp_peers
+            and _valid_split_sizes(
+                span.begin.attrs.get("split_sizes"),
+                topology.expert_tensor_parallel_size,
+            )
+        ]
+        if len(forward_gathers) != 2 or len(forward_reduce_scatters) != 1:
+            failures.append(
+                _failure(
+                    "dispatcher_tp_order",
+                    f"MoE call {occurrence} layer={layer!r} has forward ETP "
+                    f"AG/RS={len(forward_gathers)}/{len(forward_reduce_scatters)}, "
+                    "expected 2/1 at the Dispatch/Experts/Combine boundaries",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+        split_sizes = [
+            span.begin.attrs["split_sizes"]
+            for span in (*forward_gathers, *forward_reduce_scatters)
+        ]
+        reference_split_sizes = split_sizes[0]
+        if any(value != reference_split_sizes for value in split_sizes[1:]):
+            failures.append(
+                _failure(
+                    "dispatcher_tp_split",
+                    f"MoE call {occurrence} layer={layer!r} has inconsistent "
+                    f"forward split_sizes={split_sizes!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+        experts_routed = call_events[("moe-experts", "E")].attrs.get(
+            "routed_tokens"
+        )
+        combine_tokens = call_events[("moe-combine", "E")].attrs.get(
+            "num_tokens"
+        )
+        if (
+            sum(reference_split_sizes) != experts_routed
+            or reference_split_sizes[expert_tensor_rank] != combine_tokens
+        ):
+            failures.append(
+                _failure(
+                    "dispatcher_tp_split",
+                    f"MoE call {occurrence} layer={layer!r} split_sizes="
+                    f"{reference_split_sizes!r} must sum to Experts routed_tokens="
+                    f"{experts_routed!r} and select Combine num_tokens="
+                    f"{combine_tokens!r} at ETP rank {expert_tensor_rank}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+    return failures
+
+
 def _validate_tp_iteration(
     iteration: Iteration,
     *,
     rank: int,
-    topology: _ETP1Topology,
+    topology: _DeepSeekTopology,
 ) -> list[Failure]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_scopes(
@@ -736,10 +974,15 @@ def _validate_tp_iteration(
     required_model_tp_collectives = _REQUIRED_MODEL_TP_COLLECTIVES
     if pipeline_rank == PIPELINE_MODEL_PARALLEL_SIZE - 1:
         required_model_tp_collectives |= {"tp-all-gather-last"}
-    ep_group = topology.ep_group(rank)
-    ep_peers = [ep_rank for ep_rank in ep_group if ep_rank != rank]
+    tp_ep_group = topology.tp_ep_group(rank)
+    tp_ep_peers = [group_rank for group_rank in tp_ep_group if group_rank != rank]
+    expert_tp_group = topology.expert_tensor_parallel_group(rank)
+    expert_tp_peers = [
+        group_rank for group_rank in expert_tp_group if group_rank != rank
+    ]
     model_tp_observed: set[str] = set()
-    ep_metadata_gather_observed = False
+    ep_metadata_gather_count = 0
+    dispatcher_tp_counts: Counter[str] = Counter()
     for name, expected_fields in _TP_COLLECTIVES.items():
         for span in spans.get(name, ()):
             for field_name, expected in expected_fields.items():
@@ -769,25 +1012,71 @@ def _validate_tp_iteration(
                 )
             group_size = span.begin.attrs.get("group_size")
             group = span.end.attrs.get("group")
-            if group_size == TENSOR_MODEL_PARALLEL_SIZE and group == [peer]:
+            has_split_sizes = "split_sizes" in span.begin.attrs
+            if topology.expert_tensor_parallel_size > 1 and has_split_sizes:
+                split_sizes = span.begin.attrs.get("split_sizes")
+                valid_split_sizes = _valid_split_sizes(
+                    split_sizes, topology.expert_tensor_parallel_size
+                )
+                if not valid_split_sizes:
+                    failures.append(
+                        _failure(
+                            "dispatcher_tp_field",
+                            f"event {name!r} has split_sizes={split_sizes!r}; "
+                            f"expected {topology.expert_tensor_parallel_size} "
+                            "non-negative integer sizes",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                valid_dispatcher_group = (
+                    name in ("tp-all-gather-first", "tp-reduce-scatter")
+                    and group_size == topology.expert_tensor_parallel_size
+                    and group == expert_tp_peers
+                )
+                if not valid_dispatcher_group:
+                    failures.append(
+                        _failure(
+                            "dispatcher_tp_group",
+                            f"event {name!r} with split_sizes has "
+                            f"group_size={group_size!r} and peer group={group!r}; "
+                            f"expected dispatcher ETP"
+                            f"{topology.expert_tensor_parallel_size} "
+                            f"{expert_tp_peers!r}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+                elif valid_split_sizes:
+                    dispatcher_tp_counts[name] += 1
+            elif group_size == TENSOR_MODEL_PARALLEL_SIZE and group == [peer]:
                 model_tp_observed.add(name)
             elif (
                 name == "tp-all-gather-first"
-                and group_size == EXPERT_MODEL_PARALLEL_SIZE
-                and group == ep_peers
+                and group_size == topology.tp_ep_size
+                and group == tp_ep_peers
             ):
-                ep_metadata_gather_observed = True
+                ep_metadata_gather_count += 1
             else:
                 failures.append(
                     _failure(
                         "tp_collective_group",
                         f"event {name!r} has group_size={group_size!r} and peer "
                         f"group={group!r}; expected model TP2 {[peer]!r} or the "
-                        f"EP4 metadata gather {ep_peers!r}",
+                        f"ETP{topology.expert_tensor_parallel_size}xEP4 metadata "
+                        f"gather {tp_ep_peers!r}",
                         rank=rank,
                         iteration=iteration_id,
                     )
                 )
+    failures.extend(
+        _validate_moe_tp_positions(
+            iteration,
+            spans,
+            rank=rank,
+            topology=topology,
+        )
+    )
     for required in sorted(required_model_tp_collectives - model_tp_observed):
         failures.append(
             _failure(
@@ -806,15 +1095,36 @@ def _validate_tp_iteration(
                 iteration=iteration_id,
             )
         )
-    if not ep_metadata_gather_observed:
+    moe_calls = topology.microbatches_per_iteration * (
+        len(_MAIN_LAYERS[pipeline_rank]) + len(_MTP_LAYERS[pipeline_rank])
+    )
+    if ep_metadata_gather_count != moe_calls:
         failures.append(
             _failure(
                 "tp_collective_count",
-                "tp-all-gather-first has no complete EP4 metadata span",
+                "tp-all-gather-first has "
+                f"{ep_metadata_gather_count} complete "
+                f"ETP{topology.expert_tensor_parallel_size}xEP4 metadata spans, "
+                f"expected {moe_calls}",
                 rank=rank,
                 iteration=iteration_id,
             )
         )
+    if topology.expert_tensor_parallel_size > 1:
+        expected_dispatcher_count = 3 * moe_calls
+        for name in ("tp-all-gather-first", "tp-reduce-scatter"):
+            observed_count = dispatcher_tp_counts[name]
+            if observed_count != expected_dispatcher_count:
+                failures.append(
+                    _failure(
+                        "dispatcher_tp_count",
+                        f"event {name!r} has {observed_count} complete ETP2 spans "
+                        f"with split_sizes, expected {expected_dispatcher_count} "
+                        f"for {moe_calls} MoE calls",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
     allreduce_spans, allreduce_failures = _pair_scopes(
         iteration,
         ("tp-allreduce",),
@@ -930,7 +1240,7 @@ def _collect_workloads(
     iteration: Iteration,
     *,
     rank: int,
-) -> Mapping[tuple[int, int], tuple[int, int]]:
+) -> Mapping[tuple[int, int], _Workload]:
     spans, failures = _pair_scopes(
         iteration,
         _MODEL_SCOPE_NAMES,
@@ -939,21 +1249,49 @@ def _collect_workloads(
     )
     if failures:
         return {}
-    workloads: dict[tuple[int, int], dict[str, int]] = defaultdict(dict)
+    workloads: dict[tuple[int, int], dict[str, object]] = defaultdict(dict)
     duplicates: set[tuple[int, int]] = set()
     forwards = sorted(spans.get("forward-step", ()), key=lambda span: span.begin_index)
     for microbatch, forward in enumerate(forwards):
         for event in iteration.events[forward.begin_index + 1 : forward.end_index]:
-            if event.ph != "E" or event.name not in ("moe-router", "moe-experts"):
+            if event.ph != "E" or event.name not in (
+                "moe-router",
+                "moe-experts",
+                "moe-combine",
+            ):
                 continue
             layer = event.attrs.get("layer")
-            value = event.attrs.get("routed_tokens")
+            if not isinstance(layer, int) or isinstance(layer, bool):
+                continue
+            if event.name == "moe-combine":
+                value: object = event.attrs.get("num_tokens")
+            elif event.name == "moe-experts":
+                routed_tokens = event.attrs.get("routed_tokens")
+                tokens_per_expert = event.attrs.get("tokens_per_expert")
+                if not (
+                    isinstance(routed_tokens, int)
+                    and not isinstance(routed_tokens, bool)
+                    and routed_tokens >= 0
+                    and isinstance(tokens_per_expert, list)
+                    and len(tokens_per_expert) == 16
+                    and all(
+                        isinstance(count, int)
+                        and not isinstance(count, bool)
+                        and count >= 0
+                        for count in tokens_per_expert
+                    )
+                ):
+                    continue
+                value = (routed_tokens, tuple(tokens_per_expert))
+            else:
+                value = event.attrs.get("routed_tokens")
             if (
-                not isinstance(layer, int)
-                or isinstance(layer, bool)
-                or not isinstance(value, int)
-                or isinstance(value, bool)
-                or value < 0
+                event.name != "moe-experts"
+                and (
+                    not isinstance(value, int)
+                    or isinstance(value, bool)
+                    or value < 0
+                )
             ):
                 continue
             key = (microbatch, layer)
@@ -961,21 +1299,43 @@ def _collect_workloads(
                 duplicates.add(key)
             else:
                 workloads[key][event.name] = value
-    return {
-        key: (values["moe-router"], values["moe-experts"])
-        for key, values in workloads.items()
-        if key not in duplicates
-        and "moe-router" in values
-        and "moe-experts" in values
-    }
+    result: dict[tuple[int, int], _Workload] = {}
+    for key, values in workloads.items():
+        if key in duplicates or not {
+            "moe-router",
+            "moe-experts",
+            "moe-combine",
+        } <= values.keys():
+            continue
+        router_routed = values["moe-router"]
+        experts = values["moe-experts"]
+        combine_tokens = values["moe-combine"]
+        if not (
+            isinstance(router_routed, int)
+            and not isinstance(router_routed, bool)
+            and isinstance(experts, tuple)
+            and len(experts) == 2
+            and isinstance(experts[0], int)
+            and isinstance(experts[1], tuple)
+            and isinstance(combine_tokens, int)
+            and not isinstance(combine_tokens, bool)
+        ):
+            continue
+        result[key] = _Workload(
+            router_routed_tokens=router_routed,
+            experts_routed_tokens=experts[0],
+            combine_tokens=combine_tokens,
+            tokens_per_expert=experts[1],
+        )
+    return result
 
 
 def _validate_ep_conservation(
     by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
     *,
-    topology: _ETP1Topology,
+    topology: _DeepSeekTopology,
 ) -> list[Failure]:
-    workloads: dict[tuple[int, int], Mapping[tuple[int, int], tuple[int, int]]] = {}
+    workloads: dict[tuple[int, int], Mapping[tuple[int, int], _Workload]] = {}
     for rank, (_shard, iterations) in by_rank.items():
         for iteration in iterations:
             workloads[(rank, int(iteration.iteration_id))] = _collect_workloads(
@@ -987,47 +1347,117 @@ def _validate_ep_conservation(
         expected_layers = _MAIN_LAYERS[pipeline_rank] + _MTP_LAYERS[pipeline_rank]
         stage_base = pipeline_rank * topology.stage_size
         for expert_data_rank in range(topology.expert_data_parallel_size):
-            group_base = stage_base + expert_data_rank * EXPERT_MODEL_PARALLEL_SIZE
-            group = tuple(
-                range(group_base, group_base + EXPERT_MODEL_PARALLEL_SIZE)
-            )
+            group_base = stage_base + expert_data_rank * topology.tp_ep_size
+            group = tuple(range(group_base, group_base + topology.tp_ep_size))
             for iteration in _ITERATIONS:
                 for microbatch in range(topology.microbatches_per_iteration):
                     for layer in expected_layers:
-                        values = [
-                            workloads.get((rank, iteration), {}).get(
+                        by_group_rank = {
+                            rank: workloads.get((rank, iteration), {}).get(
                                 (microbatch, layer)
                             )
                             for rank in group
-                        ]
-                        if any(value is None for value in values):
+                        }
+                        if any(value is None for value in by_group_rank.values()):
                             continue
+                        complete = {
+                            rank: value
+                            for rank, value in by_group_rank.items()
+                            if value is not None
+                        }
                         router_total = sum(
-                            value[0] for value in values if value is not None
+                            value.router_routed_tokens for value in complete.values()
                         )
-                        experts_total = sum(
-                            value[1] for value in values if value is not None
+                        for expert_tensor_rank in range(
+                            topology.expert_tensor_parallel_size
+                        ):
+                            ep_slice = topology.expert_model_parallel_group(
+                                group_base + expert_tensor_rank
+                            )
+                            experts_total = sum(
+                                complete[rank].experts_routed_tokens
+                                for rank in ep_slice
+                            )
+                            if router_total != experts_total:
+                                failures.append(
+                                    _failure(
+                                        "ep_conservation",
+                                        f"ETP{topology.expert_tensor_parallel_size}xEP4 "
+                                        f"group {group} ETP slice {ep_slice} layer={layer} "
+                                        f"Router total={router_total}, Experts total="
+                                        f"{experts_total}",
+                                        rank=ep_slice[0],
+                                        iteration=iteration,
+                                        microbatch=microbatch,
+                                    )
+                                )
+                        if topology.expert_tensor_parallel_size == 1:
+                            continue
+                        combine_total = sum(
+                            value.combine_tokens for value in complete.values()
                         )
-                        if router_total != experts_total:
+                        if combine_total != router_total:
                             failures.append(
                                 _failure(
-                                    "ep_conservation",
-                                    f"EP group {group} layer={layer} Router total="
-                                    f"{router_total}, Experts total={experts_total}",
+                                    "combine_conservation",
+                                    f"ETP2xEP4 group {group} layer={layer} Combine "
+                                    f"total={combine_total}, Router total={router_total}",
                                     rank=group[0],
                                     iteration=iteration,
                                     microbatch=microbatch,
                                 )
                             )
+                        for expert_rank in range(EXPERT_MODEL_PARALLEL_SIZE):
+                            etp_group = tuple(
+                                group_base
+                                + expert_rank * topology.expert_tensor_parallel_size
+                                + expert_tensor_rank
+                                for expert_tensor_rank in range(
+                                    topology.expert_tensor_parallel_size
+                                )
+                            )
+                            reference = complete[etp_group[0]]
+                            mismatched = [
+                                rank
+                                for rank in etp_group[1:]
+                                if complete[rank].tokens_per_expert
+                                != reference.tokens_per_expert
+                            ]
+                            if mismatched:
+                                failures.append(
+                                    _failure(
+                                        "etp_workload",
+                                        f"ETP group {etp_group} layer={layer} has "
+                                        "different tokens_per_expert values",
+                                        rank=mismatched[0],
+                                        iteration=iteration,
+                                        microbatch=microbatch,
+                                    )
+                                )
+                            etp_combine_total = sum(
+                                complete[rank].combine_tokens for rank in etp_group
+                            )
+                            if etp_combine_total != reference.experts_routed_tokens:
+                                failures.append(
+                                    _failure(
+                                        "etp_combine_conservation",
+                                        f"ETP group {etp_group} layer={layer} Combine "
+                                        f"total={etp_combine_total}, Experts routed="
+                                        f"{reference.experts_routed_tokens}",
+                                        rank=etp_group[0],
+                                        iteration=iteration,
+                                        microbatch=microbatch,
+                                    )
+                                )
     return failures
 
 
 def _validate_d1_dp_groups(
     by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
     *,
-    topology: _ETP1Topology,
+    topology: _DeepSeekTopology,
 ) -> list[Failure]:
-    """Require D1 DistOpt events to expose the model-DP4 and expert-DP2 groups."""
+    """Require D1 DistOpt events to expose model-DP and expert-DP groups."""
 
     failures: list[Failure] = []
     expected_roles = frozenset(("model-dp", "expert-dp"))
@@ -1041,6 +1471,9 @@ def _validate_d1_dp_groups(
         }
         for iteration in iterations:
             iteration_id = int(iteration.iteration_id)
+            iteration_roles: dict[str, set[str]] = {
+                name: set() for name in _DP_GROUP_ROUTES
+            }
             spans, pairing_failures = _pair_scopes(
                 iteration,
                 _DP_GROUP_ROUTES,
@@ -1063,14 +1496,16 @@ def _validate_d1_dp_groups(
                             _failure(
                                 "dp_group",
                                 f"event {name!r} has group_size={group_size!r} and "
-                                f"peer group={peers!r}; expected model-DP4 or "
-                                "expert-DP2 membership",
+                                f"peer group={peers!r}; expected model-DP"
+                                f"{topology.model_data_parallel_size} or expert-DP"
+                                f"{topology.expert_data_parallel_size} membership",
                                 rank=rank,
                                 iteration=iteration_id,
                             )
                         )
                         continue
                     observed_roles[name].add(matched_role)
+                    iteration_roles[name].add(matched_role)
                     expected_fields = {
                         "group_role": "intra_optimizer_instance",
                         "op": expected_op,
@@ -1103,7 +1538,21 @@ def _validate_d1_dp_groups(
                                     iteration=iteration_id,
                                 )
                             )
+            reduce_scatter_roles = iteration_roles["dp-reduce-scatter"]
+            if reduce_scatter_roles != expected_roles:
+                failures.append(
+                    _failure(
+                        "dp_group_count",
+                        "event 'dp-reduce-scatter' covers "
+                        f"{sorted(reduce_scatter_roles)!r}, expected "
+                        f"{sorted(expected_roles)!r} in this iteration",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
         for name, roles in observed_roles.items():
+            if name == "dp-reduce-scatter":
+                continue
             if roles != expected_roles:
                 failures.append(
                     _failure(
@@ -1120,7 +1569,7 @@ def _validate_d1_dp_groups(
 def _validate_trace(
     trace_root: Path,
     *,
-    topology: _ETP1Topology,
+    topology: _DeepSeekTopology,
     require_d1_dp_groups: bool = False,
 ) -> tuple[Failure, ...]:
     by_rank = _load_iterations(trace_root)
@@ -1212,7 +1661,26 @@ def validate_deepseek_d1_tp2_sp_etp1_trace(
     )
 
 
+def validate_deepseek_d1_tp2_sp_etp2_trace(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the D1 TP2/PP2/DP4/EP4/ETP2/expert-DP1 trace."""
+
+    return (
+        *_validate_trace(
+            trace_root,
+            topology=_D1_ETP2_TOPOLOGY,
+            require_d1_dp_groups=True,
+        ),
+        *dp_probe_contract.validate_dp_distopt_overlap(trace_root),
+    )
+
+
 __all__ = [
+    "D1_ETP2_EXPERT_DATA_PARALLEL_SIZE",
+    "D1_ETP2_MICROBATCHES_PER_ITERATION",
+    "D1_ETP2_MODEL_DATA_PARALLEL_SIZE",
+    "D1_ETP2_WORLD_SIZE",
     "D1_EXPERT_DATA_PARALLEL_SIZE",
     "D1_MICROBATCHES_PER_ITERATION",
     "D1_MODEL_DATA_PARALLEL_SIZE",
@@ -1227,5 +1695,6 @@ __all__ = [
     "TENSOR_MODEL_PARALLEL_SIZE",
     "WORLD_SIZE",
     "validate_deepseek_d1_tp2_sp_etp1_trace",
+    "validate_deepseek_d1_tp2_sp_etp2_trace",
     "validate_deepseek_tp2_sp_trace",
 ]
