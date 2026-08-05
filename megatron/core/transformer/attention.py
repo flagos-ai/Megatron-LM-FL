@@ -353,6 +353,9 @@ class Attention(MegatronModule, ABC):
             pg_collection=self.pg_collection,
         )
 
+        # Cache for FSA window sizes (computed once on first call)
+        self._fsa_cached_window_sizes = None
+
         self.checkpoint_core_attention = (
             self.config.recompute_granularity == 'selective'
             and "core_attn" in self.config.recompute_modules
@@ -994,18 +997,21 @@ class Attention(MegatronModule, ABC):
                 f"({self.num_query_groups_per_partition})"
             )
 
-            # Compute TP-aware window sizes
-            seqlen_k = key.shape[1]
-            local_window_sizes = window_sizes_heuristic(
-                seqlen_k=seqlen_k,
-                num_heads_kv=num_kv_heads,
-                device=torch.cuda.current_device(),
-                equal_bandwidth=True,
-                # window_dist=1024, # use default values
-                # window_sink=64, # use default values
-                num_heads_kv_global=global_num_kv_heads,
-                tp_rank=tp_rank,
-            )
+            # Compute TP-aware window sizes (cached after first call)
+            if self._fsa_cached_window_sizes is None:
+                seqlen_k = key.shape[1]
+                self._fsa_cached_window_sizes = window_sizes_heuristic(
+                    seqlen_k=seqlen_k,
+                    num_heads_kv=num_kv_heads,
+                    device=torch.cuda.current_device(),
+                    equal_bandwidth=True,
+                    # window_dist=1024, # use default values
+                    # window_sink=64, # use default values
+                    num_heads_kv_global=global_num_kv_heads,
+                    tp_rank=tp_rank,
+                    tp_size=tp_size,
+                )
+            local_window_sizes = self._fsa_cached_window_sizes
 
             output = flash_sparse_attn_func(
                 query,
