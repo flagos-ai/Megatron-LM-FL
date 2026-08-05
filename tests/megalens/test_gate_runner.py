@@ -58,6 +58,7 @@ def test_cpu_profile_wires_static_contract_before_cpu_tests() -> None:
         "tests/megalens/test_moe_flex_hybridep_probe_contract.py",
         "tests/megalens/test_moe_recompute_fp8_probe_contract.py",
         "tests/megalens/test_deepseek_d0_probe_contract.py",
+        "tests/megalens/test_deepseek_d2_ep8_config.py",
         "tests/megalens/test_deepseek_tp2_sp_run_gate.py",
         "tests/megalens/test_deepseek_d1_tp2_sp_probe_contract.py",
         "tests/megalens/test_moe_shared_expert_overlap_probe_contract.py",
