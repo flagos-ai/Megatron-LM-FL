@@ -802,3 +802,38 @@ def test_qwen3_tp4_sp_contract_rejects_a_tp2_collective_group(
     assert "trace.tp.collective_field" in {
         failure.code for failure in failures
     }
+
+
+def test_qwen3_tp8_sp_contract_accepts_the_full_tp_group(
+    tmp_path: Path,
+) -> None:
+    for rank in range(8):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=8,
+            include_last_dim_collectives=False,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    assert tp_probe_contract.validate_qwen3_tp8_sp_profile(tmp_path) == ()
+
+
+def test_qwen3_tp8_sp_contract_rejects_last_dimension_gqa_collectives(
+    tmp_path: Path,
+) -> None:
+    for rank in range(8):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=8,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_qwen3_tp8_sp_profile(tmp_path)
+
+    assert "trace.tp.collective_count" in {
+        failure.code for failure in failures
+    }

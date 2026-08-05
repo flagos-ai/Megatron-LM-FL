@@ -420,6 +420,12 @@ def validate_qwen3_tp4_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
     return _validate_qwen3_tp_eager_phases(trace_root, tensor_parallel_size=4)
 
 
+def validate_qwen3_tp8_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate one full 28-layer Qwen3 stage on all TP8 ranks."""
+
+    return _validate_qwen3_tp_eager_phases(trace_root, tensor_parallel_size=8)
+
+
 def validate_gpt_cp_dp1_eager_phases(
     trace_root: Path, *, context_parallel_size: int
 ) -> tuple[Failure, ...]:

@@ -116,6 +116,7 @@ def _qwen3_tp_sp_arguments(tensor_parallel_size: int) -> tuple[tuple[str, str], 
 
 _QWEN3_TP2_SP_ARGUMENTS = _qwen3_tp_sp_arguments(2)
 _QWEN3_TP4_SP_ARGUMENTS = _qwen3_tp_sp_arguments(4)
+_QWEN3_TP8_SP_ARGUMENTS = _qwen3_tp_sp_arguments(8)
 
 
 def _validate_two_iteration_qwen3_tp_sp_checkpoint(
@@ -173,6 +174,18 @@ def validate_two_iteration_qwen3_tp4_sp_checkpoint(
         run_root,
         trace_enabled,
         arguments=_QWEN3_TP4_SP_ARGUMENTS,
+    )
+
+
+def validate_two_iteration_qwen3_tp8_sp_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the parsed Qwen3 TP8/SP L3 configuration."""
+
+    return _validate_two_iteration_qwen3_tp_sp_checkpoint(
+        run_root,
+        trace_enabled,
+        arguments=_QWEN3_TP8_SP_ARGUMENTS,
     )
 
 

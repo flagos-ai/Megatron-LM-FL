@@ -1007,6 +1007,16 @@ def validate_qwen3_tp4_sp_collective_hierarchy(
     )
 
 
+def validate_qwen3_tp8_sp_collective_hierarchy(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP8."""
+
+    return _validate_qwen3_tp_sp_collective_hierarchy(
+        trace_root, tensor_parallel_size=8
+    )
+
+
 def _validate_tp_linear_lifecycle(
     trace_root: Path,
     *,
@@ -1123,6 +1133,16 @@ def validate_qwen3_tp4_sp_linear_lifecycle(
 
     return _validate_qwen3_tp_sp_linear_lifecycle(
         trace_root, tensor_parallel_size=4
+    )
+
+
+def validate_qwen3_tp8_sp_linear_lifecycle(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP8/SP."""
+
+    return _validate_qwen3_tp_sp_linear_lifecycle(
+        trace_root, tensor_parallel_size=8
     )
 
 
@@ -1409,6 +1429,12 @@ def validate_qwen3_tp4_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
     """Validate the fixed Qwen3-0.6B TP4/SP communication boundary."""
 
     return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=4)
+
+
+def validate_qwen3_tp8_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the fixed Qwen3-0.6B TP8/SP communication boundary."""
+
+    return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=8)
 
 
 def _validate_tp2_ep4_flex_iteration(
