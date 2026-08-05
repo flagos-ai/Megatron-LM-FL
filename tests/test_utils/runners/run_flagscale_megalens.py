@@ -222,7 +222,7 @@ _TP2_SP_TE_OP_FUSER_EVENTS = (
         "_forward_mlp",
     ),
 )
-_QWEN3_TP2_SP_EVENTS = (
+_QWEN3_TP_SP_EVENTS = (
     *_events(
         "forward-step",
         "decoder",
@@ -574,12 +574,22 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "qwen3-enron-tp2-sp": manifest.TraceProfile(
         "qwen3-enron-tp2-sp",
         2,
-        _QWEN3_TP2_SP_EVENTS,
+        _QWEN3_TP_SP_EVENTS,
         _contracts(
             gpt_probe_contract.validate_qwen3_tp2_eager_phases,
             tp_probe_contract.validate_qwen3_tp2_sp_profile,
         ),
         training_run_contract.validate_two_iteration_qwen3_tp2_sp_checkpoint,
+    ),
+    "qwen3-enron-tp4-sp": manifest.TraceProfile(
+        "qwen3-enron-tp4-sp",
+        4,
+        _QWEN3_TP_SP_EVENTS,
+        _contracts(
+            gpt_probe_contract.validate_qwen3_tp4_eager_phases,
+            tp_probe_contract.validate_qwen3_tp4_sp_profile,
+        ),
+        training_run_contract.validate_two_iteration_qwen3_tp4_sp_checkpoint,
     ),
     "tp2-local-allreduce": manifest.TraceProfile(
         "tp2-local-allreduce",
@@ -1028,6 +1038,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_tp2_sp_te_userbuffer_smoke": "tp2-sp-te-userbuffer",
     "flagscale_single_node_tp2_sp_te_op_fuser_smoke": "tp2-sp-te-op-fuser",
     "flagscale_single_node_qwen3_enron_tp2_sp": "qwen3-enron-tp2-sp",
+    "flagscale_single_node_qwen3_enron_tp4_sp": "qwen3-enron-tp4-sp",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
     "flagscale_single_node_pp2_smoke": "pp2",
@@ -1444,7 +1455,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     profile = _profile_from_arguments(args)
     qwen3_data_prefix = None
     qwen3_tokenizer_root = None
-    if profile.name == "qwen3-enron-tp2-sp":
+    if profile.name in {"qwen3-enron-tp2-sp", "qwen3-enron-tp4-sp"}:
         if args.qwen3_data_prefix is None:
             parser.error("--qwen3-data-prefix is required for the Qwen3 profile")
         if args.qwen3_tokenizer_root is None:

@@ -239,6 +239,7 @@ def _validate_collective_span(
     *,
     rank: int,
     iteration: int,
+    tensor_parallel_size: int,
 ) -> list[Failure]:
     expected = _COLLECTIVE_SPECS[span.begin.name]
     failures = [
@@ -273,21 +274,25 @@ def _validate_collective_span(
                 iteration=iteration,
             )
         )
-    if group_size != 2:
+    if group_size != tensor_parallel_size:
         failures.append(
             _failure(
                 "trace.tp.collective_field",
-                f"event {span.begin.name!r} has group_size={group_size!r}, expected 2",
+                f"event {span.begin.name!r} has group_size={group_size!r}, "
+                f"expected {tensor_parallel_size}",
                 rank=rank,
                 iteration=iteration,
             )
         )
-    if group != [1 - rank]:
+    expected_peers = [
+        peer for peer in range(tensor_parallel_size) if peer != rank
+    ]
+    if group != expected_peers:
         failures.append(
             _failure(
                 "trace.tp.collective_field",
                 f"event {span.begin.name!r} has peer group={group!r}, "
-                f"expected {[1 - rank]!r}",
+                f"expected {expected_peers!r}",
                 rank=rank,
                 iteration=iteration,
             )
@@ -322,6 +327,7 @@ def _validate_collective_hierarchy(
     required_names: frozenset[str],
     forbidden_names: frozenset[str] = frozenset(),
     expected_counts: Mapping[str, int] | None = None,
+    tensor_parallel_size: int = 2,
 ) -> list[Failure]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _COLLECTIVE_SPECS, rank=rank)
@@ -365,6 +371,7 @@ def _validate_collective_hierarchy(
                     span,
                     rank=rank,
                     iteration=iteration_id,
+                    tensor_parallel_size=tensor_parallel_size,
                 )
             )
 
@@ -414,6 +421,7 @@ def _validate_linear_lifecycle(
     *,
     rank: int,
     expected_routes: frozenset[str],
+    tensor_parallel_size: int,
 ) -> tuple[list[Failure], set[str]]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _LINEAR_EVENTS, rank=rank)
@@ -492,11 +500,12 @@ def _validate_linear_lifecycle(
                     iteration=iteration_id,
                 )
             )
-        if begin.attrs.get("group_size") != 2:
+        if begin.attrs.get("group_size") != tensor_parallel_size:
             failures.append(
                 _failure(
                     "trace.tp_linear.field",
-                    f"linear launch has group_size={begin.attrs.get('group_size')!r}",
+                    f"linear launch has group_size={begin.attrs.get('group_size')!r}, "
+                    f"expected {tensor_parallel_size}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -633,7 +642,7 @@ def _validate_final_grad_sync(
     rank: int,
     schedule: str,
     expect_sp_layernorm: bool,
-    tp_peer: int,
+    tp_peers: Sequence[int],
     embedding_peer: int | None,
 ) -> tuple[list[Failure], int | None, int | None]:
     iteration_id = int(iteration.iteration_id)
@@ -720,7 +729,7 @@ def _validate_final_grad_sync(
             _field_failures(
                 layernorm.begin,
                 {
-                    "group_size": 2,
+                    "group_size": len(tp_peers) + 1,
                     "reduce_op": "SUM",
                     "grad_bucket": "sum",
                 },
@@ -754,12 +763,13 @@ def _validate_final_grad_sync(
                     iteration=iteration_id,
                 )
             )
-        if layernorm.end.attrs.get("group") != [tp_peer]:
+        if layernorm.end.attrs.get("group") != list(tp_peers):
             failures.append(
                 _failure(
                     "trace.tp.final_sync_field",
                     f"sp-layernorm-allreduce has peer group="
-                    f"{layernorm.end.attrs.get('group')!r}, expected {[tp_peer]!r}",
+                    f"{layernorm.end.attrs.get('group')!r}, "
+                    f"expected {list(tp_peers)!r}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -873,9 +883,10 @@ def _validate_final_grad_sync(
     return failures, data_bytes, embedding_bytes
 
 
-def _validate_tp2_gqa_collective_hierarchy(
+def _validate_tp_gqa_collective_hierarchy(
     trace_root: Path,
     *,
+    tensor_parallel_size: int,
     required_names: frozenset[str],
     forbidden_names: frozenset[str],
     profile_name: str,
@@ -883,16 +894,18 @@ def _validate_tp2_gqa_collective_hierarchy(
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
-    if tuple(sorted(by_rank)) != (0, 1):
+    expected_ranks = tuple(range(tensor_parallel_size))
+    if tuple(sorted(by_rank)) != expected_ranks:
         failures.append(
             Failure(
                 "trace.tp.ranks",
-                f"TP2 contract expects ranks [0, 1], observed {sorted(by_rank)}",
+                f"TP{tensor_parallel_size} contract expects ranks "
+                f"{list(expected_ranks)}, observed {sorted(by_rank)}",
                 profile_name,
             )
         )
 
-    for rank in (0, 1):
+    for rank in expected_ranks:
         iterations = by_rank.get(rank, ())
         iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
         if iteration_ids != (1, 2):
@@ -926,6 +939,7 @@ def _validate_tp2_gqa_collective_hierarchy(
                     required_names=required_names,
                     forbidden_names=forbidden_names,
                     expected_counts=expected_counts,
+                    tensor_parallel_size=tensor_parallel_size,
                 )
             )
     return tuple(failures)
@@ -934,8 +948,9 @@ def _validate_tp2_gqa_collective_hierarchy(
 def validate_tp2_gqa_collective_hierarchy(
     trace_root: Path,
 ) -> tuple[Failure, ...]:
-    return _validate_tp2_gqa_collective_hierarchy(
+    return _validate_tp_gqa_collective_hierarchy(
         trace_root,
+        tensor_parallel_size=2,
         required_names=_SP_GQA_COLLECTIVES,
         forbidden_names=frozenset(),
         profile_name="tp2-gqa-sp",
@@ -945,24 +960,24 @@ def validate_tp2_gqa_collective_hierarchy(
 def validate_tp2_gqa_no_sp_collective_hierarchy(
     trace_root: Path,
 ) -> tuple[Failure, ...]:
-    return _validate_tp2_gqa_collective_hierarchy(
+    return _validate_tp_gqa_collective_hierarchy(
         trace_root,
+        tensor_parallel_size=2,
         required_names=_NO_SP_GQA_COLLECTIVES,
         forbidden_names=frozenset(("tp-all-gather-first",)),
         profile_name="tp2-gqa-no-sp",
     )
 
 
-def validate_qwen3_tp2_sp_collective_hierarchy(
-    trace_root: Path,
+def _validate_qwen3_tp_sp_collective_hierarchy(
+    trace_root: Path, *, tensor_parallel_size: int
 ) -> tuple[Failure, ...]:
-    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP2."""
-
-    return _validate_tp2_gqa_collective_hierarchy(
+    return _validate_tp_gqa_collective_hierarchy(
         trace_root,
+        tensor_parallel_size=tensor_parallel_size,
         required_names=_QWEN3_SP_COLLECTIVES,
         forbidden_names=_QWEN3_FORBIDDEN_LAST_DIM_COLLECTIVES,
-        profile_name="qwen3-tp2-sp",
+        profile_name=f"qwen3-tp{tensor_parallel_size}-sp",
         expected_counts={
             "tp-all-gather-first": 2,
             "tp-all-gather-last": 0,
@@ -972,25 +987,48 @@ def validate_qwen3_tp2_sp_collective_hierarchy(
     )
 
 
-def _validate_tp2_linear_lifecycle(
+def validate_qwen3_tp2_sp_collective_hierarchy(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP2."""
+
+    return _validate_qwen3_tp_sp_collective_hierarchy(
+        trace_root, tensor_parallel_size=2
+    )
+
+
+def validate_qwen3_tp4_sp_collective_hierarchy(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP4."""
+
+    return _validate_qwen3_tp_sp_collective_hierarchy(
+        trace_root, tensor_parallel_size=4
+    )
+
+
+def _validate_tp_linear_lifecycle(
     trace_root: Path,
     *,
+    tensor_parallel_size: int,
     expected_routes: frozenset[str],
     profile_name: str,
     expected_operation_count: int | None = None,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
-    if tuple(sorted(by_rank)) != (0, 1):
+    expected_ranks = tuple(range(tensor_parallel_size))
+    if tuple(sorted(by_rank)) != expected_ranks:
         failures.append(
             Failure(
                 "trace.tp_linear.ranks",
-                f"TP2 linear contract expects ranks [0, 1], observed {sorted(by_rank)}",
+                f"TP{tensor_parallel_size} linear contract expects ranks "
+                f"{list(expected_ranks)}, observed {sorted(by_rank)}",
                 profile_name,
             )
         )
 
-    for rank in (0, 1):
+    for rank in expected_ranks:
         iterations = by_rank.get(rank, ())
         iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
         if iteration_ids != (1, 2):
@@ -1008,6 +1046,7 @@ def _validate_tp2_linear_lifecycle(
                 iteration,
                 rank=rank,
                 expected_routes=expected_routes,
+                tensor_parallel_size=tensor_parallel_size,
             )
             failures.extend(iteration_failures)
             if (
@@ -1038,18 +1077,32 @@ def _validate_tp2_linear_lifecycle(
 
 
 def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate_tp2_linear_lifecycle(
+    return _validate_tp_linear_lifecycle(
         trace_root,
+        tensor_parallel_size=2,
         expected_routes=_SP_LINEAR_ROUTES,
         profile_name="tp2-local-sp",
     )
 
 
 def validate_tp2_local_allreduce_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate_tp2_linear_lifecycle(
+    return _validate_tp_linear_lifecycle(
         trace_root,
+        tensor_parallel_size=2,
         expected_routes=_ALLREDUCE_LINEAR_ROUTES,
         profile_name="tp2-local-allreduce",
+    )
+
+
+def _validate_qwen3_tp_sp_linear_lifecycle(
+    trace_root: Path, *, tensor_parallel_size: int
+) -> tuple[Failure, ...]:
+    return _validate_tp_linear_lifecycle(
+        trace_root,
+        tensor_parallel_size=tensor_parallel_size,
+        expected_routes=_SP_LINEAR_ROUTES,
+        profile_name=f"qwen3-tp{tensor_parallel_size}-sp",
+        expected_operation_count=2,
     )
 
 
@@ -1058,15 +1111,24 @@ def validate_qwen3_tp2_sp_linear_lifecycle(
 ) -> tuple[Failure, ...]:
     """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP2/SP."""
 
-    return _validate_tp2_linear_lifecycle(
-        trace_root,
-        expected_routes=_SP_LINEAR_ROUTES,
-        profile_name="qwen3-tp2-sp",
-        expected_operation_count=2,
+    return _validate_qwen3_tp_sp_linear_lifecycle(
+        trace_root, tensor_parallel_size=2
     )
 
 
-def _validate_qwen3_tp2_sp_absences(trace_root: Path) -> tuple[Failure, ...]:
+def validate_qwen3_tp4_sp_linear_lifecycle(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP4/SP."""
+
+    return _validate_qwen3_tp_sp_linear_lifecycle(
+        trace_root, tensor_parallel_size=4
+    )
+
+
+def _validate_qwen3_tp_sp_absences(
+    trace_root: Path, *, tensor_parallel_size: int
+) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     for rank, iterations in _load_iterations(trace_root).items():
         for iteration in iterations:
@@ -1074,7 +1136,8 @@ def _validate_qwen3_tp2_sp_absences(trace_root: Path) -> tuple[Failure, ...]:
                 failures.append(
                     _failure(
                         "trace.tp.collective_count",
-                        "Qwen3 TP2/SP must not use the non-SP TP all-reduce route",
+                        f"Qwen3 TP{tensor_parallel_size}/SP must not use the "
+                        "non-SP TP all-reduce route",
                         rank=rank,
                         iteration=int(iteration.iteration_id),
                     )
@@ -1082,27 +1145,30 @@ def _validate_qwen3_tp2_sp_absences(trace_root: Path) -> tuple[Failure, ...]:
     return tuple(failures)
 
 
-def _validate_tp2_final_grad_sync(
+def _validate_tp_final_grad_sync(
     trace_root: Path,
     *,
+    tensor_parallel_size: int,
     schedule: str,
     expect_sp_layernorm: bool,
     profile_name: str,
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
-    if tuple(sorted(by_rank)) != (0, 1):
+    expected_ranks = tuple(range(tensor_parallel_size))
+    if tuple(sorted(by_rank)) != expected_ranks:
         failures.append(
             Failure(
                 "trace.tp.final_sync_ranks",
-                f"TP2 final-sync contract expects ranks [0, 1], "
+                f"TP{tensor_parallel_size} final-sync contract expects ranks "
+                f"{list(expected_ranks)}, "
                 f"observed {sorted(by_rank)}",
                 profile_name,
             )
         )
 
     bytes_by_iteration: dict[int, dict[int, int]] = defaultdict(dict)
-    for rank in (0, 1):
+    for rank in expected_ranks:
         iterations = by_rank.get(rank, ())
         iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
         if iteration_ids != (1, 2):
@@ -1120,7 +1186,7 @@ def _validate_tp2_final_grad_sync(
                 rank=rank,
                 schedule=schedule,
                 expect_sp_layernorm=expect_sp_layernorm,
-                tp_peer=1 - rank,
+                tp_peers=tuple(peer for peer in expected_ranks if peer != rank),
                 embedding_peer=None,
             )
             failures.extend(iteration_failures)
@@ -1128,7 +1194,7 @@ def _validate_tp2_final_grad_sync(
                 bytes_by_iteration[int(iteration.iteration_id)][rank] = data_bytes
 
     for iteration, rank_bytes in sorted(bytes_by_iteration.items()):
-        if set(rank_bytes) == {0, 1} and len(set(rank_bytes.values())) != 1:
+        if set(rank_bytes) == set(expected_ranks) and len(set(rank_bytes.values())) != 1:
             failures.append(
                 Failure(
                     "trace.tp.final_sync_field",
@@ -1140,8 +1206,9 @@ def _validate_tp2_final_grad_sync(
 
 
 def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate_tp2_final_grad_sync(
+    return _validate_tp_final_grad_sync(
         trace_root,
+        tensor_parallel_size=2,
         schedule="no-pipelining",
         expect_sp_layernorm=True,
         profile_name="tp2-local-sp",
@@ -1149,8 +1216,9 @@ def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
 
 
 def validate_tp2_no_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate_tp2_final_grad_sync(
+    return _validate_tp_final_grad_sync(
         trace_root,
+        tensor_parallel_size=2,
         schedule="no-pipelining",
         expect_sp_layernorm=False,
         profile_name="tp2-local-allreduce",
@@ -1247,7 +1315,7 @@ def validate_tp2_pp2_embedding_final_grad_sync(
                     rank=rank,
                     schedule="non-interleaved-1f1b",
                     expect_sp_layernorm=True,
-                    tp_peer=tp_peer,
+                    tp_peers=(tp_peer,),
                     embedding_peer=embedding_peer,
                 )
             )
@@ -1308,20 +1376,39 @@ def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
+def _validate_qwen3_tp_sp_profile(
+    trace_root: Path, *, tensor_parallel_size: int
+) -> tuple[Failure, ...]:
+    return (
+        *_validate_qwen3_tp_sp_collective_hierarchy(
+            trace_root, tensor_parallel_size=tensor_parallel_size
+        ),
+        *_validate_qwen3_tp_sp_linear_lifecycle(
+            trace_root, tensor_parallel_size=tensor_parallel_size
+        ),
+        *_validate_tp_final_grad_sync(
+            trace_root,
+            tensor_parallel_size=tensor_parallel_size,
+            schedule="no-pipelining",
+            expect_sp_layernorm=True,
+            profile_name=f"qwen3-tp{tensor_parallel_size}-sp",
+        ),
+        *_validate_qwen3_tp_sp_absences(
+            trace_root, tensor_parallel_size=tensor_parallel_size
+        ),
+    )
+
+
 def validate_qwen3_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
     """Validate the fixed Qwen3-0.6B TP2/SP communication boundary."""
 
-    validators = (
-        validate_qwen3_tp2_sp_collective_hierarchy,
-        validate_qwen3_tp2_sp_linear_lifecycle,
-        validate_tp2_sp_final_grad_sync,
-        _validate_qwen3_tp2_sp_absences,
-    )
-    return tuple(
-        failure
-        for validator in validators
-        for failure in validator(trace_root)
-    )
+    return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=2)
+
+
+def validate_qwen3_tp4_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the fixed Qwen3-0.6B TP4/SP communication boundary."""
+
+    return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=4)
 
 
 def _validate_tp2_ep4_flex_iteration(
@@ -1409,6 +1496,7 @@ def _validate_tp2_ep4_flex_iteration(
         iteration,
         rank=rank,
         expected_routes=_SP_LINEAR_ROUTES,
+        tensor_parallel_size=2,
     )
     failures.extend(linear_failures)
     if len(operation_ids) != 2:

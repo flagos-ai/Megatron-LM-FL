@@ -83,8 +83,7 @@ def validate_two_iteration_transformer_engine_checkpoint(
     return tuple(failures)
 
 
-_QWEN3_TP2_SP_ARGUMENTS = (
-    ("tensor_model_parallel_size", "2"),
+_QWEN3_TP_SP_COMMON_ARGUMENTS = (
     ("pipeline_model_parallel_size", "1"),
     ("context_parallel_size", "1"),
     ("sequence_parallel", "True"),
@@ -108,11 +107,23 @@ _QWEN3_TP2_SP_ARGUMENTS = (
 )
 
 
-def validate_two_iteration_qwen3_tp2_sp_checkpoint(
-    run_root: Path, trace_enabled: bool
-) -> tuple[Failure, ...]:
-    """Require terminal state and the parsed Qwen3 TP2/SP L3 configuration."""
+def _qwen3_tp_sp_arguments(tensor_parallel_size: int) -> tuple[tuple[str, str], ...]:
+    return (
+        ("tensor_model_parallel_size", str(tensor_parallel_size)),
+        *_QWEN3_TP_SP_COMMON_ARGUMENTS,
+    )
 
+
+_QWEN3_TP2_SP_ARGUMENTS = _qwen3_tp_sp_arguments(2)
+_QWEN3_TP4_SP_ARGUMENTS = _qwen3_tp_sp_arguments(4)
+
+
+def _validate_two_iteration_qwen3_tp_sp_checkpoint(
+    run_root: Path,
+    trace_enabled: bool,
+    *,
+    arguments: tuple[tuple[str, str], ...],
+) -> tuple[Failure, ...]:
     failures = list(
         validate_two_iteration_transformer_engine_checkpoint(
             run_root, trace_enabled
@@ -124,7 +135,7 @@ def validate_two_iteration_qwen3_tp2_sp_checkpoint(
     except (OSError, UnicodeError):
         return tuple(failures)
 
-    for name, value in _QWEN3_TP2_SP_ARGUMENTS:
+    for name, value in arguments:
         argument = re.compile(
             rf"^\[[^]]+\]:\s*{re.escape(name)}\s+\.+\s+"
             rf"{re.escape(value)}\s*$",
@@ -139,6 +150,30 @@ def validate_two_iteration_qwen3_tp2_sp_checkpoint(
                 )
             )
     return tuple(failures)
+
+
+def validate_two_iteration_qwen3_tp2_sp_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the parsed Qwen3 TP2/SP L3 configuration."""
+
+    return _validate_two_iteration_qwen3_tp_sp_checkpoint(
+        run_root,
+        trace_enabled,
+        arguments=_QWEN3_TP2_SP_ARGUMENTS,
+    )
+
+
+def validate_two_iteration_qwen3_tp4_sp_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the parsed Qwen3 TP4/SP L3 configuration."""
+
+    return _validate_two_iteration_qwen3_tp_sp_checkpoint(
+        run_root,
+        trace_enabled,
+        arguments=_QWEN3_TP4_SP_ARGUMENTS,
+    )
 
 
 def _validate_two_iteration_transformer_engine_cp_checkpoint(

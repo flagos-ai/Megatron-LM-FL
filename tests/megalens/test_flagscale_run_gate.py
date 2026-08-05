@@ -42,6 +42,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_qwen3_enron_tp2_sp.yaml": (
         "qwen3-enron-tp2-sp"
     ),
+    "flagscale_single_node_qwen3_enron_tp4_sp.yaml": (
+        "qwen3-enron-tp4-sp"
+    ),
     "flagscale_single_node_tp2_local_allreduce_smoke.yaml": (
         "tp2-local-allreduce"
     ),
@@ -1352,6 +1355,47 @@ def test_qwen3_training_contract_requires_the_reviewed_model_and_topology(
     }
 
 
+def test_qwen3_tp4_training_contract_requires_tensor_parallel_size_four(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    arguments = (
+        ("transformer_impl", "transformer_engine"),
+        *training_run_contract._QWEN3_TP4_SP_ARGUMENTS,
+    )
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "\n".join(
+            f"[default0]:  {name} ................................ {value}"
+            for name, value in arguments
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        training_run_contract.validate_two_iteration_qwen3_tp4_sp_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        launcher_log.read_text(encoding="utf-8").replace(
+            "tensor_model_parallel_size ................................ 4",
+            "tensor_model_parallel_size ................................ 2",
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_qwen3_tp4_sp_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert "run.training.qwen3_argument" in {
+        failure.code for failure in failures
+    }
+
+
 def test_userbuffer_training_contract_requires_the_parsed_overlap_route(
     tmp_path: Path,
 ) -> None:
@@ -1479,6 +1523,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
         "qwen3-enron-tp2-sp",
+        "qwen3-enron-tp4-sp",
     }
 
     for name, profile in gate.PROFILES.items():
@@ -2060,6 +2105,39 @@ def test_qwen3_enron_tp2_sp_profile_preserves_the_reviewed_l3_boundary() -> None
     }
 
 
+def test_qwen3_enron_tp4_sp_profile_only_scales_tensor_parallelism() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_qwen3_enron_tp2_sp.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    scaled = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_qwen3_enron_tp4_sp.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert scaled["experiment"]["runner"]["nproc_per_node"] == 4
+    assert scaled["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] == "0,1,2,3"
+    assert scaled["train"]["system"]["tensor_model_parallel_size"] == 4
+
+    scaled["experiment"]["exp_name"] = baseline["experiment"]["exp_name"]
+    scaled["experiment"]["runner"]["nproc_per_node"] = 2
+    scaled["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1"
+    scaled["train"]["system"]["tensor_model_parallel_size"] = 2
+    assert scaled == baseline
+
+    profile = gate.PROFILES["qwen3-enron-tp4-sp"]
+    assert profile.rank_count == 4
+    assert profile.events == gate.PROFILES["qwen3-enron-tp2-sp"].events
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_qwen3_tp4_sp_checkpoint
+    )
+    assert gate._CONFIG_PROFILES["flagscale_single_node_qwen3_enron_tp4_sp"] == (
+        "qwen3-enron-tp4-sp"
+    )
+
+
 def test_tp2_local_allreduce_profile_only_disables_sequence_parallel() -> None:
     baseline = yaml.safe_load(
         (
@@ -2235,6 +2313,43 @@ def test_qwen3_tp2_profile_requires_28_eager_layers_on_both_ranks(
     assert [failure.evidence for failure in failures] == [
         "rank=1 iteration=1",
         "rank=1 iteration=2",
+    ]
+
+
+def test_qwen3_tp4_profile_requires_28_eager_layers_on_all_ranks(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "qwen3-tp4"
+    for rank in range(4):
+        _write_gpt_phase_trace(
+            trace_root,
+            rank=rank,
+            pipeline_rank=0,
+            tensor_rank=rank,
+            include_postprocess=True,
+            eager_layers=28,
+        )
+
+    assert gpt_probe_contract.validate_qwen3_tp4_eager_phases(trace_root) == ()
+
+    incomplete_root = tmp_path / "qwen3-tp4-incomplete"
+    for rank in range(4):
+        _write_gpt_phase_trace(
+            incomplete_root,
+            rank=rank,
+            pipeline_rank=0,
+            tensor_rank=rank,
+            include_postprocess=True,
+            eager_layers=27 if rank == 3 else 28,
+        )
+
+    failures = gpt_probe_contract.validate_qwen3_tp4_eager_phases(
+        incomplete_root
+    )
+    assert {failure.code for failure in failures} == {"trace.gpt.eager_layers"}
+    assert [failure.evidence for failure in failures] == [
+        "rank=3 iteration=1",
+        "rank=3 iteration=2",
     ]
 
 

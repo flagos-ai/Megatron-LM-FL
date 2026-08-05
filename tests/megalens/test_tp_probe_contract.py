@@ -12,6 +12,7 @@ def _write_collective_trace(
     trace_root: Path,
     *,
     rank: int,
+    tensor_parallel_size: int = 2,
     pipeline_rank: int = 0,
     tensor_rank: int | None = None,
     tp_peer_rank: int | None = None,
@@ -36,7 +37,11 @@ def _write_collective_trace(
     rows: list[dict[str, object]] = []
     timestamp = 0
     tensor_rank = rank if tensor_rank is None else tensor_rank
-    tp_peer_rank = 1 - rank if tp_peer_rank is None else tp_peer_rank
+    tp_peer_ranks = (
+        [peer for peer in range(tensor_parallel_size) if peer != rank]
+        if tp_peer_rank is None
+        else [tp_peer_rank]
+    )
     embedding_peer_rank = (
         1 - rank if embedding_peer_rank is None else embedding_peer_rank
     )
@@ -58,8 +63,15 @@ def _write_collective_trace(
         )
 
     def collective(name: str, *, op: str, dim: str) -> None:
-        event(name, "B", op=op, dim=dim, data_bytes=32768, group_size=2)
-        event(name, "E", group=[tp_peer_rank])
+        event(
+            name,
+            "B",
+            op=op,
+            dim=dim,
+            data_bytes=32768,
+            group_size=tensor_parallel_size,
+        )
+        event(name, "E", group=tp_peer_ranks)
 
     def linear_lifecycle(
         *,
@@ -78,7 +90,7 @@ def _write_collective_trace(
             "execution_route": "local_linear_direct_async",
             "collective_op": collective_op,
             "data_bytes": 32768,
-            "group_size": 2,
+            "group_size": tensor_parallel_size,
             "launch_site": launch_site,
             "pass_direction": "backward",
             "payload_role": payload_role,
@@ -130,11 +142,11 @@ def _write_collective_trace(
             "sp-layernorm-allreduce",
             "B",
             data_bytes=512,
-            group_size=2,
+            group_size=tensor_parallel_size,
             reduce_op="SUM",
             grad_bucket="sum",
         )
-        event("sp-layernorm-allreduce", "E", group=[tp_peer_rank])
+        event("sp-layernorm-allreduce", "E", group=tp_peer_ranks)
 
     for iteration in (1, 2):
         rows.append(
@@ -177,7 +189,7 @@ def _write_collective_trace(
                 op="all-gather",
                 dim="first",
                 data_bytes=32768,
-                group_size=2,
+                group_size=tensor_parallel_size,
             )
             event(
                 "tp-all-gather-last",
@@ -185,10 +197,10 @@ def _write_collective_trace(
                 op="all-gather",
                 dim="last",
                 data_bytes=32768,
-                group_size=2,
+                group_size=tensor_parallel_size,
             )
-            event("tp-all-gather-first", "E", group=[tp_peer_rank])
-            event("tp-all-gather-last", "E", group=[tp_peer_rank])
+            event("tp-all-gather-first", "E", group=tp_peer_ranks)
+            event("tp-all-gather-last", "E", group=tp_peer_ranks)
         else:
             if include_first_all_gather:
                 collective("tp-all-gather-first", op="all-gather", dim="first")
@@ -202,11 +214,11 @@ def _write_collective_trace(
                 op="reduce-scatter",
                 dim="last",
                 data_bytes=32768,
-                group_size=2,
+                group_size=tensor_parallel_size,
             )
             if not omit_nested_reduce_scatter:
                 collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
-            event("tp-reduce-scatter-last", "E", group=[tp_peer_rank])
+            event("tp-reduce-scatter-last", "E", group=tp_peer_ranks)
         elif not omit_nested_reduce_scatter:
             collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
         if include_linear_lifecycle:
@@ -720,5 +732,73 @@ def test_qwen3_tp2_sp_contract_rejects_last_dimension_gqa_collectives(
     failures = tp_probe_contract.validate_qwen3_tp2_sp_profile(tmp_path)
 
     assert "trace.tp.collective_count" in {
+        failure.code for failure in failures
+    }
+
+
+def test_qwen3_tp4_sp_contract_accepts_the_full_tp_group(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=4,
+            include_last_dim_collectives=False,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    assert tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path) == ()
+
+
+def test_qwen3_tp4_sp_contract_rejects_an_incomplete_tp_group(
+    tmp_path: Path,
+) -> None:
+    for rank in range(3):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=4,
+            include_last_dim_collectives=False,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path)
+
+    assert {
+        "trace.tp.ranks",
+        "trace.tp_linear.ranks",
+        "trace.tp.final_sync_ranks",
+    } <= {failure.code for failure in failures}
+
+
+def test_qwen3_tp4_sp_contract_rejects_a_tp2_collective_group(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=4,
+            include_last_dim_collectives=False,
+            include_linear_lifecycle=True,
+            include_final_grad_sync=True,
+        )
+
+    rank_zero = tmp_path / "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
+    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
+    first_collective = next(
+        row
+        for row in rows
+        if row.get("name") == "tp-all-gather-first" and row.get("ph") == "B"
+    )
+    first_collective["group_size"] = 2
+    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path)
+
+    assert "trace.tp.collective_field" in {
         failure.code for failure in failures
     }
