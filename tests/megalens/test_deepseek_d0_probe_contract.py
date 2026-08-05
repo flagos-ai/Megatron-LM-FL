@@ -122,7 +122,7 @@ def _write_rank_trace(
             iteration,
             router_topk=6,
             dispatcher="alltoall",
-            num_tokens=4096,
+            num_tokens=24576,
             capacity_factor=None,
             **topology,
             **handoff,
@@ -485,6 +485,31 @@ def test_deepseek_d0_contract_requires_ep4_router_dispatch_handoff(
     assert "trace.deepseek_d0.router_handoff" in {
         failure.code for failure in failures
     }
+
+
+def test_deepseek_d0_contract_requires_routed_assignment_count_at_dispatch(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_profile(trace_root)
+
+    def restore_pre_route_token_count(rows: list[dict[str, object]]) -> None:
+        dispatch = next(
+            row
+            for row in rows
+            if row.get("name") == "moe-dispatch"
+            and row.get("ph") == "E"
+            and row.get("iteration") == 1
+        )
+        dispatch["num_tokens"] = 4096
+
+    _mutate_rank(trace_root, 0, restore_pre_route_token_count)
+    failures = contract.validate_deepseek_d0_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d0.field" in {failure.code for failure in failures}
 
 
 def test_deepseek_d0_contract_relates_combine_to_the_local_expert_workload(

@@ -280,21 +280,32 @@ def _validate_moe_call(
             region=region,
             layer=layer,
         )
-        _validate_field(
-            failures,
-            event,
-            "num_tokens",
-            4096,
-            rank=rank,
-            iteration=iteration,
-            microbatch=microbatch,
-            region=region,
-            layer=layer,
-        )
+    _validate_field(
+        failures,
+        router,
+        "num_tokens",
+        4096,
+        rank=rank,
+        iteration=iteration,
+        microbatch=microbatch,
+        region=region,
+        layer=layer,
+    )
     _validate_field(
         failures,
         router,
         "routed_tokens",
+        24576,
+        rank=rank,
+        iteration=iteration,
+        microbatch=microbatch,
+        region=region,
+        layer=layer,
+    )
+    _validate_field(
+        failures,
+        dispatch,
+        "num_tokens",
         24576,
         rank=rank,
         iteration=iteration,
