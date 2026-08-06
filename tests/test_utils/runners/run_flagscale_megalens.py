@@ -602,6 +602,17 @@ _QWEN3_CP_EVENTS = (
 )
 
 
+QWEN3_CP2_DP8_OFFLINE_PROFILE = manifest.TraceProfile(
+    "qwen3-enron-cp2-dp8",
+    16,
+    _QWEN3_CP_EVENTS,
+    cp_probe_contract.validate_qwen3_cp2_dp8_distopt_coexistence,
+    training_run_contract.validate_two_iteration_qwen3_cp2_dp8_checkpoint,
+)
+
+
+# Profiles selectable by the loopback runner. Multi-node validation profiles
+# remain separate and are applied only to already completed run artifacts.
 PROFILES: Mapping[str, manifest.TraceProfile] = {
     "pp1": manifest.TraceProfile(
         "pp1",
@@ -1263,6 +1274,10 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_mimo_fanout": "mimo-train8-fanout",
 }
 
+_OFFLINE_CONFIG_PROFILES = {
+    "flagscale_dual_node_qwen3_enron_cp2_dp8": QWEN3_CP2_DP8_OFFLINE_PROFILE,
+}
+
 
 @dataclass(frozen=True)
 class ExecutionResult:
@@ -1294,6 +1309,12 @@ def _reserve_loopback_port(requested: int) -> int:
 
 
 def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
+    offline_profile = _OFFLINE_CONFIG_PROFILES.get(args.input_config.stem)
+    if offline_profile is not None:
+        raise ValueError(
+            f"profile {offline_profile.name!r} requires manual dual-node "
+            "orchestration and offline artifact validation"
+        )
     if args.profile is not None:
         return PROFILES[args.profile]
     configured = _CONFIG_PROFILES.get(args.input_config.stem)
@@ -1621,7 +1642,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ValueError as error:
         parser.error(str(error))
 
-    profile = _profile_from_arguments(args)
+    try:
+        profile = _profile_from_arguments(args)
+    except ValueError as error:
+        parser.error(str(error))
     qwen3_data_prefix = None
     qwen3_tokenizer_root = None
     deepseek_tokenizer_root = None

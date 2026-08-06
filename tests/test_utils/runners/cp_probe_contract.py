@@ -329,12 +329,14 @@ def _validate_dp_cp_group(
     return failures, operation_id, data_bytes
 
 
-def _validate_tp1_pp1_dp1_cp_identity(
+def _validate_tp1_pp1_cp_identity(
     iteration: Iteration,
     *,
     rank: int,
+    context_parallel_size: int,
+    data_parallel_size: int,
 ) -> list[Failure]:
-    """Validate the rank identity of the controlled TP1/PP1/DP1 CP profiles."""
+    """Validate rank identity for the reviewed TP1/PP1 CP rank order."""
 
     iteration_id = int(iteration.iteration_id)
     failures: list[Failure] = []
@@ -380,7 +382,19 @@ def _validate_tp1_pp1_dp1_cp_identity(
         )
         for event in iteration.events
     }
-    expected_coordinates = {(rank, 0, 0, 0)}
+    expected_rank_count = context_parallel_size * data_parallel_size
+    if rank < 0 or rank >= expected_rank_count:
+        failures.append(
+            _failure(
+                "trace.cp.coordinates",
+                f"global rank {rank} is outside the expected rank domain "
+                f"[0, {expected_rank_count})",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    expected_data_rank = rank // context_parallel_size
+    expected_coordinates = {(rank, expected_data_rank, 0, 0)}
     if observed_coordinates != expected_coordinates:
         failures.append(
             _failure(
@@ -432,9 +446,11 @@ def _validate_te_dp1_coexistence(
         for iteration in iterations:
             iteration_id = int(iteration.iteration_id)
             failures.extend(
-                _validate_tp1_pp1_dp1_cp_identity(
+                _validate_tp1_pp1_cp_identity(
                     iteration,
                     rank=rank,
+                    context_parallel_size=context_parallel_size,
+                    data_parallel_size=1,
                 )
             )
             iteration_failures, operation_id, data_bytes = _validate_dp_cp_group(
@@ -521,13 +537,16 @@ def _validate_qwen3_distopt_iteration(
     *,
     rank: int,
     context_parallel_size: int,
-) -> tuple[list[Failure], dict[str, tuple[int, ...]]]:
+    data_parallel_size: int,
+) -> tuple[list[Failure], dict[str, tuple[tuple[int, int], ...]]]:
     """Validate the DP×CP group carried by existing DistOpt events."""
 
     iteration_id = int(iteration.iteration_id)
-    failures = _validate_tp1_pp1_dp1_cp_identity(
+    failures = _validate_tp1_pp1_cp_identity(
         iteration,
         rank=rank,
+        context_parallel_size=context_parallel_size,
+        data_parallel_size=data_parallel_size,
     )
     sync_failures, all_grads_sync = _validate_distopt_sync_scopes(
         iteration,
@@ -573,16 +592,15 @@ def _validate_qwen3_distopt_iteration(
                 )
             )
 
-    expected_peers = [
-        peer for peer in range(context_parallel_size) if peer != rank
-    ]
-    payloads: dict[str, list[int]] = defaultdict(list)
+    optimizer_group_size = context_parallel_size * data_parallel_size
+    expected_peers = [peer for peer in range(optimizer_group_size) if peer != rank]
+    payloads: dict[str, list[tuple[int, int]]] = defaultdict(list)
     for event in selected:
         if event.name not in _DISTOPT_DISPATCH_NAMES:
             continue
         if event.ph == "B":
             for field, expected in {
-                "group_size": context_parallel_size,
+                "group_size": optimizer_group_size,
                 "group_role": "intra_optimizer_instance",
             }.items():
                 if event.attrs.get(field, "<missing>") != expected:
@@ -597,11 +615,12 @@ def _validate_qwen3_distopt_iteration(
                         )
                     )
             n_buckets = event.attrs.get("n_buckets")
-            if (
+            invalid_n_buckets = (
                 not isinstance(n_buckets, int)
                 or isinstance(n_buckets, bool)
                 or n_buckets <= 0
-            ):
+            )
+            if invalid_n_buckets:
                 failures.append(
                     _failure(
                         "trace.cp.distopt_payload",
@@ -624,8 +643,8 @@ def _validate_qwen3_distopt_iteration(
                         iteration=iteration_id,
                     )
                 )
-            else:
-                payloads[event.name].append(data_bytes)
+            elif not invalid_n_buckets:
+                payloads[event.name].append((data_bytes, n_buckets))
         elif event.ph == "E" and event.attrs.get("group") != expected_peers:
             failures.append(
                 _failure(
@@ -686,30 +705,37 @@ def _validate_qwen3_distopt_iteration(
 
 
 def _validate_qwen3_distopt_coexistence(
-    trace_root: Path, *, context_parallel_size: int
+    trace_root: Path,
+    *,
+    context_parallel_size: int,
+    data_parallel_size: int,
 ) -> tuple[Failure, ...]:
     failures = list(
-        gpt_probe_contract.validate_gpt_cp_dp1_eager_phases(
+        gpt_probe_contract.validate_gpt_cp_eager_phases(
             trace_root,
             context_parallel_size=context_parallel_size,
+            data_parallel_size=data_parallel_size,
             expected_layers=28,
         )
     )
     failures.extend(dp_probe_contract.validate_dp_distopt_overlap(trace_root))
     by_rank = _load_iterations(trace_root)
-    expected_ranks = tuple(range(context_parallel_size))
+    expected_ranks = tuple(range(context_parallel_size * data_parallel_size))
     observed_ranks = tuple(sorted(by_rank))
     if observed_ranks != expected_ranks:
         failures.append(
             Failure(
                 "trace.cp.ranks",
-                f"Qwen3 CP{context_parallel_size} contract expects ranks "
+                f"Qwen3 CP{context_parallel_size}/DP{data_parallel_size} "
+                "contract expects ranks "
                 f"{list(expected_ranks)}, observed {list(observed_ranks)}",
-                f"qwen3-cp{context_parallel_size}-distopt",
+                f"qwen3-cp{context_parallel_size}-dp{data_parallel_size}-distopt",
             )
         )
 
-    signatures: dict[tuple[int, str], dict[int, tuple[int, ...]]] = defaultdict(dict)
+    signatures: dict[
+        tuple[int, str], dict[int, tuple[tuple[int, int], ...]]
+    ] = defaultdict(dict)
     for rank in expected_ranks:
         iterations = by_rank.get(rank, ())
         iteration_ids = tuple(item.iteration_id for item in iterations)
@@ -728,6 +754,7 @@ def _validate_qwen3_distopt_coexistence(
                 iteration,
                 rank=rank,
                 context_parallel_size=context_parallel_size,
+                data_parallel_size=data_parallel_size,
             )
             failures.extend(iteration_failures)
             for name, values in payloads.items():
@@ -740,8 +767,9 @@ def _validate_qwen3_distopt_coexistence(
             failures.append(
                 Failure(
                     "trace.cp.distopt_payload",
-                    f"iteration {iteration_id} {name!r} payload sequences differ "
-                    f"across CP ranks: {rank_payloads}",
+                    f"iteration {iteration_id} {name!r} payload/bucket "
+                    "sequences differ "
+                    f"across DP×CP ranks: {rank_payloads}",
                     f"iteration={iteration_id}",
                 )
             )
@@ -754,7 +782,7 @@ def validate_qwen3_cp2_distopt_coexistence(
     """Validate Qwen3-0.6B with TP1/PP1/CP2/DP1 DistOpt overlap."""
 
     return _validate_qwen3_distopt_coexistence(
-        trace_root, context_parallel_size=2
+        trace_root, context_parallel_size=2, data_parallel_size=1
     )
 
 
@@ -764,5 +792,15 @@ def validate_qwen3_cp4_distopt_coexistence(
     """Validate Qwen3-0.6B with TP1/PP1/CP4/DP1 DistOpt overlap."""
 
     return _validate_qwen3_distopt_coexistence(
-        trace_root, context_parallel_size=4
+        trace_root, context_parallel_size=4, data_parallel_size=1
+    )
+
+
+def validate_qwen3_cp2_dp8_distopt_coexistence(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the Q3 TP1/PP1/CP2/DP8 Distributed Optimizer topology."""
+
+    return _validate_qwen3_distopt_coexistence(
+        trace_root, context_parallel_size=2, data_parallel_size=8
     )

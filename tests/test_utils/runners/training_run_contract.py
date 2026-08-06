@@ -142,6 +142,13 @@ def _qwen3_cp_arguments(
 
 _QWEN3_CP2_ARGUMENTS = _qwen3_cp_arguments(2)
 _QWEN3_CP4_ARGUMENTS = _qwen3_cp_arguments(4)
+_QWEN3_CP2_DP8_ARGUMENTS = (
+    *(item for item in _QWEN3_CP2_ARGUMENTS if item[0] != "global_batch_size"),
+    ("global_batch_size", "32"),
+    ("world_size", "16"),
+    ("data_parallel_size", "8"),
+    ("num_distributed_optimizer_instances", "1"),
+)
 
 
 def _validate_two_iteration_qwen3_tp_sp_checkpoint(
@@ -224,6 +231,34 @@ def validate_two_iteration_qwen3_cp4_checkpoint(
         trace_enabled,
         arguments=_QWEN3_CP4_ARGUMENTS,
     )
+
+
+def validate_two_iteration_qwen3_cp2_dp8_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the Q3 CP2/DP8 DistOpt configuration."""
+
+    failures = list(
+        _validate_two_iteration_qwen3_tp_sp_checkpoint(
+            run_root,
+            trace_enabled,
+            arguments=_QWEN3_CP2_DP8_ARGUMENTS,
+        )
+    )
+    checkpoint_root = run_root / "checkpoints" / "iter_0000002"
+    observed_shards = {path.name for path in checkpoint_root.glob("*.distcp")}
+    expected_shards = {f"__{rank}_0.distcp" for rank in range(16)}
+    if observed_shards != expected_shards:
+        failures.append(
+            Failure(
+                "run.training.checkpoint_shards",
+                "Q3 terminal checkpoint does not cover global ranks 0 through 15; "
+                f"missing={sorted(expected_shards - observed_shards)}, "
+                f"unexpected={sorted(observed_shards - expected_shards)}",
+                str(checkpoint_root),
+            )
+        )
+    return tuple(failures)
 
 
 _QWEN3_TP4_LOCAL_NO_SP_ARGUMENTS = (

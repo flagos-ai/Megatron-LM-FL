@@ -29,7 +29,7 @@ class EventRequirement:
 
 @dataclass(frozen=True)
 class TraceProfile:
-    """Observable trace requirements for one runnable FlagScale profile."""
+    """Observable requirements for one FlagScale trace and training run."""
 
     name: str
     rank_count: int
@@ -301,6 +301,27 @@ def validate_run_artifacts(
         ranks=report.ranks,
         event_counts=report.event_counts,
         total_records=report.total_records,
+    )
+
+
+def validate_existing_run(
+    run_root: Path,
+    profile: TraceProfile,
+    *,
+    trace_enabled: bool,
+) -> ValidationReport:
+    """Validate trace and terminal artifacts from an already completed run."""
+
+    report = validate_trace(
+        run_root / "traces",
+        profile,
+        trace_enabled=trace_enabled,
+    )
+    return validate_run_artifacts(
+        run_root,
+        profile,
+        report,
+        trace_enabled=trace_enabled,
     )
 
 
