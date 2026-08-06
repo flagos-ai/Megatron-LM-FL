@@ -183,7 +183,7 @@ _QWEN3_TP4_LOCAL_NO_SP_ARGUMENTS = (
     ("context_parallel_size", "1"),
     ("sequence_parallel", "False"),
     ("transformer_impl", "local"),
-    ("attention_backend", "local"),
+    ("attention_backend", "auto"),
     ("persist_layer_norm", "False"),
     ("gradient_accumulation_fusion", "False"),
     ("qk_layernorm", "True"),

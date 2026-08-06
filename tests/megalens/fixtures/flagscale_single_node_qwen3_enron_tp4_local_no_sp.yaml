@@ -64,7 +64,9 @@ train:
       ckpt_format: torch_dist
   model:
     transformer_impl: local
-    attention_backend: local
+    # GPT selects the MCore local layer spec from transformer_impl. FlagScale's
+    # explicit `local` backend is reserved for its `--spec local` path.
+    attention_backend: auto
     no_persist_layer_norm: true
     no_gradient_accumulation_fusion: true
     enable_flag_gems: false

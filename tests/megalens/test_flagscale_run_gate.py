@@ -2247,7 +2247,8 @@ def test_qwen3_enron_tp4_local_no_sp_profile_only_changes_the_backend_route() ->
     assert "NVTE_ALLOW_NONDETERMINISTIC_ALGO" not in local["experiment"]["envs"]
     assert local["train"]["system"]["sequence_parallel"] is False
     assert local["train"]["model"]["transformer_impl"] == "local"
-    assert local["train"]["model"]["attention_backend"] == "local"
+    assert local["train"]["model"]["attention_backend"] == "auto"
+    assert "spec" not in local["train"]["model"]
     assert local["train"]["model"]["no_persist_layer_norm"] is True
     assert local["train"]["model"]["no_gradient_accumulation_fusion"] is True
     assert "te_fl_prefer" not in local["train"]["model"]
@@ -2258,7 +2259,7 @@ def test_qwen3_enron_tp4_local_no_sp_profile_only_changes_the_backend_route() ->
     baseline["train"]["model"].update(
         {
             "transformer_impl": "local",
-            "attention_backend": "local",
+            "attention_backend": "auto",
             "no_persist_layer_norm": True,
             "no_gradient_accumulation_fusion": True,
         }
