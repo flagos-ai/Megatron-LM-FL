@@ -119,6 +119,31 @@ _QWEN3_TP4_SP_ARGUMENTS = _qwen3_tp_sp_arguments(4)
 _QWEN3_TP8_SP_ARGUMENTS = _qwen3_tp_sp_arguments(8)
 
 
+def _qwen3_cp_arguments(
+    context_parallel_size: int,
+) -> tuple[tuple[str, str], ...]:
+    return (
+        ("tensor_model_parallel_size", "1"),
+        ("pipeline_model_parallel_size", "1"),
+        ("context_parallel_size", str(context_parallel_size)),
+        ("sequence_parallel", "False"),
+        *(
+            item
+            for item in _QWEN3_TP_SP_COMMON_ARGUMENTS
+            if item[0]
+            not in {
+                "pipeline_model_parallel_size",
+                "context_parallel_size",
+                "sequence_parallel",
+            }
+        ),
+    )
+
+
+_QWEN3_CP2_ARGUMENTS = _qwen3_cp_arguments(2)
+_QWEN3_CP4_ARGUMENTS = _qwen3_cp_arguments(4)
+
+
 def _validate_two_iteration_qwen3_tp_sp_checkpoint(
     run_root: Path,
     trace_enabled: bool,
@@ -174,6 +199,30 @@ def validate_two_iteration_qwen3_tp4_sp_checkpoint(
         run_root,
         trace_enabled,
         arguments=_QWEN3_TP4_SP_ARGUMENTS,
+    )
+
+
+def validate_two_iteration_qwen3_cp2_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the Qwen3 CP2/DP1 DistOpt configuration."""
+
+    return _validate_two_iteration_qwen3_tp_sp_checkpoint(
+        run_root,
+        trace_enabled,
+        arguments=_QWEN3_CP2_ARGUMENTS,
+    )
+
+
+def validate_two_iteration_qwen3_cp4_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the Qwen3 CP4/DP1 DistOpt configuration."""
+
+    return _validate_two_iteration_qwen3_tp_sp_checkpoint(
+        run_root,
+        trace_enabled,
+        arguments=_QWEN3_CP4_ARGUMENTS,
     )
 
 

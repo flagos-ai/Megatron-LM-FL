@@ -16,6 +16,9 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 _FIXTURE = _FIXTURES / "flagscale_single_node_cp2_te_smoke.yaml"
 _CP4_FIXTURE = _FIXTURES / "flagscale_single_node_cp4_te_smoke.yaml"
 _TP2_TE_FIXTURE = _FIXTURES / "flagscale_single_node_tp2_sp_te_linear_smoke.yaml"
+_QWEN3_TP2_FIXTURE = _FIXTURES / "flagscale_single_node_qwen3_enron_tp2_sp.yaml"
+_QWEN3_CP2_FIXTURE = _FIXTURES / "flagscale_single_node_qwen3_enron_cp2.yaml"
+_QWEN3_CP4_FIXTURE = _FIXTURES / "flagscale_single_node_qwen3_enron_cp4.yaml"
 
 
 def _write_cp_trace(
@@ -26,6 +29,7 @@ def _write_cp_trace(
     data_rank: int = 0,
     wrong_peer: bool = False,
     omit_attention: bool = False,
+    num_layers: int = 2,
 ) -> Path:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
@@ -59,7 +63,7 @@ def _write_cp_trace(
         )
         event("forward-step", "B")
         event("decoder", "B")
-        for _ in range(2):
+        for _ in range(num_layers):
             event("transformer_layer", "B")
             event("_forward_attention", "B")
             if not omit_attention:
@@ -127,6 +131,180 @@ def _write_cp_trace(
     return path
 
 
+def _write_qwen3_cp_distopt_trace(
+    trace_root: Path,
+    *,
+    rank: int,
+    context_parallel_size: int,
+    num_layers: int = 28,
+    wrong_group_size: bool = False,
+) -> Path:
+    trace_root.mkdir(parents=True, exist_ok=True)
+    rows: list[dict[str, object]] = []
+    timestamp = 0
+    next_operation = 0
+    peers = [peer for peer in range(context_parallel_size) if peer != rank]
+
+    def event(name: str, phase: str, **attrs: object) -> None:
+        nonlocal timestamp
+        timestamp += 1
+        rows.append(
+            {
+                "name": name,
+                "ph": phase,
+                "rel_ts": timestamp,
+                "dev": rank,
+                "g_rk": rank,
+                "dp_rk": 0,
+                "pp_rk": 0,
+                "tp_rk": 0,
+                **attrs,
+            }
+        )
+
+    def distopt_scope(name: str, *, data_bytes: int) -> None:
+        nonlocal next_operation
+        next_operation += 1
+        operation_kind = (
+            "reduce-scatter" if name == "dp-reduce-scatter" else "param-all-gather"
+        )
+        operation_id = f"dp:{operation_kind}:{next_operation}"
+        route = (
+            {
+                "op": "reduce_scatter",
+                "payload_role": "gradient_bucket",
+                "stage": "intra_instance_reduce_scatter",
+            }
+            if name == "dp-reduce-scatter"
+            else {
+                "op": "all_gather",
+                "optimizer_kind": "distributed",
+                "payload_role": "parameter_bucket",
+                "stage": "distributed_optimizer_param_allgather",
+            }
+        )
+        group_size = context_parallel_size
+        if wrong_group_size and next_operation == 1:
+            group_size = 1
+        event(
+            name,
+            "B",
+            api_async_op=True,
+            async_op=True,
+            completion_included=False,
+            data_bytes=data_bytes,
+            group_role="intra_optimizer_instance",
+            group_size=group_size,
+            n_buckets=1,
+            operation_id=operation_id,
+            operation_id_scope="rank_local",
+            overlap_enabled=True,
+            timing_phase="async_dispatch",
+            **route,
+        )
+        event(name, "E", group=peers)
+
+        if name == "dp-reduce-scatter":
+            completion_name = "dp-grad-sync-complete"
+            completion_fields = {
+                "completion_site": "finish_grad_sync",
+                "force_all_reduce": False,
+                "num_distributed_optimizer_instances": 1,
+                "op": "wait",
+                "operation_count": 1,
+                "operation_ids": [operation_id],
+                "operations": [
+                    {
+                        "event_name": name,
+                        "operation_id": operation_id,
+                        "stage": route["stage"],
+                    }
+                ],
+                "stage": "gradient_collective_completion",
+                "use_distributed_optimizer": True,
+            }
+        else:
+            completion_name = "dp-param-sync-complete"
+            completion_fields = {
+                "completion_site": "finish_param_sync",
+                "op": "wait",
+                "operation_count": 1,
+                "operation_id": operation_id,
+                "operation_ids": [operation_id],
+                "stage": "parameter_allgather_completion",
+            }
+        event(
+            completion_name,
+            "B",
+            completion_guarantee="current_stream_after_wait",
+            completion_included=True,
+            completion_kind="work_wait",
+            host_blocking_guaranteed=False,
+            launch_observed=True,
+            operation_id_scope="rank_local",
+            timing_phase="stream_dependency",
+            **completion_fields,
+        )
+        event(completion_name, "E", completed=True, error_type=None)
+
+    for iteration in (1, 2):
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "B",
+                "pad_before": 0,
+                "iteration": iteration,
+            }
+        )
+        if iteration == 2:
+            for payload in (800, 400):
+                distopt_scope("dp-param-all-gather", data_bytes=payload)
+        event("forward-step", "B")
+        event("decoder", "B")
+        for _ in range(num_layers):
+            event("transformer_layer", "B")
+            event("_forward_attention", "B")
+            event("attention", "B")
+            event("attention", "E")
+            event("_forward_attention", "E")
+            event("_forward_mlp", "B")
+            event("MLP.forward", "B")
+            event("MLP.forward", "E")
+            event("_forward_mlp", "E")
+            event("transformer_layer", "E")
+        event("decoder", "E")
+        event("decoder-postprocess", "B")
+        event("output_layer", "B")
+        event("output_layer", "E")
+        event("loss", "B")
+        event("loss", "E")
+        event("decoder-postprocess", "E")
+        event("forward-step", "E")
+        event(
+            "grad-sync",
+            "B",
+            schedule="no-pipelining",
+            timing_phase="framework_phase",
+        )
+        event("all-grads-sync", "B")
+        for payload in (1600, 1200, 800):
+            distopt_scope("dp-reduce-scatter", data_bytes=payload)
+        event("all-grads-sync", "E")
+        event("grad-sync", "E")
+        rows.append(
+            {
+                "name": "iteration",
+                "ph": "E",
+                "iteration": iteration,
+                "duration_wall": timestamp,
+            }
+        )
+
+    path = trace_root / f"benchmark-global-{rank}-data-0-pipeline-0-tensor-0.json"
+    path.write_text(json.dumps(rows), encoding="utf-8")
+    return path
+
+
 def _write_terminal_checkpoint(run_root: Path) -> None:
     checkpoint_root = run_root / "checkpoints"
     iteration_root = checkpoint_root / "iter_0000002"
@@ -189,6 +367,128 @@ def test_cp4_fixture_is_the_cp4_derivative_of_the_cp2_profile() -> None:
     )
     assert world_size // model_parallel_size == 1
     assert model["seq_length"] % (2 * system["context_parallel_size"]) == 0
+
+
+def test_qwen3_cp2_fixture_only_replaces_tp_sp_with_cp() -> None:
+    baseline = yaml.safe_load(_QWEN3_TP2_FIXTURE.read_text(encoding="utf-8"))
+    cp2 = yaml.safe_load(_QWEN3_CP2_FIXTURE.read_text(encoding="utf-8"))
+
+    baseline["experiment"]["exp_name"] = cp2["experiment"]["exp_name"]
+    baseline["train"]["system"]["tensor_model_parallel_size"] = 1
+    baseline["train"]["system"]["context_parallel_size"] = 2
+    baseline["train"]["system"]["sequence_parallel"] = False
+    assert cp2 == baseline
+
+    system = cp2["train"]["system"]
+    model = cp2["train"]["model"]
+    data = cp2["train"]["data"]
+    assert system["use_distributed_optimizer"] is True
+    assert system["overlap_grad_reduce"] is True
+    assert system["overlap_param_gather"] is True
+    assert model["transformer_impl"] == "transformer_engine"
+    assert model["attention_backend"] == "flash"
+    assert model["num_layers"] == 28
+    assert model["seq_length"] % (2 * system["context_parallel_size"]) == 0
+    assert data["data_path"] == "${oc.env:MEGALENS_QWEN3_DATA_PATH}"
+    assert "mock_data" not in data
+
+
+def test_qwen3_cp4_fixture_only_scales_context_parallelism() -> None:
+    cp2 = yaml.safe_load(_QWEN3_CP2_FIXTURE.read_text(encoding="utf-8"))
+    cp4 = yaml.safe_load(_QWEN3_CP4_FIXTURE.read_text(encoding="utf-8"))
+
+    cp4["experiment"]["exp_name"] = cp2["experiment"]["exp_name"]
+    cp4["experiment"]["runner"]["nproc_per_node"] = 2
+    cp4["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1"
+    cp4["train"]["system"]["context_parallel_size"] = 2
+    assert cp4 == cp2
+
+
+def test_qwen3_cp_profiles_require_existing_gpt_and_distopt_events() -> None:
+    cp2 = gate.PROFILES["qwen3-enron-cp2"]
+    cp4 = gate.PROFILES["qwen3-enron-cp4"]
+    event_names = {requirement.name for requirement in cp2.events}
+
+    assert cp2.rank_count == 2
+    assert cp4.rank_count == 4
+    assert cp4.events == cp2.events
+    assert cp2.contract is cp_probe_contract.validate_qwen3_cp2_distopt_coexistence
+    assert cp4.contract is cp_probe_contract.validate_qwen3_cp4_distopt_coexistence
+    assert (
+        cp2.run_contract
+        is training_run_contract.validate_two_iteration_qwen3_cp2_checkpoint
+    )
+    assert (
+        cp4.run_contract
+        is training_run_contract.validate_two_iteration_qwen3_cp4_checkpoint
+    )
+    assert {"dp-reduce-scatter", "dp-param-all-gather"} <= event_names
+    assert "dp-allreduce" not in event_names
+    assert not any(name.startswith(("cp-", "cp_")) for name in event_names)
+    assert gate._CONFIG_PROFILES[_QWEN3_CP2_FIXTURE.stem] == "qwen3-enron-cp2"
+    assert gate._CONFIG_PROFILES[_QWEN3_CP4_FIXTURE.stem] == "qwen3-enron-cp4"
+
+
+def test_qwen3_cp2_contract_accepts_qwen3_28_layer_synthetic_trace(
+    tmp_path: Path,
+) -> None:
+    for rank in range(2):
+        _write_qwen3_cp_distopt_trace(
+            tmp_path, rank=rank, context_parallel_size=2
+        )
+
+    report = manifest.validate_trace(
+        tmp_path,
+        gate.PROFILES["qwen3-enron-cp2"],
+        trace_enabled=True,
+    )
+
+    assert report.passed
+    assert report.ranks == (0, 1)
+    assert report.failures == ()
+
+
+def test_qwen3_cp4_contract_accepts_qwen3_28_layer_synthetic_trace(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        _write_qwen3_cp_distopt_trace(
+            tmp_path, rank=rank, context_parallel_size=4
+        )
+
+    report = manifest.validate_trace(
+        tmp_path,
+        gate.PROFILES["qwen3-enron-cp4"],
+        trace_enabled=True,
+    )
+
+    assert report.passed
+    assert report.ranks == (0, 1, 2, 3)
+    assert report.failures == ()
+
+
+def test_qwen3_cp_contract_rejects_the_tiny_model_and_wrong_group(
+    tmp_path: Path,
+) -> None:
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=0,
+        context_parallel_size=2,
+        num_layers=2,
+        wrong_group_size=True,
+    )
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=1,
+        context_parallel_size=2,
+        num_layers=2,
+    )
+
+    failures = cp_probe_contract.validate_qwen3_cp2_distopt_coexistence(tmp_path)
+    codes = {failure.code for failure in failures}
+
+    assert "trace.gpt.eager_layers" in codes
+    assert "trace.cp.distopt_group" in codes
 
 
 def test_cp2_runner_profile_requires_only_existing_probe_events() -> None:

@@ -573,6 +573,35 @@ def _dp_events(profile: str) -> tuple[manifest.EventRequirement, ...]:
     return tuple(manifest.EventRequirement(name, _DP_FIELDS, "B") for name in names)
 
 
+_QWEN3_CP_EVENTS = (
+    *_events(
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+        "grad-sync",
+        "all-grads-sync",
+    ),
+    *_dp_events("distopt"),
+    manifest.EventRequirement(
+        "dp-grad-sync-complete",
+        (*_COMMON_FIELDS, "operation_ids", "completion_kind"),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "dp-param-sync-complete",
+        (*_COMMON_FIELDS, "operation_id", "completion_kind"),
+        "B",
+    ),
+)
+
+
 PROFILES: Mapping[str, manifest.TraceProfile] = {
     "pp1": manifest.TraceProfile(
         "pp1",
@@ -678,6 +707,20 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             tp_probe_contract.validate_qwen3_tp8_sp_profile,
         ),
         training_run_contract.validate_two_iteration_qwen3_tp8_sp_checkpoint,
+    ),
+    "qwen3-enron-cp2": manifest.TraceProfile(
+        "qwen3-enron-cp2",
+        2,
+        _QWEN3_CP_EVENTS,
+        cp_probe_contract.validate_qwen3_cp2_distopt_coexistence,
+        training_run_contract.validate_two_iteration_qwen3_cp2_checkpoint,
+    ),
+    "qwen3-enron-cp4": manifest.TraceProfile(
+        "qwen3-enron-cp4",
+        4,
+        _QWEN3_CP_EVENTS,
+        cp_probe_contract.validate_qwen3_cp4_distopt_coexistence,
+        training_run_contract.validate_two_iteration_qwen3_cp4_checkpoint,
     ),
     "deepseek-tp2-sp-mock": manifest.TraceProfile(
         "deepseek-tp2-sp-mock",
@@ -1146,6 +1189,8 @@ _CONFIG_PROFILES = {
         "qwen3-enron-tp4-local-no-sp"
     ),
     "flagscale_single_node_qwen3_enron_tp8_sp": "qwen3-enron-tp8-sp",
+    "flagscale_single_node_qwen3_enron_cp2": "qwen3-enron-cp2",
+    "flagscale_single_node_qwen3_enron_cp4": "qwen3-enron-cp4",
     "flagscale_single_node_deepseek_tp2_sp_mock": "deepseek-tp2-sp-mock",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
@@ -1585,6 +1630,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         "qwen3-enron-tp4-sp",
         "qwen3-enron-tp4-local-no-sp",
         "qwen3-enron-tp8-sp",
+        "qwen3-enron-cp2",
+        "qwen3-enron-cp4",
     }:
         if args.qwen3_data_prefix is None:
             parser.error("--qwen3-data-prefix is required for the Qwen3 profile")

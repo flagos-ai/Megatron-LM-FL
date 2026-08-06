@@ -427,16 +427,16 @@ def validate_qwen3_tp8_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
 
 
 def validate_gpt_cp_dp1_eager_phases(
-    trace_root: Path, *, context_parallel_size: int
+    trace_root: Path, *, context_parallel_size: int, expected_layers: int = 2
 ) -> tuple[Failure, ...]:
-    """Validate DP1 CP ranks sharing one complete two-layer GPT stage."""
+    """Validate DP1 CP ranks sharing one complete eager GPT stage."""
 
     ranks = range(context_parallel_size)
     return _validate_gpt_model_phases(
         trace_root,
         expected_pipeline_ranks={rank: 0 for rank in ranks},
         postprocess_ranks=frozenset(ranks),
-        eager_layers_by_rank={rank: 2 for rank in ranks},
+        eager_layers_by_rank={rank: expected_layers for rank in ranks},
     )
 
 

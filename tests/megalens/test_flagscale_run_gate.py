@@ -51,6 +51,8 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_qwen3_enron_tp8_sp.yaml": (
         "qwen3-enron-tp8-sp"
     ),
+    "flagscale_single_node_qwen3_enron_cp2.yaml": "qwen3-enron-cp2",
+    "flagscale_single_node_qwen3_enron_cp4.yaml": "qwen3-enron-cp4",
     "flagscale_single_node_deepseek_tp2_sp_mock.yaml": (
         "deepseek-tp2-sp-mock"
     ),
@@ -1615,6 +1617,8 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
             "qwen3-enron-tp4-sp",
             "qwen3-enron-tp4-local-no-sp",
             "qwen3-enron-tp8-sp",
+        "qwen3-enron-cp2",
+        "qwen3-enron-cp4",
         "deepseek-tp2-sp-mock",
     }
 
