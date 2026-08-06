@@ -815,13 +815,22 @@ def test_existing_yaml_profiles_remain_selectable(config: str, profile: str) -> 
     assert gate._profile_from_arguments(args).name == profile
 
 
-def test_dual_node_qwen3_config_is_reserved_for_offline_validation() -> None:
+@pytest.mark.parametrize(
+    "config_name",
+    (
+        "flagscale_dual_node_qwen3_enron_cp2_dp4.yaml",
+        "flagscale_dual_node_qwen3_enron_cp2_dp8.yaml",
+    ),
+)
+def test_dual_node_qwen3_config_is_reserved_for_offline_validation(
+    config_name: str,
+) -> None:
     args = gate._parser().parse_args(
         (
             "--run-dir",
             "unused",
             "--input-config",
-            str(_FIXTURES / "flagscale_dual_node_qwen3_enron_cp2_dp8.yaml"),
+            str(_FIXTURES / config_name),
             "--mode",
             "trace-on",
             "--image",

@@ -796,6 +796,16 @@ def validate_qwen3_cp4_distopt_coexistence(
     )
 
 
+def validate_qwen3_cp2_dp4_distopt_coexistence(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the reduced TP1/PP1/CP2/DP4 DistOpt topology."""
+
+    return _validate_qwen3_distopt_coexistence(
+        trace_root, context_parallel_size=2, data_parallel_size=4
+    )
+
+
 def validate_qwen3_cp2_dp8_distopt_coexistence(
     trace_root: Path,
 ) -> tuple[Failure, ...]:

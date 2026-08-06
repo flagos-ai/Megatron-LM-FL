@@ -19,6 +19,9 @@ _TP2_TE_FIXTURE = _FIXTURES / "flagscale_single_node_tp2_sp_te_linear_smoke.yaml
 _QWEN3_TP2_FIXTURE = _FIXTURES / "flagscale_single_node_qwen3_enron_tp2_sp.yaml"
 _QWEN3_CP2_FIXTURE = _FIXTURES / "flagscale_single_node_qwen3_enron_cp2.yaml"
 _QWEN3_CP4_FIXTURE = _FIXTURES / "flagscale_single_node_qwen3_enron_cp4.yaml"
+_QWEN3_CP2_DP4_FIXTURE = (
+    _FIXTURES / "flagscale_dual_node_qwen3_enron_cp2_dp4.yaml"
+)
 _QWEN3_CP2_DP8_FIXTURE = (
     _FIXTURES / "flagscale_dual_node_qwen3_enron_cp2_dp8.yaml"
 )
@@ -329,14 +332,16 @@ def _write_terminal_checkpoint(run_root: Path) -> None:
     (iteration_root / "common.pt").write_bytes(b"checkpoint")
 
 
-def _write_qwen3_cp2_dp8_run_artifacts(run_root: Path) -> None:
+def _write_qwen3_cp2_dp_run_artifacts(
+    run_root: Path, *, data_parallel_size: int
+) -> None:
     _write_terminal_checkpoint(run_root)
     checkpoint_root = run_root / "checkpoints" / "iter_0000002"
-    for rank in range(16):
+    for rank in range(2 * data_parallel_size):
         (checkpoint_root / f"__{rank}_0.distcp").write_bytes(b"checkpoint shard")
     arguments = (
         ("transformer_impl", "transformer_engine"),
-        *training_run_contract._QWEN3_CP2_DP8_ARGUMENTS,
+        *training_run_contract._qwen3_cp2_dp_arguments(data_parallel_size),
     )
     (run_root / "launcher.log").write_text(
         "\n".join(
@@ -345,6 +350,14 @@ def _write_qwen3_cp2_dp8_run_artifacts(run_root: Path) -> None:
         ),
         encoding="utf-8",
     )
+
+
+def _write_qwen3_cp2_dp4_run_artifacts(run_root: Path) -> None:
+    _write_qwen3_cp2_dp_run_artifacts(run_root, data_parallel_size=4)
+
+
+def _write_qwen3_cp2_dp8_run_artifacts(run_root: Path) -> None:
+    _write_qwen3_cp2_dp_run_artifacts(run_root, data_parallel_size=8)
 
 
 def test_cp2_fixture_is_the_tp1_cp2_derivative_of_the_te_baseline() -> None:
@@ -436,6 +449,52 @@ def test_qwen3_cp4_fixture_only_scales_context_parallelism() -> None:
     assert cp4 == cp2
 
 
+def test_qwen3_cp2_dp4_fixture_only_reduces_the_q3_world_size() -> None:
+    expected = yaml.safe_load(_QWEN3_CP2_DP8_FIXTURE.read_text(encoding="utf-8"))
+    derived = yaml.safe_load(_QWEN3_CP2_DP4_FIXTURE.read_text(encoding="utf-8"))
+
+    expected["experiment"]["exp_name"] = "megalens-g5-7-qwen3-enron-cp2-dp4"
+    expected["experiment"]["runner"]["nproc_per_node"] = 4
+    expected["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "4,5,6,7"
+    expected["train"]["model"]["global_batch_size"] = 16
+
+    assert derived == expected
+
+
+def test_qwen3_cp2_dp4_fixture_derives_the_reduced_rank_domains() -> None:
+    config = yaml.safe_load(_QWEN3_CP2_DP4_FIXTURE.read_text(encoding="utf-8"))
+    runner = config["experiment"]["runner"]
+    system = config["train"]["system"]
+    model = config["train"]["model"]
+
+    world_size = runner["nnodes"] * runner["nproc_per_node"]
+    model_parallel_size = (
+        system["tensor_model_parallel_size"]
+        * system["pipeline_model_parallel_size"]
+        * system["context_parallel_size"]
+    )
+    data_parallel_size = world_size // model_parallel_size
+    microbatches = model["global_batch_size"] // (
+        model["micro_batch_size"] * data_parallel_size
+    )
+
+    assert (world_size, data_parallel_size, microbatches) == (8, 4, 1)
+    assert (
+        system["tensor_model_parallel_size"],
+        system["pipeline_model_parallel_size"],
+        system["context_parallel_size"],
+    ) == (1, 1, 2)
+    assert system["num_distributed_optimizer_instances"] == 1
+    assert system["overlap_grad_reduce"] is True
+    assert system["overlap_param_gather"] is True
+    assert config["experiment"]["envs"]["NCCL_NVLS_ENABLE"] == 0
+    assert config["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] == "4,5,6,7"
+    assert (model["micro_batch_size"], model["global_batch_size"]) == (4, 16)
+    assert model["train_iters"] == 2
+    assert "mock_data" not in config["train"]["data"]
+    assert _QWEN3_CP2_DP4_FIXTURE.stem not in gate._CONFIG_PROFILES
+
+
 def test_qwen3_cp2_dp8_fixture_only_applies_the_q3_topology() -> None:
     expected = yaml.safe_load(_QWEN3_CP2_FIXTURE.read_text(encoding="utf-8"))
     derived = yaml.safe_load(_QWEN3_CP2_DP8_FIXTURE.read_text(encoding="utf-8"))
@@ -512,6 +571,24 @@ def test_qwen3_cp2_dp8_profile_is_offline_only_and_reuses_cp_events() -> None:
     )
     assert profile.name not in gate.PROFILES
     assert _QWEN3_CP2_DP8_FIXTURE.stem not in gate._CONFIG_PROFILES
+
+
+def test_qwen3_cp2_dp4_profile_is_offline_only_and_reuses_cp_events() -> None:
+    profile = gate.QWEN3_CP2_DP4_OFFLINE_PROFILE
+    cp2 = gate.PROFILES["qwen3-enron-cp2"]
+
+    assert profile.rank_count == 8
+    assert profile.events == cp2.events
+    assert (
+        profile.contract
+        is cp_probe_contract.validate_qwen3_cp2_dp4_distopt_coexistence
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_qwen3_cp2_dp4_checkpoint
+    )
+    assert profile.name not in gate.PROFILES
+    assert _QWEN3_CP2_DP4_FIXTURE.stem not in gate._CONFIG_PROFILES
 
 
 def test_qwen3_cp_profiles_require_existing_gpt_and_distopt_events() -> None:
@@ -600,6 +677,55 @@ def test_qwen3_cp2_dp8_contract_accepts_the_q3_rank_and_group_topology(
     assert report.ranks == tuple(range(16))
     assert report.failures == ()
     assert report.as_manifest()["passed"] is True
+
+
+def test_qwen3_cp2_dp4_contract_accepts_the_reduced_rank_and_group_topology(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    for rank in range(8):
+        _write_qwen3_cp_distopt_trace(
+            trace_root,
+            rank=rank,
+            context_parallel_size=2,
+            data_parallel_size=4,
+        )
+    _write_qwen3_cp2_dp4_run_artifacts(tmp_path)
+
+    report = manifest.validate_existing_run(
+        tmp_path,
+        gate.QWEN3_CP2_DP4_OFFLINE_PROFILE,
+        trace_enabled=True,
+    )
+
+    assert report.passed
+    assert report.ranks == tuple(range(8))
+    assert report.failures == ()
+    assert report.as_manifest()["passed"] is True
+
+
+def test_qwen3_cp2_dp4_training_contract_requires_all_eight_shards(
+    tmp_path: Path,
+) -> None:
+    _write_qwen3_cp2_dp4_run_artifacts(tmp_path)
+
+    assert (
+        training_run_contract.validate_two_iteration_qwen3_cp2_dp4_checkpoint(
+            tmp_path, False
+        )
+        == ()
+    )
+
+    (tmp_path / "checkpoints" / "iter_0000002" / "__7_0.distcp").unlink()
+    report = manifest.validate_existing_run(
+        tmp_path,
+        gate.QWEN3_CP2_DP4_OFFLINE_PROFILE,
+        trace_enabled=False,
+    )
+
+    assert "run.training.checkpoint_shards" in {
+        failure.code for failure in report.failures
+    }
 
 
 def test_qwen3_cp2_dp8_contract_rejects_a_wrong_repeated_dp_rank(
