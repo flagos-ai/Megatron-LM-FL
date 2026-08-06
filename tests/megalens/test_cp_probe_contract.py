@@ -138,6 +138,8 @@ def _write_qwen3_cp_distopt_trace(
     context_parallel_size: int,
     num_layers: int = 28,
     wrong_group_size: bool = False,
+    param_gather_iteration: int = 2,
+    omit_sync_iteration: int | None = None,
 ) -> Path:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
@@ -256,7 +258,7 @@ def _write_qwen3_cp_distopt_trace(
                 "iteration": iteration,
             }
         )
-        if iteration == 2:
+        if iteration == param_gather_iteration:
             for payload in (800, 400):
                 distopt_scope("dp-param-all-gather", data_bytes=payload)
         event("forward-step", "B")
@@ -280,17 +282,19 @@ def _write_qwen3_cp_distopt_trace(
         event("loss", "E")
         event("decoder-postprocess", "E")
         event("forward-step", "E")
-        event(
-            "grad-sync",
-            "B",
-            schedule="no-pipelining",
-            timing_phase="framework_phase",
-        )
-        event("all-grads-sync", "B")
+        if iteration != omit_sync_iteration:
+            event(
+                "grad-sync",
+                "B",
+                schedule="no-pipelining",
+                timing_phase="framework_phase",
+            )
+            event("all-grads-sync", "B")
         for payload in (1600, 1200, 800):
             distopt_scope("dp-reduce-scatter", data_bytes=payload)
-        event("all-grads-sync", "E")
-        event("grad-sync", "E")
+        if iteration != omit_sync_iteration:
+            event("all-grads-sync", "E")
+            event("grad-sync", "E")
         rows.append(
             {
                 "name": "iteration",
@@ -489,6 +493,115 @@ def test_qwen3_cp_contract_rejects_the_tiny_model_and_wrong_group(
 
     assert "trace.gpt.eager_layers" in codes
     assert "trace.cp.distopt_group" in codes
+
+
+def test_qwen3_cp_contract_rejects_cross_rank_param_gather_iteration_mismatch(
+    tmp_path: Path,
+) -> None:
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=0,
+        context_parallel_size=2,
+        param_gather_iteration=1,
+    )
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=1,
+        context_parallel_size=2,
+        param_gather_iteration=2,
+    )
+
+    failures = cp_probe_contract.validate_qwen3_cp2_distopt_coexistence(tmp_path)
+
+    assert "trace.cp.distopt_payload" in {failure.code for failure in failures}
+
+
+def test_qwen3_cp_contract_requires_each_iteration_sync_hierarchy(
+    tmp_path: Path,
+) -> None:
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=0,
+        context_parallel_size=2,
+        omit_sync_iteration=1,
+    )
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=1,
+        context_parallel_size=2,
+    )
+
+    failures = cp_probe_contract.validate_qwen3_cp2_distopt_coexistence(tmp_path)
+
+    assert "trace.cp.distopt_sync" in {failure.code for failure in failures}
+
+
+def test_qwen3_cp_contract_rejects_reversed_distopt_scope(
+    tmp_path: Path,
+) -> None:
+    path = _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=0,
+        context_parallel_size=2,
+    )
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=1,
+        context_parallel_size=2,
+    )
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    positions = [
+        position
+        for position, row in enumerate(rows)
+        if row.get("name") == "dp-reduce-scatter"
+    ]
+    rows[positions[0]], rows[positions[1]] = rows[positions[1]], rows[positions[0]]
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = cp_probe_contract.validate_qwen3_cp2_distopt_coexistence(tmp_path)
+
+    assert "trace.cp.distopt_pairing" in {failure.code for failure in failures}
+
+
+def test_qwen3_cp_contract_requires_dispatch_end_before_completion(
+    tmp_path: Path,
+) -> None:
+    path = _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=0,
+        context_parallel_size=2,
+    )
+    _write_qwen3_cp_distopt_trace(
+        tmp_path,
+        rank=1,
+        context_parallel_size=2,
+    )
+    rows = json.loads(path.read_text(encoding="utf-8"))
+    begin = next(
+        position
+        for position, row in enumerate(rows)
+        if row.get("name") == "dp-reduce-scatter" and row.get("ph") == "B"
+    )
+    assert [row["name"] for row in rows[begin : begin + 4]] == [
+        "dp-reduce-scatter",
+        "dp-reduce-scatter",
+        "dp-grad-sync-complete",
+        "dp-grad-sync-complete",
+    ]
+    rows[begin : begin + 4] = [
+        rows[begin],
+        rows[begin + 2],
+        rows[begin + 3],
+        rows[begin + 1],
+    ]
+    rows[begin]["n_buckets"] = 0
+    path.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = cp_probe_contract.validate_qwen3_cp2_distopt_coexistence(tmp_path)
+    codes = {failure.code for failure in failures}
+
+    assert "trace.cp.distopt_pairing" in codes
+    assert "trace.cp.distopt_payload" in codes
 
 
 def test_cp2_runner_profile_requires_only_existing_probe_events() -> None:

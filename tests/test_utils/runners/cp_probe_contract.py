@@ -45,6 +45,9 @@ _DISTOPT_ROUTE_NAMES = frozenset(
         "dp-param-sync-complete",
     )
 )
+_DISTOPT_DISPATCH_NAMES = frozenset(
+    ("dp-reduce-scatter", "dp-param-all-gather")
+)
 
 
 def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
@@ -108,6 +111,72 @@ def _pair_dp_scopes(
             _failure(
                 "trace.cp.dp_sync_pairing",
                 f"DP sync scopes have {len(pending)} unmatched begin record(s)",
+                rank=rank,
+                iteration=iteration_id,
+            )
+        )
+    return spans, failures
+
+
+def _pair_named_scopes(
+    iteration: Iteration,
+    *,
+    rank: int,
+    names: frozenset[str],
+) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
+    """Pair flat B/E scopes without assuming nesting across route names."""
+
+    pending: dict[str, tuple[int, Event]] = {}
+    spans: dict[str, list[_Span]] = defaultdict(list)
+    failures: list[Failure] = []
+    iteration_id = int(iteration.iteration_id)
+
+    for position, event in enumerate(iteration.events):
+        if event.name not in names:
+            continue
+        if event.ph == "B":
+            if event.name in pending:
+                failures.append(
+                    _failure(
+                        "trace.cp.distopt_pairing",
+                        f"event {event.name!r} begins before its prior scope ends",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+                continue
+            pending[event.name] = (position, event)
+        elif event.ph == "E":
+            begin = pending.pop(event.name, None)
+            if begin is None:
+                failures.append(
+                    _failure(
+                        "trace.cp.distopt_pairing",
+                        f"event {event.name!r} ends without an active begin",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+                continue
+            begin_position, begin_event = begin
+            spans[event.name].append(
+                _Span(begin_event, event, begin_position, position, None)
+            )
+        else:
+            failures.append(
+                _failure(
+                    "trace.cp.distopt_pairing",
+                    f"event {event.name!r} uses unsupported phase {event.ph!r}",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    for name in sorted(pending):
+        failures.append(
+            _failure(
+                "trace.cp.distopt_pairing",
+                f"event {name!r} has an unmatched begin",
                 rank=rank,
                 iteration=iteration_id,
             )
@@ -410,6 +479,43 @@ def validate_cp4_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
     return _validate_te_dp1_coexistence(trace_root, context_parallel_size=4)
 
 
+def _validate_distopt_sync_scopes(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> tuple[list[Failure], _Span | None]:
+    """Require the per-iteration framework sync hierarchy around DP completion."""
+
+    iteration_id = int(iteration.iteration_id)
+    spans, failures = _pair_dp_scopes(iteration, rank=rank)
+    for name in ("grad-sync", "all-grads-sync"):
+        observed = len(spans.get(name, ()))
+        if observed != 1:
+            failures.append(
+                _failure(
+                    "trace.cp.distopt_sync",
+                    f"event {name!r} has {observed} span(s), expected 1",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+
+    grad_sync = spans.get("grad-sync", ())
+    all_grads_sync = spans.get("all-grads-sync", ())
+    if len(grad_sync) == len(all_grads_sync) == 1:
+        if all_grads_sync[0].parent_begin_position != grad_sync[0].begin_position:
+            failures.append(
+                _failure(
+                    "trace.cp.distopt_sync",
+                    "all-grads-sync must be a direct child of grad-sync",
+                    rank=rank,
+                    iteration=iteration_id,
+                )
+            )
+        return failures, all_grads_sync[0]
+    return failures, None
+
+
 def _validate_qwen3_distopt_iteration(
     iteration: Iteration,
     *,
@@ -423,6 +529,17 @@ def _validate_qwen3_distopt_iteration(
         iteration,
         rank=rank,
     )
+    sync_failures, all_grads_sync = _validate_distopt_sync_scopes(
+        iteration,
+        rank=rank,
+    )
+    failures.extend(sync_failures)
+    route_spans, pairing_failures = _pair_named_scopes(
+        iteration,
+        rank=rank,
+        names=_DISTOPT_ROUTE_NAMES,
+    )
+    failures.extend(pairing_failures)
     selected = [
         event for event in iteration.events if event.name in _DISTOPT_ROUTE_NAMES
     ]
@@ -461,7 +578,7 @@ def _validate_qwen3_distopt_iteration(
     ]
     payloads: dict[str, list[int]] = defaultdict(list)
     for event in selected:
-        if event.name not in {"dp-reduce-scatter", "dp-param-all-gather"}:
+        if event.name not in _DISTOPT_DISPATCH_NAMES:
             continue
         if event.ph == "B":
             for field, expected in {
@@ -479,6 +596,20 @@ def _validate_qwen3_distopt_iteration(
                             iteration=iteration_id,
                         )
                     )
+            n_buckets = event.attrs.get("n_buckets")
+            if (
+                not isinstance(n_buckets, int)
+                or isinstance(n_buckets, bool)
+                or n_buckets <= 0
+            ):
+                failures.append(
+                    _failure(
+                        "trace.cp.distopt_payload",
+                        f"{event.name!r} has invalid n_buckets={n_buckets!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
             data_bytes = event.attrs.get("data_bytes")
             if (
                 not isinstance(data_bytes, int)
@@ -506,7 +637,52 @@ def _validate_qwen3_distopt_iteration(
                 )
             )
 
-    return failures, {name: tuple(values) for name, values in payloads.items()}
+    launches: dict[str, _Span] = {}
+    for name in _DISTOPT_DISPATCH_NAMES:
+        for span in route_spans.get(name, ()):
+            operation_id = span.begin.attrs.get("operation_id")
+            if isinstance(operation_id, str):
+                launches[operation_id] = span
+    for name in ("dp-grad-sync-complete", "dp-param-sync-complete"):
+        for span in route_spans.get(name, ()):
+            operation_ids = span.begin.attrs.get("operation_ids")
+            if not isinstance(operation_ids, list):
+                continue
+            for operation_id in operation_ids:
+                launch = launches.get(operation_id)
+                if launch is not None and launch.end_position >= span.begin_position:
+                    failures.append(
+                        _failure(
+                            "trace.cp.distopt_pairing",
+                            f"event {name!r} begins before dispatch "
+                            f"{operation_id!r} ends",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+            if (
+                name == "dp-grad-sync-complete"
+                and all_grads_sync is not None
+                and not (
+                    all_grads_sync.begin_position
+                    < span.begin_position
+                    < span.end_position
+                    < all_grads_sync.end_position
+                )
+            ):
+                failures.append(
+                    _failure(
+                        "trace.cp.distopt_sync",
+                        "dp-grad-sync-complete must be inside all-grads-sync",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+
+    return failures, {
+        name: tuple(payloads.get(name, ()))
+        for name in sorted(_DISTOPT_DISPATCH_NAMES)
+    }
 
 
 def _validate_qwen3_distopt_coexistence(
