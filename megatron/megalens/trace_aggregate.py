@@ -2,6 +2,7 @@ import json
 import os
 import warnings
 from dataclasses import dataclass
+from statistics import median
 from typing import Any, Dict, List, Optional, Tuple
 
 COLOR_UNKNOWN = "thread_state_unknown"
@@ -13,6 +14,9 @@ COLOR_EXCHANGE_NEXT = "thread_state_runnable"
 COLOR_EXCHANGE_PREV = "thread_state_uninterruptible"
 COLOR_ALLREDUCE = "light_memory_dump"
 COLOR_OPTIMIZER = "detailed_memory_dump"
+
+FRAMEWORK_TIMELINE_ANCHOR = "tp-allreduce"
+FRAMEWORK_TIMELINE_MIN_ANCHORS = 3
 
 COLOR_MAP = {
     "forward": COLOR_FORWARD,
@@ -84,6 +88,18 @@ class Iteration:
     duration: int
     iteration_id: Optional[int] = None
     ranks: Tuple[Rank, ...] = ()
+
+
+@dataclass(frozen=True)
+class FrameworkTimelineAlignment:
+    """One explicitly requested rank-local framework timeline calibration."""
+
+    iteration_id: int
+    anchor_name: str
+    group: Tuple[int, ...]
+    anchor_count: int
+    rank_offsets_us: Tuple[Tuple[int, int], ...]
+    applied_shifts_us: Tuple[Tuple[int, int], ...]
 
 
 def _validate_iteration_id(value: Any, *, record: str) -> Optional[int]:
@@ -508,6 +524,259 @@ def transform(traces: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         )
 
     return transformed
+
+
+def _framework_trace_rank(trace: Dict[str, Any]) -> int:
+    args = trace.get("args")
+    if not isinstance(args, dict):
+        raise ValueError(f"Trace event {trace.get('name')!r} has no argument mapping")
+    rank = args.get("g_rk", trace.get("pid"))
+    if not isinstance(rank, int) or isinstance(rank, bool):
+        raise ValueError(f"Trace event {trace.get('name')!r} has no integer global rank")
+    pid = trace.get("pid")
+    if isinstance(pid, int) and not isinstance(pid, bool) and pid != rank:
+        raise ValueError(f"Trace event {trace.get('name')!r} maps global rank {rank} to pid {pid}")
+    return rank
+
+
+def _framework_trace_interval(trace: Dict[str, Any]) -> Tuple[int, int]:
+    start = trace.get("ts")
+    duration = trace.get("dur", 0)
+    if not isinstance(start, int) or isinstance(start, bool):
+        raise ValueError(f"Trace event {trace.get('name')!r} has no integer timestamp")
+    if not isinstance(duration, int) or isinstance(duration, bool) or duration < 0:
+        raise ValueError(f"Trace event {trace.get('name')!r} has an invalid duration")
+    return start, start + duration
+
+
+def _is_framework_timeline_record(trace: Dict[str, Any]) -> bool:
+    return (
+        trace.get("ph") in ("X", "C")
+        and trace.get("name") != "iteration"
+        and trace.get("record_type") != "cuda_kernel"
+        and trace.get("cat") != "cuda_kernel"
+    )
+
+
+def align_framework_trace_timeline(
+    traces: List[Dict[str, Any]]
+) -> Tuple[List[Dict[str, Any]], List[FrameworkTimelineAlignment]]:
+    """Calibrate rank-local framework timestamps from synchronous collective ends.
+
+    The operation is deliberately offline and opt-in.  For each iteration and
+    communication group, matching synchronous ``tp-allreduce`` complete events
+    are paired by their rank-local order.  A robust per-rank constant offset is
+    estimated from their completion boundaries and applied to every framework
+    span and same-origin hardware counter on that rank.  Event duration, name,
+    arguments, nesting, and CUDA-kernel records are left unchanged.
+    """
+
+    aligned = [dict(trace) for trace in traces]
+    iteration_bounds: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    framework_events: Dict[Tuple[int, int], List[Dict[str, Any]]] = {}
+    anchors: Dict[Tuple[int, Tuple[int, ...]], Dict[int, List[Dict[str, Any]]]] = {}
+
+    for trace in traces:
+        is_anchor = trace.get("name") == FRAMEWORK_TIMELINE_ANCHOR and trace.get("ph") == "X"
+        args = trace.get("args")
+        if not isinstance(args, dict):
+            if is_anchor:
+                raise ValueError(
+                    f"Framework timeline anchor {FRAMEWORK_TIMELINE_ANCHOR!r} "
+                    "has no argument mapping"
+                )
+            continue
+        iteration_id = args.get("iteration")
+        if not isinstance(iteration_id, int) or isinstance(iteration_id, bool):
+            if is_anchor:
+                raise ValueError(
+                    f"Framework timeline anchor {FRAMEWORK_TIMELINE_ANCHOR!r} "
+                    "has no integer iteration"
+                )
+            continue
+
+        if trace.get("name") == "iteration" and trace.get("ph") == "X":
+            rank = _framework_trace_rank(trace)
+            key = (iteration_id, rank)
+            if key in iteration_bounds:
+                raise ValueError(
+                    f"Iteration {iteration_id} has multiple timeline bounds for rank {rank}"
+                )
+            iteration_bounds[key] = _framework_trace_interval(trace)
+            continue
+
+        if _is_framework_timeline_record(trace):
+            rank = _framework_trace_rank(trace)
+            _framework_trace_interval(trace)
+            framework_events.setdefault((iteration_id, rank), []).append(trace)
+
+        if not is_anchor:
+            continue
+
+        rank = _framework_trace_rank(trace)
+        if args.get("op") != "all_reduce" or args.get("timing_phase") != "collective_call":
+            raise ValueError(
+                f"Framework timeline anchor {FRAMEWORK_TIMELINE_ANCHOR!r} on rank {rank} "
+                "does not represent a synchronous all_reduce collective_call"
+            )
+        peers = args.get("group")
+        group_size = args.get("group_size")
+        if not isinstance(peers, list) or any(
+            not isinstance(peer, int) or isinstance(peer, bool) for peer in peers
+        ):
+            raise ValueError(
+                f"Framework timeline anchor {FRAMEWORK_TIMELINE_ANCHOR!r} on rank {rank} "
+                "has no integer peer list"
+            )
+        if not isinstance(group_size, int) or isinstance(group_size, bool):
+            raise ValueError(
+                f"Framework timeline anchor {FRAMEWORK_TIMELINE_ANCHOR!r} on rank {rank} "
+                "has no integer group_size"
+            )
+        if group_size <= 1:
+            continue
+        members = tuple(sorted((rank, *peers)))
+        if len(set(members)) != len(members) or len(members) != group_size:
+            raise ValueError(
+                f"Framework timeline anchor {FRAMEWORK_TIMELINE_ANCHOR!r} on rank {rank} "
+                f"has inconsistent group metadata: members={members}, group_size={group_size}"
+            )
+        anchors.setdefault((iteration_id, members), {}).setdefault(rank, []).append(trace)
+
+    if not anchors:
+        raise ValueError(
+            f"No {FRAMEWORK_TIMELINE_ANCHOR!r} anchors are available for framework alignment"
+        )
+
+    reports: List[FrameworkTimelineAlignment] = []
+    applied_shifts: Dict[Tuple[int, int], int] = {}
+
+    for (iteration_id, members), per_rank in sorted(anchors.items()):
+        missing_ranks = sorted(set(members) - set(per_rank))
+        unexpected_ranks = sorted(set(per_rank) - set(members))
+        if missing_ranks or unexpected_ranks:
+            raise ValueError(
+                f"Framework timeline anchors for iteration {iteration_id}, group {members} "
+                f"have missing ranks {missing_ranks} and unexpected ranks {unexpected_ranks}"
+            )
+
+        ordered: Dict[int, List[Dict[str, Any]]] = {
+            rank: sorted(events, key=lambda event: _framework_trace_interval(event)[0])
+            for rank, events in per_rank.items()
+        }
+        counts = {rank: len(events) for rank, events in ordered.items()}
+        if len(set(counts.values())) != 1:
+            raise ValueError(
+                f"Framework timeline anchors for iteration {iteration_id}, group {members} "
+                f"have mismatched counts: {counts}"
+            )
+        anchor_count = next(iter(counts.values()))
+        if anchor_count < FRAMEWORK_TIMELINE_MIN_ANCHORS:
+            raise ValueError(
+                f"Framework timeline anchors for iteration {iteration_id}, group {members} "
+                f"contain {anchor_count} events; at least "
+                f"{FRAMEWORK_TIMELINE_MIN_ANCHORS} are required"
+            )
+
+        reference_rank = members[0]
+        reference_signatures = [
+            (
+                event.get("args", {}).get("op"),
+                event.get("args", {}).get("timing_phase"),
+                event.get("args", {}).get("data_bytes"),
+                event.get("args", {}).get("reduce_op"),
+                event.get("args", {}).get("payload_role"),
+            )
+            for event in ordered[reference_rank]
+        ]
+        reference_ends = [_framework_trace_interval(event)[1] for event in ordered[reference_rank]]
+        offsets = {reference_rank: 0}
+        for rank in members[1:]:
+            signatures = [
+                (
+                    event.get("args", {}).get("op"),
+                    event.get("args", {}).get("timing_phase"),
+                    event.get("args", {}).get("data_bytes"),
+                    event.get("args", {}).get("reduce_op"),
+                    event.get("args", {}).get("payload_role"),
+                )
+                for event in ordered[rank]
+            ]
+            if signatures != reference_signatures:
+                raise ValueError(
+                    f"Framework timeline anchors for iteration {iteration_id}, group {members} "
+                    f"have mismatched payload/order on rank {rank}"
+                )
+            ends = [_framework_trace_interval(event)[1] for event in ordered[rank]]
+            offsets[rank] = round(
+                median(end - reference for end, reference in zip(ends, reference_ends))
+            )
+
+        corrections = {rank: -offset for rank, offset in offsets.items()}
+        lower_bound: Optional[int] = None
+        upper_bound: Optional[int] = None
+        for rank in members:
+            key = (iteration_id, rank)
+            if key not in iteration_bounds:
+                raise ValueError(f"Iteration {iteration_id} has no timeline bound for rank {rank}")
+            events = framework_events.get(key)
+            if not events:
+                raise ValueError(
+                    f"Iteration {iteration_id} has no framework events for rank {rank}"
+                )
+            iteration_start, iteration_end = iteration_bounds[key]
+            event_start = min(_framework_trace_interval(event)[0] for event in events)
+            event_end = max(_framework_trace_interval(event)[1] for event in events)
+            rank_lower = iteration_start - event_start - corrections[rank]
+            rank_upper = iteration_end - event_end - corrections[rank]
+            lower_bound = rank_lower if lower_bound is None else max(lower_bound, rank_lower)
+            upper_bound = rank_upper if upper_bound is None else min(upper_bound, rank_upper)
+
+        assert lower_bound is not None and upper_bound is not None
+        if lower_bound > upper_bound:
+            raise ValueError(
+                f"Framework timeline correction for iteration {iteration_id}, group {members} "
+                "cannot fit inside the existing iteration duration"
+            )
+        common_translation = min(max(0, lower_bound), upper_bound)
+        group_shifts = {rank: corrections[rank] + common_translation for rank in members}
+        for rank, shift in group_shifts.items():
+            key = (iteration_id, rank)
+            previous = applied_shifts.get(key)
+            if previous is not None and previous != shift:
+                raise ValueError(
+                    f"Rank {rank} in iteration {iteration_id} belongs to framework "
+                    f"alignment groups with conflicting shifts {previous} and {shift}"
+                )
+            applied_shifts[key] = shift
+
+        reports.append(
+            FrameworkTimelineAlignment(
+                iteration_id=iteration_id,
+                anchor_name=FRAMEWORK_TIMELINE_ANCHOR,
+                group=members,
+                anchor_count=anchor_count,
+                rank_offsets_us=tuple(sorted(offsets.items())),
+                applied_shifts_us=tuple(sorted(group_shifts.items())),
+            )
+        )
+
+    for trace in aligned:
+        if not _is_framework_timeline_record(trace):
+            continue
+        args = trace.get("args")
+        if not isinstance(args, dict):
+            continue
+        iteration_id = args.get("iteration")
+        if not isinstance(iteration_id, int) or isinstance(iteration_id, bool):
+            continue
+        rank = _framework_trace_rank(trace)
+        shift = applied_shifts.get((iteration_id, rank))
+        if shift is not None:
+            start, _ = _framework_trace_interval(trace)
+            trace["ts"] = start + shift
+
+    return aligned, reports
 
 
 def benchmark_to_chrome_trace(iterations: List[Iteration]) -> List[Dict[str, Any]]:

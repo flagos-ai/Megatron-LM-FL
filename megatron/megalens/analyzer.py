@@ -41,6 +41,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from megatron.megalens.trace_aggregate import (
     Iteration,
     aggregate_benchmark_data,
+    align_framework_trace_timeline,
     benchmark_to_chrome_trace,
     collect_benchmark_files,
     read_benchmark_file,
@@ -246,9 +247,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help=(
-            "Write aggregated trace JSON to this path. "
+            "Write aggregated trace JSON to this path. With --trace, this is used "
+            "only when --align-framework-timeline is enabled. "
             "With --bench-dir, default: <output-dir>/aggregated_trace.json if "
             "--output-dir is set, else ./megalens_trace_<timestamp>.json"
+        ),
+    )
+    parser.add_argument(
+        "--align-framework-timeline",
+        action="store_true",
+        help=(
+            "Explicitly calibrate rank-local framework timestamps from matching "
+            "synchronous TP AllReduce completion boundaries. CUDA-kernel records "
+            "and event durations are unchanged."
         ),
     )
     parser.add_argument(
@@ -297,6 +308,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     traces: List[Dict[str, Any]]
     default_stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
+    trace_out: Optional[Path] = None
     if args.bench_dir is not None:
         traces, _ = aggregate_traces_from_benchmark_dir(args.bench_dir)
         if args.trace_output is not None:
@@ -305,10 +317,27 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             trace_out = args.output_dir.resolve() / "aggregated_trace.json"
         else:
             trace_out = Path.cwd() / f"megalens_trace_{default_stamp}.json"
-        write_trace_json(traces, trace_out)
     else:
         assert args.trace is not None
         traces = load_traces_from_json(args.trace)
+
+    if args.align_framework_timeline:
+        traces, alignments = align_framework_trace_timeline(traces)
+        for alignment in alignments:
+            logger.info(
+                "Aligned framework timeline: iteration=%d group=%s anchors=%d "
+                "offsets_us=%s shifts_us=%s",
+                alignment.iteration_id,
+                alignment.group,
+                alignment.anchor_count,
+                dict(alignment.rank_offsets_us),
+                dict(alignment.applied_shifts_us),
+            )
+        if args.trace is not None and args.trace_output is not None:
+            trace_out = args.trace_output.resolve()
+
+    if trace_out is not None:
+        write_trace_json(traces, trace_out)
 
     if args.aggregate_only:
         logger.info("Aggregate-only mode; skipping analyzers.")

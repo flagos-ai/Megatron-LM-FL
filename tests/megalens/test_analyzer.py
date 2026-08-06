@@ -18,9 +18,9 @@ _SOURCE_BASELINE = "12fb7169ce30fdb62b50f86b41afa09336a523ea"
 _SOURCE_SHA256 = "73ff14a902ba5cff507187dd3693f4c2479dac1b11194d5a4bbf9ca885777ef7"
 _SOURCE_LINE_COUNT = 350
 _SOURCE_BYTE_COUNT = 11_905
-_TARGET_SHA256 = "b5f8dc5381f25f8710c68953bc1b0f390ae6ee1d8727888048cb96d8357047af"
-_TARGET_LINE_COUNT = 334
-_TARGET_BYTE_COUNT = 11_303
+_TARGET_SHA256 = "ea4f01d61f3af0fd1e110f6c0f1632cf13fa930862749818dd60484aa989149d"
+_TARGET_LINE_COUNT = 363
+_TARGET_BYTE_COUNT = 12_479
 
 
 def _install_fake_analyzers(
@@ -217,6 +217,9 @@ def test_parser_requires_exactly_one_trace_source(tmp_path: Path) -> None:
     assert parser.parse_args(["--trace", str(tmp_path / "trace.json")]).trace == (
         tmp_path / "trace.json"
     )
+    assert parser.parse_args(
+        ["--trace", str(tmp_path / "trace.json"), "--align-framework-timeline"]
+    ).align_framework_timeline
     with pytest.raises(SystemExit, match="2"):
         parser.parse_args(["--trace", str(tmp_path / "trace.json"), "--run", "pig"])
 
@@ -306,3 +309,76 @@ def test_trace_input_ignores_trace_output_and_runs_selected_modes(
         "kwargs": {"pp_theory_bw_gbps": 12.5, "tp_nvlink_peak_gbps": 250.0},
     }
     assert not ignored.exists()
+
+
+def test_trace_input_can_explicitly_align_and_write_framework_timeline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    traces: list[dict[str, Any]] = []
+    for rank, offset in ((0, 0), (1, 50)):
+        common_args = {"iteration": 2, "g_rk": rank, "dp_rk": 0, "pp_rk": 0, "tp_rk": rank}
+        traces.append(
+            {
+                "name": "iteration",
+                "ph": "X",
+                "ts": 0,
+                "dur": 1_000,
+                "pid": rank,
+                "args": dict(common_args),
+            }
+        )
+        for completion in (200, 400, 600):
+            traces.append(
+                {
+                    "name": "tp-allreduce",
+                    "ph": "X",
+                    "ts": completion + offset - 20,
+                    "dur": 20,
+                    "pid": rank,
+                    "args": {
+                        **common_args,
+                        "group": [1 - rank],
+                        "group_size": 2,
+                        "op": "all_reduce",
+                        "timing_phase": "collective_call",
+                        "data_bytes": 4096,
+                        "payload_role": "inplace_input_output",
+                    },
+                }
+            )
+
+    trace_path = tmp_path / "trace.json"
+    trace_path.write_text(json.dumps(traces), encoding="utf-8")
+    aligned_path = tmp_path / "aligned.json"
+    captured: dict[str, Any] = {}
+
+    def fake_run(
+        actual_traces: list[dict[str, Any]], modes: list[str], output_dir: Path, **kwargs: Any
+    ) -> None:
+        captured["traces"] = actual_traces
+
+    monkeypatch.setattr(analyzer_module, "run_parallelism_analyses", fake_run)
+
+    assert (
+        analyzer_module.main(
+            [
+                "--trace",
+                str(trace_path),
+                "--trace-output",
+                str(aligned_path),
+                "--align-framework-timeline",
+                "--run",
+                "tp",
+                "--output-dir",
+                str(tmp_path / "reports"),
+            ]
+        )
+        == 0
+    )
+
+    aligned = json.loads(aligned_path.read_text(encoding="utf-8"))
+    assert captured["traces"] == aligned
+    anchors = [event for event in aligned if event["name"] == "tp-allreduce"]
+    assert {event["ts"] + event["dur"] for event in anchors[:3]} == {200, 400, 600}
+    assert {event["ts"] + event["dur"] for event in anchors[3:]} == {200, 400, 600}
+    assert [event["dur"] for event in anchors] == [20] * 6

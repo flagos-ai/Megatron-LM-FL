@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -13,6 +15,7 @@ from megatron.megalens.trace_aggregate import (
     Iteration,
     Rank,
     aggregate_benchmark_data,
+    align_framework_trace_timeline,
     benchmark_to_chrome_trace,
     read_benchmark_file,
     transform,
@@ -125,6 +128,175 @@ def test_aggregate_keeps_legacy_position_alignment_when_all_ids_are_absent() -> 
 
     assert len(iterations) == 1
     assert iterations[0].iteration_id is None
+
+
+def _framework_alignment_trace() -> list[dict[str, Any]]:
+    traces: list[dict[str, Any]] = []
+    offsets = {0: 0, 1: 300, 2: 500, 3: 400}
+    for rank, offset in offsets.items():
+        common_args = {"iteration": 2, "g_rk": rank, "dp_rk": 0, "pp_rk": 0, "tp_rk": rank}
+        traces.append(
+            {
+                "name": "iteration",
+                "ph": "X",
+                "ts": 0,
+                "dur": 10_000,
+                "pid": rank,
+                "tid": 0,
+                "args": dict(common_args),
+            }
+        )
+        traces.append(
+            {
+                "name": "forward",
+                "ph": "X",
+                "ts": 500 + offset,
+                "dur": 1_000,
+                "pid": rank,
+                "tid": 0,
+                "args": dict(common_args),
+            }
+        )
+        traces.append(
+            {
+                "name": "gpu-utilization",
+                "ph": "C",
+                "ts": 700 + offset,
+                "pid": rank,
+                "tid": "Hardware Monitor",
+                "args": {**common_args, "utilization": 90},
+            }
+        )
+        peers = [peer for peer in offsets if peer != rank]
+        for index, completion in enumerate((2_000, 4_000, 6_000)):
+            duration = 100 + rank * 10 + index
+            completion_outlier = 30 if rank == 3 and index == 1 else 0
+            traces.append(
+                {
+                    "name": "tp-allreduce",
+                    "ph": "X",
+                    "ts": completion + offset + completion_outlier - duration,
+                    "dur": duration,
+                    "pid": rank,
+                    "tid": 0,
+                    "args": {
+                        **common_args,
+                        "group": peers,
+                        "group_size": 4,
+                        "op": "all_reduce",
+                        "timing_phase": "collective_call",
+                        "data_bytes": 4096,
+                        "reduce_op": "SUM",
+                        "payload_role": "inplace_input_output",
+                    },
+                }
+            )
+    traces.append({"ph": "M", "name": "process_name", "pid": 0, "args": {"name": "rank 0"}})
+    traces.append(
+        {
+            "record_type": "cuda_kernel",
+            "name": "ncclKernel_AllReduce",
+            "ph": "X",
+            "ts": 900,
+            "dur": 50,
+            "pid": 0,
+            "args": {"iteration": 2, "g_rk": 0},
+        }
+    )
+    return traces
+
+
+def test_framework_timeline_alignment_removes_rank_offset_only() -> None:
+    traces = _framework_alignment_trace()
+    original = deepcopy(traces)
+
+    aligned, reports = align_framework_trace_timeline(traces)
+
+    assert traces == original
+    assert len(reports) == 1
+    report = reports[0]
+    assert report.iteration_id == 2
+    assert report.group == (0, 1, 2, 3)
+    assert report.anchor_count == 3
+    assert dict(report.rank_offsets_us) == {0: 0, 1: 300, 2: 500, 3: 400}
+    assert dict(report.applied_shifts_us) == {0: 0, 1: -300, 2: -500, 3: -400}
+
+    anchors = [event for event in aligned if event.get("name") == "tp-allreduce"]
+    for index in range(3):
+        operation = sorted(
+            (event for event in anchors if event["pid"] in range(4)),
+            key=lambda event: (event["pid"], event["ts"]),
+        )[index::3]
+        expected_completions = {(2_000, 4_000, 6_000)[index]}
+        if index == 1:
+            expected_completions.add(4_030)
+        assert {event["ts"] + event["dur"] for event in operation} == expected_completions
+
+    expected_shifts = {0: 0, 1: -300, 2: -500, 3: -400}
+    for before, after in zip(original, aligned):
+        is_framework_record = (
+            before.get("ph") in ("X", "C")
+            and before.get("name") != "iteration"
+            and before.get("record_type") != "cuda_kernel"
+        )
+        if is_framework_record:
+            assert after["ts"] == before["ts"] + expected_shifts[before["pid"]]
+
+    forwards = [event for event in aligned if event.get("name") == "forward"]
+    assert {event["ts"] for event in forwards} == {500}
+    counters = [event for event in aligned if event.get("ph") == "C"]
+    assert {event["ts"] for event in counters} == {700}
+    iterations = [event for event in aligned if event.get("name") == "iteration"]
+    assert {(event["ts"], event["dur"]) for event in iterations} == {(0, 10_000)}
+    kernel = next(event for event in aligned if event.get("record_type") == "cuda_kernel")
+    assert (kernel["ts"], kernel["dur"]) == (900, 50)
+    assert [event.get("name") for event in aligned] == [event.get("name") for event in traces]
+    assert [event.get("args") for event in aligned] == [event.get("args") for event in traces]
+    assert [event.get("dur") for event in aligned] == [event.get("dur") for event in traces]
+
+
+@pytest.mark.parametrize(
+    ("case", "message"),
+    [
+        ("missing-rank", "missing ranks"),
+        ("mismatched-count", "mismatched counts"),
+        ("mismatched-payload", "mismatched payload/order"),
+        ("missing-iteration", "no integer iteration"),
+    ],
+)
+def test_framework_timeline_alignment_rejects_incomplete_or_ambiguous_anchors(
+    case: str, message: str
+) -> None:
+    traces = _framework_alignment_trace()
+    if case == "missing-rank":
+        traces[:] = [
+            event
+            for event in traces
+            if not (event.get("name") == "tp-allreduce" and event.get("pid") == 3)
+        ]
+    elif case == "mismatched-count":
+        traces.remove(
+            next(
+                event
+                for event in traces
+                if event.get("name") == "tp-allreduce"
+                and event.get("pid") == 3
+                and event.get("ts") > 5_000
+            )
+        )
+    elif case == "mismatched-payload":
+        anchor = next(
+            event
+            for event in traces
+            if event.get("name") == "tp-allreduce" and event.get("pid") == 2
+        )
+        anchor["args"]["data_bytes"] = 8192
+    else:
+        anchor = next(event for event in traces if event.get("name") == "tp-allreduce")
+        del anchor["args"]["iteration"]
+
+    with pytest.raises(ValueError, match=message):
+        align_framework_trace_timeline(traces)
 
 
 def test_directory_loader_converts_raw_rank_traces_end_to_end(tmp_path: Path) -> None:
