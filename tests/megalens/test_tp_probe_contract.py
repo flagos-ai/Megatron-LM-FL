@@ -24,6 +24,8 @@ def _write_collective_trace(
     include_last_dim_collectives: bool = True,
     include_linear_lifecycle: bool = False,
     include_linear_allreduce: bool = False,
+    tp_allreduce_count: int = 0,
+    linear_allreduce_count: int | None = None,
     mismatched_linear_completion: bool = False,
     include_final_grad_sync: bool = False,
     include_sp_sync: bool = True,
@@ -72,6 +74,18 @@ def _write_collective_trace(
             group_size=tensor_parallel_size,
         )
         event(name, "E", group=tp_peer_ranks)
+
+    def tp_allreduce() -> None:
+        event(
+            "tp-allreduce",
+            "B",
+            op="all_reduce",
+            data_bytes=32768,
+            group_size=tensor_parallel_size,
+            timing_phase="collective_call",
+            payload_role="inplace_input_output",
+        )
+        event("tp-allreduce", "E", group=tp_peer_ranks)
 
     def linear_lifecycle(
         *,
@@ -221,6 +235,8 @@ def _write_collective_trace(
             event("tp-reduce-scatter-last", "E", group=tp_peer_ranks)
         elif not omit_nested_reduce_scatter:
             collective("tp-reduce-scatter", op="reduce-scatter", dim="first")
+        for _ in range(tp_allreduce_count):
+            tp_allreduce()
         if include_linear_lifecycle:
             linear_lifecycle(
                 operation_id=f"tp-linear:{rank}:{iteration}:all-gather",
@@ -241,9 +257,16 @@ def _write_collective_trace(
                 and rank == 0
                 and iteration == 1,
             )
-        if include_linear_allreduce:
+        allreduce_lifecycles = (
+            linear_allreduce_count
+            if linear_allreduce_count is not None
+            else int(include_linear_allreduce)
+        )
+        for operation_index in range(allreduce_lifecycles):
             linear_lifecycle(
-                operation_id=f"tp-linear:{rank}:{iteration}:all-reduce",
+                operation_id=(
+                    f"tp-linear:{rank}:{iteration}:all-reduce:{operation_index}"
+                ),
                 collective_op="all-reduce",
                 launch_site="linear_backward_dgrad_all_reduce",
                 payload_role="input_gradient",
@@ -800,6 +823,48 @@ def test_qwen3_tp4_sp_contract_rejects_a_tp2_collective_group(
     failures = tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path)
 
     assert "trace.tp.collective_field" in {
+        failure.code for failure in failures
+    }
+
+
+def test_qwen3_tp4_local_no_sp_contract_accepts_per_layer_allreduce(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=4,
+            include_first_all_gather=False,
+            include_last_dim_collectives=False,
+            omit_nested_reduce_scatter=True,
+            tp_allreduce_count=57,
+            linear_allreduce_count=57,
+            include_final_grad_sync=True,
+        )
+
+    assert tp_probe_contract.validate_qwen3_tp4_local_no_sp_profile(tmp_path) == ()
+
+
+def test_qwen3_tp4_local_no_sp_contract_rejects_missing_allreduce(
+    tmp_path: Path,
+) -> None:
+    for rank in range(4):
+        _write_collective_trace(
+            tmp_path,
+            rank=rank,
+            tensor_parallel_size=4,
+            include_first_all_gather=False,
+            include_last_dim_collectives=False,
+            omit_nested_reduce_scatter=True,
+            tp_allreduce_count=56 if rank == 0 else 57,
+            linear_allreduce_count=57,
+            include_final_grad_sync=True,
+        )
+
+    failures = tp_probe_contract.validate_qwen3_tp4_local_no_sp_profile(tmp_path)
+
+    assert "trace.tp.allreduce_count" in {
         failure.code for failure in failures
     }
 

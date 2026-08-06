@@ -45,6 +45,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_qwen3_enron_tp4_sp.yaml": (
         "qwen3-enron-tp4-sp"
     ),
+    "flagscale_single_node_qwen3_enron_tp4_local_no_sp.yaml": (
+        "qwen3-enron-tp4-local-no-sp"
+    ),
     "flagscale_single_node_qwen3_enron_tp8_sp.yaml": (
         "qwen3-enron-tp8-sp"
     ),
@@ -1402,6 +1405,45 @@ def test_qwen3_tp4_training_contract_requires_tensor_parallel_size_four(
     }
 
 
+def test_qwen3_tp4_local_no_sp_training_contract_requires_the_control_route(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "\n".join(
+            f"[default0]:  {name} ................................ {value}"
+            for name, value in (
+                training_run_contract._QWEN3_TP4_LOCAL_NO_SP_ARGUMENTS
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    assert (
+        training_run_contract.validate_two_iteration_qwen3_tp4_local_no_sp_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        launcher_log.read_text(encoding="utf-8").replace(
+            "sequence_parallel ................................ False",
+            "sequence_parallel ................................ True",
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_qwen3_tp4_local_no_sp_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert "run.training.qwen3_local_argument" in {
+        failure.code for failure in failures
+    }
+
+
 def test_qwen3_tp8_training_contract_requires_tensor_parallel_size_eight(
     tmp_path: Path,
 ) -> None:
@@ -1569,9 +1611,10 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-linear",
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
-        "qwen3-enron-tp2-sp",
-        "qwen3-enron-tp4-sp",
-        "qwen3-enron-tp8-sp",
+            "qwen3-enron-tp2-sp",
+            "qwen3-enron-tp4-sp",
+            "qwen3-enron-tp4-local-no-sp",
+            "qwen3-enron-tp8-sp",
         "deepseek-tp2-sp-mock",
     }
 
@@ -2185,6 +2228,70 @@ def test_qwen3_enron_tp4_sp_profile_only_scales_tensor_parallelism() -> None:
     assert gate._CONFIG_PROFILES["flagscale_single_node_qwen3_enron_tp4_sp"] == (
         "qwen3-enron-tp4-sp"
     )
+
+
+def test_qwen3_enron_tp4_local_no_sp_profile_only_changes_the_backend_route() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_qwen3_enron_tp4_sp.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    local = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_qwen3_enron_tp4_local_no_sp.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert local["experiment"]["exp_name"].endswith("tp4-local-no-sp")
+    assert "NVTE_ALLOW_NONDETERMINISTIC_ALGO" not in local["experiment"]["envs"]
+    assert local["train"]["system"]["sequence_parallel"] is False
+    assert local["train"]["model"]["transformer_impl"] == "local"
+    assert local["train"]["model"]["attention_backend"] == "local"
+    assert local["train"]["model"]["no_persist_layer_norm"] is True
+    assert local["train"]["model"]["no_gradient_accumulation_fusion"] is True
+    assert "te_fl_prefer" not in local["train"]["model"]
+
+    baseline["experiment"]["exp_name"] = local["experiment"]["exp_name"]
+    baseline["experiment"]["envs"].pop("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
+    baseline["train"]["system"]["sequence_parallel"] = False
+    baseline["train"]["model"].update(
+        {
+            "transformer_impl": "local",
+            "attention_backend": "local",
+            "no_persist_layer_norm": True,
+            "no_gradient_accumulation_fusion": True,
+        }
+    )
+    baseline["train"]["model"].pop("te_fl_prefer")
+    assert local == baseline
+
+    profile = gate.PROFILES["qwen3-enron-tp4-local-no-sp"]
+    assert profile.rank_count == 4
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_qwen3_tp4_local_no_sp_checkpoint
+    )
+    assert gate._CONFIG_PROFILES[
+        "flagscale_single_node_qwen3_enron_tp4_local_no_sp"
+    ] == "qwen3-enron-tp4-local-no-sp"
+    assert {requirement.name for requirement in profile.events} == {
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+        "tp-allreduce",
+        "tp-linear-async-launch",
+        "tp-linear-async-complete",
+        "grad-sync",
+        "all-grads-sync",
+        "sp-layernorm-allreduce",
+    }
 
 
 def test_qwen3_enron_tp8_sp_profile_only_scales_tensor_parallelism() -> None:

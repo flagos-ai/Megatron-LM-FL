@@ -244,6 +244,57 @@ _QWEN3_TP_SP_EVENTS = (
         not in {"tp-all-gather-last", "tp-reduce-scatter-last"}
     ),
 )
+_QWEN3_TP4_LOCAL_NO_SP_EVENTS = (
+    *_events(
+        "forward-step",
+        "decoder",
+        "decoder-postprocess",
+        "output_layer",
+        "loss",
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+    ),
+    manifest.EventRequirement(
+        "tp-allreduce",
+        _TP_ALLREDUCE_FIELDS,
+        "B",
+    ),
+    manifest.EventRequirement(
+        "tp-linear-async-launch",
+        (*_COMMON_FIELDS, "operation_id", "collective_op", "launch_site"),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "tp-linear-async-complete",
+        (
+            *_COMMON_FIELDS,
+            "operation_id",
+            "collective_op",
+            "completion_kind",
+        ),
+        "B",
+    ),
+    manifest.EventRequirement(
+        "grad-sync",
+        (*_COMMON_FIELDS, "schedule", "timing_phase"),
+        "B",
+    ),
+    manifest.EventRequirement("all-grads-sync", _COMMON_FIELDS, "B"),
+    manifest.EventRequirement(
+        "sp-layernorm-allreduce",
+        (
+            *_COMMON_FIELDS,
+            "data_bytes",
+            "group_size",
+            "reduce_op",
+            "grad_bucket",
+        ),
+        "B",
+    ),
+)
 _DEEPSEEK_TP2_SP_MODEL_EVENTS = (
     *_events(
         "forward-step",
@@ -607,6 +658,16 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
             tp_probe_contract.validate_qwen3_tp4_sp_profile,
         ),
         training_run_contract.validate_two_iteration_qwen3_tp4_sp_checkpoint,
+    ),
+    "qwen3-enron-tp4-local-no-sp": manifest.TraceProfile(
+        "qwen3-enron-tp4-local-no-sp",
+        4,
+        _QWEN3_TP4_LOCAL_NO_SP_EVENTS,
+        _contracts(
+            gpt_probe_contract.validate_qwen3_tp4_eager_phases,
+            tp_probe_contract.validate_qwen3_tp4_local_no_sp_profile,
+        ),
+        training_run_contract.validate_two_iteration_qwen3_tp4_local_no_sp_checkpoint,
     ),
     "qwen3-enron-tp8-sp": manifest.TraceProfile(
         "qwen3-enron-tp8-sp",
@@ -1081,6 +1142,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_tp2_sp_te_op_fuser_smoke": "tp2-sp-te-op-fuser",
     "flagscale_single_node_qwen3_enron_tp2_sp": "qwen3-enron-tp2-sp",
     "flagscale_single_node_qwen3_enron_tp4_sp": "qwen3-enron-tp4-sp",
+    "flagscale_single_node_qwen3_enron_tp4_local_no_sp": (
+        "qwen3-enron-tp4-local-no-sp"
+    ),
     "flagscale_single_node_qwen3_enron_tp8_sp": "qwen3-enron-tp8-sp",
     "flagscale_single_node_deepseek_tp2_sp_mock": "deepseek-tp2-sp-mock",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
@@ -1519,6 +1583,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if profile.name in {
         "qwen3-enron-tp2-sp",
         "qwen3-enron-tp4-sp",
+        "qwen3-enron-tp4-local-no-sp",
         "qwen3-enron-tp8-sp",
     }:
         if args.qwen3_data_prefix is None:

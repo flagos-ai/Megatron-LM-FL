@@ -1437,6 +1437,94 @@ def validate_qwen3_tp8_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
     return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=8)
 
 
+def _validate_qwen3_tp4_local_no_sp_collectives(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the fixed collective counts of the local control."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    expected_ranks = tuple(range(4))
+    if tuple(sorted(by_rank)) != expected_ranks:
+        failures.append(
+            Failure(
+                "trace.tp.ranks",
+                "Qwen3 TP4 local/no-SP contract expects ranks [0, 1, 2, 3], "
+                f"observed {sorted(by_rank)}",
+                "qwen3-tp4-local-no-sp",
+            )
+        )
+
+    selected_names = ("tp-allreduce", *_COLLECTIVE_SPECS)
+    for rank in expected_ranks:
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.tp.iterations",
+                    f"rank {rank} expects iterations [1, 2], "
+                    f"observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        for iteration in iterations:
+            iteration_id = int(iteration.iteration_id)
+            spans, pairing_failures = _pair_spans(
+                iteration,
+                selected_names,
+                rank=rank,
+            )
+            failures.extend(pairing_failures)
+            observed_allreduces = len(spans.get("tp-allreduce", ()))
+            if observed_allreduces != 57:
+                failures.append(
+                    _failure(
+                        "trace.tp.allreduce_count",
+                        f"event 'tp-allreduce' has {observed_allreduces} span(s), "
+                        "expected 57",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            for name in _COLLECTIVE_SPECS:
+                observed = len(spans.get(name, ()))
+                if observed:
+                    failures.append(
+                        _failure(
+                            "trace.tp.collective_count",
+                            f"event {name!r} has {observed} span(s), expected 0",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+    return tuple(failures)
+
+
+def validate_qwen3_tp4_local_no_sp_profile(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate Qwen3 TP4 with MCore local layers and sequence parallel off."""
+
+    return (
+        *_validate_qwen3_tp4_local_no_sp_collectives(trace_root),
+        *_validate_tp_linear_lifecycle(
+            trace_root,
+            tensor_parallel_size=4,
+            expected_routes=_ALLREDUCE_LINEAR_ROUTES,
+            profile_name="qwen3-tp4-local-no-sp",
+            expected_operation_count=57,
+        ),
+        *_validate_tp_final_grad_sync(
+            trace_root,
+            tensor_parallel_size=4,
+            schedule="no-pipelining",
+            expect_sp_layernorm=True,
+            profile_name="qwen3-tp4-local-no-sp",
+        ),
+    )
+
+
 def _validate_tp2_ep4_flex_iteration(
     iteration: Iteration,
     *,

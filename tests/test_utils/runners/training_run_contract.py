@@ -177,6 +177,72 @@ def validate_two_iteration_qwen3_tp4_sp_checkpoint(
     )
 
 
+_QWEN3_TP4_LOCAL_NO_SP_ARGUMENTS = (
+    ("tensor_model_parallel_size", "4"),
+    ("pipeline_model_parallel_size", "1"),
+    ("context_parallel_size", "1"),
+    ("sequence_parallel", "False"),
+    ("transformer_impl", "local"),
+    ("attention_backend", "local"),
+    ("persist_layer_norm", "False"),
+    ("gradient_accumulation_fusion", "False"),
+    ("qk_layernorm", "True"),
+    ("normalization", "RMSNorm"),
+    ("num_layers", "28"),
+    ("hidden_size", "1024"),
+    ("ffn_hidden_size", "3072"),
+    ("num_attention_heads", "16"),
+    ("num_query_groups", "8"),
+    ("seq_length", "4096"),
+    ("micro_batch_size", "4"),
+    ("global_batch_size", "4"),
+    ("train_iters", "2"),
+    ("tokenizer_type", "QwenTokenizerFS"),
+    ("use_distributed_optimizer", "True"),
+    ("overlap_grad_reduce", "True"),
+    ("overlap_param_gather", "True"),
+    ("enable_flag_gems", "False"),
+    ("distributed_backend", "nccl"),
+    ("mock_data", "False"),
+)
+
+
+def validate_two_iteration_qwen3_tp4_local_no_sp_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require terminal state and the parsed Qwen3 TP4 local/no-SP control."""
+
+    failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    for name, value in _QWEN3_TP4_LOCAL_NO_SP_ARGUMENTS:
+        argument = re.compile(
+            rf"^\[[^]]+\]:\s*{re.escape(name)}\s+\.+\s+"
+            rf"{re.escape(value)}\s*$",
+            re.MULTILINE,
+        )
+        if argument.search(log_text) is None:
+            failures.append(
+                Failure(
+                    "run.training.qwen3_local_argument",
+                    f"Megatron did not report {name}={value}",
+                    str(launcher_log),
+                )
+            )
+    return tuple(failures)
+
+
 def validate_two_iteration_qwen3_tp8_sp_checkpoint(
     run_root: Path, trace_enabled: bool
 ) -> tuple[Failure, ...]:
