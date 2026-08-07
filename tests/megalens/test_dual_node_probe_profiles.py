@@ -40,6 +40,29 @@ _PROFILES = {
         "0,1,2,3,4,5,6,7",
     ),
 }
+_FLAGCX_PROFILES = (
+    (
+        "flagscale_dual_node_dp2_standard_flagcx.yaml",
+        "flagscale_dual_node_dp2_standard_smoke.yaml",
+    ),
+    (
+        "flagscale_dual_node_dp2_distopt_flagcx.yaml",
+        "flagscale_dual_node_dp2_distopt_smoke.yaml",
+    ),
+)
+_FLAGCX_SITE_ENVS = {
+    "GLOO_SOCKET_IFNAME": "bond0.2208",
+    "FLAGCX_SOCKET_IFNAME": "=bond0.2208",
+    "FLAGCX_IB_DISABLE": 0,
+    "FLAGCX_IB_HCA": (
+        "mlx5_101,mlx5_102,mlx5_103,mlx5_104,"
+        "mlx5_105,mlx5_106,mlx5_107,mlx5_108"
+    ),
+    "FLAGCX_TOPO_DETECTION_DISABLE": 0,
+    "FLAGCX_DEBUG": "INFO",
+    "FLAGCX_DEBUG_SUBSYS": "INIT,ENV,NET",
+    "NCCL_NVLS_ENABLE": 0,
+}
 
 
 def _load(name: str) -> dict[str, Any]:
@@ -113,3 +136,17 @@ def test_dual_node_optimizer_profiles_only_change_optimizer_contract(
     standard_system["num_distributed_optimizer_instances"] = 1
 
     assert standard == distopt
+
+
+@pytest.mark.parametrize(("flagcx_filename", "baseline_filename"), _FLAGCX_PROFILES)
+def test_dual_node_flagcx_profile_preserves_the_dp2_training_contract(
+    flagcx_filename: str, baseline_filename: str
+) -> None:
+    flagcx = _load(flagcx_filename)
+    expected = deepcopy(_load(baseline_filename))
+
+    expected["experiment"]["exp_name"] = flagcx["experiment"]["exp_name"]
+    expected["experiment"]["envs"].update(_FLAGCX_SITE_ENVS)
+    expected["train"]["system"]["distributed_backend"] = "flagcx"
+
+    assert flagcx == expected

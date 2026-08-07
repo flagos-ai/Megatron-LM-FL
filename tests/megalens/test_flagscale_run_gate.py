@@ -818,11 +818,13 @@ def test_existing_yaml_profiles_remain_selectable(config: str, profile: str) -> 
 @pytest.mark.parametrize(
     "config_name",
     (
+        "flagscale_dual_node_dp2_standard_flagcx.yaml",
+        "flagscale_dual_node_dp2_distopt_flagcx.yaml",
         "flagscale_dual_node_qwen3_enron_cp2_dp4.yaml",
         "flagscale_dual_node_qwen3_enron_cp2_dp8.yaml",
     ),
 )
-def test_dual_node_qwen3_config_is_reserved_for_offline_validation(
+def test_dual_node_config_is_reserved_for_offline_validation(
     config_name: str,
 ) -> None:
     args = gate._parser().parse_args(
@@ -840,6 +842,35 @@ def test_dual_node_qwen3_config_is_reserved_for_offline_validation(
 
     with pytest.raises(ValueError, match="manual dual-node orchestration"):
         gate._profile_from_arguments(args)
+
+
+@pytest.mark.parametrize(
+    ("config_stem", "profile_name", "event_names"),
+    (
+        (
+            "flagscale_dual_node_dp2_standard_flagcx",
+            "flagcx-dp2-standard",
+            {"dp-allreduce"},
+        ),
+        (
+            "flagscale_dual_node_dp2_distopt_flagcx",
+            "flagcx-dp2-distopt",
+            {"dp-reduce-scatter", "dp-param-all-gather"},
+        ),
+    ),
+)
+def test_dual_node_flagcx_offline_profiles_keep_the_dp_event_contract(
+    config_stem: str, profile_name: str, event_names: set[str]
+) -> None:
+    profile = gate._OFFLINE_CONFIG_PROFILES[config_stem]
+
+    assert profile.name == profile_name
+    assert profile.rank_count == 2
+    assert {requirement.name for requirement in profile.events} == event_names
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_flagcx_checkpoint
+    )
 
 
 def test_gpt_eager_profile_disables_persistent_layernorm() -> None:
@@ -1345,6 +1376,35 @@ def test_transformer_engine_training_contract_requires_the_parsed_model_route(
     )
     assert (
         training_run_contract.validate_two_iteration_transformer_engine_checkpoint(
+            tmp_path, False
+        )
+        == ()
+    )
+
+
+def test_flagcx_training_contract_requires_the_parsed_backend(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    launcher_log.write_text(
+        "[default0]:  distributed_backend ............................ nccl\n",
+        encoding="utf-8",
+    )
+
+    failures = training_run_contract.validate_two_iteration_flagcx_checkpoint(
+        tmp_path, False
+    )
+    assert {failure.code for failure in failures} == {
+        "run.training.distributed_backend"
+    }
+
+    launcher_log.write_text(
+        "[default0]:  distributed_backend ............................ flagcx\n",
+        encoding="utf-8",
+    )
+    assert (
+        training_run_contract.validate_two_iteration_flagcx_checkpoint(
             tmp_path, False
         )
         == ()

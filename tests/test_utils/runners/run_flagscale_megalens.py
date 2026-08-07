@@ -620,6 +620,22 @@ QWEN3_CP2_DP8_OFFLINE_PROFILE = manifest.TraceProfile(
 )
 
 
+FLAGCX_DP2_STANDARD_OFFLINE_PROFILE = manifest.TraceProfile(
+    "flagcx-dp2-standard",
+    2,
+    _dp_events("standard-ddp"),
+    run_contract=training_run_contract.validate_two_iteration_flagcx_checkpoint,
+)
+
+
+FLAGCX_DP2_DISTOPT_OFFLINE_PROFILE = manifest.TraceProfile(
+    "flagcx-dp2-distopt",
+    2,
+    _dp_events("distopt"),
+    run_contract=training_run_contract.validate_two_iteration_flagcx_checkpoint,
+)
+
+
 # Profiles selectable by the loopback runner. Multi-node validation profiles
 # remain separate and are applied only to already completed run artifacts.
 PROFILES: Mapping[str, manifest.TraceProfile] = {
@@ -1284,6 +1300,8 @@ _CONFIG_PROFILES = {
 }
 
 _OFFLINE_CONFIG_PROFILES = {
+    "flagscale_dual_node_dp2_standard_flagcx": FLAGCX_DP2_STANDARD_OFFLINE_PROFILE,
+    "flagscale_dual_node_dp2_distopt_flagcx": FLAGCX_DP2_DISTOPT_OFFLINE_PROFILE,
     "flagscale_dual_node_qwen3_enron_cp2_dp4": QWEN3_CP2_DP4_OFFLINE_PROFILE,
     "flagscale_dual_node_qwen3_enron_cp2_dp8": QWEN3_CP2_DP8_OFFLINE_PROFILE,
 }
