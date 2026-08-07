@@ -46,6 +46,16 @@ _FLAGCX_BACKEND_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*distributed_backend\s+\.+\s+flagcx\s*$",
     re.MULTILINE,
 )
+_FLAGCX_BOOTSTRAP = re.compile(
+    r"FLAGCX INFO Bootstrap : Using (?P<interface>[^:]+):(?P<address>[^<\s]+)<"
+)
+_FLAGCX_DP2_RANK = re.compile(
+    r"FLAGCX INFO rank (?P<rank>[01]) nranks 2 - DONE"
+)
+_FLAGCX_FATAL_MARKER = re.compile(
+    r"ChildFailedError|Traceback \(most recent call last\)|"
+    r"FLAGCX (?:WARN|ERROR)|CUDA error"
+)
 _TP_COMM_OVERLAP_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*tp_comm_overlap\s+\.+\s+True\s*$",
     re.MULTILINE,
@@ -90,7 +100,7 @@ def validate_two_iteration_transformer_engine_checkpoint(
 def validate_two_iteration_flagcx_checkpoint(
     run_root: Path, trace_enabled: bool
 ) -> tuple[Failure, ...]:
-    """Require terminal state and the parsed FlagCX distributed backend."""
+    """Require terminal state and both FlagCX DP2 worker logs."""
 
     failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
     launcher_log = run_root / "launcher.log"
@@ -112,6 +122,68 @@ def validate_two_iteration_flagcx_checkpoint(
                 "run.training.distributed_backend",
                 "Megatron did not report distributed_backend=flagcx",
                 str(launcher_log),
+            )
+        )
+
+    worker_logs = tuple(sorted((run_root / "logs").glob("host_*.output")))
+    if len(worker_logs) != 2:
+        failures.append(
+            Failure(
+                "run.training.flagcx_worker_logs",
+                "FlagCX DP2 validation requires exactly two host worker logs",
+                str(run_root / "logs"),
+            )
+        )
+        return tuple(failures)
+
+    worker_texts: list[str] = []
+    for worker_log in worker_logs:
+        try:
+            worker_texts.append(worker_log.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError) as error:
+            failures.append(
+                Failure(
+                    "run.training.flagcx_worker_log",
+                    f"cannot read a FlagCX worker log: {error}",
+                    str(worker_log),
+                )
+            )
+    if len(worker_texts) != len(worker_logs):
+        return tuple(failures)
+
+    worker_text = "\n".join(worker_texts)
+    fatal_marker = _FLAGCX_FATAL_MARKER.search(worker_text)
+    if fatal_marker is not None:
+        failures.append(
+            Failure(
+                "run.training.flagcx_worker_failure",
+                f"FlagCX worker logs contain {fatal_marker.group(0)!r}",
+                str(run_root / "logs"),
+            )
+        )
+
+    bootstraps = {
+        (match.group("interface"), match.group("address"))
+        for match in _FLAGCX_BOOTSTRAP.finditer(worker_text)
+    }
+    if len(bootstraps) != 2:
+        failures.append(
+            Failure(
+                "run.training.flagcx_bootstrap",
+                "FlagCX did not report two distinct host bootstrap addresses",
+                str(run_root / "logs"),
+            )
+        )
+
+    dp2_ranks = {
+        match.group("rank") for match in _FLAGCX_DP2_RANK.finditer(worker_text)
+    }
+    if dp2_ranks != {"0", "1"}:
+        failures.append(
+            Failure(
+                "run.training.flagcx_dp2_group",
+                "FlagCX did not initialize both ranks of the two-rank DP group",
+                str(run_root / "logs"),
             )
         )
     return tuple(failures)

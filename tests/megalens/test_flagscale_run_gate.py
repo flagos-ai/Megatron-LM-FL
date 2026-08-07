@@ -168,6 +168,25 @@ def _write_terminal_checkpoint(run_dir: Path) -> None:
     (iteration_root / "common.pt").write_bytes(b"checkpoint")
 
 
+def _write_flagcx_worker_logs(
+    run_dir: Path,
+    *,
+    ranks: tuple[int, int] = (0, 1),
+    fatal_marker: str | None = None,
+) -> None:
+    log_root = run_dir / "logs"
+    log_root.mkdir()
+    for host_rank, dp_rank in enumerate(ranks):
+        suffix = f"\n{fatal_marker}" if fatal_marker and host_rank == 1 else ""
+        (log_root / f"host_{host_rank}.output").write_text(
+            "[default0]:host:0:0 [0] FLAGCX INFO Bootstrap : Using "
+            f"bond0.2208:10.6.208.{99 + 19 * host_rank}<0>\n"
+            "[default0]:host:0:0 [0] FLAGCX INFO rank "
+            f"{dp_rank} nranks 2 - DONE{suffix}\n",
+            encoding="utf-8",
+        )
+
+
 def _write_legacy_pp2_terminal_checkpoint(run_dir: Path) -> None:
     checkpoint_root = run_dir / "checkpoints"
     iteration_root = checkpoint_root / "iter_0000002"
@@ -1386,6 +1405,7 @@ def test_flagcx_training_contract_requires_the_parsed_backend(
     tmp_path: Path,
 ) -> None:
     _write_terminal_checkpoint(tmp_path)
+    _write_flagcx_worker_logs(tmp_path)
     launcher_log = tmp_path / "launcher.log"
     launcher_log.write_text(
         "[default0]:  distributed_backend ............................ nccl\n",
@@ -1409,6 +1429,42 @@ def test_flagcx_training_contract_requires_the_parsed_backend(
         )
         == ()
     )
+
+
+def test_flagcx_training_contract_requires_both_dp2_worker_ranks(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    _write_flagcx_worker_logs(tmp_path, ranks=(0, 0))
+    (tmp_path / "launcher.log").write_text(
+        "[default0]:  distributed_backend ............................ flagcx\n",
+        encoding="utf-8",
+    )
+
+    failures = training_run_contract.validate_two_iteration_flagcx_checkpoint(
+        tmp_path, False
+    )
+    assert {failure.code for failure in failures} == {
+        "run.training.flagcx_dp2_group"
+    }
+
+
+def test_flagcx_training_contract_rejects_worker_failure_marker(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    _write_flagcx_worker_logs(tmp_path, fatal_marker="ChildFailedError")
+    (tmp_path / "launcher.log").write_text(
+        "[default0]:  distributed_backend ............................ flagcx\n",
+        encoding="utf-8",
+    )
+
+    failures = training_run_contract.validate_two_iteration_flagcx_checkpoint(
+        tmp_path, False
+    )
+    assert {failure.code for failure in failures} == {
+        "run.training.flagcx_worker_failure"
+    }
 
 
 def test_qwen3_training_contract_requires_the_reviewed_model_and_topology(
