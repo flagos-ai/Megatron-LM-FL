@@ -1,0 +1,156 @@
+# V3.1 Qwen3 Q0 runtime contract derived from the supplied FlagOS guide.
+# The guide model, DP16 topology, real-data contract, FlagOS backends, training
+# samples, optimizer, and checkpoint settings stay intact. Cloud rendezvous,
+# shared paths, site network values, foreground execution, and the Probe switch
+# adapt that contract to the two provided H100 nodes. The guide's placeholder
+# flag_gems_unused value is intentionally not treated as an operator policy.
+experiment:
+  exp_name: megalens-v3-1-qwen3-q0-guide
+  seed: 42
+  save_steps: 2000
+  load: null
+  exp_dir: ${oc.env:MEGALENS_V31_RUN_DIR}
+  ckpt_format: torch
+  task:
+    type: train
+    backend: megatron
+    entrypoint: flagscale/train/megatron/train_gpt.py
+  runner:
+    type: cloud
+    per_node_task: false
+    no_shared_fs: false
+    rdzv_backend: static
+    rdzv_endpoint: ${oc.env:MASTER_ADDR}:${oc.env:MASTER_PORT}
+    hostfile: null
+    nnodes: 2
+    node_rank: ${oc.decode:${oc.env:NODE_RANK}}
+    nproc_per_node: 8
+    master_addr: ${oc.env:MASTER_ADDR}
+    master_port: ${oc.decode:${oc.env:MASTER_PORT}}
+    redirects: 0
+    tee: 3
+  cmds:
+    before_start: ulimit -n 1048576 && source /root/miniconda3/bin/activate flagscale-train
+  envs:
+    LOGLEVEL: INFO
+    CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+    CUDA_DEVICE_MAX_CONNECTIONS: 1
+    NCCL_IB_DISABLE: 0
+    GLOO_SOCKET_IFNAME: bond0.2208
+    NCCL_SOCKET_IFNAME: bond0.2208
+    NCCL_IB_HCA: mlx5_101,mlx5_102,mlx5_103,mlx5_104,mlx5_105,mlx5_106,mlx5_107,mlx5_108
+    FLAGCX_SOCKET_IFNAME: "=bond0.2208"
+    FLAGCX_IB_DISABLE: 0
+    FLAGCX_IB_HCA: mlx5_101,mlx5_102,mlx5_103,mlx5_104,mlx5_105,mlx5_106,mlx5_107,mlx5_108
+    FLAGCX_TOPO_DETECTION_DISABLE: 0
+    FLAGCX_DEBUG: INFO
+    FLAGCX_DEBUG_SUBSYS: INIT,ENV,NET
+    NCCL_NVLS_ENABLE: 0
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO: 0
+    CUDA_LAUNCH_BLOCKING: 1
+action: test
+train:
+  system:
+    no_shared_fs: false
+    num_workers: 16
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 1
+    context_parallel_size: 1
+    disable_bias_linear: true
+    reset_position_ids: true
+    reset_attention_mask: true
+    qk_layernorm: true
+    sequence_parallel: true
+    use_distributed_optimizer: true
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    distributed_backend: flagcx
+    finetune: false
+    trace: ${oc.decode:${oc.env:MEGALENS_V31_TRACE,false}}
+    trace_mode: 1
+    trace_dir: ${oc.env:MEGALENS_V31_RUN_DIR}/traces
+    hardware_monitor: false
+    trace_interval: 1000
+    continuous_trace_iterations: 1
+    trace_granularity: full
+    trace_cupti_kernels: "off"
+    precision:
+      bf16: true
+      attention_softmax_in_fp32: true
+      accumulate_allreduce_grads_in_fp32: true
+    logging:
+      log_interval: 1
+      tensorboard_log_interval: 1
+      wandb_project: ${experiment.exp_name}
+      wandb_exp_name: ${experiment.exp_name}
+      log_timers_to_tensorboard: true
+      log_validation_ppl_to_tensorboard: true
+      log_throughput: true
+      log_params_norm: true
+      log_num_zeros_in_grad: true
+      log_memory_to_tensorboard: true
+    checkpoint:
+      save_interval: ${experiment.save_steps}
+      load: ${experiment.load}
+      ckpt_format: ${experiment.ckpt_format}
+  model:
+    transformer_impl: transformer_engine
+    te_fl_prefer: flagos
+    enable_flag_gems: true
+    flag_gems_log_path: ${oc.env:MEGALENS_V31_RUN_DIR}/flaggems
+    attention_backend: flash
+    profile: true
+    profile_step_start: 3
+    profile_step_end: 5
+    profile_ranks: [0, 7]
+    use_pytorch_profiler: true
+    tensorboard_dir: ${oc.env:MEGALENS_V31_RUN_DIR}/torch_profile
+    num_layers: 28
+    hidden_size: 1024
+    ffn_hidden_size: 3072
+    kv_channels: 128
+    num_attention_heads: 16
+    group_query_attention: true
+    num_query_groups: 8
+    seq_length: 4096
+    max_position_embeddings: 40960
+    norm_epsilon: 1.0e-6
+    use_rotary_position_embeddings: true
+    rotary_base: 1000000
+    swiglu: true
+    normalization: RMSNorm
+    init_method_std: 0.006
+    attention_dropout: 0.0
+    hidden_dropout: 0.0
+    clip_grad: 1.0
+    position_embedding_type: rope
+    untie_embeddings_and_output_weights: false
+    no_position_embedding: true
+    no_rope_fusion: true
+    seed: ${experiment.seed}
+    micro_batch_size: 4
+    global_batch_size: 2048
+    eval_iters: 0
+    eval_interval: 10000
+    train_samples: 29297664
+    optimizer:
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      lr_scheduler:
+        lr: 3.0e-3
+        min_lr: 3.0e-4
+        lr_warmup_samples: 2048000
+        lr_decay_style: cosine
+  data:
+    data_path: ${oc.env:MEGALENS_V31_QWEN3_DATA_PATH}
+    split: 1
+    no_mmap_bin_files: true
+    tokenizer:
+      tokenizer_type: QwenTokenizerFS
+      tokenizer_path: ${oc.env:MEGALENS_V31_QWEN3_TOKENIZER_PATH}
+      vocab_size: 151851
+      make_vocab_size_divisible_by: 64
+hydra:
+  run:
+    dir: ${oc.env:MEGALENS_V31_RUN_DIR}/hydra/node_${oc.env:NODE_RANK}
