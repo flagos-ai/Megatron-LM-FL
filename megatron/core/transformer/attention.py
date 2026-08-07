@@ -1011,6 +1011,7 @@ class Attention(MegatronModule, ABC):
                     tp_rank=tp_rank,
                     tp_size=tp_size,
                 )
+                print(f"flash sparse attention, setting fsa window sizes...")
             local_window_sizes = self._fsa_cached_window_sizes
 
             output = flash_sparse_attn_func(
