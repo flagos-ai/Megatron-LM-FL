@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""Terminal artifact contract for controlled two-iteration training profiles."""
+"""Terminal artifact contracts for controlled training profiles."""
 
 from __future__ import annotations
 
@@ -9,33 +9,50 @@ from pathlib import Path
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
 
+def _validate_iteration_checkpoint(
+    run_root: Path, iteration: int
+) -> tuple[Failure, ...]:
+    failures: list[Failure] = []
+    checkpoint_root = run_root / "checkpoints"
+    tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
+    if (
+        not tracker.is_file()
+        or tracker.read_text(encoding="utf-8").strip() != str(iteration)
+    ):
+        failures.append(
+            Failure(
+                "run.training.tracker",
+                f"training checkpoint tracker does not point to iteration {iteration}",
+                str(tracker),
+            )
+        )
+
+    common_state = checkpoint_root / f"iter_{iteration:07d}" / "common.pt"
+    if not common_state.is_file():
+        failures.append(
+            Failure(
+                "run.training.checkpoint",
+                f"training iteration {iteration} torch_dist checkpoint has no common state",
+                str(common_state),
+            )
+        )
+    return tuple(failures)
+
+
 def validate_two_iteration_checkpoint(
     run_root: Path, _trace_enabled: bool
 ) -> tuple[Failure, ...]:
     """Require the terminal torch_dist checkpoint from a two-iteration run."""
 
-    failures: list[Failure] = []
-    checkpoint_root = run_root / "checkpoints"
-    tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
-    if not tracker.is_file() or tracker.read_text(encoding="utf-8").strip() != "2":
-        failures.append(
-            Failure(
-                "run.training.tracker",
-                "training checkpoint tracker does not point to iteration 2",
-                str(tracker),
-            )
-        )
+    return _validate_iteration_checkpoint(run_root, 2)
 
-    common_state = checkpoint_root / "iter_0000002" / "common.pt"
-    if not common_state.is_file():
-        failures.append(
-            Failure(
-                "run.training.checkpoint",
-                "training iteration 2 torch_dist checkpoint has no common state",
-                str(common_state),
-            )
-        )
-    return tuple(failures)
+
+def validate_three_iteration_checkpoint(
+    run_root: Path, _trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require the terminal torch_dist checkpoint from a three-iteration run."""
+
+    return _validate_iteration_checkpoint(run_root, 3)
 
 
 _TRANSFORMER_ENGINE_ARGUMENT = re.compile(
@@ -46,6 +63,10 @@ _TRANSFORMER_ENGINE_CUDA_GRAPH_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*cuda_graph_impl\s+\.+\s+transformer_engine\s*$",
     re.MULTILINE,
 )
+_LOCAL_CUDA_GRAPH_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_impl\s+\.+\s+local\s*$",
+    re.MULTILINE,
+)
 _WHOLE_LAYER_CUDA_GRAPH_SCOPE_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*cuda_graph_scope\s+\.+\s+\[\]\s*$",
     re.MULTILINE,
@@ -54,8 +75,24 @@ _ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*cuda_graph_warmup_steps\s+\.+\s+1\s*$",
     re.MULTILINE,
 )
+_FULL_ITERATION_CUDA_GRAPH_SCOPE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_scope\s+\.+\s+"
+    r"\[<CudaGraphScope\.full_iteration:\s*\d+>\]\s*$",
+    re.MULTILINE,
+)
+_NAN_CHECK_DISABLED_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*check_for_nan_in_loss_and_grad\s+\.+\s+False\s*$",
+    re.MULTILINE,
+)
+_OPTIMIZER_CUDA_GRAPH_DISABLED_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*optimizer_cuda_graph\s+\.+\s+False\s*$",
+    re.MULTILINE,
+)
 _TWO_ITERATION_PROGRESS = re.compile(
     r"iteration\s+(?P<iteration>[12])/\s*2\s*\|"
+)
+_THREE_ITERATION_PROGRESS = re.compile(
+    r"iteration\s+(?P<iteration>[123])/\s*3\s*\|"
 )
 _CUDA_GRAPH_DELETION = re.compile(
     r"Rank 0: (?P<explicit>\d+) graphs deleted with explicit reset, "
@@ -229,6 +266,118 @@ def validate_two_iteration_te_full_cuda_graph_checkpoint(
             Failure(
                 "run.training.iterations",
                 "TE whole-layer run must report iterations [1, 2]; "
+                f"observed {list(completed_iterations)}",
+                str(launcher_log),
+            )
+        )
+    return tuple(failures)
+
+
+def validate_three_iteration_local_full_cuda_graph_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require local full-iteration capture followed by stable replay."""
+
+    failures = list(validate_three_iteration_checkpoint(run_root, trace_enabled))
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    argument_contracts = (
+        (
+            _TRANSFORMER_ENGINE_ARGUMENT,
+            "run.training.transformer_impl",
+            "Megatron did not report transformer_impl=transformer_engine",
+        ),
+        (
+            _LOCAL_CUDA_GRAPH_ARGUMENT,
+            "run.training.cuda_graph_impl",
+            "Megatron did not report cuda_graph_impl=local",
+        ),
+        (
+            _FULL_ITERATION_CUDA_GRAPH_SCOPE_ARGUMENT,
+            "run.training.cuda_graph_scope",
+            "Megatron did not report the local full_iteration Graph scope",
+        ),
+        (
+            _ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT,
+            "run.training.cuda_graph_warmup_steps",
+            "Megatron did not report one CUDA Graph warmup step",
+        ),
+        (
+            _NAN_CHECK_DISABLED_ARGUMENT,
+            "run.training.cuda_graph_nan_check",
+            "Megatron did not disable the incompatible loss/gradient NaN check",
+        ),
+        (
+            _OPTIMIZER_CUDA_GRAPH_DISABLED_ARGUMENT,
+            "run.training.optimizer_cuda_graph",
+            "Megatron did not report optimizer_cuda_graph=False",
+        ),
+    )
+    for pattern, code, message in argument_contracts:
+        if pattern.search(log_text) is None:
+            failures.append(Failure(code, message, str(launcher_log)))
+
+    capture_start_count = log_text.count("Capture CUDA graph for training!!!")
+    if capture_start_count != 1:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_capture_start",
+                "local full-iteration run must start training Graph capture exactly once; "
+                f"observed {capture_start_count}",
+                str(launcher_log),
+            )
+        )
+    capture_done_count = log_text.count(
+        "CUDA graph capture done for training!!!"
+    )
+    if capture_done_count != 1:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_capture_done",
+                "local full-iteration run must finish training Graph capture exactly once; "
+                f"observed {capture_done_count}",
+                str(launcher_log),
+            )
+        )
+
+    optimizer_capture_markers = tuple(
+        marker
+        for marker in (
+            "Capture CUDA graph for optimizer!!!",
+            "Optimizer CUDA graph capture done!!!",
+        )
+        if marker in log_text
+    )
+    if optimizer_capture_markers:
+        failures.append(
+            Failure(
+                "run.training.optimizer_cuda_graph_capture",
+                "local full-iteration run must keep optimizer capture disabled; "
+                f"observed {list(optimizer_capture_markers)!r}",
+                str(launcher_log),
+            )
+        )
+
+    completed_iterations = tuple(
+        int(match.group("iteration"))
+        for match in _THREE_ITERATION_PROGRESS.finditer(log_text)
+    )
+    if completed_iterations != (1, 2, 3):
+        failures.append(
+            Failure(
+                "run.training.iterations",
+                "local full-iteration run must report iterations [1, 2, 3]; "
                 f"observed {list(completed_iterations)}",
                 str(launcher_log),
             )

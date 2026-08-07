@@ -123,6 +123,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
     "flagscale_single_node_te_cuda_graph_full_smoke.yaml": "te-full-cuda-graph",
+    "flagscale_single_node_cuda_graph_full_iteration_smoke.yaml": (
+        "local-full-iteration-cuda-graph"
+    ),
     "flagscale_single_node_te_cuda_graph_moe_router_smoke.yaml": (
         "te-moe-router-cuda-graph"
     ),
@@ -159,12 +162,12 @@ def _write_rank_trace(run_dir: Path, rank: int, event: str = "forward") -> None:
     )
 
 
-def _write_terminal_checkpoint(run_dir: Path) -> None:
+def _write_terminal_checkpoint(run_dir: Path, *, iteration: int = 2) -> None:
     checkpoint_root = run_dir / "checkpoints"
-    iteration_root = checkpoint_root / "iter_0000002"
+    iteration_root = checkpoint_root / f"iter_{iteration:07d}"
     iteration_root.mkdir(parents=True)
     (checkpoint_root / "latest_checkpointed_iteration.txt").write_text(
-        "2", encoding="utf-8"
+        str(iteration), encoding="utf-8"
     )
     (iteration_root / "common.pt").write_bytes(b"checkpoint")
 
@@ -215,6 +218,10 @@ def _write_gpt_phase_trace(
     include_optimizer: bool = False,
     include_backward: bool = False,
     eager_iterations: frozenset[int] | None = None,
+    model_iterations: frozenset[int] | None = None,
+    iteration_ids: tuple[int, ...] = (1, 2),
+    microbatches: int = 1,
+    include_schedule_finalize: bool = False,
     include_optimizer_postprocess: bool = True,
     p2p_route: str | None = None,
     ring_directional_wait: bool = False,
@@ -512,7 +519,7 @@ def _write_gpt_phase_trace(
                     host_blocking_guaranteed=True,
                 )
 
-    for iteration in (1, 2):
+    for iteration in iteration_ids:
         rows.append(
             {
                 "name": "iteration",
@@ -521,36 +528,58 @@ def _write_gpt_phase_trace(
                 "iteration": iteration,
             }
         )
-        event("forward-step", "B")
-        event("decoder", "B")
-        layer_count = (
-            eager_layers
-            if eager_iterations is None or iteration in eager_iterations
-            else 0
-        )
-        for _ in range(layer_count):
-            event("transformer_layer", "B")
-            event("_forward_attention", "B")
-            event("attention", "B")
-            event("attention", "E")
-            event("_forward_attention", "E")
-            event("_forward_mlp", "B")
-            event("MLP.forward", "B")
-            event("MLP.forward", "E")
-            event("_forward_mlp", "E")
-            event("transformer_layer", "E")
-        event("decoder", "E")
-        event("decoder-postprocess", "B")
-        if include_postprocess:
-            event("output_layer", "B")
-            event("output_layer", "E")
-            event("loss", "B")
-            event("loss", "E")
-        event("decoder-postprocess", "E")
-        event("forward-step", "E")
-        if include_backward:
-            event("backward-step", "B")
-            event("backward-step", "E")
+        if model_iterations is None or iteration in model_iterations:
+            layer_count = (
+                eager_layers
+                if eager_iterations is None or iteration in eager_iterations
+                else 0
+            )
+            for microbatch in range(microbatches):
+                event(
+                    "forward-step",
+                    "B",
+                    current_microbatch=microbatch,
+                )
+                event("decoder", "B")
+                for _ in range(layer_count):
+                    event("transformer_layer", "B")
+                    event("_forward_attention", "B")
+                    event("attention", "B")
+                    event("attention", "E")
+                    event("_forward_attention", "E")
+                    event("_forward_mlp", "B")
+                    event("MLP.forward", "B")
+                    event("MLP.forward", "E")
+                    event("_forward_mlp", "E")
+                    event("transformer_layer", "E")
+                event("decoder", "E")
+                event("decoder-postprocess", "B")
+                if include_postprocess:
+                    event("output_layer", "B")
+                    event("output_layer", "E")
+                    event("loss", "B")
+                    event("loss", "E")
+                event("decoder-postprocess", "E")
+                if include_schedule_finalize:
+                    event(
+                        "forward-step-calc-loss",
+                        "B",
+                        current_microbatch=microbatch,
+                    )
+                    event("forward-step-calc-loss", "E")
+                event("forward-step", "E")
+                if include_backward:
+                    event(
+                        "backward-step",
+                        "B",
+                        current_microbatch=microbatch,
+                    )
+                    event("backward-step", "E")
+            if include_schedule_finalize and include_backward:
+                event("grad-sync", "B")
+                event("all-grads-sync", "B")
+                event("all-grads-sync", "E")
+                event("grad-sync", "E")
         p2p_events(iteration)
         if include_optimizer:
             event("optimizer", "B")
@@ -941,6 +970,51 @@ def test_te_full_cuda_graph_profile_only_changes_the_graph_lifecycle() -> None:
     )
     assert profile.run_contract is (
         training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint
+    )
+
+
+def test_local_full_iteration_cuda_graph_profile_only_changes_its_owner_and_schedule() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_te_cuda_graph_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    full_iteration = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_cuda_graph_full_iteration_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = full_iteration["experiment"][
+        "exp_name"
+    ]
+    baseline["experiment"]["save_steps"] = 3
+    baseline["train"]["system"]["checkpoint"].update(
+        {"save_interval": 3, "load": None}
+    )
+    baseline["train"]["model"].update(
+        {
+            "cuda_graph_impl": "local",
+            "cuda_graph_scope": ["full_iteration"],
+            "optimizer_cuda_graph": False,
+            "no_check_for_nan_in_loss_and_grad": True,
+            "global_batch_size": 2,
+            "train_iters": 3,
+        }
+    )
+    baseline["train"]["model"]["optimizer"]["lr_scheduler"][
+        "lr_decay_iters"
+    ] = 3
+
+    assert full_iteration == baseline
+    profile = gate.PROFILES["local-full-iteration-cuda-graph"]
+    assert profile.rank_count == 1
+    assert profile.contract is (
+        gpt_probe_contract.validate_local_full_iteration_cuda_graph_phases
+    )
+    assert profile.run_contract is (
+        training_run_contract.validate_three_iteration_local_full_cuda_graph_checkpoint
     )
 
 
@@ -1492,6 +1566,122 @@ def test_te_full_cuda_graph_training_contract_requires_capture_and_replay(
     ]
 
 
+def test_local_full_iteration_training_contract_requires_capture_and_replay(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path, iteration=3)
+    launcher_log = tmp_path / "launcher.log"
+    valid_log = "\n".join(
+        (
+            "[default0]:  transformer_impl ................ transformer_engine",
+            "[default0]:  cuda_graph_impl ................. local",
+            "[default0]:  cuda_graph_scope ................ "
+            "[<CudaGraphScope.full_iteration: 9>]",
+            "[default0]:  cuda_graph_warmup_steps ......... 1",
+            "[default0]:  check_for_nan_in_loss_and_grad .. False",
+            "[default0]:  optimizer_cuda_graph ............ False",
+            "[default0]: iteration 1/ 3 | lm loss: 1.0 |",
+            "[default0]: Capture CUDA graph for training!!!",
+            "[default0]: CUDA graph capture done for training!!!",
+            "[default0]: iteration 2/ 3 | lm loss: 0.9 |",
+            "[default0]: iteration 3/ 3 | lm loss: 0.8 |",
+        )
+    )
+    launcher_log.write_text(valid_log, encoding="utf-8")
+
+    assert (
+        training_run_contract.validate_three_iteration_local_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        valid_log.replace(
+            "[<CudaGraphScope.full_iteration: 9>]",
+            "[<CudaGraphScope.attn: 2>]",
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_three_iteration_local_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_graph_scope"
+    ]
+
+
+def test_local_full_iteration_training_contract_rejects_missing_training_capture(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path, iteration=3)
+    (tmp_path / "launcher.log").write_text(
+        "\n".join(
+            (
+                "[default0]:  transformer_impl ................ transformer_engine",
+                "[default0]:  cuda_graph_impl ................. local",
+                "[default0]:  cuda_graph_scope ................ "
+                "[<CudaGraphScope.full_iteration: 1>]",
+                "[default0]:  cuda_graph_warmup_steps ......... 1",
+                "[default0]:  check_for_nan_in_loss_and_grad .. False",
+                "[default0]:  optimizer_cuda_graph ............ False",
+                "[default0]: iteration 1/ 3 | lm loss: 1.0 |",
+                "[default0]: CUDA graph capture done for training!!!",
+                "[default0]: iteration 2/ 3 | lm loss: 0.9 |",
+                "[default0]: iteration 3/ 3 | lm loss: 0.8 |",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    failures = (
+        training_run_contract.validate_three_iteration_local_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_graph_capture_start"
+    ]
+
+
+def test_local_full_iteration_training_contract_rejects_optimizer_capture(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path, iteration=3)
+    (tmp_path / "launcher.log").write_text(
+        "\n".join(
+            (
+                "[default0]:  transformer_impl ................ transformer_engine",
+                "[default0]:  cuda_graph_impl ................. local",
+                "[default0]:  cuda_graph_scope ................ "
+                "[<CudaGraphScope.full_iteration: 1>]",
+                "[default0]:  cuda_graph_warmup_steps ......... 1",
+                "[default0]:  check_for_nan_in_loss_and_grad .. False",
+                "[default0]:  optimizer_cuda_graph ............ False",
+                "[default0]: iteration 1/ 3 | lm loss: 1.0 |",
+                "[default0]: Capture CUDA graph for training!!!",
+                "[default0]: CUDA graph capture done for training!!!",
+                "[default0]: Capture CUDA graph for optimizer!!!",
+                "[default0]: Optimizer CUDA graph capture done!!!",
+                "[default0]: iteration 2/ 3 | lm loss: 0.9 |",
+                "[default0]: iteration 3/ 3 | lm loss: 0.8 |",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    failures = (
+        training_run_contract.validate_three_iteration_local_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.optimizer_cuda_graph_capture"
+    ]
+
+
 def test_flagcx_training_contract_requires_the_parsed_backend(
     tmp_path: Path,
 ) -> None:
@@ -1848,6 +2038,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
         "te-full-cuda-graph",
+        "local-full-iteration-cuda-graph",
             "qwen3-enron-tp2-sp",
             "qwen3-enron-tp4-sp",
             "qwen3-enron-tp4-local-no-sp",
@@ -2748,6 +2939,60 @@ def test_te_full_cuda_graph_profile_rejects_inner_replay_events(
 
     assert [failure.code for failure in failures] == [
         "trace.gpt.cuda_graph_replay_inner"
+    ]
+    assert failures[0].evidence == "rank=0 iteration=2"
+
+
+def test_local_full_iteration_profile_keeps_only_optimizer_outside_replay(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "local-full-iteration-cuda-graph"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+        eager_iterations=frozenset((1,)),
+        model_iterations=frozenset((1,)),
+        iteration_ids=(1, 2, 3),
+        microbatches=2,
+        include_schedule_finalize=True,
+    )
+
+    assert (
+        gate.PROFILES["local-full-iteration-cuda-graph"].contract(trace_root)
+        == ()
+    )
+
+
+def test_local_full_iteration_profile_rejects_captured_events_during_replay(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "local-full-iteration-cuda-graph-inner-replay"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+        eager_iterations=frozenset((1,)),
+        model_iterations=frozenset((1, 2)),
+        iteration_ids=(1, 2, 3),
+        microbatches=2,
+        include_schedule_finalize=True,
+    )
+
+    failures = gate.PROFILES["local-full-iteration-cuda-graph"].contract(
+        trace_root
+    )
+
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.full_iteration_replay_inner"
     ]
     assert failures[0].evidence == "rank=0 iteration=2"
 
