@@ -23,7 +23,7 @@ DEFAULT_MICROBATCHES_PER_ITERATION = 64
 DEFAULT_DATA_PARALLEL_SIZE = 8
 D2_DATA_PARALLEL_SIZE = 8
 D2_EXPERT_MODEL_PARALLEL_SIZE = 8
-D3_DATA_PARALLEL_SIZE = 8
+D3_DATA_PARALLEL_SIZE = 16
 D3_EXPERT_MODEL_PARALLEL_SIZE = 4
 D0_RANK_ORDER = "tp-cp-ep-dp-pp"
 
@@ -1513,7 +1513,7 @@ def validate_deepseek_d3_trace(
     *,
     microbatches_per_iteration: int = 1,
 ) -> tuple[Failure, ...]:
-    """Validate D3 PP1/DP8/EP4/ETP1/expert-DP2 and DistOpt lifecycle."""
+    """Validate D3 PP1/DP16/EP4/ETP1/expert-DP4 and DistOpt lifecycle."""
 
     if microbatches_per_iteration < 1:
         raise ValueError("microbatches_per_iteration must be positive")

@@ -673,10 +673,14 @@ def test_deepseek_d3_no_pp_profile_only_applies_the_reviewed_derivation() -> Non
     expected["experiment"]["exp_name"] = (
         "megalens-g7-9-deepseek-d3-no-pp-mock"
     )
+    expected["experiment"]["runner"]["nproc_per_node"] = 8
+    expected["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = (
+        "0,1,2,3,4,5,6,7"
+    )
     system = expected["train"]["system"]
     system["pipeline_model_parallel_size"] = 1
     system.pop("decoder_first_pipeline_num_layers")
-    expected["train"]["model"]["global_batch_size"] = 8
+    expected["train"]["model"]["global_batch_size"] = 16
 
     assert derived == expected
 
@@ -699,7 +703,7 @@ def test_deepseek_d3_no_pp_profile_only_applies_the_reviewed_derivation() -> Non
         model["micro_batch_size"] * model_dp
     )
 
-    assert (world_size, model_dp, expert_dp, microbatches) == (8, 8, 2, 1)
+    assert (world_size, model_dp, expert_dp, microbatches) == (16, 16, 4, 1)
     assert (
         system["tensor_model_parallel_size"],
         system["pipeline_model_parallel_size"],
@@ -778,7 +782,7 @@ def test_deepseek_d2_contract_accepts_nonuniform_workload_across_one_ep8_group(
     )
 
 
-def test_deepseek_d3_contract_accepts_pp1_dp8_ep4_expert_dp2(
+def test_deepseek_d3_contract_accepts_pp1_dp16_ep4_expert_dp4(
     tmp_path: Path,
 ) -> None:
     trace_root = tmp_path / "traces"
@@ -793,7 +797,7 @@ def test_deepseek_d3_contract_accepts_pp1_dp8_ep4_expert_dp2(
     )
 
 
-def test_deepseek_d3_contract_requires_cross_node_expert_dp2_group(
+def test_deepseek_d3_contract_requires_expert_dp4_group(
     tmp_path: Path,
 ) -> None:
     trace_root = tmp_path / "traces"
@@ -812,7 +816,12 @@ def test_deepseek_d3_contract_requires_cross_node_expert_dp2_group(
         assert end.get("ph") == "E"
         end["group"] = []
 
-    _mutate_rank(trace_root, 0, break_expert_dp_group)
+    _mutate_rank(
+        trace_root,
+        0,
+        break_expert_dp_group,
+        data_parallel_size=contract.D3_DATA_PARALLEL_SIZE,
+    )
     failures = contract.validate_deepseek_d3_trace(
         trace_root,
         microbatches_per_iteration=_TEST_MICROBATCHES,
@@ -838,7 +847,12 @@ def test_deepseek_d3_contract_requires_ep4_metadata_group(
         )
         end["group"] = [4, 5, 6]
 
-    _mutate_rank(trace_root, 0, break_metadata_group)
+    _mutate_rank(
+        trace_root,
+        0,
+        break_metadata_group,
+        data_parallel_size=contract.D3_DATA_PARALLEL_SIZE,
+    )
     failures = contract.validate_deepseek_d3_trace(
         trace_root,
         microbatches_per_iteration=_TEST_MICROBATCHES,
