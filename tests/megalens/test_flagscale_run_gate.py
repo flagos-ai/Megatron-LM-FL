@@ -123,6 +123,9 @@ _CONFIG_PROFILE_CASES = {
     ),
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
     "flagscale_single_node_te_cuda_graph_full_smoke.yaml": "te-full-cuda-graph",
+    "flagscale_single_node_local_cuda_graph_full_smoke.yaml": (
+        "local-layerwise-full-cuda-graph"
+    ),
     "flagscale_single_node_cuda_graph_full_iteration_smoke.yaml": (
         "local-full-iteration-cuda-graph"
     ),
@@ -973,6 +976,34 @@ def test_te_full_cuda_graph_profile_only_changes_the_graph_lifecycle() -> None:
     )
 
 
+def test_local_layerwise_full_cuda_graph_profile_only_changes_the_graph_owner() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_te_cuda_graph_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    local = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_local_cuda_graph_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = local["experiment"]["exp_name"]
+    baseline["train"]["model"]["cuda_graph_impl"] = "local"
+
+    assert local == baseline
+    assert "cuda_graph_scope" not in local["train"]["model"]
+
+    profile = gate.PROFILES["local-layerwise-full-cuda-graph"]
+    assert profile.rank_count == 1
+    assert profile.contract is (
+        gpt_probe_contract.validate_local_layerwise_full_cuda_graph_phases
+    )
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint
+    )
+
+
 def test_local_full_iteration_cuda_graph_profile_only_changes_its_owner_and_schedule() -> None:
     baseline = yaml.safe_load(
         (
@@ -1566,6 +1597,50 @@ def test_te_full_cuda_graph_training_contract_requires_capture_and_replay(
     ]
 
 
+def test_local_layerwise_full_training_contract_requires_four_graphs(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    valid_log = "\n".join(
+        (
+            "[default0]:  transformer_impl ................ transformer_engine",
+            "[default0]:  cuda_graph_impl ................. local",
+            "[default0]:  cuda_graph_scope ................ []",
+            "[default0]:  cuda_graph_warmup_steps ......... 1",
+            "[default0]:  optimizer_cuda_graph ............ False",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Creating 4 CUDA graphs",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "> built 4 cuda graph(s) in 0.25 sec, with total memory usage: "
+            "allocated 1.0 mb, reserved 2.0 mb.",
+            "[default0]: iteration 1/ 2 | lm loss: 1.0 |",
+            "[default0]: iteration 2/ 2 | lm loss: 0.9 |",
+        )
+    )
+    launcher_log.write_text(valid_log, encoding="utf-8")
+
+    assert (
+        training_run_contract.validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        valid_log.replace("> built 4 cuda graph(s)", "> built 2 cuda graph(s)"),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_graph_capture_done"
+    ]
+
+
 def test_local_full_iteration_training_contract_requires_capture_and_replay(
     tmp_path: Path,
 ) -> None:
@@ -2038,6 +2113,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
         "te-full-cuda-graph",
+        "local-layerwise-full-cuda-graph",
         "local-full-iteration-cuda-graph",
             "qwen3-enron-tp2-sp",
             "qwen3-enron-tp4-sp",
@@ -2936,6 +3012,52 @@ def test_te_full_cuda_graph_profile_rejects_inner_replay_events(
     )
 
     failures = gate.PROFILES["te-full-cuda-graph"].contract(trace_root)
+
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.cuda_graph_replay_inner"
+    ]
+    assert failures[0].evidence == "rank=0 iteration=2"
+
+
+def test_local_layerwise_full_profile_separates_eager_and_replay_phases(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "local-layerwise-full-cuda-graph"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+        eager_iterations=frozenset((1,)),
+    )
+
+    assert (
+        gate.PROFILES["local-layerwise-full-cuda-graph"].contract(trace_root)
+        == ()
+    )
+
+
+def test_local_layerwise_full_profile_rejects_inner_replay_events(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "local-layerwise-full-cuda-graph-inner-replay"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+        eager_iterations=frozenset((1, 2)),
+    )
+
+    failures = gate.PROFILES["local-layerwise-full-cuda-graph"].contract(
+        trace_root
+    )
 
     assert [failure.code for failure in failures] == [
         "trace.gpt.cuda_graph_replay_inner"

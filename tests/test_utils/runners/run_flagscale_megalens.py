@@ -1151,6 +1151,28 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         gpt_probe_contract.validate_te_full_cuda_graph_phases,
         training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint,
     ),
+    "local-layerwise-full-cuda-graph": manifest.TraceProfile(
+        "local-layerwise-full-cuda-graph",
+        1,
+        _events(
+            "forward-step",
+            "backward-step",
+            "decoder",
+            "decoder-postprocess",
+            "output_layer",
+            "loss",
+            "transformer_layer",
+            "_forward_attention",
+            "attention",
+            "_forward_mlp",
+            "MLP.forward",
+            "optimizer",
+            "optimizer-step",
+            "optimizer-postprocess",
+        ),
+        gpt_probe_contract.validate_local_layerwise_full_cuda_graph_phases,
+        training_run_contract.validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint,
+    ),
     "local-full-iteration-cuda-graph": manifest.TraceProfile(
         "local-full-iteration-cuda-graph",
         1,
@@ -1328,6 +1350,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_dp8_distopt_overlap_smoke": "dp8-distopt-overlap",
     "flagscale_single_node_te_cuda_graph_attn_smoke": "te-attn-cuda-graph",
     "flagscale_single_node_te_cuda_graph_full_smoke": "te-full-cuda-graph",
+    "flagscale_single_node_local_cuda_graph_full_smoke": (
+        "local-layerwise-full-cuda-graph"
+    ),
     "flagscale_single_node_cuda_graph_full_iteration_smoke": (
         "local-full-iteration-cuda-graph"
     ),
@@ -1407,6 +1432,8 @@ def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
         return PROFILES["te-attn-cuda-graph"]
     if args.cuda_graph_profile == "transformer-engine-full":
         return PROFILES["te-full-cuda-graph"]
+    if args.cuda_graph_profile == "local-layerwise-full":
+        return PROFILES["local-layerwise-full-cuda-graph"]
     if args.cuda_graph_profile == "local-full-iteration":
         return PROFILES["local-full-iteration-cuda-graph"]
     if args.cuda_graph_profile == "transformer-engine-moe-router":
@@ -1659,6 +1686,7 @@ def _parser() -> argparse.ArgumentParser:
             "transformer-engine-attn",
             "transformer-engine-full",
             "transformer-engine-moe-router",
+            "local-layerwise-full",
             "local-full-iteration",
         ),
     )

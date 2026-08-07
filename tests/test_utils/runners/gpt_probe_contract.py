@@ -510,8 +510,10 @@ def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
-def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate eager then repeated replay for a two-layer TE whole-layer graph."""
+def _validate_layerwise_full_cuda_graph_phases(
+    trace_root: Path, *, owner: str, profile_name: str
+) -> tuple[Failure, ...]:
+    """Validate eager then replay visibility for a two-layer whole-layer graph."""
 
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -520,9 +522,9 @@ def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
         failures.append(
             Failure(
                 "trace.gpt.ranks",
-                "TE whole-layer CUDA Graph expects only global rank 0; "
+                f"{owner} whole-layer CUDA Graph expects only global rank 0; "
                 f"observed {list(observed_ranks)}",
-                "te-full-cuda-graph",
+                profile_name,
             )
         )
 
@@ -532,7 +534,7 @@ def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
         failures.append(
             Failure(
                 "trace.gpt.iterations",
-                "TE whole-layer CUDA Graph expects iterations [1, 2]; "
+                f"{owner} whole-layer CUDA Graph expects iterations [1, 2]; "
                 f"observed {list(iteration_ids)}",
                 "rank=0",
             )
@@ -576,6 +578,28 @@ def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
                 )
             )
     return tuple(failures)
+
+
+def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate TE whole-layer eager and replay visibility."""
+
+    return _validate_layerwise_full_cuda_graph_phases(
+        trace_root,
+        owner="TE",
+        profile_name="te-full-cuda-graph",
+    )
+
+
+def validate_local_layerwise_full_cuda_graph_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate local whole-layer eager and replay visibility."""
+
+    return _validate_layerwise_full_cuda_graph_phases(
+        trace_root,
+        owner="local",
+        profile_name="local-layerwise-full-cuda-graph",
+    )
 
 
 def validate_local_full_iteration_cuda_graph_phases(
