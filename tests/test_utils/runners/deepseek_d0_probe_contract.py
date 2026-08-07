@@ -21,6 +21,8 @@ from tests.test_utils.runners.megalens_run_manifest import Failure
 
 DEFAULT_MICROBATCHES_PER_ITERATION = 64
 DEFAULT_DATA_PARALLEL_SIZE = 8
+D0_REDUCED_DATA_PARALLEL_SIZE = 4
+D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE = 2
 D2_DATA_PARALLEL_SIZE = 8
 D2_EXPERT_MODEL_PARALLEL_SIZE = 8
 D3_DATA_PARALLEL_SIZE = 16
@@ -34,6 +36,11 @@ _D0_EXPERT_MODEL_PARALLEL_SIZE = 4
 _SUPPORTED_DATA_PARALLEL_SIZES = frozenset((4, DEFAULT_DATA_PARALLEL_SIZE))
 _REVIEWED_TOPOLOGIES = frozenset(
     (
+        (
+            _PIPELINE_MODEL_PARALLEL_SIZE,
+            D0_REDUCED_DATA_PARALLEL_SIZE,
+            D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE,
+        ),
         (_PIPELINE_MODEL_PARALLEL_SIZE, 4, _D0_EXPERT_MODEL_PARALLEL_SIZE),
         (
             _PIPELINE_MODEL_PARALLEL_SIZE,
@@ -1515,6 +1522,45 @@ def validate_deepseek_d0_dp8_trace(
     )
 
 
+def validate_deepseek_d0_dp4_ep2_trace(
+    trace_root: Path,
+    *,
+    microbatches_per_iteration: int = 1,
+) -> tuple[Failure, ...]:
+    """Validate D0 PP2/DP4/EP2/ETP1/expert-DP2 and DistOpt lifecycle."""
+
+    if microbatches_per_iteration < 1:
+        raise ValueError("microbatches_per_iteration must be positive")
+    by_rank = _load_iterations(trace_root)
+    return (
+        *_validate_deepseek_trace(
+            trace_root,
+            contract_name="deepseek_d0_dp4_ep2",
+            pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+            microbatches_per_iteration=microbatches_per_iteration,
+            data_parallel_size=D0_REDUCED_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE,
+            main_layers=_MAIN_LAYERS,
+            mtp_layers=_MTP_LAYERS,
+        ),
+        *_validate_etp1_metadata(
+            by_rank,
+            pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+            data_parallel_size=D0_REDUCED_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE,
+            contract_name="deepseek_d0_dp4_ep2",
+        ),
+        *_validate_distopt_groups(
+            by_rank,
+            pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+            data_parallel_size=D0_REDUCED_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE,
+            contract_name="deepseek_d0_dp4_ep2",
+        ),
+        *dp_probe_contract.validate_dp_distopt_overlap(trace_root),
+    )
+
+
 def validate_deepseek_d2_trace(
     trace_root: Path,
     *,
@@ -1583,12 +1629,15 @@ def validate_deepseek_d3_trace(
 
 __all__ = [
     "D0_RANK_ORDER",
+    "D0_REDUCED_DATA_PARALLEL_SIZE",
+    "D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE",
     "D2_DATA_PARALLEL_SIZE",
     "D2_EXPERT_MODEL_PARALLEL_SIZE",
     "D3_DATA_PARALLEL_SIZE",
     "D3_EXPERT_MODEL_PARALLEL_SIZE",
     "DEFAULT_DATA_PARALLEL_SIZE",
     "DEFAULT_MICROBATCHES_PER_ITERATION",
+    "validate_deepseek_d0_dp4_ep2_trace",
     "validate_deepseek_d0_dp8_trace",
     "validate_deepseek_d0_trace",
     "validate_deepseek_d2_trace",

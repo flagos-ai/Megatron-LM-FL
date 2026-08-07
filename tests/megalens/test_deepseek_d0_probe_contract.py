@@ -443,6 +443,18 @@ def _write_d3_profile(trace_root: Path) -> None:
     )
 
 
+def _write_d0_dp4_ep2_profile(trace_root: Path) -> None:
+    _write_profile(
+        trace_root,
+        data_parallel_size=contract.D0_REDUCED_DATA_PARALLEL_SIZE,
+        expert_model_parallel_size=(
+            contract.D0_REDUCED_EXPERT_MODEL_PARALLEL_SIZE
+        ),
+        include_dp_groups=True,
+        include_etp1_metadata=True,
+    )
+
+
 def _adjust_first_local_expert_workload(
     rows: list[dict[str, object]],
     delta: int,
@@ -836,6 +848,87 @@ def test_deepseek_d0_dp8_contract_requires_ep4_metadata_group(
     )
 
     assert "trace.deepseek_d0_dp8.metadata_collective" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d0_dp4_ep2_contract_accepts_the_reduced_runtime_trace(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_d0_dp4_ep2_profile(trace_root)
+
+    assert (
+        contract.validate_deepseek_d0_dp4_ep2_trace(
+            trace_root,
+            microbatches_per_iteration=_TEST_MICROBATCHES,
+        )
+        == ()
+    )
+
+
+def test_deepseek_d0_dp4_ep2_contract_requires_the_expert_dp2_group(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_d0_dp4_ep2_profile(trace_root)
+
+    def break_expert_dp_group(rows: list[dict[str, object]]) -> None:
+        begin_index = next(
+            index
+            for index, row in enumerate(rows)
+            if row.get("name") == "dp-reduce-scatter"
+            and row.get("ph") == "B"
+            and ":expert-dp:" in str(row.get("operation_id"))
+        )
+        end = rows[begin_index + 1]
+        assert end.get("name") == "dp-reduce-scatter"
+        assert end.get("ph") == "E"
+        end["group"] = [1]
+
+    _mutate_rank(
+        trace_root,
+        0,
+        break_expert_dp_group,
+        data_parallel_size=contract.D0_REDUCED_DATA_PARALLEL_SIZE,
+    )
+    failures = contract.validate_deepseek_d0_dp4_ep2_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d0_dp4_ep2.dp_group" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d0_dp4_ep2_contract_requires_the_ep2_metadata_group(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_d0_dp4_ep2_profile(trace_root)
+
+    def break_metadata_group(rows: list[dict[str, object]]) -> None:
+        end = next(
+            row
+            for row in rows
+            if row.get("name") == "tp-all-gather-first"
+            and row.get("ph") == "E"
+        )
+        end["group"] = [2]
+
+    _mutate_rank(
+        trace_root,
+        0,
+        break_metadata_group,
+        data_parallel_size=contract.D0_REDUCED_DATA_PARALLEL_SIZE,
+    )
+    failures = contract.validate_deepseek_d0_dp4_ep2_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d0_dp4_ep2.metadata_collective" in {
         failure.code for failure in failures
     }
 
