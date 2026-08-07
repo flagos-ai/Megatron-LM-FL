@@ -23,17 +23,33 @@ DEFAULT_MICROBATCHES_PER_ITERATION = 64
 DEFAULT_DATA_PARALLEL_SIZE = 8
 D2_DATA_PARALLEL_SIZE = 8
 D2_EXPERT_MODEL_PARALLEL_SIZE = 8
+D3_DATA_PARALLEL_SIZE = 8
+D3_EXPERT_MODEL_PARALLEL_SIZE = 4
 D0_RANK_ORDER = "tp-cp-ep-dp-pp"
 
 _ITERATIONS = (1, 2)
 _PIPELINE_MODEL_PARALLEL_SIZE = 2
+_D3_PIPELINE_MODEL_PARALLEL_SIZE = 1
 _D0_EXPERT_MODEL_PARALLEL_SIZE = 4
 _SUPPORTED_DATA_PARALLEL_SIZES = frozenset((4, DEFAULT_DATA_PARALLEL_SIZE))
-_REVIEWED_DP_EP_TOPOLOGIES = frozenset(
+_REVIEWED_TOPOLOGIES = frozenset(
     (
-        (4, _D0_EXPERT_MODEL_PARALLEL_SIZE),
-        (DEFAULT_DATA_PARALLEL_SIZE, _D0_EXPERT_MODEL_PARALLEL_SIZE),
-        (D2_DATA_PARALLEL_SIZE, D2_EXPERT_MODEL_PARALLEL_SIZE),
+        (_PIPELINE_MODEL_PARALLEL_SIZE, 4, _D0_EXPERT_MODEL_PARALLEL_SIZE),
+        (
+            _PIPELINE_MODEL_PARALLEL_SIZE,
+            DEFAULT_DATA_PARALLEL_SIZE,
+            _D0_EXPERT_MODEL_PARALLEL_SIZE,
+        ),
+        (
+            _PIPELINE_MODEL_PARALLEL_SIZE,
+            D2_DATA_PARALLEL_SIZE,
+            D2_EXPERT_MODEL_PARALLEL_SIZE,
+        ),
+        (
+            _D3_PIPELINE_MODEL_PARALLEL_SIZE,
+            D3_DATA_PARALLEL_SIZE,
+            D3_EXPERT_MODEL_PARALLEL_SIZE,
+        ),
     )
 )
 _NUM_EXPERTS = 64
@@ -73,6 +89,8 @@ _MAIN_LAYERS = {
     1: tuple(range(14, 28)),
 }
 _MTP_LAYERS = {0: (), 1: (1,)}
+_D3_MAIN_LAYERS = {0: tuple(range(2, 28))}
+_D3_MTP_LAYERS = {0: (1,)}
 _ROUTER_HANDOFF_FIELDS = (
     "dropped_tokens",
     "drop_rate",
@@ -632,8 +650,11 @@ def _validate_iteration(
     *,
     rank: int,
     pipeline_rank: int,
+    pipeline_model_parallel_size: int,
     microbatches_per_iteration: int,
     expert_model_parallel_size: int,
+    main_layers: Mapping[int, Sequence[int]],
+    mtp_layers: Mapping[int, Sequence[int]],
 ) -> list[Failure]:
     if iteration.iteration_id is None:
         return [
@@ -655,8 +676,16 @@ def _validate_iteration(
         "forward-step": microbatches_per_iteration,
         "decoder": microbatches_per_iteration,
         "decoder-postprocess": microbatches_per_iteration,
-        "output_layer": microbatches_per_iteration if pipeline_rank == 1 else 0,
-        "loss": microbatches_per_iteration if pipeline_rank == 1 else 0,
+        "output_layer": (
+            microbatches_per_iteration
+            if pipeline_rank == pipeline_model_parallel_size - 1
+            else 0
+        ),
+        "loss": (
+            microbatches_per_iteration
+            if pipeline_rank == pipeline_model_parallel_size - 1
+            else 0
+        ),
     }
     for name, expected in expected_counts.items():
         observed = (
@@ -708,7 +737,7 @@ def _validate_iteration(
                 iteration,
                 decoder[0],
                 expert_model_parallel_size=expert_model_parallel_size,
-                expected_layers=_MAIN_LAYERS[pipeline_rank],
+                expected_layers=main_layers[pipeline_rank],
                 rank=rank,
                 microbatch=microbatch,
                 region="decoder",
@@ -719,7 +748,7 @@ def _validate_iteration(
                 iteration,
                 postprocess[0],
                 expert_model_parallel_size=expert_model_parallel_size,
-                expected_layers=_MTP_LAYERS[pipeline_rank],
+                expected_layers=mtp_layers[pipeline_rank],
                 rank=rank,
                 microbatch=microbatch,
                 region="decoder-postprocess",
@@ -727,7 +756,9 @@ def _validate_iteration(
         )
         output_layers = _contained(spans.get("output_layer", ()), postprocess[0])
         losses = _contained(spans.get("loss", ()), postprocess[0])
-        expected_postprocess = 1 if pipeline_rank == 1 else 0
+        expected_postprocess = (
+            1 if pipeline_rank == pipeline_model_parallel_size - 1 else 0
+        )
         if (
             len(output_layers) != expected_postprocess
             or len(losses) != expected_postprocess
@@ -795,9 +826,12 @@ def _collect_moe_workloads(
 def _validate_ep_workload_conservation(
     by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
     *,
+    pipeline_model_parallel_size: int,
     microbatches_per_iteration: int,
     data_parallel_size: int,
     expert_model_parallel_size: int,
+    main_layers: Mapping[int, Sequence[int]],
+    mtp_layers: Mapping[int, Sequence[int]],
 ) -> list[Failure]:
     """Require routed assignments to be conserved within every reviewed EP group."""
 
@@ -813,8 +847,10 @@ def _validate_ep_workload_conservation(
 
     failures: list[Failure] = []
     expert_data_replicas = data_parallel_size // expert_model_parallel_size
-    for pipeline_rank in (0, 1):
-        expected_layers = _MAIN_LAYERS[pipeline_rank] + _MTP_LAYERS[pipeline_rank]
+    for pipeline_rank in range(pipeline_model_parallel_size):
+        expected_layers = tuple(main_layers[pipeline_rank]) + tuple(
+            mtp_layers[pipeline_rank]
+        )
         stage_base = pipeline_rank * data_parallel_size
         for expert_data_rank in range(expert_data_replicas):
             group_base = stage_base + expert_data_rank * expert_model_parallel_size
@@ -935,21 +971,34 @@ def _pair_dp_scopes(
     return {name: tuple(items) for name, items in spans.items()}, failures
 
 
-def _validate_d2_dp_groups(
+def _validate_distopt_groups(
     by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
+    *,
+    pipeline_model_parallel_size: int,
+    data_parallel_size: int,
+    expert_model_parallel_size: int,
+    contract_name: str,
 ) -> list[Failure]:
-    """Require D2 DistOpt events to expose model-DP8 and expert-DP1 groups."""
+    """Require reviewed DistOpt model-DP and expert-DP groups."""
 
     failures: list[Failure] = []
     expected_roles = frozenset(("model-dp", "expert-dp"))
     for rank, (_shard, iterations) in by_rank.items():
-        pipeline_rank = rank // D2_DATA_PARALLEL_SIZE
-        stage_base = pipeline_rank * D2_DATA_PARALLEL_SIZE
+        pipeline_rank = rank // data_parallel_size
+        if pipeline_rank >= pipeline_model_parallel_size:
+            continue
+        stage_base = pipeline_rank * data_parallel_size
         stage_rank = rank - stage_base
-        expert_rank = stage_rank % D2_EXPERT_MODEL_PARALLEL_SIZE
+        expert_rank = stage_rank % expert_model_parallel_size
+        expert_data_parallel_size = (
+            data_parallel_size // expert_model_parallel_size
+        )
         expected_groups = {
-            "model-dp": tuple(range(stage_base, stage_base + D2_DATA_PARALLEL_SIZE)),
-            "expert-dp": (stage_base + expert_rank,),
+            "model-dp": tuple(range(stage_base, stage_base + data_parallel_size)),
+            "expert-dp": tuple(
+                stage_base + expert_rank + replica * expert_model_parallel_size
+                for replica in range(expert_data_parallel_size)
+            ),
         }
         observed_roles: dict[str, set[str]] = {name: set() for name in _DP_GROUP_ROUTES}
         dispatch_ends: dict[str, tuple[int, int]] = {}
@@ -988,8 +1037,9 @@ def _validate_d2_dp_groups(
                             _d2_failure(
                                 "dp_group",
                                 f"event {name!r} has group_size={group_size!r} and "
-                                f"peer group={peers!r}; expected model-DP8 or "
-                                "expert-DP1 membership",
+                                f"peer group={peers!r}; expected model-DP"
+                                f"{data_parallel_size} or expert-DP"
+                                f"{expert_data_parallel_size} membership",
                                 rank=rank,
                                 iteration=iteration_id,
                             )
@@ -1047,8 +1097,9 @@ def _validate_d2_dp_groups(
                 failures.append(
                     _d2_failure(
                         "dp_group_count",
-                        "event 'dp-reduce-scatter' must cover model-DP8 and "
-                        "expert-DP1 in each iteration",
+                        "event 'dp-reduce-scatter' must cover model-DP"
+                        f"{data_parallel_size} and expert-DP"
+                        f"{expert_data_parallel_size} in each iteration",
                         rank=rank,
                         iteration=iteration_id,
                     )
@@ -1080,26 +1131,62 @@ def _validate_d2_dp_groups(
                 failures.append(
                     _d2_failure(
                         "dp_group_count",
-                        f"event {name!r} must cover model-DP8 and expert-DP1 "
+                        f"event {name!r} must cover model-DP{data_parallel_size} "
+                        f"and expert-DP{expert_data_parallel_size} "
                         "across the two-iteration window",
                         rank=rank,
                         iteration=None,
                     )
                 )
-    return failures
+    if contract_name == "deepseek_d2":
+        return failures
+    return [
+        Failure(
+            failure.code.replace(
+                "trace.deepseek_d2.", f"trace.{contract_name}.", 1
+            ),
+            failure.message,
+            failure.evidence,
+        )
+        for failure in failures
+    ]
 
 
-def _validate_d2_etp1(
+def _validate_d2_dp_groups(
     by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
 ) -> list[Failure]:
-    """Require EP8 metadata gathers and reject ETP dispatcher TP work."""
+    return _validate_distopt_groups(
+        by_rank,
+        pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+        data_parallel_size=D2_DATA_PARALLEL_SIZE,
+        expert_model_parallel_size=D2_EXPERT_MODEL_PARALLEL_SIZE,
+        contract_name="deepseek_d2",
+    )
+
+
+def _validate_etp1_metadata(
+    by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
+    *,
+    pipeline_model_parallel_size: int,
+    data_parallel_size: int,
+    expert_model_parallel_size: int,
+    contract_name: str,
+) -> list[Failure]:
+    """Require ETP1 metadata gathers and reject dispatcher TP work."""
 
     failures: list[Failure] = []
     for rank, (_shard, iterations) in by_rank.items():
-        pipeline_rank = rank // D2_DATA_PARALLEL_SIZE
-        stage_base = pipeline_rank * D2_DATA_PARALLEL_SIZE
+        pipeline_rank = rank // data_parallel_size
+        if pipeline_rank >= pipeline_model_parallel_size:
+            continue
+        stage_base = pipeline_rank * data_parallel_size
+        stage_rank = rank - stage_base
+        expert_data_rank = stage_rank // expert_model_parallel_size
+        group_base = (
+            stage_base + expert_data_rank * expert_model_parallel_size
+        )
         metadata_group = tuple(
-            range(stage_base, stage_base + D2_EXPERT_MODEL_PARALLEL_SIZE)
+            range(group_base, group_base + expert_model_parallel_size)
         )
         metadata_peers = [peer for peer in metadata_group if peer != rank]
         for iteration in iterations:
@@ -1178,7 +1265,7 @@ def _validate_d2_etp1(
                 for field, expected in (
                     ("op", "all-gather"),
                     ("dim", "first"),
-                    ("group_size", D2_EXPERT_MODEL_PARALLEL_SIZE),
+                    ("group_size", expert_model_parallel_size),
                 ):
                     if begin.attrs.get(field) != expected:
                         failures.append(
@@ -1242,38 +1329,62 @@ def _validate_d2_etp1(
                         iteration=iteration_id,
                     )
                 )
-    return failures
+    if contract_name == "deepseek_d2":
+        return failures
+    return [
+        Failure(
+            failure.code.replace(
+                "trace.deepseek_d2.", f"trace.{contract_name}.", 1
+            ),
+            failure.message,
+            failure.evidence,
+        )
+        for failure in failures
+    ]
+
+
+def _validate_d2_etp1(
+    by_rank: Mapping[int, tuple[Rank, Sequence[Iteration]]],
+) -> list[Failure]:
+    return _validate_etp1_metadata(
+        by_rank,
+        pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+        data_parallel_size=D2_DATA_PARALLEL_SIZE,
+        expert_model_parallel_size=D2_EXPERT_MODEL_PARALLEL_SIZE,
+        contract_name="deepseek_d2",
+    )
 
 
 def _validate_deepseek_trace(
     trace_root: Path,
     *,
+    contract_name: str,
+    pipeline_model_parallel_size: int,
     microbatches_per_iteration: int,
     data_parallel_size: int,
     expert_model_parallel_size: int,
-    require_d2_contract: bool,
+    main_layers: Mapping[int, Sequence[int]],
+    mtp_layers: Mapping[int, Sequence[int]],
 ) -> tuple[Failure, ...]:
     if (
+        pipeline_model_parallel_size,
         data_parallel_size,
         expert_model_parallel_size,
-    ) not in _REVIEWED_DP_EP_TOPOLOGIES:
+    ) not in _REVIEWED_TOPOLOGIES:
         raise ValueError(
-            "data/expert parallel sizes do not match a reviewed D0/D2 topology"
+            "pipeline/data/expert parallel sizes do not match a reviewed "
+            "D0/D2/D3 topology"
         )
     by_rank = _load_iterations(trace_root)
     failures: list[Failure] = []
-    expected_ranks = tuple(range(_PIPELINE_MODEL_PARALLEL_SIZE * data_parallel_size))
+    expected_ranks = tuple(range(pipeline_model_parallel_size * data_parallel_size))
     observed_ranks = tuple(sorted(by_rank))
     if observed_ranks != expected_ranks:
         failures.append(
             Failure(
-                (
-                    "trace.deepseek_d2.ranks"
-                    if require_d2_contract
-                    else "trace.deepseek_d0.ranks"
-                ),
+                f"trace.{contract_name}.ranks",
                 f"expected ranks {expected_ranks}, observed {observed_ranks}",
-                "deepseek-d2" if require_d2_contract else "deepseek-d0",
+                contract_name.replace("_", "-"),
             )
         )
 
@@ -1314,29 +1425,35 @@ def _validate_deepseek_trace(
                     iteration,
                     rank=global_rank,
                     pipeline_rank=pipeline_rank,
+                    pipeline_model_parallel_size=pipeline_model_parallel_size,
                     microbatches_per_iteration=microbatches_per_iteration,
                     expert_model_parallel_size=expert_model_parallel_size,
+                    main_layers=main_layers,
+                    mtp_layers=mtp_layers,
                 )
             )
     failures.extend(
         _validate_ep_workload_conservation(
             by_rank,
+            pipeline_model_parallel_size=pipeline_model_parallel_size,
             microbatches_per_iteration=microbatches_per_iteration,
             data_parallel_size=data_parallel_size,
             expert_model_parallel_size=expert_model_parallel_size,
+            main_layers=main_layers,
+            mtp_layers=mtp_layers,
         )
     )
-    if require_d2_contract:
+    if contract_name != "deepseek_d0":
         failures = [
             Failure(
-                failure.code.replace("trace.deepseek_d0.", "trace.deepseek_d2.", 1),
+                failure.code.replace(
+                    "trace.deepseek_d0.", f"trace.{contract_name}.", 1
+                ),
                 failure.message,
                 failure.evidence,
             )
             for failure in failures
         ]
-        failures.extend(_validate_d2_etp1(by_rank))
-        failures.extend(_validate_d2_dp_groups(by_rank))
     return tuple(failures)
 
 
@@ -1354,10 +1471,13 @@ def validate_deepseek_d0_trace(
         raise ValueError("data_parallel_size must be 4 or 8 for a reviewed D0 profile")
     return _validate_deepseek_trace(
         trace_root,
+        contract_name="deepseek_d0",
+        pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
         microbatches_per_iteration=microbatches_per_iteration,
         data_parallel_size=data_parallel_size,
         expert_model_parallel_size=_D0_EXPERT_MODEL_PARALLEL_SIZE,
-        require_d2_contract=False,
+        main_layers=_MAIN_LAYERS,
+        mtp_layers=_MTP_LAYERS,
     )
 
 
@@ -1370,13 +1490,58 @@ def validate_deepseek_d2_trace(
 
     if microbatches_per_iteration < 1:
         raise ValueError("microbatches_per_iteration must be positive")
+    by_rank = _load_iterations(trace_root)
     return (
         *_validate_deepseek_trace(
             trace_root,
+            contract_name="deepseek_d2",
+            pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
             microbatches_per_iteration=microbatches_per_iteration,
             data_parallel_size=D2_DATA_PARALLEL_SIZE,
             expert_model_parallel_size=D2_EXPERT_MODEL_PARALLEL_SIZE,
-            require_d2_contract=True,
+            main_layers=_MAIN_LAYERS,
+            mtp_layers=_MTP_LAYERS,
+        ),
+        *_validate_d2_etp1(by_rank),
+        *_validate_d2_dp_groups(by_rank),
+        *dp_probe_contract.validate_dp_distopt_overlap(trace_root),
+    )
+
+
+def validate_deepseek_d3_trace(
+    trace_root: Path,
+    *,
+    microbatches_per_iteration: int = 1,
+) -> tuple[Failure, ...]:
+    """Validate D3 PP1/DP8/EP4/ETP1/expert-DP2 and DistOpt lifecycle."""
+
+    if microbatches_per_iteration < 1:
+        raise ValueError("microbatches_per_iteration must be positive")
+    by_rank = _load_iterations(trace_root)
+    return (
+        *_validate_deepseek_trace(
+            trace_root,
+            contract_name="deepseek_d3",
+            pipeline_model_parallel_size=_D3_PIPELINE_MODEL_PARALLEL_SIZE,
+            microbatches_per_iteration=microbatches_per_iteration,
+            data_parallel_size=D3_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D3_EXPERT_MODEL_PARALLEL_SIZE,
+            main_layers=_D3_MAIN_LAYERS,
+            mtp_layers=_D3_MTP_LAYERS,
+        ),
+        *_validate_etp1_metadata(
+            by_rank,
+            pipeline_model_parallel_size=_D3_PIPELINE_MODEL_PARALLEL_SIZE,
+            data_parallel_size=D3_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D3_EXPERT_MODEL_PARALLEL_SIZE,
+            contract_name="deepseek_d3",
+        ),
+        *_validate_distopt_groups(
+            by_rank,
+            pipeline_model_parallel_size=_D3_PIPELINE_MODEL_PARALLEL_SIZE,
+            data_parallel_size=D3_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=D3_EXPERT_MODEL_PARALLEL_SIZE,
+            contract_name="deepseek_d3",
         ),
         *dp_probe_contract.validate_dp_distopt_overlap(trace_root),
     )
@@ -1386,8 +1551,11 @@ __all__ = [
     "D0_RANK_ORDER",
     "D2_DATA_PARALLEL_SIZE",
     "D2_EXPERT_MODEL_PARALLEL_SIZE",
+    "D3_DATA_PARALLEL_SIZE",
+    "D3_EXPERT_MODEL_PARALLEL_SIZE",
     "DEFAULT_DATA_PARALLEL_SIZE",
     "DEFAULT_MICROBATCHES_PER_ITERATION",
     "validate_deepseek_d0_trace",
     "validate_deepseek_d2_trace",
+    "validate_deepseek_d3_trace",
 ]

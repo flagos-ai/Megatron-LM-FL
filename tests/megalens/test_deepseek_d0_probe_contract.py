@@ -22,12 +22,18 @@ _DP8_FIXTURE = (
 _DP4_FIXTURE = (
     Path(__file__).parent / "fixtures" / "flagscale_dual_node_deepseek_d0_dp4_mock.yaml"
 )
+_D3_FIXTURE = (
+    Path(__file__).parent
+    / "fixtures"
+    / "flagscale_dual_node_deepseek_d3_no_pp_mock.yaml"
+)
 _TEST_MICROBATCHES = 1
 _D0_DP8_DATA_PARALLEL_SIZE = 8
 _D0_DP4_DATA_PARALLEL_SIZE = 4
 _D0_EXPERT_MODEL_PARALLEL_SIZE = 4
 _D2_DATA_PARALLEL_SIZE = 8
 _D2_EXPERT_MODEL_PARALLEL_SIZE = 8
+_D3_PIPELINE_MODEL_PARALLEL_SIZE = 1
 
 
 def _expert_metrics(tokens_per_expert: list[int]) -> dict[str, float]:
@@ -61,11 +67,20 @@ def _write_rank_trace(
     *,
     data_parallel_size: int = _D0_DP8_DATA_PARALLEL_SIZE,
     expert_model_parallel_size: int = _D0_EXPERT_MODEL_PARALLEL_SIZE,
+    pipeline_model_parallel_size: int = 2,
     include_dp_groups: bool = False,
+    include_etp1_metadata: bool = False,
 ) -> None:
     pipeline_rank = rank // data_parallel_size
     data_rank = rank % data_parallel_size
-    main_layers = tuple(range(2, 14)) if pipeline_rank == 0 else tuple(range(14, 28))
+    if pipeline_model_parallel_size == 1:
+        main_layers = tuple(range(2, 28))
+    else:
+        main_layers = (
+            tuple(range(2, 14))
+            if pipeline_rank == 0
+            else tuple(range(14, 28))
+        )
     timestamp = 0
     rows: list[dict[str, object]] = []
 
@@ -144,7 +159,7 @@ def _write_rank_trace(
             **topology,
             **router_workload,
         )
-        if expert_model_parallel_size == _D2_EXPERT_MODEL_PARALLEL_SIZE:
+        if include_etp1_metadata:
             stage_base = pipeline_rank * data_parallel_size
             expert_data_rank = data_rank // expert_model_parallel_size
             group_base = stage_base + expert_data_rank * expert_model_parallel_size
@@ -322,7 +337,7 @@ def _write_rank_trace(
                 moe_call(iteration, layer)
             event("decoder", "E", iteration)
             event("decoder-postprocess", "B", iteration)
-            if pipeline_rank == 1:
+            if pipeline_rank == pipeline_model_parallel_size - 1:
                 moe_call(iteration, 1)
                 event("output_layer", "B", iteration)
                 event("output_layer", "E", iteration)
@@ -373,15 +388,19 @@ def _write_profile(
     *,
     data_parallel_size: int = _D0_DP8_DATA_PARALLEL_SIZE,
     expert_model_parallel_size: int = _D0_EXPERT_MODEL_PARALLEL_SIZE,
+    pipeline_model_parallel_size: int = 2,
     include_dp_groups: bool = False,
+    include_etp1_metadata: bool = False,
 ) -> None:
-    for rank in range(2 * data_parallel_size):
+    for rank in range(pipeline_model_parallel_size * data_parallel_size):
         _write_rank_trace(
             trace_root,
             rank,
             data_parallel_size=data_parallel_size,
             expert_model_parallel_size=expert_model_parallel_size,
+            pipeline_model_parallel_size=pipeline_model_parallel_size,
             include_dp_groups=include_dp_groups,
+            include_etp1_metadata=include_etp1_metadata,
         )
 
 
@@ -409,6 +428,18 @@ def _write_d2_profile(trace_root: Path) -> None:
         data_parallel_size=_D2_DATA_PARALLEL_SIZE,
         expert_model_parallel_size=_D2_EXPERT_MODEL_PARALLEL_SIZE,
         include_dp_groups=True,
+        include_etp1_metadata=True,
+    )
+
+
+def _write_d3_profile(trace_root: Path) -> None:
+    _write_profile(
+        trace_root,
+        data_parallel_size=contract.D3_DATA_PARALLEL_SIZE,
+        expert_model_parallel_size=contract.D3_EXPERT_MODEL_PARALLEL_SIZE,
+        pipeline_model_parallel_size=_D3_PIPELINE_MODEL_PARALLEL_SIZE,
+        include_dp_groups=True,
+        include_etp1_metadata=True,
     )
 
 
@@ -635,11 +666,59 @@ def test_deepseek_d0_dp4_mock_profile_has_only_the_reviewed_derivation() -> None
     )
 
 
+def test_deepseek_d3_no_pp_profile_only_applies_the_reviewed_derivation() -> None:
+    baseline = _load_config(_DP4_FIXTURE)
+    derived = _load_config(_D3_FIXTURE)
+    expected = deepcopy(baseline)
+    expected["experiment"]["exp_name"] = (
+        "megalens-g7-9-deepseek-d3-no-pp-mock"
+    )
+    system = expected["train"]["system"]
+    system["pipeline_model_parallel_size"] = 1
+    system.pop("decoder_first_pipeline_num_layers")
+    expected["train"]["model"]["global_batch_size"] = 8
+
+    assert derived == expected
+
+    runner = derived["experiment"]["runner"]
+    system = derived["train"]["system"]
+    model = derived["train"]["model"]
+    world_size = runner["nnodes"] * runner["nproc_per_node"]
+    model_dp = world_size // (
+        system["tensor_model_parallel_size"]
+        * system["pipeline_model_parallel_size"]
+        * system["context_parallel_size"]
+    )
+    expert_dp = world_size // (
+        system["expert_tensor_parallel_size"]
+        * system["expert_model_parallel_size"]
+        * system["pipeline_model_parallel_size"]
+        * system["context_parallel_size"]
+    )
+    microbatches = model["global_batch_size"] // (
+        model["micro_batch_size"] * model_dp
+    )
+
+    assert (world_size, model_dp, expert_dp, microbatches) == (8, 8, 2, 1)
+    assert (
+        system["tensor_model_parallel_size"],
+        system["pipeline_model_parallel_size"],
+        system["context_parallel_size"],
+        system["expert_model_parallel_size"],
+        system["expert_tensor_parallel_size"],
+    ) == (1, 1, 1, 4, 1)
+    assert "decoder_first_pipeline_num_layers" not in system
+    assert model["num_layers"] == 27
+    assert model["mtp_num_layers"] == 1
+    assert derived["train"]["data"]["mock_data"] is True
+
+
 def test_deepseek_d0_profile_is_not_registered_with_the_single_node_docker_runner() -> (
     None
 ):
     assert _DP8_FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
     assert _DP4_FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
+    assert _D3_FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
 
 
 def test_deepseek_d0_contract_accepts_the_exact_pp2_ep4_trace(tmp_path: Path) -> None:
@@ -697,6 +776,77 @@ def test_deepseek_d2_contract_accepts_nonuniform_workload_across_one_ep8_group(
         )
         == ()
     )
+
+
+def test_deepseek_d3_contract_accepts_pp1_dp8_ep4_expert_dp2(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_d3_profile(trace_root)
+
+    assert (
+        contract.validate_deepseek_d3_trace(
+            trace_root,
+            microbatches_per_iteration=_TEST_MICROBATCHES,
+        )
+        == ()
+    )
+
+
+def test_deepseek_d3_contract_requires_cross_node_expert_dp2_group(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_d3_profile(trace_root)
+
+    def break_expert_dp_group(rows: list[dict[str, object]]) -> None:
+        begin_index = next(
+            index
+            for index, row in enumerate(rows)
+            if row.get("name") == "dp-reduce-scatter"
+            and row.get("ph") == "B"
+            and ":expert-dp:" in str(row.get("operation_id"))
+        )
+        end = rows[begin_index + 1]
+        assert end.get("name") == "dp-reduce-scatter"
+        assert end.get("ph") == "E"
+        end["group"] = []
+
+    _mutate_rank(trace_root, 0, break_expert_dp_group)
+    failures = contract.validate_deepseek_d3_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d3.dp_group" in {
+        failure.code for failure in failures
+    }
+
+
+def test_deepseek_d3_contract_requires_ep4_metadata_group(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "traces"
+    _write_d3_profile(trace_root)
+
+    def break_metadata_group(rows: list[dict[str, object]]) -> None:
+        end = next(
+            row
+            for row in rows
+            if row.get("name") == "tp-all-gather-first"
+            and row.get("ph") == "E"
+        )
+        end["group"] = [4, 5, 6]
+
+    _mutate_rank(trace_root, 0, break_metadata_group)
+    failures = contract.validate_deepseek_d3_trace(
+        trace_root,
+        microbatches_per_iteration=_TEST_MICROBATCHES,
+    )
+
+    assert "trace.deepseek_d3.metadata_collective" in {
+        failure.code for failure in failures
+    }
 
 
 def test_deepseek_d2_contract_requires_ep8_topology_fields(
