@@ -1,5 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""Exact offline Trace contracts for the FlagOS DeepSeek D0/D2 profiles."""
+"""Exact offline Trace contracts for the FlagOS DeepSeek D0/D2/D3 profiles."""
 
 from __future__ import annotations
 
@@ -1481,6 +1481,40 @@ def validate_deepseek_d0_trace(
     )
 
 
+def validate_deepseek_d0_dp8_trace(
+    trace_root: Path,
+    *,
+    microbatches_per_iteration: int = 1,
+) -> tuple[Failure, ...]:
+    """Validate D0 PP2/DP8/EP4/ETP1/expert-DP2 and DistOpt lifecycle."""
+
+    if microbatches_per_iteration < 1:
+        raise ValueError("microbatches_per_iteration must be positive")
+    by_rank = _load_iterations(trace_root)
+    return (
+        *validate_deepseek_d0_trace(
+            trace_root,
+            microbatches_per_iteration=microbatches_per_iteration,
+            data_parallel_size=DEFAULT_DATA_PARALLEL_SIZE,
+        ),
+        *_validate_etp1_metadata(
+            by_rank,
+            pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+            data_parallel_size=DEFAULT_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=_D0_EXPERT_MODEL_PARALLEL_SIZE,
+            contract_name="deepseek_d0_dp8",
+        ),
+        *_validate_distopt_groups(
+            by_rank,
+            pipeline_model_parallel_size=_PIPELINE_MODEL_PARALLEL_SIZE,
+            data_parallel_size=DEFAULT_DATA_PARALLEL_SIZE,
+            expert_model_parallel_size=_D0_EXPERT_MODEL_PARALLEL_SIZE,
+            contract_name="deepseek_d0_dp8",
+        ),
+        *dp_probe_contract.validate_dp_distopt_overlap(trace_root),
+    )
+
+
 def validate_deepseek_d2_trace(
     trace_root: Path,
     *,
@@ -1555,6 +1589,7 @@ __all__ = [
     "D3_EXPERT_MODEL_PARALLEL_SIZE",
     "DEFAULT_DATA_PARALLEL_SIZE",
     "DEFAULT_MICROBATCHES_PER_ITERATION",
+    "validate_deepseek_d0_dp8_trace",
     "validate_deepseek_d0_trace",
     "validate_deepseek_d2_trace",
     "validate_deepseek_d3_trace",

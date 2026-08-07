@@ -1,0 +1,154 @@
+# G7.9 two-node DP8 automatic GPU derivative of the reviewed DeepSeek D0 mock.
+# Only the experiment identity, per-node process/GPU fanout, and GBS differ from
+# the DP4 fixture. World size 16 derives model-DP8 and expert-DP2; GBS8 keeps one
+# microbatch per iteration while preserving PP2, EP4, ETP1, and two iterations.
+experiment:
+  exp_name: megalens-g7-9-deepseek-d0-dp8-mock
+  seed: 42
+  save_steps: 2
+  load: null
+  exp_dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}
+  ckpt_format: torch_dist
+  task:
+    type: train
+    backend: megatron
+    entrypoint: flagscale/train/megatron/train_gpt.py
+  runner:
+    type: cloud
+    per_node_task: false
+    rdzv_backend: static
+    rdzv_endpoint: ${oc.env:MASTER_ADDR}:${oc.env:MASTER_PORT}
+    hostfile: null
+    nnodes: 2
+    node_rank: ${oc.decode:${oc.env:NODE_RANK}}
+    nproc_per_node: 8
+    master_addr: ${oc.env:MASTER_ADDR}
+    master_port: ${oc.decode:${oc.env:MASTER_PORT}}
+    redirects: 0
+    tee: 3
+  cmds:
+    before_start: ulimit -n 1048576 && source /root/miniconda3/bin/activate flagscale-train
+  envs:
+    CUDA_VISIBLE_DEVICES: "0,1,2,3,4,5,6,7"
+    CUDA_DEVICE_MAX_CONNECTIONS: 1
+    NCCL_NVLS_ENABLE: 0
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO: 0
+action: test
+train:
+  system:
+    no_shared_fs: false
+    num_workers: 0
+    tensor_model_parallel_size: 1
+    pipeline_model_parallel_size: 2
+    decoder_first_pipeline_num_layers: 13
+    expert_model_parallel_size: 4
+    expert_tensor_parallel_size: 1
+    context_parallel_size: 1
+    sequence_parallel: true
+    use_distributed_optimizer: true
+    overlap_grad_reduce: true
+    overlap_param_gather: true
+    distributed_backend: nccl
+    finetune: false
+    trace: ${oc.decode:${oc.env:MEGALENS_GATE_TRACE,false}}
+    trace_mode: 1
+    trace_dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/traces
+    hardware_monitor: false
+    trace_interval: 1
+    continuous_trace_iterations: 1
+    trace_granularity: full
+    trace_cupti_kernels: "off"
+    precision:
+      bf16: true
+      attention_softmax_in_fp32: true
+      accumulate_allreduce_grads_in_fp32: true
+    logging:
+      log_interval: 1
+      tensorboard_log_interval: 1
+      log_throughput: true
+      log_params_norm: true
+      log_num_zeros_in_grad: true
+    checkpoint:
+      save_interval: 2
+      load: null
+      ckpt_format: torch_dist
+  model:
+    transformer_impl: transformer_engine
+    te_fl_prefer: vendor
+    enable_flag_gems: false
+    attention_backend: unfused
+    num_layers: 27
+    hidden_size: 2048
+    num_attention_heads: 16
+    num_query_groups: 16
+    seq_length: 4096
+    max_position_embeddings: 4096
+    norm_epsilon: 1.0e-6
+    use_rotary_position_embeddings: true
+    rotary_base: 1000000
+    swiglu: true
+    normalization: RMSNorm
+    qk_layernorm: true
+    init_method_std: 0.02
+    attention_dropout: 0.0
+    hidden_dropout: 0.0
+    position_embedding_type: rope
+    untie_embeddings_and_output_weights: true
+    no_position_embedding: true
+    no_rope_fusion: true
+    disable_bias_linear: true
+    multi_latent_attention: true
+    kv_lora_rank: 512
+    qk_head_dim: 128
+    qk_pos_emb_head_dim: 64
+    v_head_dim: 128
+    ffn_hidden_size: 11264
+    moe_ffn_hidden_size: 1408
+    moe_grouped_gemm: true
+    moe_shared_expert_intermediate_size: 2816
+    num_experts: 64
+    moe_router_load_balancing_type: seq_aux_loss
+    moe_router_score_function: sigmoid
+    moe_router_enable_expert_bias: true
+    moe_router_bias_update_rate: 0.001
+    moe_aux_loss_coeff: 0.02
+    moe_layer_freq: "[0]+[1]*26"
+    moe_router_num_groups: 1
+    moe_router_group_topk: 1
+    moe_router_topk: 6
+    moe_router_topk_scaling_factor: 2.446
+    moe_token_dispatcher_type: alltoall
+    mtp_num_layers: 1
+    mtp_loss_scaling_factor: 0.3
+    seed: ${experiment.seed}
+    finetune: false
+    micro_batch_size: 1
+    global_batch_size: 8
+    eval_iters: 0
+    eval_interval: 10000
+    train_iters: 2
+    optimizer:
+      clip_grad: 1.0
+      weight_decay: 0.1
+      adam_beta1: 0.9
+      adam_beta2: 0.95
+      lr_scheduler:
+        lr: 3.0e-4
+        min_lr: 3.0e-5
+        lr_warmup_fraction: 0.01
+        lr_decay_style: cosine
+  data:
+    reset_position_ids: true
+    reset_attention_mask: true
+    mock_data: true
+    split: 1
+    no_mmap_bin_files: true
+    data_cache_path: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/data-cache
+    tokenizer:
+      tokenizer_type: QwenTokenizerFS
+      tokenizer_path: ${oc.env:MEGALENS_DEEPSEEK_TOKENIZER_PATH}
+      vocab_size: 151851
+      make_vocab_size_divisible_by: 64
+hydra:
+  run:
+    dir: ${oc.env:MEGALENS_GATE_CONTAINER_RUN_DIR}/hydra/node_${oc.env:NODE_RANK}
