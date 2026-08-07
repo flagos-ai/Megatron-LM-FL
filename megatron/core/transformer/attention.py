@@ -1040,76 +1040,76 @@ class Attention(MegatronModule, ABC):
 
         return output
 
-    # def flash_sparse_decode_and_prefill(
-    #     self,
-    #     q: Tensor,
-    #     k: Tensor,
-    #     v: Tensor,
-    #     max_seqlen_q,
-    #     max_seqlen_k,
-    #     cu_seqlens_q,
-    #     cu_seqlens_k,
-    #     seqlens_k,
-    # ) -> Tensor:
-    #     """Flash-sparse-attention kernel for mixed decode and prefill (dynamic batching).
+    def flash_sparse_decode_and_prefill(
+        self,
+        q: Tensor,
+        k: Tensor,
+        v: Tensor,
+        max_seqlen_q,
+        max_seqlen_k,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        seqlens_k,
+    ) -> Tensor:
+        """Flash-sparse-attention kernel for mixed decode and prefill (dynamic batching).
 
-    #     Mirrors flash_decode_and_prefill() but uses FSA kernels.
-    #     Note: paged KV cache (block_table) is not supported by FSA.
-    #     """
-    #     assert HAVE_FSA, (
-    #         "flash-sparse-attn is not installed. "
-    #         "pip install flash-sparse-attn"
-    #     )
-    #     assert not self.training
+        Mirrors flash_decode_and_prefill() but uses FSA kernels.
+        Note: paged KV cache (block_table) is not supported by FSA.
+        """
+        assert HAVE_FSA, (
+            "flash-sparse-attn is not installed. "
+            "pip install flash-sparse-attn"
+        )
+        assert not self.training
 
-    #     softmax_scale = self.config.softmax_scale
-    #     if softmax_scale is None:
-    #         softmax_scale = q.shape[-1] ** -0.5
-    #     softmax_threshold = self.config.softmax_threshold
-    #     is_quant = self.config.is_quant
-    #     is_local = self.config.is_local
-    #     is_autotune = self.config.is_autotune
+        softmax_scale = self.config.softmax_scale
+        if softmax_scale is None:
+            softmax_scale = q.shape[-1] ** -0.5
+        softmax_threshold = self.config.softmax_threshold
+        is_quant = self.config.is_quant
+        is_local = self.config.is_local
+        is_autotune = self.config.is_autotune
 
-    #     if max_seqlen_q > 1:
-    #         # Prefill path: q/k/v are [total or sq, b, np, hn]
-    #         q = q.squeeze(1)  # [total, np, hn]
-    #         output_total = flash_sparse_attn_varlen_func(
-    #             q,
-    #             k,
-    #             v,
-    #             cu_seqlens_q,
-    #             cu_seqlens_k,
-    #             max_seqlen_q,
-    #             max_seqlen_k,
-    #             is_causal=True,
-    #             softmax_scale=softmax_scale,
-    #             seqused_k=seqlens_k,
-    #             softmax_threshold=softmax_threshold,
-    #             is_local=is_local,
-    #             is_quant=is_quant,
-    #             is_autotune=is_autotune,
-    #             is_split_kv=True,
-    #             is_split_qo=True,
-    #         )
-    #         output_total = output_total.unsqueeze(1)
-    #     else:
-    #         # Decode-only path: q is [b, 1, np, hn] squeezed to [b, np, hn]
-    #         # k/v are [total_k, np, hn] with cu_seqlens_k
-    #         q = q.squeeze(1)  # [b, np, hn]
-    #         output_total = flash_sparse_attn_varlen_with_kvcache_func(
-    #             q,
-    #             k,
-    #             v,
-    #             cu_seqlens_k=cu_seqlens_k,
-    #             max_seqlen_k=max_seqlen_k,
-    #             softmax_scale=softmax_scale,
-    #             seqused_k=seqlens_k,
-    #             softmax_threshold=softmax_threshold,
-    #             is_local=is_local,
-    #             is_quant=is_quant,
-    #             is_autotune=is_autotune,
-    #         )
-    #     return output_total
+        if max_seqlen_q > 1:
+            # Prefill path: q/k/v are [total or sq, b, np, hn]
+            q = q.squeeze(1)  # [total, np, hn]
+            output_total = flash_sparse_attn_varlen_func(
+                q,
+                k,
+                v,
+                cu_seqlens_q,
+                cu_seqlens_k,
+                max_seqlen_q,
+                max_seqlen_k,
+                is_causal=True,
+                softmax_scale=softmax_scale,
+                seqused_k=seqlens_k,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
+                is_split_kv=True,
+                is_split_qo=True,
+            )
+            output_total = output_total.unsqueeze(1)
+        else:
+            # Decode-only path: q is [b, 1, np, hn] squeezed to [b, np, hn]
+            # k/v are [total_k, np, hn] with cu_seqlens_k
+            q = q.squeeze(1)  # [b, np, hn]
+            output_total = flash_sparse_attn_varlen_with_kvcache_func(
+                q,
+                k,
+                v,
+                cu_seqlens_k=cu_seqlens_k,
+                max_seqlen_k=max_seqlen_k,
+                softmax_scale=softmax_scale,
+                seqused_k=seqlens_k,
+                softmax_threshold=softmax_threshold,
+                is_local=is_local,
+                is_quant=is_quant,
+                is_autotune=is_autotune,
+            )
+        return output_total
 
     def forward(
         self,
@@ -1371,7 +1371,7 @@ class Attention(MegatronModule, ABC):
 
         nvtx_range_push(suffix="core_attention")
         if self.config.attention_backend == AttnBackend.fsa:
-            print(f"Attention.py, {query.shape=}, {key.shape=}, {value.shape=}")
+            # print(f"Attention.py, {query.shape=}, {key.shape=}, {value.shape=}")
             core_attn_out = self._flash_sparse_attention(
                 query,
                 key,
@@ -1410,18 +1410,31 @@ class Attention(MegatronModule, ABC):
                 q, k, v = (query, key, value)
                 cu_query_lengths, max_seqlen_q = inference_context.cu_query_lengths()
                 cu_kv_lengths, kv_lengths, max_seqlen_k = inference_context.cu_kv_lengths()
-                core_attn_out = self.flash_decode_and_prefill(
-                    q,
-                    k,
-                    v,
-                    max_seqlen_q,
-                    max_seqlen_k,
-                    cu_query_lengths,
-                    cu_kv_lengths,
-                    kv_lengths,
-                    block_table,
-                    inference_context.is_decode_only(),
-                )
+
+                if self.config.attention_backend == AttnBackend.fsa:
+                    core_attn_out = self.flash_sparse_decode_and_prefill(
+                        q,
+                        k,
+                        v,
+                        max_seqlen_q,
+                        max_seqlen_k,
+                        cu_query_lengths,
+                        cu_kv_lengths,
+                        kv_lengths,
+                    )
+                else:
+                    core_attn_out = self.flash_decode_and_prefill(
+                        q,
+                        k,
+                        v,
+                        max_seqlen_q,
+                        max_seqlen_k,
+                        cu_query_lengths,
+                        cu_kv_lengths,
+                        kv_lengths,
+                        block_table,
+                        inference_context.is_decode_only(),
+                    )
                 core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
 
                 # Clear the outputs for padding tokens when using quantization scales
