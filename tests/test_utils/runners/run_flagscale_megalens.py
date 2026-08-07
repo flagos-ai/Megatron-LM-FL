@@ -1129,6 +1129,28 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _events("MLP.forward"),
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "te-full-cuda-graph": manifest.TraceProfile(
+        "te-full-cuda-graph",
+        1,
+        _events(
+            "forward-step",
+            "backward-step",
+            "decoder",
+            "decoder-postprocess",
+            "output_layer",
+            "loss",
+            "transformer_layer",
+            "_forward_attention",
+            "attention",
+            "_forward_mlp",
+            "MLP.forward",
+            "optimizer",
+            "optimizer-step",
+            "optimizer-postprocess",
+        ),
+        gpt_probe_contract.validate_te_full_cuda_graph_phases,
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint,
+    ),
     "te-moe-router-cuda-graph": manifest.TraceProfile(
         "te-moe-router-cuda-graph",
         2,
@@ -1280,6 +1302,7 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_dp8_distopt_smoke": "dp8-distopt",
     "flagscale_single_node_dp8_distopt_overlap_smoke": "dp8-distopt-overlap",
     "flagscale_single_node_te_cuda_graph_attn_smoke": "te-attn-cuda-graph",
+    "flagscale_single_node_te_cuda_graph_full_smoke": "te-full-cuda-graph",
     "flagscale_single_node_te_cuda_graph_moe_router_smoke": (
         "te-moe-router-cuda-graph"
     ),
@@ -1354,6 +1377,8 @@ def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
         return PROFILES["bert-encoder"]
     if args.cuda_graph_profile == "transformer-engine-attn":
         return PROFILES["te-attn-cuda-graph"]
+    if args.cuda_graph_profile == "transformer-engine-full":
+        return PROFILES["te-full-cuda-graph"]
     if args.cuda_graph_profile == "transformer-engine-moe-router":
         return PROFILES["te-moe-router-cuda-graph"]
     if args.topology == "tp2":
@@ -1600,7 +1625,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--cuda-graph-profile",
-        choices=("transformer-engine-attn", "transformer-engine-moe-router"),
+        choices=(
+            "transformer-engine-attn",
+            "transformer-engine-full",
+            "transformer-engine-moe-router",
+        ),
     )
     parser.add_argument("--model-profile", choices=("bert-encoder",))
     parser.add_argument(

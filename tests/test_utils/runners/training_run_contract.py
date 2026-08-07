@@ -42,6 +42,25 @@ _TRANSFORMER_ENGINE_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*transformer_impl\s+\.+\s+transformer_engine\s*$",
     re.MULTILINE,
 )
+_TRANSFORMER_ENGINE_CUDA_GRAPH_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_impl\s+\.+\s+transformer_engine\s*$",
+    re.MULTILINE,
+)
+_WHOLE_LAYER_CUDA_GRAPH_SCOPE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_scope\s+\.+\s+\[\]\s*$",
+    re.MULTILINE,
+)
+_ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_warmup_steps\s+\.+\s+1\s*$",
+    re.MULTILINE,
+)
+_TWO_ITERATION_PROGRESS = re.compile(
+    r"iteration\s+(?P<iteration>[12])/\s*2\s*\|"
+)
+_CUDA_GRAPH_DELETION = re.compile(
+    r"Rank 0: (?P<explicit>\d+) graphs deleted with explicit reset, "
+    r"(?P<implicit>\d+) graphs deleted without explicit reset\."
+)
 _FLAGCX_BACKEND_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*distributed_backend\s+\.+\s+flagcx\s*$",
     re.MULTILINE,
@@ -91,6 +110,126 @@ def validate_two_iteration_transformer_engine_checkpoint(
             Failure(
                 "run.training.transformer_impl",
                 "Megatron did not report transformer_impl=transformer_engine",
+                str(launcher_log),
+            )
+        )
+    return tuple(failures)
+
+
+def validate_two_iteration_te_full_cuda_graph_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require a completed TE whole-layer capture followed by replay."""
+
+    failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    argument_contracts = (
+        (
+            _TRANSFORMER_ENGINE_ARGUMENT,
+            "run.training.transformer_impl",
+            "Megatron did not report transformer_impl=transformer_engine",
+        ),
+        (
+            _TRANSFORMER_ENGINE_CUDA_GRAPH_ARGUMENT,
+            "run.training.cuda_graph_impl",
+            "Megatron did not report cuda_graph_impl=transformer_engine",
+        ),
+        (
+            _WHOLE_LAYER_CUDA_GRAPH_SCOPE_ARGUMENT,
+            "run.training.cuda_graph_scope",
+            "Megatron did not normalize the whole-layer CUDA Graph scope to []",
+        ),
+        (
+            _ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT,
+            "run.training.cuda_graph_warmup_steps",
+            "Megatron did not report one CUDA Graph warmup step",
+        ),
+    )
+    for pattern, code, message in argument_contracts:
+        if pattern.search(log_text) is None:
+            failures.append(Failure(code, message, str(launcher_log)))
+
+    if "Rank 0: 2 graphable layers." not in log_text:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_layers",
+                "Transformer Engine did not discover both graphable layers",
+                str(launcher_log),
+            )
+        )
+    if "No graphable layers found" in log_text:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_empty",
+                "Transformer Engine reported no graphable layers",
+                str(launcher_log),
+            )
+        )
+
+    capture_start_count = log_text.count("Start CUDA Graphs capture...")
+    if capture_start_count != 1:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_capture_start",
+                "TE whole-layer run must start CUDA Graph capture exactly once; "
+                f"observed {capture_start_count}",
+                str(launcher_log),
+            )
+        )
+    capture_done_count = log_text.count(
+        "Time spent in CUDA Graphs capture on rank 0:"
+    )
+    if capture_done_count != 1:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_capture_done",
+                "TE whole-layer run must finish CUDA Graph capture exactly once; "
+                f"observed {capture_done_count}",
+                str(launcher_log),
+            )
+        )
+
+    deletion_matches = tuple(_CUDA_GRAPH_DELETION.finditer(log_text))
+    deleted_graphs = (
+        sum(
+            int(match.group("explicit")) + int(match.group("implicit"))
+            for match in deletion_matches
+        )
+        if deletion_matches
+        else 0
+    )
+    if len(deletion_matches) != 1 or deleted_graphs != 2:
+        failures.append(
+            Failure(
+                "run.training.cuda_graph_deletion",
+                "TE whole-layer run must delete exactly two captured layer graphs; "
+                f"observed {deleted_graphs} across {len(deletion_matches)} log record(s)",
+                str(launcher_log),
+            )
+        )
+
+    completed_iterations = tuple(
+        int(match.group("iteration"))
+        for match in _TWO_ITERATION_PROGRESS.finditer(log_text)
+    )
+    if completed_iterations != (1, 2):
+        failures.append(
+            Failure(
+                "run.training.iterations",
+                "TE whole-layer run must report iterations [1, 2]; "
+                f"observed {list(completed_iterations)}",
                 str(launcher_log),
             )
         )

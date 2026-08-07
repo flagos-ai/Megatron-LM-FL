@@ -50,6 +50,15 @@ _OPTIMIZER_SEQUENCE = (
     ("optimizer-postprocess", "B"),
     ("optimizer-postprocess", "E"),
 )
+_CUDA_GRAPH_INNER_PHASES = frozenset(
+    (
+        "transformer_layer",
+        "_forward_attention",
+        "attention",
+        "_forward_mlp",
+        "MLP.forward",
+    )
+)
 
 
 @dataclass(frozen=True)
@@ -277,6 +286,48 @@ def _validate_optimizer_phases(
     ]
 
 
+def _validate_single_scope(
+    iteration: Iteration,
+    name: str,
+    *,
+    rank: int,
+) -> list[Failure]:
+    spans, failures = _pair_spans(iteration, (name,), rank=rank)
+    observed = len(spans.get(name, ()))
+    if observed != 1:
+        failures.append(
+            _failure(
+                "trace.gpt.count",
+                f"event {name!r} has {observed} complete scope(s), expected 1",
+                rank=rank,
+                iteration=int(iteration.iteration_id),
+            )
+        )
+    return failures
+
+
+def _validate_cuda_graph_replay_inner_phases_absent(
+    iteration: Iteration,
+    *,
+    rank: int,
+) -> list[Failure]:
+    observed = Counter(
+        event.name
+        for event in iteration.events
+        if event.name in _CUDA_GRAPH_INNER_PHASES
+    )
+    if not observed:
+        return []
+    return [
+        _failure(
+            "trace.gpt.cuda_graph_replay_inner",
+            f"CUDA Graph replay contains inner Core events {dict(observed)!r}",
+            rank=rank,
+            iteration=int(iteration.iteration_id),
+        )
+    ]
+
+
 def _validate_gpt_model_phases(
     trace_root: Path,
     *,
@@ -392,6 +443,74 @@ def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
         postprocess_ranks=frozenset((0,)),
         eager_layers_by_rank={0: 2},
     )
+
+
+def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate eager then repeated replay for a two-layer TE whole-layer graph."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    observed_ranks = tuple(sorted(by_rank))
+    if observed_ranks != (0,):
+        failures.append(
+            Failure(
+                "trace.gpt.ranks",
+                "TE whole-layer CUDA Graph expects only global rank 0; "
+                f"observed {list(observed_ranks)}",
+                "te-full-cuda-graph",
+            )
+        )
+
+    iterations = by_rank.get(0, ())
+    iteration_ids = tuple(int(item.iteration_id) for item in iterations)
+    if iteration_ids != (1, 2):
+        failures.append(
+            Failure(
+                "trace.gpt.iterations",
+                "TE whole-layer CUDA Graph expects iterations [1, 2]; "
+                f"observed {list(iteration_ids)}",
+                "rank=0",
+            )
+        )
+
+    for iteration in iterations:
+        iteration_id = int(iteration.iteration_id)
+        observed_pp_ranks = {event.rank.pipeline for event in iteration.events}
+        if observed_pp_ranks != {0}:
+            failures.append(
+                _failure(
+                    "trace.gpt.pipeline_rank",
+                    f"events use pipeline ranks {sorted(observed_pp_ranks)}, expected [0]",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+        failures.extend(
+            _validate_iteration(
+                iteration,
+                rank=0,
+                expected_counts={
+                    "forward-step": 1,
+                    "decoder": 1,
+                    "decoder-postprocess": 1,
+                    "output_layer": 1,
+                    "loss": 1,
+                },
+            )
+        )
+        failures.extend(_validate_single_scope(iteration, "backward-step", rank=0))
+        failures.extend(_validate_optimizer_phases(iteration, rank=0))
+        if iteration_id == 1:
+            failures.extend(
+                _validate_eager_layers(iteration, rank=0, expected_layers=2)
+            )
+        elif iteration_id == 2:
+            failures.extend(
+                _validate_cuda_graph_replay_inner_phases_absent(
+                    iteration, rank=0
+                )
+            )
+    return tuple(failures)
 
 
 def _validate_qwen3_tp_eager_phases(

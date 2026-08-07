@@ -122,6 +122,7 @@ _CONFIG_PROFILE_CASES = {
         "dp8-distopt-overlap"
     ),
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
+    "flagscale_single_node_te_cuda_graph_full_smoke.yaml": "te-full-cuda-graph",
     "flagscale_single_node_te_cuda_graph_moe_router_smoke.yaml": (
         "te-moe-router-cuda-graph"
     ),
@@ -212,6 +213,8 @@ def _write_gpt_phase_trace(
     tensor_rank: int = 0,
     eager_layers: int = 0,
     include_optimizer: bool = False,
+    include_backward: bool = False,
+    eager_iterations: frozenset[int] | None = None,
     include_optimizer_postprocess: bool = True,
     p2p_route: str | None = None,
     ring_directional_wait: bool = False,
@@ -520,7 +523,12 @@ def _write_gpt_phase_trace(
         )
         event("forward-step", "B")
         event("decoder", "B")
-        for _ in range(eager_layers):
+        layer_count = (
+            eager_layers
+            if eager_iterations is None or iteration in eager_iterations
+            else 0
+        )
+        for _ in range(layer_count):
             event("transformer_layer", "B")
             event("_forward_attention", "B")
             event("attention", "B")
@@ -540,6 +548,9 @@ def _write_gpt_phase_trace(
             event("loss", "E")
         event("decoder-postprocess", "E")
         event("forward-step", "E")
+        if include_backward:
+            event("backward-step", "B")
+            event("backward-step", "E")
         p2p_events(iteration)
         if include_optimizer:
             event("optimizer", "B")
@@ -901,6 +912,36 @@ def test_gpt_eager_profile_disables_persistent_layernorm() -> None:
 
     assert payload["train"]["model"]["transformer_impl"] == "local"
     assert payload["train"]["model"]["no_persist_layer_norm"] is True
+
+
+def test_te_full_cuda_graph_profile_only_changes_the_graph_lifecycle() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_te_cuda_graph_attn_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    full = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_te_cuda_graph_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = full["experiment"]["exp_name"]
+    baseline["train"]["model"].pop("cuda_graph_scope")
+    baseline["train"]["model"]["cuda_graph_warmup_steps"] = 1
+
+    assert full == baseline
+    assert "cuda_graph_scope" not in full["train"]["model"]
+
+    profile = gate.PROFILES["te-full-cuda-graph"]
+    assert profile.rank_count == 1
+    assert (
+        profile.contract
+        is gpt_probe_contract.validate_te_full_cuda_graph_phases
+    )
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint
+    )
 
 
 def test_ep2_capacity_drop_profile_only_enables_unpadded_token_dropping() -> None:
@@ -1401,6 +1442,56 @@ def test_transformer_engine_training_contract_requires_the_parsed_model_route(
     )
 
 
+def test_te_full_cuda_graph_training_contract_requires_capture_and_replay(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    valid_log = "\n".join(
+        (
+            "[default0]:  transformer_impl ................ transformer_engine",
+            "[default0]:  cuda_graph_impl ................. transformer_engine",
+            "[default0]:  cuda_graph_scope ................ []",
+            "[default0]:  cuda_graph_warmup_steps ......... 1",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Rank 0: 2 graphable layers.",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Start CUDA Graphs capture...",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Time spent in CUDA Graphs capture on rank 0: 1.25s",
+            "[default0]: iteration 1/ 2 | lm loss: 1.0 |",
+            "[default0]: iteration 2/ 2 | lm loss: 0.9 |",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Rank 0: 2 graphs deleted with explicit reset, "
+            "0 graphs deleted without explicit reset.",
+        )
+    )
+    launcher_log.write_text(valid_log, encoding="utf-8")
+
+    assert (
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        valid_log.replace(
+            "cuda_graph_scope ................ []",
+            "cuda_graph_scope ................ [<CudaGraphScope.attn: 2>]",
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_graph_scope"
+    ]
+
+
 def test_flagcx_training_contract_requires_the_parsed_backend(
     tmp_path: Path,
 ) -> None:
@@ -1756,6 +1847,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-linear",
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
+        "te-full-cuda-graph",
             "qwen3-enron-tp2-sp",
             "qwen3-enron-tp4-sp",
             "qwen3-enron-tp4-local-no-sp",
@@ -2617,6 +2709,47 @@ def test_gpt_eager_profile_rejects_an_incomplete_layer_sequence(
         "rank=0 iteration=1",
         "rank=0 iteration=2",
     ]
+
+
+def test_te_full_cuda_graph_profile_separates_eager_and_replay_phases(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "te-full-cuda-graph"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+        eager_iterations=frozenset((1,)),
+    )
+
+    assert gate.PROFILES["te-full-cuda-graph"].contract(trace_root) == ()
+
+
+def test_te_full_cuda_graph_profile_rejects_inner_replay_events(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "te-full-cuda-graph-inner-replay"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+        eager_iterations=frozenset((1, 2)),
+    )
+
+    failures = gate.PROFILES["te-full-cuda-graph"].contract(trace_root)
+
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.cuda_graph_replay_inner"
+    ]
+    assert failures[0].evidence == "rank=0 iteration=2"
 
 
 def test_qwen3_tp2_profile_requires_28_eager_layers_on_both_ranks(
