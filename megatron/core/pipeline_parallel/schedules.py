@@ -384,8 +384,8 @@ def forward_step_calc_loss(
         if is_last_stage:
             assert cp_group_size is not None, "cp_group_size must be provided on last stage"
 
-    num_tokens = torch.tensor(
-        0, dtype=torch.int, device=cur_platform.device_name()
+    num_tokens = torch.zeros(
+        [], dtype=torch.int, device=cur_platform.device_name()
     )  # FlagScale Add
     if is_last_stage:
         if loss_func is None:
