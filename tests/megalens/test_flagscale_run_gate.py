@@ -184,18 +184,24 @@ def _write_terminal_checkpoint(run_dir: Path, *, iteration: int = 2) -> None:
 def _write_flagcx_worker_logs(
     run_dir: Path,
     *,
-    ranks: tuple[int, int] = (0, 1),
+    ranks: tuple[int, ...] = (0, 1),
     fatal_marker: str | None = None,
 ) -> None:
     log_root = run_dir / "logs"
     log_root.mkdir()
-    for host_rank, dp_rank in enumerate(ranks):
+    split = len(ranks) // 2
+    for host_rank, host_ranks in enumerate((ranks[:split], ranks[split:])):
         suffix = f"\n{fatal_marker}" if fatal_marker and host_rank == 1 else ""
         (log_root / f"host_{host_rank}.output").write_text(
             "[default0]:host:0:0 [0] FLAGCX INFO Bootstrap : Using "
             f"bond0.2208:10.6.208.{99 + 19 * host_rank}<0>\n"
-            "[default0]:host:0:0 [0] FLAGCX INFO rank "
-            f"{dp_rank} nranks 2 - DONE{suffix}\n",
+            "[default0]:host:0:0 [0] FLAGCX INFO rank 0 nranks 1 - DONE\n"
+            + "\n".join(
+                "[default0]:host:0:0 [0] FLAGCX INFO rank "
+                f"{rank} nranks {len(ranks)} - DONE"
+                for rank in host_ranks
+            )
+            + f"{suffix}\n",
             encoding="utf-8",
         )
 
@@ -923,6 +929,7 @@ def test_existing_yaml_profiles_remain_selectable(config: str, profile: str) -> 
     (
         "flagscale_dual_node_dp2_standard_flagcx.yaml",
         "flagscale_dual_node_dp2_distopt_flagcx.yaml",
+        "flagscale_dual_node_dp8_distopt_overlap_flagcx.yaml",
         "flagscale_dual_node_qwen3_enron_cp2_dp4.yaml",
         "flagscale_dual_node_qwen3_enron_cp2_dp8.yaml",
     ),
@@ -974,6 +981,42 @@ def test_dual_node_flagcx_offline_profiles_keep_the_dp_event_contract(
         profile.run_contract
         is training_run_contract.validate_two_iteration_flagcx_checkpoint
     )
+
+
+def test_dual_node_flagcx_dp8_overlap_profile_reuses_the_dp8_contract(
+    tmp_path: Path,
+) -> None:
+    profile = gate._OFFLINE_CONFIG_PROFILES[
+        "flagscale_dual_node_dp8_distopt_overlap_flagcx"
+    ]
+    baseline = gate.PROFILES["dp8-distopt-overlap"]
+
+    assert profile.name == "flagcx-dp8-distopt-overlap"
+    assert profile.rank_count == 8
+    assert profile.events == baseline.events
+    assert profile.contract is baseline.contract
+    assert profile.run_contract is not None
+
+    valid = tmp_path / "valid"
+    _write_terminal_checkpoint(valid)
+    _write_flagcx_worker_logs(valid, ranks=tuple(range(8)))
+    (valid / "launcher.log").write_text(
+        "[default0]:  distributed_backend ............................ flagcx\n",
+        encoding="utf-8",
+    )
+    assert profile.run_contract(valid, False) == ()
+
+    missing = tmp_path / "missing"
+    _write_terminal_checkpoint(missing)
+    _write_flagcx_worker_logs(missing, ranks=(1, 2, 3, 4, 5, 6, 7, 7))
+    (missing / "launcher.log").write_text(
+        "[default0]:  distributed_backend ............................ flagcx\n",
+        encoding="utf-8",
+    )
+    failures = profile.run_contract(missing, False)
+    assert {failure.code for failure in failures} == {
+        "run.training.flagcx_dp8_group"
+    }
 
 
 def test_gpt_eager_profile_disables_persistent_layernorm() -> None:

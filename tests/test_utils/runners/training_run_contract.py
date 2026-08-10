@@ -137,8 +137,8 @@ _FLAGCX_BACKEND_ARGUMENT = re.compile(
 _FLAGCX_BOOTSTRAP = re.compile(
     r"FLAGCX INFO Bootstrap : Using (?P<interface>[^:]+):(?P<address>[^<\s]+)<"
 )
-_FLAGCX_DP2_RANK = re.compile(
-    r"FLAGCX INFO rank (?P<rank>[01]) nranks 2 - DONE"
+_FLAGCX_RANK = re.compile(
+    r"FLAGCX INFO rank (?P<rank>\d+) nranks (?P<nranks>\d+) - DONE"
 )
 _FLAGCX_FATAL_MARKER = re.compile(
     r"ChildFailedError|Traceback \(most recent call last\)|"
@@ -650,9 +650,9 @@ def validate_three_iteration_local_full_cuda_graph_checkpoint(
 
 
 def validate_two_iteration_flagcx_checkpoint(
-    run_root: Path, trace_enabled: bool
+    run_root: Path, trace_enabled: bool, *, expected_nranks: int = 2
 ) -> tuple[Failure, ...]:
-    """Require terminal state and both FlagCX DP2 worker logs."""
+    """Require terminal state and both FlagCX worker logs."""
 
     failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
     launcher_log = run_root / "launcher.log"
@@ -682,7 +682,7 @@ def validate_two_iteration_flagcx_checkpoint(
         failures.append(
             Failure(
                 "run.training.flagcx_worker_logs",
-                "FlagCX DP2 validation requires exactly two host worker logs",
+                "FlagCX validation requires exactly two host worker logs",
                 str(run_root / "logs"),
             )
         )
@@ -727,14 +727,17 @@ def validate_two_iteration_flagcx_checkpoint(
             )
         )
 
-    dp2_ranks = {
-        match.group("rank") for match in _FLAGCX_DP2_RANK.finditer(worker_text)
+    ranks = {
+        int(match.group("rank"))
+        for match in _FLAGCX_RANK.finditer(worker_text)
+        if int(match.group("nranks")) == expected_nranks
     }
-    if dp2_ranks != {"0", "1"}:
+    if ranks != set(range(expected_nranks)):
         failures.append(
             Failure(
-                "run.training.flagcx_dp2_group",
-                "FlagCX did not initialize both ranks of the two-rank DP group",
+                f"run.training.flagcx_dp{expected_nranks}_group",
+                f"FlagCX did not initialize ranks 0..{expected_nranks - 1} "
+                f"of the {expected_nranks}-rank DP group",
                 str(run_root / "logs"),
             )
         )

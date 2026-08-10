@@ -10,6 +10,7 @@ import socket
 import subprocess
 import sys
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -1421,9 +1422,25 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_mimo_fanout": "mimo-train8-fanout",
 }
 
+_DP8_DISTOPT_OVERLAP_PROFILE = PROFILES["dp8-distopt-overlap"]
+FLAGCX_DP8_DISTOPT_OVERLAP_OFFLINE_PROFILE = manifest.TraceProfile(
+    "flagcx-dp8-distopt-overlap",
+    _DP8_DISTOPT_OVERLAP_PROFILE.rank_count,
+    _DP8_DISTOPT_OVERLAP_PROFILE.events,
+    _DP8_DISTOPT_OVERLAP_PROFILE.contract,
+    partial(
+        training_run_contract.validate_two_iteration_flagcx_checkpoint,
+        expected_nranks=8,
+    ),
+)
+
+
 _OFFLINE_CONFIG_PROFILES = {
     "flagscale_dual_node_dp2_standard_flagcx": FLAGCX_DP2_STANDARD_OFFLINE_PROFILE,
     "flagscale_dual_node_dp2_distopt_flagcx": FLAGCX_DP2_DISTOPT_OFFLINE_PROFILE,
+    "flagscale_dual_node_dp8_distopt_overlap_flagcx": (
+        FLAGCX_DP8_DISTOPT_OVERLAP_OFFLINE_PROFILE
+    ),
     "flagscale_dual_node_qwen3_enron_cp2_dp4": QWEN3_CP2_DP4_OFFLINE_PROFILE,
     "flagscale_dual_node_qwen3_enron_cp2_dp8": QWEN3_CP2_DP8_OFFLINE_PROFILE,
 }

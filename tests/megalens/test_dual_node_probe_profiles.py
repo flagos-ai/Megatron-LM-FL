@@ -150,3 +150,17 @@ def test_dual_node_flagcx_profile_preserves_the_dp2_training_contract(
     expected["train"]["system"]["distributed_backend"] = "flagcx"
 
     assert flagcx == expected
+
+
+def test_dual_node_flagcx_dp8_overlap_only_combines_existing_routes() -> None:
+    overlap = _load("flagscale_dual_node_dp8_distopt_overlap_flagcx.yaml")
+    expected = deepcopy(_load("flagscale_dual_node_dp2_distopt_flagcx.yaml"))
+
+    expected["experiment"]["exp_name"] = overlap["experiment"]["exp_name"]
+    expected["experiment"]["runner"]["nproc_per_node"] = 4
+    expected["experiment"]["envs"]["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
+    expected["train"]["system"]["overlap_grad_reduce"] = True
+    expected["train"]["system"]["overlap_param_gather"] = True
+    expected["train"]["model"]["global_batch_size"] = 8
+
+    assert overlap == expected
