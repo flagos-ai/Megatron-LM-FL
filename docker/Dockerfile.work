@@ -247,8 +247,8 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
 
 # FlagScale's runner prepends its vendored megatron.training package to
 # PYTHONPATH. Apply the reviewable compatibility diff that mirrors the
-# Megatron-LM-FL MegaLens arguments, runtime lifecycle, iteration scope, and
-# optimizer probes.
+# Megatron-LM-FL MegaLens arguments, runtime lifecycle, iteration scope,
+# optimizer probes, and dense-batch Graph compatibility.
 # The baseline hashes prevent this patch from being applied to an unreviewed
 # FlagScale source revision. FlagScale is installed without cuda-train extras
 # so its MCore 0.16 pin cannot replace the validated MCore 0.17.1 source.
@@ -260,10 +260,11 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         && test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})" = "${FLAGSCALE_TREE}"; \
     fi \
     && printf '%s  %s\n' \
-        "97ed3fd4cce5d01267ec73c18dc3e56d1895cffed4bc49525da598f7c50ccdbb" "/tmp/flagscale-megalens.patch" \
+        "77a419f01249263507b69d34759777636b163789f3bd57f9ab7e5639425db724" "/tmp/flagscale-megalens.patch" \
         "913b47495a8e58ed4aac8d4c72cede063afbbaa79ed61ee900e90979e9441667" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "d7c73b0764c4b192cd2e5e3cc46fc2cffbdca3dc3beeef703139e8b3f9b9914e" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "d3eace40ed2bbc2e24e51f801201aaaa406a3d68cbde8614981c0643169a36a2" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        "f4a31581bd93b6e53500e520a72312adf2f069e23634d176c97d707a0558c45c" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
         | sha256sum -c - \
     && git -C "${FLAGSCALE_ROOT}" apply --check /tmp/flagscale-megalens.patch \
     && git -C "${FLAGSCALE_ROOT}" apply /tmp/flagscale-megalens.patch \
@@ -271,11 +272,13 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         "374793cd1bc17562cd43b574866ffafe3d5543752082c8dc745d1efba1db3e6c" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "b1e4ee2eff25440bc1265438c082d53e39061c61d6e979af9828a4e7e7f5ee81" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "897b74e5387fb19e7b7c48abf9faf7e4559fa377f523e6580cab60f15f2f2368" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        "e5e6166aca7a7ac7db62e261217cc5e8eb6bdc829d5637c4f5f8cf2094968cf9" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
         | sha256sum -c - \
     && python -m py_compile \
         "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
     && python -m pip install \
         --no-cache-dir \
         --no-deps \
@@ -290,7 +293,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         "${MEGATRON_CODE_PARENT}" \
         "${FLAGSCALE_REVISION}" \
         "${FLAGSCALE_TREE}" \
-        "97ed3fd4cce5d01267ec73c18dc3e56d1895cffed4bc49525da598f7c50ccdbb" \
+        "77a419f01249263507b69d34759777636b163789f3bd57f9ab7e5639425db724" \
         "${EMERGING_OPTIMIZERS_REVISION}" \
         "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
         "${DEEP_EP_REVISION}" \

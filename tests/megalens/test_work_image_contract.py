@@ -57,7 +57,7 @@ def test_userbuffer_patch_is_pinned_by_the_work_image() -> None:
     assert 'docker/verify_transformer_engine_userbuffer.py' in dockerfile
 
 
-def test_flagscale_patch_allows_graph_kernel_capture_and_is_pinned() -> None:
+def test_flagscale_patch_preserves_graph_compatibility_and_is_pinned() -> None:
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
     patch_bytes = _FLAGSCALE_PATCH.read_bytes()
     patch = patch_bytes.decode()
@@ -66,6 +66,22 @@ def test_flagscale_patch_allows_graph_kernel_capture_and_is_pinned() -> None:
     assert dockerfile.count(f'"{patch_sha256}"') == 2
     assert "requires --trace-cupti-kernels=off until the GPU gate" not in patch
     assert "Python scopes inside managed capture/replay are" in patch
+    assert (
+        "broadcast_packed_sequence_metadata = "
+        "args.hybrid_context_parallel or args.sft"
+    ) in patch
+    assert patch.count("if broadcast_packed_sequence_metadata:") == 5
+    assert (
+        '"f4a31581bd93b6e53500e520a72312adf2f069e23634d176c97d707a0558c45c" '
+        '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py"'
+    ) in dockerfile
+    assert (
+        '"e5e6166aca7a7ac7db62e261217cc5e8eb6bdc829d5637c4f5f8cf2094968cf9" '
+        '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py"'
+    ) in dockerfile
+    assert dockerfile.count(
+        '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py"'
+    ) == 3
 
 
 def test_work_image_wheel_manifest_matches_the_docker_argument() -> None:
