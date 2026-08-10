@@ -428,11 +428,6 @@ class Tracer:
                 "MegaLens kernel capture currently requires "
                 "continuous_trace_iterations=1 for unambiguous kernel ownership"
             )
-        if getattr(args, "cuda_graph_impl", "none") != "none" and cupti_mode != "off":
-            raise ValueError(
-                "MegaLens kernel capture with CUDA Graphs requires a validated GPU gate; "
-                "set trace_cupti_kernels=off"
-            )
         if (
             cupti_mode != "off"
             and getattr(args, "profile", False)
@@ -1001,6 +996,7 @@ class Tracer:
             # in the same payload as framework events.
             self._stop_kernel_profiler_and_extract()
             self.log()
+            self._pendings = None
 
     def abort_iteration(self) -> None:
         """Discard incomplete iteration state without distributed coordination."""

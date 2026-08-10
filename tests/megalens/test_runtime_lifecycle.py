@@ -387,7 +387,6 @@ def test_tracer_abort_discards_only_incomplete_iteration_records() -> None:
         {"sentinel_flush_interval": 0},
         {"trace_mode": 0, "trace_cupti_kernels": "on"},
         {"trace_interval": 2, "continuous_trace_iterations": 2, "trace_cupti_kernels": "on"},
-        {"cuda_graph_impl": "local", "trace_cupti_kernels": "on"},
         {"trace_cupti_kernels": "on", "profile": True, "use_pytorch_profiler": True},
     ],
 )
@@ -447,11 +446,10 @@ def test_training_argument_validation_matches_runtime_contract() -> None:
     _validate_megalens_args(_args())
     with pytest.raises(ValueError, match="continuous-trace-iterations"):
         _validate_megalens_args(_args(trace_interval=2, continuous_trace_iterations=3))
-    with warnings.catch_warnings(record=True) as caught:
-        warnings.simplefilter("always")
-        with pytest.raises(ValueError, match="CUDA Graphs"):
-            _validate_megalens_args(_args(cuda_graph_impl="local", trace_cupti_kernels="on"))
-    assert caught == []
+    with pytest.warns(RuntimeWarning, match="graph-external"):
+        _validate_megalens_args(
+            _args(cuda_graph_impl="local", trace_cupti_kernels="on")
+        )
     with pytest.raises(ValueError, match="hardware-monitor requires --trace"):
         _validate_megalens_args(_args(trace=False, hardware_monitor=True))
 
@@ -481,8 +479,50 @@ def test_training_argument_validation_ignores_trace_only_values_when_disabled() 
 def test_cuda_graph_framework_trace_warns_about_probe_coverage() -> None:
     from megatron.training.arguments import _validate_megalens_args
 
-    with pytest.warns(RuntimeWarning, match="iteration boundaries only"):
+    with pytest.warns(RuntimeWarning, match="graph-external"):
         _validate_megalens_args(_args(cuda_graph_impl="local", trace_cupti_kernels="off"))
+
+
+def test_cuda_graph_kernel_capture_is_allowed_in_mode1() -> None:
+    tracer = Tracer()
+    tracer.configure(_args(cuda_graph_impl="local", trace_cupti_kernels="on"))
+
+    assert tracer._resolve_kernel_capture_mode()
+
+    tracer.shutdown(graceful=False)
+
+
+def test_flushed_trace_window_reopens_kernel_profiler() -> None:
+    tracer = Tracer()
+    tracer.configure(
+        _args(
+            trace_interval=1,
+            continuous_trace_iterations=1,
+            trace_cupti_kernels="on",
+        )
+    )
+    calls: list[str] = []
+    tracer.iter = 1
+    tracer._pendings = [
+        SimpleNamespace(event=SimpleNamespace(synchronize=lambda: None))
+    ]
+    tracer._pending_pad_before = 0
+    tracer._add_cuda_event = lambda *args, **kwargs: None
+    tracer._cache_ranks = lambda: None
+    tracer._calibrate = lambda: 1
+    tracer._process_pending_scope = lambda *args: tracer._records.append(
+        {"rel_ts": 1}
+    )
+    tracer._stop_kernel_profiler_and_extract = lambda: calls.append("stop")
+    tracer.log = lambda: calls.append("log")
+
+    tracer._iteration_end_impl()
+    assert tracer._pendings is None
+
+    tracer._start_kernel_profiler = lambda: calls.append("start")
+    tracer._iteration_begin_impl(2)
+
+    assert calls == ["stop", "log", "start"]
 
 
 def test_runtime_warns_when_hardware_monitor_has_no_metric_provider(monkeypatch) -> None:

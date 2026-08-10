@@ -1173,6 +1173,28 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         gpt_probe_contract.validate_local_layerwise_full_cuda_graph_phases,
         training_run_contract.validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint,
     ),
+    "local-layerwise-cuda-kernels": manifest.TraceProfile(
+        "local-layerwise-cuda-kernels",
+        1,
+        _events(
+            "forward-step",
+            "backward-step",
+            "decoder",
+            "decoder-postprocess",
+            "output_layer",
+            "loss",
+            "transformer_layer",
+            "_forward_attention",
+            "attention",
+            "_forward_mlp",
+            "MLP.forward",
+            "optimizer",
+            "optimizer-step",
+            "optimizer-postprocess",
+        ),
+        gpt_probe_contract.validate_local_layerwise_cuda_graph_kernel_phases,
+        training_run_contract.validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint,
+    ),
     "local-full-iteration-cuda-graph": manifest.TraceProfile(
         "local-full-iteration-cuda-graph",
         1,
@@ -1353,6 +1375,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_local_cuda_graph_full_smoke": (
         "local-layerwise-full-cuda-graph"
     ),
+    "flagscale_single_node_local_cuda_graph_cupti_smoke": (
+        "local-layerwise-cuda-kernels"
+    ),
     "flagscale_single_node_cuda_graph_full_iteration_smoke": (
         "local-full-iteration-cuda-graph"
     ),
@@ -1434,6 +1459,8 @@ def _profile_from_arguments(args: argparse.Namespace) -> manifest.TraceProfile:
         return PROFILES["te-full-cuda-graph"]
     if args.cuda_graph_profile == "local-layerwise-full":
         return PROFILES["local-layerwise-full-cuda-graph"]
+    if args.cuda_graph_profile == "local-layerwise-cupti":
+        return PROFILES["local-layerwise-cuda-kernels"]
     if args.cuda_graph_profile == "local-full-iteration":
         return PROFILES["local-full-iteration-cuda-graph"]
     if args.cuda_graph_profile == "transformer-engine-moe-router":
@@ -1687,6 +1714,7 @@ def _parser() -> argparse.ArgumentParser:
             "transformer-engine-full",
             "transformer-engine-moe-router",
             "local-layerwise-full",
+            "local-layerwise-cupti",
             "local-full-iteration",
         ),
     )

@@ -127,7 +127,11 @@ def _add_megalens_args(parser):
         '--trace-cupti-kernels',
         choices=['auto', 'on', 'off'],
         default='off',
-        help='Kernel capture is opt-in until CUDA Graph combinations pass the GPU gate.',
+        help=(
+            'Optional CUDA kernel-level tracing via torch.profiler. "auto" enables '
+            'kernel capture for mode-1 full traces, "on" forces it for mode-1 '
+            'traces, and "off" disables it.'
+        ),
     )
     return parser
 
@@ -157,15 +161,11 @@ def _validate_megalens_args(args):
             'MegaLens kernel capture currently requires '
             '--continuous-trace-iterations=1 for unambiguous kernel ownership'
         )
-    if args.cuda_graph_impl != 'none' and args.trace_cupti_kernels != 'off':
-        raise ValueError(
-            'MegaLens kernel capture with CUDA Graphs requires '
-            '--trace-cupti-kernels=off until the GPU gate is validated'
-        )
     if args.cuda_graph_impl != 'none':
         warnings.warn(
-            'MegaLens tracing with CUDA Graphs records iteration boundaries only; '
-            'fine-grained Python probes are unavailable during graph capture/replay.',
+            'MegaLens tracing with CUDA Graphs records eager and graph-external '
+            'framework scopes; Python scopes inside managed capture/replay are '
+            'unavailable.',
             RuntimeWarning,
             stacklevel=2,
         )

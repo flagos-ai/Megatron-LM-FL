@@ -101,6 +101,14 @@ _CUDA_GRAPH_DELETION = re.compile(
 _LOCAL_CUDA_GRAPH_BUILD = re.compile(
     r"> built (?P<count>\d+) cuda graph\(s\) in "
 )
+_CUPTI_KERNEL_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*trace_cupti_kernels\s+\.+\s+on\s*$",
+    re.MULTILINE,
+)
+_CUDA_KERNEL_EXTRACTION = re.compile(
+    r"\[trace\] extracted (?P<count>\d+) cuda kernel events at iter "
+    r"(?P<iteration>[12])"
+)
 _FLAGCX_BACKEND_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*distributed_backend\s+\.+\s+flagcx\s*$",
     re.MULTILINE,
@@ -382,6 +390,69 @@ def validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
                 str(launcher_log),
             )
         )
+    return tuple(failures)
+
+
+def validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require local Graph lifecycle and per-iteration CUDA kernel extraction."""
+
+    failures = list(
+        validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
+            run_root, trace_enabled
+        )
+    )
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    if _CUPTI_KERNEL_ARGUMENT.search(log_text) is None:
+        failures.append(
+            Failure(
+                "run.training.trace_cupti_kernels",
+                "Megatron did not report trace_cupti_kernels=on",
+                str(launcher_log),
+            )
+        )
+
+    extractions = tuple(
+        (int(match.group("iteration")), int(match.group("count")))
+        for match in _CUDA_KERNEL_EXTRACTION.finditer(log_text)
+    )
+    if trace_enabled:
+        if (
+            tuple(iteration for iteration, _ in extractions) != (1, 2)
+            or any(count <= 0 for _, count in extractions)
+        ):
+            failures.append(
+                Failure(
+                    "run.training.cuda_kernel_capture",
+                    "CUPTI-on local whole-layer run must extract a positive CUDA "
+                    "kernel count exactly once for iterations [1, 2]; observed "
+                    f"{list(extractions)}",
+                    str(launcher_log),
+                )
+            )
+    elif extractions:
+        failures.append(
+            Failure(
+                "run.training.cuda_kernel_capture",
+                "trace-off local whole-layer run unexpectedly extracted CUDA "
+                f"kernels; observed {list(extractions)}",
+                str(launcher_log),
+            )
+        )
+
     return tuple(failures)
 
 

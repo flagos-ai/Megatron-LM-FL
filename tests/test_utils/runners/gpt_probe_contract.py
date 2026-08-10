@@ -69,6 +69,31 @@ _FULL_ITERATION_CAPTURED_PHASES = frozenset(
         "all-grads-sync",
     )
 )
+_CUDA_KERNEL_REQUIRED_FIELDS = frozenset(
+    (
+        "record_type",
+        "name",
+        "start_us",
+        "end_us",
+        "wall_start_us",
+        "wall_end_us",
+        "iter_rel_start_us",
+        "iter_rel_end_us",
+        "duration_us",
+        "device",
+        "iteration",
+        "g_rk",
+        "dp_rk",
+        "pp_rk",
+        "tp_rk",
+    )
+)
+_CUDA_GRAPH_MODEL_KERNEL_MARKERS = (
+    "gemm",
+    "nvjet_",
+    "sdpa",
+    "transformer_engine::",
+)
 
 
 @dataclass(frozen=True)
@@ -600,6 +625,145 @@ def validate_local_layerwise_full_cuda_graph_phases(
         owner="local",
         profile_name="local-layerwise-full-cuda-graph",
     )
+
+
+def validate_local_layerwise_cuda_graph_kernel_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate rank-local device work for eager and local Graph replay."""
+
+    failures = list(validate_local_layerwise_full_cuda_graph_phases(trace_root))
+    iterations = _load_iterations(trace_root).get(0, ())
+
+    for iteration in iterations:
+        iteration_id = int(iteration.iteration_id)
+        kernels = [
+            event
+            for event in iteration.events
+            if event.name == "cuda_kernel"
+        ]
+        if not kernels:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_kernel_capture",
+                    "local whole-layer CUDA Graph iteration has no CUDA kernel records",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+
+        missing_fields: set[str] = set()
+        ownership_errors = 0
+        timeline_errors = 0
+        positive_duration_kernels = 0
+        replay_compute_kernels = 0
+        profiler_anchors: set[int] = set()
+        iteration_anchors: set[int] = set()
+        for event in kernels:
+            attrs = event.attrs
+            event_missing = _CUDA_KERNEL_REQUIRED_FIELDS - attrs.keys()
+            missing_fields.update(event_missing)
+            if event_missing:
+                continue
+
+            if (
+                event.ph != "X"
+                or attrs["record_type"] != "cuda_kernel"
+                or attrs["device"] != 0
+                or attrs["iteration"] != iteration_id
+                or tuple(attrs[field] for field in ("g_rk", "dp_rk", "pp_rk", "tp_rk"))
+                != (0, 0, 0, 0)
+            ):
+                ownership_errors += 1
+
+            duration = 0
+            try:
+                start = int(attrs["start_us"])
+                end = int(attrs["end_us"])
+                wall_start = int(attrs["wall_start_us"])
+                wall_end = int(attrs["wall_end_us"])
+                iter_start = int(attrs["iter_rel_start_us"])
+                iter_end = int(attrs["iter_rel_end_us"])
+                duration = int(attrs["duration_us"])
+            except (TypeError, ValueError):
+                timeline_errors += 1
+            else:
+                if (
+                    end < start
+                    or wall_end < wall_start
+                    or iter_end < iter_start
+                    or duration < 0
+                    or wall_start - start != wall_end - end
+                    or wall_start - iter_start != wall_end - iter_end
+                ):
+                    timeline_errors += 1
+                else:
+                    profiler_anchors.add(wall_start - start)
+                    iteration_anchors.add(wall_start - iter_start)
+                    if duration > 0:
+                        positive_duration_kernels += 1
+
+            kernel_name = str(attrs["name"]).lower()
+            if (
+                iteration_id == 2
+                and duration > 0
+                and "nccl" not in kernel_name
+                and any(
+                    marker in kernel_name
+                    for marker in _CUDA_GRAPH_MODEL_KERNEL_MARKERS
+                )
+            ):
+                replay_compute_kernels += 1
+
+        if (
+            len(profiler_anchors) > 1
+            or len(iteration_anchors) > 1
+            or positive_duration_kernels == 0
+        ):
+            timeline_errors += 1
+
+        if missing_fields:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_kernel_fields",
+                    "CUDA kernel records lack required ownership or timeline fields: "
+                    f"{sorted(missing_fields)}",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+        if ownership_errors:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_kernel_ownership",
+                    f"{ownership_errors} CUDA kernel record(s) use an unexpected "
+                    "rank, device, iteration, phase, or record type",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+        if timeline_errors:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_kernel_timeline",
+                    f"{timeline_errors} CUDA kernel record(s) have an invalid "
+                    "rank-local device interval",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+        if iteration_id == 2 and replay_compute_kernels == 0:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_replay_compute_kernel",
+                    "local whole-layer replay has no recognized model-compute kernel",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+
+    return tuple(failures)
 
 
 def validate_local_full_iteration_cuda_graph_phases(
