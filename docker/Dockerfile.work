@@ -260,7 +260,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         && test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})" = "${FLAGSCALE_TREE}"; \
     fi \
     && printf '%s  %s\n' \
-        "2ce5473b6280598d1954c575b068523d9f9facdf20a685ac08dd61822bdaa162" "/tmp/flagscale-megalens.patch" \
+        "97ed3fd4cce5d01267ec73c18dc3e56d1895cffed4bc49525da598f7c50ccdbb" "/tmp/flagscale-megalens.patch" \
         "913b47495a8e58ed4aac8d4c72cede063afbbaa79ed61ee900e90979e9441667" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "d7c73b0764c4b192cd2e5e3cc46fc2cffbdca3dc3beeef703139e8b3f9b9914e" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "d3eace40ed2bbc2e24e51f801201aaaa406a3d68cbde8614981c0643169a36a2" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
@@ -268,7 +268,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
     && git -C "${FLAGSCALE_ROOT}" apply --check /tmp/flagscale-megalens.patch \
     && git -C "${FLAGSCALE_ROOT}" apply /tmp/flagscale-megalens.patch \
     && printf '%s  %s\n' \
-        "d60ed817ea6510fce29697020dc58bdd621f59dd45fbde81507df00d07ce4d36" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "374793cd1bc17562cd43b574866ffafe3d5543752082c8dc745d1efba1db3e6c" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "b1e4ee2eff25440bc1265438c082d53e39061c61d6e979af9828a4e7e7f5ee81" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "897b74e5387fb19e7b7c48abf9faf7e4559fa377f523e6580cab60f15f2f2368" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
         | sha256sum -c - \
@@ -290,7 +290,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         "${MEGATRON_CODE_PARENT}" \
         "${FLAGSCALE_REVISION}" \
         "${FLAGSCALE_TREE}" \
-        "2ce5473b6280598d1954c575b068523d9f9facdf20a685ac08dd61822bdaa162" \
+        "97ed3fd4cce5d01267ec73c18dc3e56d1895cffed4bc49525da598f7c50ccdbb" \
         "${EMERGING_OPTIMIZERS_REVISION}" \
         "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
         "${DEEP_EP_REVISION}" \

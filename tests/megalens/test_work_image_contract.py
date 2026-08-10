@@ -13,6 +13,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[2]
 _DOCKERFILE = _ROOT / "docker" / "Dockerfile.work"
 _WHEEL_MANIFEST = _ROOT / "docker" / "work-wheels.sha256"
+_FLAGSCALE_PATCH = _ROOT / "docker" / "patches" / "flagscale-megalens.patch"
 _USERBUFFER_PATCH = (
     _ROOT
     / "docker"
@@ -54,6 +55,17 @@ def test_userbuffer_patch_is_pinned_by_the_work_image() -> None:
     )
     assert '"transformer_engine_fl_userbuffer_patch_sha256": "%s"' in dockerfile
     assert 'docker/verify_transformer_engine_userbuffer.py' in dockerfile
+
+
+def test_flagscale_patch_allows_graph_kernel_capture_and_is_pinned() -> None:
+    dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
+    patch_bytes = _FLAGSCALE_PATCH.read_bytes()
+    patch = patch_bytes.decode()
+    patch_sha256 = hashlib.sha256(patch_bytes).hexdigest()
+
+    assert dockerfile.count(f'"{patch_sha256}"') == 2
+    assert "requires --trace-cupti-kernels=off until the GPU gate" not in patch
+    assert "Python scopes inside managed capture/replay are" in patch
 
 
 def test_work_image_wheel_manifest_matches_the_docker_argument() -> None:
