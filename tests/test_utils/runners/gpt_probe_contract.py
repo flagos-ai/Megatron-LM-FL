@@ -615,6 +615,74 @@ def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
+def validate_te_attention_cuda_graph_mlp_recompute_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate MLP forward and recompute outside TE attention Graphs."""
+
+    failures = list(
+        _validate_gpt_model_phases(
+            trace_root,
+            expected_pipeline_ranks={0: 0},
+            postprocess_ranks=frozenset((0,)),
+            validate_optimizer=True,
+        )
+    )
+    iterations = _load_iterations(trace_root).get(0, ())
+    hidden_phases = frozenset(
+        ("transformer_layer", "_forward_attention", "attention", "_forward_mlp")
+    )
+    for iteration in iterations:
+        iteration_id = int(iteration.iteration_id)
+        failures.extend(_validate_single_scope(iteration, "backward-step", rank=0))
+        spans, span_failures = _pair_spans(
+            iteration, ("decoder", "backward-step", "MLP.forward"), rank=0
+        )
+        failures.extend(span_failures)
+        decoder = spans.get("decoder", ())
+        backward = spans.get("backward-step", ())
+        mlp = spans.get("MLP.forward", ())
+        if len(decoder) == len(backward) == 1:
+            forward_calls = sum(
+                decoder[0].begin.rel_ts <= call.begin.rel_ts
+                and call.end.rel_ts <= decoder[0].end.rel_ts
+                for call in mlp
+            )
+            recompute_calls = sum(
+                backward[0].begin.rel_ts <= call.begin.rel_ts
+                and call.end.rel_ts <= backward[0].end.rel_ts
+                for call in mlp
+            )
+        else:
+            forward_calls = recompute_calls = 0
+        if len(mlp) != 4 or forward_calls != 2 or recompute_calls != 2:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_recompute_mlp",
+                    "TE attention Graph iteration requires two forward and two "
+                    "backward-recompute MLP.forward scopes; observed "
+                    f"total={len(mlp)}, forward={forward_calls}, "
+                    f"recompute={recompute_calls}",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+
+        hidden = Counter(
+            event.name for event in iteration.events if event.name in hidden_phases
+        )
+        if hidden:
+            failures.append(
+                _failure(
+                    "trace.gpt.cuda_graph_attention_inner",
+                    f"TE attention Graph exposed captured Core events {dict(hidden)!r}",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+    return tuple(failures)
+
+
 def validate_local_layerwise_full_cuda_graph_phases(
     trace_root: Path,
 ) -> tuple[Failure, ...]:

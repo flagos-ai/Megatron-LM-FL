@@ -1129,6 +1129,24 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         _events("MLP.forward"),
         run_contract=training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "te-attn-mlp-recompute-cuda-graph": manifest.TraceProfile(
+        "te-attn-mlp-recompute-cuda-graph",
+        1,
+        _events(
+            "forward-step",
+            "backward-step",
+            "decoder",
+            "decoder-postprocess",
+            "output_layer",
+            "loss",
+            "MLP.forward",
+            "optimizer",
+            "optimizer-step",
+            "optimizer-postprocess",
+        ),
+        gpt_probe_contract.validate_te_attention_cuda_graph_mlp_recompute_phases,
+        training_run_contract.validate_two_iteration_te_attention_mlp_recompute_checkpoint,
+    ),
     "te-full-cuda-graph": manifest.TraceProfile(
         "te-full-cuda-graph",
         1,
@@ -1371,6 +1389,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_dp8_distopt_smoke": "dp8-distopt",
     "flagscale_single_node_dp8_distopt_overlap_smoke": "dp8-distopt-overlap",
     "flagscale_single_node_te_cuda_graph_attn_smoke": "te-attn-cuda-graph",
+    "flagscale_single_node_te_cuda_graph_attn_mlp_recompute_smoke": (
+        "te-attn-mlp-recompute-cuda-graph"
+    ),
     "flagscale_single_node_te_cuda_graph_full_smoke": "te-full-cuda-graph",
     "flagscale_single_node_local_cuda_graph_full_smoke": (
         "local-layerwise-full-cuda-graph"

@@ -122,6 +122,9 @@ _CONFIG_PROFILE_CASES = {
         "dp8-distopt-overlap"
     ),
     "flagscale_single_node_te_cuda_graph_attn_smoke.yaml": ("te-attn-cuda-graph"),
+    "flagscale_single_node_te_cuda_graph_attn_mlp_recompute_smoke.yaml": (
+        "te-attn-mlp-recompute-cuda-graph"
+    ),
     "flagscale_single_node_te_cuda_graph_full_smoke.yaml": "te-full-cuda-graph",
     "flagscale_single_node_local_cuda_graph_full_smoke.yaml": (
         "local-layerwise-full-cuda-graph"
@@ -221,6 +224,8 @@ def _write_gpt_phase_trace(
     include_postprocess: bool,
     tensor_rank: int = 0,
     eager_layers: int = 0,
+    external_mlp_layers: int = 0,
+    recompute_mlp_layers: int = 0,
     include_optimizer: bool = False,
     include_backward: bool = False,
     eager_iterations: frozenset[int] | None = None,
@@ -559,6 +564,9 @@ def _write_gpt_phase_trace(
                     event("MLP.forward", "E")
                     event("_forward_mlp", "E")
                     event("transformer_layer", "E")
+                for _ in range(external_mlp_layers):
+                    event("MLP.forward", "B")
+                    event("MLP.forward", "E")
                 event("decoder", "E")
                 event("decoder-postprocess", "B")
                 if include_postprocess:
@@ -581,6 +589,9 @@ def _write_gpt_phase_trace(
                         "B",
                         current_microbatch=microbatch,
                     )
+                    for _ in range(recompute_mlp_layers):
+                        event("MLP.forward", "B")
+                        event("MLP.forward", "E")
                     event("backward-step", "E")
             if include_schedule_finalize and include_backward:
                 event("grad-sync", "B")
@@ -974,6 +985,40 @@ def test_gpt_eager_profile_disables_persistent_layernorm() -> None:
 
     assert payload["train"]["model"]["transformer_impl"] == "local"
     assert payload["train"]["model"]["no_persist_layer_norm"] is True
+
+
+def test_te_attention_mlp_recompute_profile_only_adds_recompute() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_te_cuda_graph_attn_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    recompute = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_te_cuda_graph_attn_mlp_recompute_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = recompute["experiment"]["exp_name"]
+    baseline["train"]["model"].update(
+        {
+            "recompute_granularity": "selective",
+            "recompute_modules": ["mlp"],
+        }
+    )
+
+    assert recompute == baseline
+    assert recompute["train"]["system"]["trace_cupti_kernels"] == "off"
+
+    profile = gate.PROFILES["te-attn-mlp-recompute-cuda-graph"]
+    assert profile.rank_count == 1
+    assert profile.contract is (
+        gpt_probe_contract.validate_te_attention_cuda_graph_mlp_recompute_phases
+    )
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_te_attention_mlp_recompute_checkpoint
+    )
 
 
 def test_te_full_cuda_graph_profile_only_changes_the_graph_lifecycle() -> None:
@@ -1654,6 +1699,73 @@ def test_te_full_cuda_graph_training_contract_requires_capture_and_replay(
     ]
 
 
+def test_te_attention_mlp_recompute_training_contract(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    valid_log = "\n".join(
+        (
+            "[default0]:  transformer_impl ................ transformer_engine",
+            "[default0]:  cuda_graph_impl ................. transformer_engine",
+            "[default0]:  cuda_graph_scope ................ "
+            "[<CudaGraphScope.attn: 2>]",
+            "[default0]:  cuda_graph_warmup_steps ......... 0",
+            "[default0]:  recompute_granularity ........... selective",
+            "[default0]:  recompute_modules ............... ['mlp']",
+            "[default0]:  trace_cupti_kernels ............. off",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Rank 0: 2 graphable layers.",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Start CUDA Graphs capture...",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Time spent in CUDA Graphs capture on rank 0: 1.25s",
+            "[default0]: iteration 1/ 2 | lm loss: 1.0 |",
+            "[default0]: iteration 2/ 2 | lm loss: 0.9 |",
+            "[default0]:INFO:megatron.core.transformer.cuda_graphs:"
+            "Rank 0: 0 graphs deleted with explicit reset, "
+            "2 graphs deleted without explicit reset.",
+        )
+    )
+    launcher_log.write_text(valid_log, encoding="utf-8")
+
+    assert (
+        training_run_contract.validate_two_iteration_te_attention_mlp_recompute_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        valid_log.replace(
+            "recompute_modules ............... ['mlp']",
+            "recompute_modules ............... ['core_attn']",
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_te_attention_mlp_recompute_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.recompute_modules"
+    ]
+
+    launcher_log.write_text(
+        valid_log.replace("Start CUDA Graphs capture...", "CUDA Graph capture omitted"),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_te_attention_mlp_recompute_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_graph_capture_start"
+    ]
+
+
 def test_local_layerwise_full_training_contract_requires_four_graphs(
     tmp_path: Path,
 ) -> None:
@@ -2232,6 +2344,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-linear",
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
+        "te-attn-mlp-recompute-cuda-graph",
         "te-full-cuda-graph",
         "local-layerwise-full-cuda-graph",
         "local-layerwise-cuda-kernels",
@@ -3115,6 +3228,78 @@ def test_te_full_cuda_graph_profile_separates_eager_and_replay_phases(
     )
 
     assert gate.PROFILES["te-full-cuda-graph"].contract(trace_root) == ()
+
+
+def test_te_attention_mlp_recompute_profile_separates_calls(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "te-attn-mlp-recompute-cuda-graph"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        external_mlp_layers=2,
+        recompute_mlp_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+    )
+
+    assert (
+        gate.PROFILES["te-attn-mlp-recompute-cuda-graph"].contract(trace_root)
+        == ()
+    )
+
+
+def test_te_attention_mlp_recompute_profile_rejects_missing_recompute(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "te-attn-mlp-recompute-missing"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        external_mlp_layers=2,
+        recompute_mlp_layers=1,
+        include_optimizer=True,
+        include_backward=True,
+    )
+
+    failures = gate.PROFILES["te-attn-mlp-recompute-cuda-graph"].contract(
+        trace_root
+    )
+
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.cuda_graph_recompute_mlp",
+        "trace.gpt.cuda_graph_recompute_mlp",
+    ]
+
+
+def test_te_attention_mlp_recompute_profile_rejects_captured_scopes(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "te-attn-mlp-recompute-inner"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=1,
+        external_mlp_layers=1,
+        recompute_mlp_layers=2,
+        include_optimizer=True,
+        include_backward=True,
+    )
+
+    failures = gate.PROFILES["te-attn-mlp-recompute-cuda-graph"].contract(
+        trace_root
+    )
+
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.cuda_graph_attention_inner",
+        "trace.gpt.cuda_graph_attention_inner",
+    ]
 
 
 def test_te_full_cuda_graph_profile_rejects_inner_replay_events(

@@ -71,8 +71,17 @@ _WHOLE_LAYER_CUDA_GRAPH_SCOPE_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*cuda_graph_scope\s+\.+\s+\[\]\s*$",
     re.MULTILINE,
 )
+_ATTENTION_CUDA_GRAPH_SCOPE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_scope\s+\.+\s+"
+    r"\[<CudaGraphScope\.attn:\s*\d+>\]\s*$",
+    re.MULTILINE,
+)
 _ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*cuda_graph_warmup_steps\s+\.+\s+1\s*$",
+    re.MULTILINE,
+)
+_ZERO_CUDA_GRAPH_WARMUP_STEPS_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*cuda_graph_warmup_steps\s+\.+\s+0\s*$",
     re.MULTILINE,
 )
 _FULL_ITERATION_CUDA_GRAPH_SCOPE_ARGUMENT = re.compile(
@@ -86,6 +95,18 @@ _NAN_CHECK_DISABLED_ARGUMENT = re.compile(
 )
 _OPTIMIZER_CUDA_GRAPH_DISABLED_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*optimizer_cuda_graph\s+\.+\s+False\s*$",
+    re.MULTILINE,
+)
+_SELECTIVE_RECOMPUTE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*recompute_granularity\s+\.+\s+selective\s*$",
+    re.MULTILINE,
+)
+_MLP_RECOMPUTE_MODULE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*recompute_modules\s+\.+\s+\['mlp'\]\s*$",
+    re.MULTILINE,
+)
+_CUPTI_KERNEL_DISABLED_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*trace_cupti_kernels\s+\.+\s+off\s*$",
     re.MULTILINE,
 )
 _TWO_ITERATION_PROGRESS = re.compile(
@@ -164,10 +185,16 @@ def validate_two_iteration_transformer_engine_checkpoint(
     return tuple(failures)
 
 
-def validate_two_iteration_te_full_cuda_graph_checkpoint(
-    run_root: Path, trace_enabled: bool
+def _validate_two_iteration_te_cuda_graph_checkpoint(
+    run_root: Path,
+    trace_enabled: bool,
+    *,
+    profile_label: str,
+    scope_contract: tuple[re.Pattern[str], str, str],
+    warmup_contract: tuple[re.Pattern[str], str, str],
+    extra_argument_contracts: tuple[tuple[re.Pattern[str], str, str], ...] = (),
 ) -> tuple[Failure, ...]:
-    """Require a completed TE whole-layer capture followed by replay."""
+    """Require a completed two-layer TE capture followed by replay."""
 
     failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
     launcher_log = run_root / "launcher.log"
@@ -194,16 +221,9 @@ def validate_two_iteration_te_full_cuda_graph_checkpoint(
             "run.training.cuda_graph_impl",
             "Megatron did not report cuda_graph_impl=transformer_engine",
         ),
-        (
-            _WHOLE_LAYER_CUDA_GRAPH_SCOPE_ARGUMENT,
-            "run.training.cuda_graph_scope",
-            "Megatron did not normalize the whole-layer CUDA Graph scope to []",
-        ),
-        (
-            _ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT,
-            "run.training.cuda_graph_warmup_steps",
-            "Megatron did not report one CUDA Graph warmup step",
-        ),
+        scope_contract,
+        warmup_contract,
+        *extra_argument_contracts,
     )
     for pattern, code, message in argument_contracts:
         if pattern.search(log_text) is None:
@@ -231,7 +251,7 @@ def validate_two_iteration_te_full_cuda_graph_checkpoint(
         failures.append(
             Failure(
                 "run.training.cuda_graph_capture_start",
-                "TE whole-layer run must start CUDA Graph capture exactly once; "
+                f"{profile_label} must start CUDA Graph capture exactly once; "
                 f"observed {capture_start_count}",
                 str(launcher_log),
             )
@@ -243,7 +263,7 @@ def validate_two_iteration_te_full_cuda_graph_checkpoint(
         failures.append(
             Failure(
                 "run.training.cuda_graph_capture_done",
-                "TE whole-layer run must finish CUDA Graph capture exactly once; "
+                f"{profile_label} must finish CUDA Graph capture exactly once; "
                 f"observed {capture_done_count}",
                 str(launcher_log),
             )
@@ -262,7 +282,7 @@ def validate_two_iteration_te_full_cuda_graph_checkpoint(
         failures.append(
             Failure(
                 "run.training.cuda_graph_deletion",
-                "TE whole-layer run must delete exactly two captured layer graphs; "
+                f"{profile_label} must delete exactly two captured layer graphs; "
                 f"observed {deleted_graphs} across {len(deletion_matches)} log record(s)",
                 str(launcher_log),
             )
@@ -276,12 +296,73 @@ def validate_two_iteration_te_full_cuda_graph_checkpoint(
         failures.append(
             Failure(
                 "run.training.iterations",
-                "TE whole-layer run must report iterations [1, 2]; "
+                f"{profile_label} must report iterations [1, 2]; "
                 f"observed {list(completed_iterations)}",
                 str(launcher_log),
             )
         )
     return tuple(failures)
+
+
+def validate_two_iteration_te_full_cuda_graph_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require a completed TE whole-layer capture followed by replay."""
+
+    return _validate_two_iteration_te_cuda_graph_checkpoint(
+        run_root,
+        trace_enabled,
+        profile_label="TE whole-layer run",
+        scope_contract=(
+            _WHOLE_LAYER_CUDA_GRAPH_SCOPE_ARGUMENT,
+            "run.training.cuda_graph_scope",
+            "Megatron did not normalize the whole-layer CUDA Graph scope to []",
+        ),
+        warmup_contract=(
+            _ONE_CUDA_GRAPH_WARMUP_STEP_ARGUMENT,
+            "run.training.cuda_graph_warmup_steps",
+            "Megatron did not report one CUDA Graph warmup step",
+        ),
+    )
+
+
+def validate_two_iteration_te_attention_mlp_recompute_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require TE attention Graph replay with selective MLP recompute."""
+
+    return _validate_two_iteration_te_cuda_graph_checkpoint(
+        run_root,
+        trace_enabled,
+        profile_label="TE attention Graph with MLP recompute",
+        scope_contract=(
+            _ATTENTION_CUDA_GRAPH_SCOPE_ARGUMENT,
+            "run.training.cuda_graph_scope",
+            "Megatron did not report cuda_graph_scope=[attn]",
+        ),
+        warmup_contract=(
+            _ZERO_CUDA_GRAPH_WARMUP_STEPS_ARGUMENT,
+            "run.training.cuda_graph_warmup_steps",
+            "Megatron did not report zero CUDA Graph warmup steps",
+        ),
+        extra_argument_contracts=(
+            (
+                _SELECTIVE_RECOMPUTE_ARGUMENT,
+                "run.training.recompute_granularity",
+                "Megatron did not report recompute_granularity=selective",
+            ),
+            (
+                _MLP_RECOMPUTE_MODULE_ARGUMENT,
+                "run.training.recompute_modules",
+                "Megatron did not report recompute_modules=['mlp']",
+            ),
+            (
+                _CUPTI_KERNEL_DISABLED_ARGUMENT,
+                "run.training.trace_cupti_kernels",
+                "Megatron did not report trace_cupti_kernels=off",
+            ),
+        ),
+    )
 
 
 def validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
