@@ -1481,6 +1481,24 @@ def _source_head(source_root: Path) -> str:
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise ValueError(f"cannot read source HEAD: {detail}")
+    status = subprocess.run(
+        (
+            "git",
+            "-C",
+            str(source_root),
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=normal",
+        ),
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if status.returncode != 0:
+        detail = status.stderr.strip() or status.stdout.strip()
+        raise ValueError(f"cannot read source status: {detail}")
+    if status.stdout.strip():
+        raise ValueError("source tree must be clean before running the gate")
     return result.stdout.strip()
 
 
@@ -1838,12 +1856,6 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not checkpoint_load_root.is_dir():
             parser.error("--checkpoint-load-root must be a directory")
     try:
-        source_head = _source_head(source_root)
-        rdzv_port = _reserve_loopback_port(args.rdzv_port)
-    except ValueError as error:
-        parser.error(str(error))
-
-    try:
         profile = _profile_from_arguments(args)
     except ValueError as error:
         parser.error(str(error))
@@ -1884,6 +1896,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         deepseek_tokenizer_root = args.deepseek_tokenizer_root.resolve()
         if not deepseek_tokenizer_root.is_dir():
             parser.error("--deepseek-tokenizer-root must be a directory")
+    try:
+        source_head = _source_head(source_root)
+        rdzv_port = _reserve_loopback_port(args.rdzv_port)
+    except ValueError as error:
+        parser.error(str(error))
     run_dir = args.run_dir.resolve()
     try:
         run_dir.mkdir(parents=True, exist_ok=False)

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -928,6 +929,7 @@ def _invoke(
         return gate.ExecutionResult(child_returncode)
 
     monkeypatch.setattr(gate, "run_foreground", fake_run_foreground)
+    monkeypatch.setattr(gate, "_source_head", lambda _source_root: "a" * 40)
     result = gate.main(
         (
             "--run-dir",
@@ -4367,6 +4369,52 @@ def test_runner_uses_requested_image_current_source_and_flagscale_entrypoint(
     assert any("conda activate flagscale-train" in argument for argument in command)
     assert ("flagscale", "run") == command[-5:-3]
     assert command[-1] == "--action=test"
+
+
+def test_source_head_rejects_a_dirty_mounted_checkout(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=source_root, check=True)
+    (source_root / "tracked.py").write_text("VALUE = 1\n", encoding="utf-8")
+    subprocess.run(("git", "add", "tracked.py"), cwd=source_root, check=True)
+    subprocess.run(
+        (
+            "git",
+            "-c",
+            "user.name=MegaLens Test",
+            "-c",
+            "user.email=megalens@example.invalid",
+            "commit",
+            "-qm",
+            "baseline",
+        ),
+        cwd=source_root,
+        check=True,
+    )
+
+    assert gate._source_head(source_root) == subprocess.check_output(
+        ("git", "-C", str(source_root), "rev-parse", "HEAD"),
+        text=True,
+    ).strip()
+
+    (source_root / "untracked.py").write_text("VALUE = 2\n", encoding="utf-8")
+    run_dir = tmp_path / "run"
+    with pytest.raises(SystemExit, match="2"):
+        gate.main(
+            (
+                "--run-dir",
+                str(run_dir),
+                "--input-config",
+                str(_FIXTURES / "flagscale_single_node_smoke.yaml"),
+                "--mode",
+                "trace-off",
+                "--image",
+                "example/flagscale:dev",
+                "--megatron-source-root",
+                str(source_root),
+            )
+        )
+    assert not run_dir.exists()
 
 
 def test_runner_records_config_returncode_log_and_trace_summary(
