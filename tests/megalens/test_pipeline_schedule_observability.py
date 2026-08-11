@@ -589,6 +589,15 @@ def test_grad_sync_error_closes_phase_and_propagates_from_no_pipeline_schedule()
     backward_record = next(record for record in sink.records if record["name"] == "backward-step")
     assert _event_fields(backward_record)["operation_id"] == "pp:microbatch=0:vp=none"
     assert _event_fields(backward_record)["is_last_stage"] is True
+    assert (
+        _event_fields(backward_record)["num_tokens"],
+        _event_fields(backward_record)["sum_sq_seq_len"],
+    ) == (1, 1.0)
+    forward_record = next(record for record in sink.records if record["name"] == "forward-step")
+    assert (
+        _event_fields(forward_record)["num_tokens"],
+        _event_fields(forward_record)["sum_sq_seq_len"],
+    ) == (1, 1.0)
     grad_record = next(record for record in sink.records if record["name"] == "grad-sync")
     assert _event_fields(grad_record) == {
         "schedule": "no-pipelining",
@@ -604,7 +613,7 @@ def test_interleaved_forward_only_identifies_each_virtual_stage_without_backward
         overlap_p2p_comm=False,
         batch_p2p_comm=False,
         overlap_p2p_comm_warmup_flush=False,
-        overlap_moe_expert_parallel_comm=False,
+        overlap_moe_expert_parallel_comm=True,
         finalize_model_grads_func=None,
         barrier_with_L1_time=False,
         no_sync_func=None,
@@ -652,11 +661,18 @@ def test_interleaved_forward_only_identifies_each_virtual_stage_without_backward
         "pp:microbatch=0:vp=1",
     ]
     assert [_event_fields(record)["is_last_stage"] for record in forward_records] == [False, True]
+    assert [
+        (
+            _event_fields(record)["num_tokens"],
+            _event_fields(record)["sum_sq_seq_len"],
+        )
+        for record in forward_records
+    ] == [(1, 1.0), (1, 1.0)]
     assert all(record["name"] != "backward-step" for record in sink.records)
     assert all(record["name"] != "grad-sync" for record in sink.records)
 
 
-def test_interleaved_1f1b_pairs_backward_with_virtual_stage_operation() -> None:
+def test_interleaved_1f1b_pairs_backward_with_virtual_stage_operation(monkeypatch) -> None:
     sink = _RecordingSink()
     install_trace_sink(sink)
     config = _phase_config(
@@ -682,6 +698,12 @@ def test_interleaved_1f1b_pairs_backward_with_virtual_stage_operation() -> None:
     pg_collection = ProcessGroupCollection()
     pg_collection.tp = _FakeGroup()
     pg_collection.cp = _FakeGroup()
+
+    def workload_from_value(output_tensor, config, **kwargs):
+        value = int(output_tensor.detach())
+        return value, float(value**2)
+
+    monkeypatch.setattr(schedules, "_pipeline_workload_from_output", workload_from_value)
 
     def forward_step_func(data_iterator, active_model):
         leaf = torch.tensor(float(next(data_iterator)), requires_grad=True)
@@ -718,6 +740,21 @@ def test_interleaved_1f1b_pairs_backward_with_virtual_stage_operation() -> None:
         "pp:microbatch=1:vp=1",
     }
     assert backward_ids == forward_ids
+    expected_workloads = {
+        "pp:microbatch=0:vp=0": (1, 1.0),
+        "pp:microbatch=1:vp=0": (2, 4.0),
+        "pp:microbatch=0:vp=1": (3, 9.0),
+        "pp:microbatch=1:vp=1": (4, 16.0),
+    }
+    for event_name in ("forward-step", "backward-step"):
+        assert {
+            _event_fields(record)["operation_id"]: (
+                _event_fields(record)["num_tokens"],
+                _event_fields(record)["sum_sq_seq_len"],
+            )
+            for record in sink.records
+            if record["name"] == event_name
+        } == expected_workloads
 
 
 def test_multimodule_backward_accepts_schedule_identity_and_emits_phase() -> None:

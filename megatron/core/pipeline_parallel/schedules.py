@@ -910,6 +910,10 @@ def forward_backward_no_pipelining(
             model_type,
         )
     else:
+        backward_workloads = (
+            [] if not forward_only and trace_is_enabled("backward-step") else None
+        )
+        workload_tp_group_size = pg_collection.tp.size()
         with no_sync_func():
             for i in range(num_microbatches - 1):
                 output_tensor, num_tokens = forward_step(
@@ -924,6 +928,10 @@ def forward_backward_no_pipelining(
                     collect_non_loss_data,
                     is_first_microbatch=check_first_val_step(first_val_step, forward_only, i == 0),
                     current_microbatch=i,
+                    record_pipeline_workload=True,
+                    backward_workload_queue=backward_workloads,
+                    workload_fallback_num_tokens=micro_batch_size * seq_length,
+                    workload_tp_group_size=workload_tp_group_size,
                 )
                 total_num_tokens += num_tokens
                 if not forward_only:
@@ -935,6 +943,11 @@ def forward_backward_no_pipelining(
                         current_microbatch=i,
                         is_first_microbatch=i == 0,
                         is_last_stage=True,
+                        pipeline_workload=(
+                            backward_workloads.pop(0)
+                            if backward_workloads is not None
+                            else None
+                        ),
                     )
         # Run computation for last microbatch out of context handler (want to
         # synchronize gradients).
@@ -952,6 +965,10 @@ def forward_backward_no_pipelining(
                 first_val_step, forward_only, num_microbatches == 1
             ),
             current_microbatch=num_microbatches - 1,
+            record_pipeline_workload=True,
+            backward_workload_queue=backward_workloads,
+            workload_fallback_num_tokens=micro_batch_size * seq_length,
+            workload_tp_group_size=workload_tp_group_size,
         )
 
         total_num_tokens += num_tokens
@@ -965,6 +982,9 @@ def forward_backward_no_pipelining(
                 current_microbatch=num_microbatches - 1,
                 is_first_microbatch=num_microbatches == 1,
                 is_last_stage=True,
+                pipeline_workload=(
+                    backward_workloads.pop(0) if backward_workloads is not None else None
+                ),
             )
 
     if config.finalize_model_grads_func is not None and not forward_only:
@@ -1257,6 +1277,15 @@ def forward_backward_pipelining_with_interleaving(
 
     input_tensors = [[] for _ in range(len(model))]
     output_tensors = [[] for _ in range(len(model))]
+    record_pipeline_workload = forward_only or not config.overlap_moe_expert_parallel_comm
+    backward_workloads = (
+        [[] for _ in model]
+        if record_pipeline_workload
+        and not forward_only
+        and trace_is_enabled("backward-step")
+        else None
+    )
+    workload_tp_group_size = tp_group.size() if record_pipeline_workload else 1
     total_num_tokens = torch.zeros(
         [], dtype=torch.int, device=cur_platform.device_name()
     )  # FlagScale Add
@@ -1531,6 +1560,12 @@ def forward_backward_pipelining_with_interleaving(
             current_microbatch=microbatch_id,
             vp_stage=model_chunk_id,
             is_last_stage=_is_vp_last_stage(vp_stage=model_chunk_id) and is_pp_last_stage(pp_group),
+            record_pipeline_workload=record_pipeline_workload,
+            backward_workload_queue=(
+                backward_workloads[model_chunk_id] if backward_workloads is not None else None
+            ),
+            workload_fallback_num_tokens=micro_batch_size * seq_length,
+            workload_tp_group_size=workload_tp_group_size,
         )
 
         forward_step_helper_postprocess(model_chunk_id, output_tensor, num_tokens)
@@ -1596,6 +1631,11 @@ def forward_backward_pipelining_with_interleaving(
             is_first_microbatch=microbatch_id == 0,
             is_last_stage=(
                 _is_vp_last_stage(vp_stage=model_chunk_id) and is_pp_last_stage(pp_group)
+            ),
+            pipeline_workload=(
+                backward_workloads[model_chunk_id].pop(0)
+                if backward_workloads is not None
+                else None
             ),
         )
 
