@@ -84,6 +84,40 @@ def test_flagscale_patch_preserves_graph_compatibility_and_is_pinned() -> None:
     ) == 3
 
 
+def test_flagscale_range_skip_traces_only_the_actual_training_iteration() -> None:
+    dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
+    patch = _FLAGSCALE_PATCH.read_text(encoding="utf-8")
+
+    ordered_snippets = (
+        "if args.trace and args.skip_samples_range and args.rampup_batch_size is not None:",
+        "if args.skip_samples_range:",
+        "args.consumed_train_samples + current_global_batch_size",
+        "elif args.skip_iters_range:",
+        "args.skip_iters_range[0] <= iteration < args.skip_iters_range[1]",
+        "if trace_iteration and not range_skip_active:",
+        "if args.use_pytorch_profiler:",
+        "while iteration >= start_skip_iteration and iteration < end_skip_iteration:",
+        "if trace_iteration and range_skip_active:",
+        ") = train_step(",
+    )
+
+    added_lines = "\n".join(
+        line[1:]
+        for line in patch.splitlines()
+        if line.startswith("+") and not line.startswith("+++")
+    )
+    cursor = 0
+    for snippet in ordered_snippets:
+        cursor = added_lines.index(snippet, cursor) + len(snippet)
+    assert "MegaLens tracing does not support --skip-samples-range" in patch
+    assert "if trace_iteration and not range_skip_enabled:" not in patch
+    assert (
+        '"c79538410f1ada613d5230c0f7e2aa2dc1be3a6d11edde0cb90aab9fbe0ec153" '
+        '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py"'
+        in dockerfile
+    )
+
+
 def test_work_image_wheel_manifest_matches_the_docker_argument() -> None:
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
     wheel_sha256 = _docker_arg(dockerfile, "TE_FL_WHEEL_SHA256")
