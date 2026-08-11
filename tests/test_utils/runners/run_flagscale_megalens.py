@@ -601,6 +601,20 @@ _QWEN3_CP_EVENTS = (
         "B",
     ),
 )
+_QWEN3_V31_Q0_EVENTS = (
+    *(
+        requirement
+        for requirement in _QWEN3_CP_EVENTS
+        if requirement.name not in {"dp-param-all-gather", "dp-param-sync-complete"}
+    ),
+    *_events(
+        "forward-step-calc-loss",
+        "backward-step",
+        "optimizer",
+        "optimizer-step",
+        "optimizer-postprocess",
+    ),
+)
 
 
 QWEN3_CP2_DP4_OFFLINE_PROFILE = manifest.TraceProfile(
@@ -618,6 +632,15 @@ QWEN3_CP2_DP8_OFFLINE_PROFILE = manifest.TraceProfile(
     _QWEN3_CP_EVENTS,
     cp_probe_contract.validate_qwen3_cp2_dp8_distopt_coexistence,
     training_run_contract.validate_two_iteration_qwen3_cp2_dp8_checkpoint,
+)
+
+
+QWEN3_V31_Q0_OFFLINE_PROFILE = manifest.TraceProfile(
+    "qwen3-v31-q0-dp16",
+    16,
+    _QWEN3_V31_Q0_EVENTS,
+    cp_probe_contract.validate_qwen3_v31_q0_sampled_trace,
+    training_run_contract.validate_qwen3_v31_q0_artifacts,
 )
 
 
@@ -1443,6 +1466,7 @@ _OFFLINE_CONFIG_PROFILES = {
     ),
     "flagscale_dual_node_qwen3_enron_cp2_dp4": QWEN3_CP2_DP4_OFFLINE_PROFILE,
     "flagscale_dual_node_qwen3_enron_cp2_dp8": QWEN3_CP2_DP8_OFFLINE_PROFILE,
+    "flagscale_dual_node_qwen3_v31_q0_guide": QWEN3_V31_Q0_OFFLINE_PROFILE,
 }
 
 

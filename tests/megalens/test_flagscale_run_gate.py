@@ -206,6 +206,42 @@ def _write_flagcx_worker_logs(
         )
 
 
+def _write_v31_q0_run_artifacts(
+    run_dir: Path, *, iteration: int = 2, trace_enabled: bool = True
+) -> None:
+    _write_flagcx_worker_logs(run_dir, ranks=tuple(range(16)))
+    host_logs = tuple(sorted((run_dir / "logs").glob("host_*.output")))
+    additions = (
+        "\n".join(
+            (
+                "[default0]:  distributed_backend ........................ flagcx",
+                f"[default0]:  trace ...................................... {trace_enabled}",
+                f"[default0]:setting training iterations to {iteration}",
+                "[default0]:[after training is done] datetime: now",
+            )
+        ),
+        "\n".join(
+            (
+                f"[default7]: iteration {iteration}/{iteration} | lm loss: 1.0 |",
+            )
+        ),
+    )
+    for path, addition in zip(host_logs, additions):
+        path.write_text(
+            path.read_text(encoding="utf-8") + addition + "\n",
+            encoding="utf-8",
+        )
+
+    checkpoint_root = run_dir / "checkpoints"
+    rank_root = checkpoint_root / f"iter_{iteration:07d}" / "mp_rank_00"
+    rank_root.mkdir(parents=True)
+    (checkpoint_root / "latest_checkpointed_iteration.txt").write_text(
+        str(iteration), encoding="utf-8"
+    )
+    (rank_root / "model_optim_rng.pt").write_bytes(b"model")
+    (rank_root / "distrib_optim.pt").write_bytes(b"optimizer")
+
+
 def _write_legacy_pp2_terminal_checkpoint(run_dir: Path) -> None:
     checkpoint_root = run_dir / "checkpoints"
     iteration_root = checkpoint_root / "iter_0000002"
@@ -932,6 +968,7 @@ def test_existing_yaml_profiles_remain_selectable(config: str, profile: str) -> 
         "flagscale_dual_node_dp8_distopt_overlap_flagcx.yaml",
         "flagscale_dual_node_qwen3_enron_cp2_dp4.yaml",
         "flagscale_dual_node_qwen3_enron_cp2_dp8.yaml",
+        "flagscale_dual_node_qwen3_v31_q0_guide.yaml",
     ),
 )
 def test_dual_node_config_is_reserved_for_offline_validation(
@@ -2096,6 +2133,23 @@ def test_flagcx_training_contract_rejects_worker_failure_marker(
     assert {failure.code for failure in failures} == {
         "run.training.flagcx_worker_failure"
     }
+
+
+def test_v31_q0_training_contract_requires_the_planned_legacy_terminal(
+    tmp_path: Path,
+) -> None:
+    _write_v31_q0_run_artifacts(tmp_path)
+
+    assert training_run_contract.validate_qwen3_v31_q0_artifacts(tmp_path, True) == ()
+
+    (tmp_path / "checkpoints" / "latest_checkpointed_iteration.txt").write_text(
+        "1", encoding="utf-8"
+    )
+    failures = training_run_contract.validate_qwen3_v31_q0_artifacts(
+        tmp_path, True
+    )
+
+    assert {failure.code for failure in failures} == {"run.training.tracker"}
 
 
 def test_qwen3_training_contract_requires_the_reviewed_model_and_topology(

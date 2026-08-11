@@ -503,6 +503,28 @@ def validate_dp_distopt_overlap(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
+def validate_dp_distopt_sampled_overlap(trace_root: Path) -> tuple[Failure, ...]:
+    """Validate the DistOpt routes present in a sampled trace."""
+
+    return tuple(
+        failure
+        for rank, events in _load_rank_events(trace_root).items()
+        for failure in _validate_rank(
+            events,
+            (
+                _DISTOPT_DISPATCHES
+                if any(
+                    event.name == "dp-param-all-gather" for _, event in events
+                )
+                else {"dp-reduce-scatter": _DISTOPT_DISPATCHES["dp-reduce-scatter"]}
+            ),
+            use_distributed_optimizer=True,
+            num_instances=1,
+            rank=rank,
+        )
+    )
+
+
 def validate_dp_optimizer_step_force_sync_training(
     trace_root: Path,
 ) -> tuple[Failure, ...]:

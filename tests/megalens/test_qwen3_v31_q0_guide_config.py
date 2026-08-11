@@ -184,4 +184,17 @@ def test_v31_q0_limits_adaptations_to_the_reviewed_runtime_boundary() -> None:
         "${oc.env:MEGALENS_V31_RUN_DIR}/hydra/node_${oc.env:NODE_RANK}"
     )
     assert _FIXTURE.stem not in single_node_gate._CONFIG_PROFILES
-    assert _FIXTURE.stem not in single_node_gate._OFFLINE_CONFIG_PROFILES
+    profile = single_node_gate._OFFLINE_CONFIG_PROFILES[_FIXTURE.stem]
+    assert profile.name == "qwen3-v31-q0-dp16"
+    assert profile.rank_count == 16
+    assert {
+        "dp-reduce-scatter",
+        "dp-grad-sync-complete",
+        "forward-step-calc-loss",
+        "backward-step",
+        "optimizer",
+    } <= {requirement.name for requirement in profile.events}
+    assert {
+        "dp-param-all-gather",
+        "dp-param-sync-complete",
+    }.isdisjoint(requirement.name for requirement in profile.events)

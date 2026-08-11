@@ -144,6 +144,16 @@ _FLAGCX_FATAL_MARKER = re.compile(
     r"ChildFailedError|Traceback \(most recent call last\)|"
     r"FLAGCX (?:WARN|ERROR)|CUDA error"
 )
+_TRAINING_ITERATIONS = re.compile(
+    r"setting training iterations to (?P<iterations>[1-9]\d*)"
+)
+_TRAINING_PROGRESS = re.compile(
+    r"iteration\s+(?P<iteration>[1-9]\d*)/\s*(?P<total>[1-9]\d*)\s*\|"
+)
+_TRACE_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*trace\s+\.+\s+(?P<enabled>True|False)\s*$",
+    re.MULTILINE,
+)
 _TP_COMM_OVERLAP_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*tp_comm_overlap\s+\.+\s+True\s*$",
     re.MULTILINE,
@@ -649,35 +659,11 @@ def validate_three_iteration_local_full_cuda_graph_checkpoint(
     return tuple(failures)
 
 
-def validate_two_iteration_flagcx_checkpoint(
-    run_root: Path, trace_enabled: bool, *, expected_nranks: int = 2
-) -> tuple[Failure, ...]:
-    """Require terminal state and both FlagCX worker logs."""
-
-    failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
-    launcher_log = run_root / "launcher.log"
-    try:
-        log_text = launcher_log.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as error:
-        failures.append(
-            Failure(
-                "run.training.log",
-                f"cannot read the training launcher log: {error}",
-                str(launcher_log),
-            )
-        )
-        return tuple(failures)
-
-    if _FLAGCX_BACKEND_ARGUMENT.search(log_text) is None:
-        failures.append(
-            Failure(
-                "run.training.distributed_backend",
-                "Megatron did not report distributed_backend=flagcx",
-                str(launcher_log),
-            )
-        )
-
+def _validate_flagcx_runtime(
+    run_root: Path, *, expected_nranks: int
+) -> tuple[list[Failure], str | None]:
     worker_logs = tuple(sorted((run_root / "logs").glob("host_*.output")))
+    failures: list[Failure] = []
     if len(worker_logs) != 2:
         failures.append(
             Failure(
@@ -686,7 +672,7 @@ def validate_two_iteration_flagcx_checkpoint(
                 str(run_root / "logs"),
             )
         )
-        return tuple(failures)
+        return failures, None
 
     worker_texts: list[str] = []
     for worker_log in worker_logs:
@@ -701,7 +687,7 @@ def validate_two_iteration_flagcx_checkpoint(
                 )
             )
     if len(worker_texts) != len(worker_logs):
-        return tuple(failures)
+        return failures, None
 
     worker_text = "\n".join(worker_texts)
     fatal_marker = _FLAGCX_FATAL_MARKER.search(worker_text)
@@ -741,6 +727,137 @@ def validate_two_iteration_flagcx_checkpoint(
                 str(run_root / "logs"),
             )
         )
+    return failures, worker_text
+
+
+def validate_two_iteration_flagcx_checkpoint(
+    run_root: Path, trace_enabled: bool, *, expected_nranks: int = 2
+) -> tuple[Failure, ...]:
+    """Require terminal state and both FlagCX worker logs."""
+
+    failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    if _FLAGCX_BACKEND_ARGUMENT.search(log_text) is None:
+        failures.append(
+            Failure(
+                "run.training.distributed_backend",
+                "Megatron did not report distributed_backend=flagcx",
+                str(launcher_log),
+            )
+        )
+    runtime_failures, _ = _validate_flagcx_runtime(
+        run_root, expected_nranks=expected_nranks
+    )
+    failures.extend(runtime_failures)
+    return tuple(failures)
+
+
+def validate_qwen3_v31_q0_artifacts(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require one completed DP16 FlagCX run and its legacy checkpoint."""
+
+    failures, worker_text = _validate_flagcx_runtime(run_root, expected_nranks=16)
+    if worker_text is None:
+        return tuple(failures)
+
+    if _FLAGCX_BACKEND_ARGUMENT.search(worker_text) is None:
+        failures.append(
+            Failure(
+                "run.training.distributed_backend",
+                "Megatron did not report distributed_backend=flagcx",
+                str(run_root / "logs"),
+            )
+        )
+    trace_values = {match.group("enabled") for match in _TRACE_ARGUMENT.finditer(worker_text)}
+    expected_trace = "True" if trace_enabled else "False"
+    if trace_values != {expected_trace}:
+        failures.append(
+            Failure(
+                "run.training.trace_mode",
+                f"Megatron trace values are {sorted(trace_values)!r}, "
+                f"expected only {expected_trace!r}",
+                str(run_root / "logs"),
+            )
+        )
+
+    planned = {
+        int(match.group("iterations"))
+        for match in _TRAINING_ITERATIONS.finditer(worker_text)
+    }
+    if len(planned) != 1:
+        failures.append(
+            Failure(
+                "run.training.iterations",
+                f"training logs report planned iteration counts {sorted(planned)!r}",
+                str(run_root / "logs"),
+            )
+        )
+        return tuple(failures)
+    terminal_iteration = next(iter(planned))
+    progress = {
+        (int(match.group("iteration")), int(match.group("total")))
+        for match in _TRAINING_PROGRESS.finditer(worker_text)
+    }
+    if (terminal_iteration, terminal_iteration) not in progress:
+        failures.append(
+            Failure(
+                "run.training.iterations",
+                f"training did not report terminal iteration {terminal_iteration}",
+                str(run_root / "logs"),
+            )
+        )
+    if "[after training is done]" not in worker_text:
+        failures.append(
+            Failure(
+                "run.training.completion",
+                "training logs do not report normal training completion",
+                str(run_root / "logs"),
+            )
+        )
+
+    checkpoint_root = run_root / "checkpoints"
+    tracker = checkpoint_root / "latest_checkpointed_iteration.txt"
+    try:
+        tracked_iteration = int(tracker.read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeError, ValueError):
+        tracked_iteration = None
+    if tracked_iteration != terminal_iteration:
+        failures.append(
+            Failure(
+                "run.training.tracker",
+                f"checkpoint tracker is {tracked_iteration!r}, "
+                f"expected {terminal_iteration}",
+                str(tracker),
+            )
+        )
+    rank_root = (
+        checkpoint_root
+        / f"iter_{terminal_iteration:07d}"
+        / "mp_rank_00"
+    )
+    for name in ("model_optim_rng.pt", "distrib_optim.pt"):
+        checkpoint = rank_root / name
+        if not checkpoint.is_file() or checkpoint.stat().st_size <= 0:
+            failures.append(
+                Failure(
+                    "run.training.checkpoint",
+                    f"training iteration {terminal_iteration} has no non-empty {name}",
+                    str(checkpoint),
+                )
+            )
     return tuple(failures)
 
 

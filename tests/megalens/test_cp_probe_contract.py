@@ -148,6 +148,7 @@ def _write_qwen3_cp_distopt_trace(
     wrong_peer: bool = False,
     param_gather_iteration: int = 2,
     omit_sync_iteration: int | None = None,
+    iteration_ids: tuple[int, ...] = (1, 2),
 ) -> Path:
     trace_root.mkdir(parents=True, exist_ok=True)
     rows: list[dict[str, object]] = []
@@ -259,7 +260,7 @@ def _write_qwen3_cp_distopt_trace(
         )
         event(completion_name, "E", completed=True, error_type=None)
 
-    for iteration in (1, 2):
+    for iteration in iteration_ids:
         rows.append(
             {
                 "name": "iteration",
@@ -271,7 +272,7 @@ def _write_qwen3_cp_distopt_trace(
         if iteration == param_gather_iteration:
             for payload in (800, 400):
                 distopt_scope("dp-param-all-gather", data_bytes=payload)
-        event("forward-step", "B")
+        event("forward-step", "B", current_microbatch=0)
         event("decoder", "B")
         for _ in range(num_layers):
             event("transformer_layer", "B")
@@ -291,7 +292,11 @@ def _write_qwen3_cp_distopt_trace(
         event("loss", "B")
         event("loss", "E")
         event("decoder-postprocess", "E")
+        event("forward-step-calc-loss", "B", current_microbatch=0)
+        event("forward-step-calc-loss", "E")
         event("forward-step", "E")
+        event("backward-step", "B", current_microbatch=0)
+        event("backward-step", "E")
         if iteration != omit_sync_iteration:
             event(
                 "grad-sync",
@@ -305,6 +310,12 @@ def _write_qwen3_cp_distopt_trace(
         if iteration != omit_sync_iteration:
             event("all-grads-sync", "E")
             event("grad-sync", "E")
+        event("optimizer", "B")
+        event("optimizer-step", "B")
+        event("optimizer-step", "E")
+        event("optimizer", "E")
+        event("optimizer-postprocess", "B")
+        event("optimizer-postprocess", "E")
         rows.append(
             {
                 "name": "iteration",
@@ -614,6 +625,31 @@ def test_qwen3_cp_profiles_require_existing_gpt_and_distopt_events() -> None:
     assert not any(name.startswith(("cp-", "cp_")) for name in event_names)
     assert gate._CONFIG_PROFILES[_QWEN3_CP2_FIXTURE.stem] == "qwen3-enron-cp2"
     assert gate._CONFIG_PROFILES[_QWEN3_CP4_FIXTURE.stem] == "qwen3-enron-cp4"
+
+
+def test_v31_q0_contract_accepts_first_and_later_sampled_iterations(
+    tmp_path: Path,
+) -> None:
+    for name, iteration_ids, param_iteration in (
+        ("first", (1,), -1),
+        ("later", (1, 1001), 1001),
+        ("later-without-prefetch", (1, 1001), -1),
+    ):
+        trace_root = tmp_path / name
+        for rank in range(16):
+            _write_qwen3_cp_distopt_trace(
+                trace_root,
+                rank=rank,
+                context_parallel_size=1,
+                data_parallel_size=16,
+                param_gather_iteration=param_iteration,
+                iteration_ids=iteration_ids,
+            )
+
+        assert (
+            cp_probe_contract.validate_qwen3_v31_q0_sampled_trace(trace_root)
+            == ()
+        )
 
 
 def test_qwen3_cp2_contract_accepts_qwen3_28_layer_synthetic_trace(

@@ -776,6 +776,164 @@ def _validate_qwen3_distopt_coexistence(
     return tuple(failures)
 
 
+def validate_qwen3_v31_q0_sampled_trace(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate sampled Qwen3 Q0 model and DP16 DistOpt activity."""
+
+    failures = list(dp_probe_contract.validate_dp_distopt_sampled_overlap(trace_root))
+    by_rank = _load_iterations(trace_root)
+    expected_ranks = tuple(range(16))
+    observed_ranks = tuple(sorted(by_rank))
+    if observed_ranks != expected_ranks:
+        failures.append(
+            Failure(
+                "trace.cp.ranks",
+                f"Qwen3 V3.1 Q0 expects ranks {list(expected_ranks)}, "
+                f"observed {list(observed_ranks)}",
+                "qwen3-v31-q0-dp16",
+            )
+        )
+
+    reference_iterations = tuple(
+        int(item.iteration_id) for item in by_rank.get(0, ())
+    )
+    if not reference_iterations:
+        failures.append(
+            Failure(
+                "trace.cp.iterations",
+                "Qwen3 V3.1 Q0 has no sampled iteration on rank 0",
+                "rank=0",
+            )
+        )
+    elif reference_iterations != tuple(
+        range(1, reference_iterations[-1] + 1, 1000)
+    ):
+        failures.append(
+            Failure(
+                "trace.cp.iterations",
+                "Qwen3 V3.1 Q0 sampled iterations must start at 1 and "
+                f"advance by 1000; observed {list(reference_iterations)}",
+                "rank=0",
+            )
+        )
+
+    reference_microbatches: dict[int, tuple[int, ...]] = {}
+    signatures: dict[
+        tuple[int, str], dict[int, tuple[tuple[int, int], ...]]
+    ] = defaultdict(dict)
+    for rank in expected_ranks:
+        iterations = by_rank.get(rank, ())
+        iteration_ids = tuple(int(item.iteration_id) for item in iterations)
+        if iteration_ids != reference_iterations:
+            failures.append(
+                Failure(
+                    "trace.cp.iterations",
+                    f"rank {rank} sampled iterations {list(iteration_ids)} "
+                    f"differ from rank 0 {list(reference_iterations)}",
+                    f"rank={rank}",
+                )
+            )
+        for iteration in iterations:
+            iteration_id = int(iteration.iteration_id)
+            microbatches = tuple(
+                event.attrs.get("current_microbatch")
+                for event in iteration.events
+                if event.name == "forward-step" and event.ph == "B"
+            )
+            if microbatches != tuple(range(len(microbatches))) or not microbatches:
+                failures.append(
+                    _failure(
+                        "trace.gpt.microbatches",
+                        "forward-step microbatches must be the contiguous range "
+                        f"0..N-1; observed {list(microbatches)!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            if rank == 0:
+                reference_microbatches[iteration_id] = microbatches
+            elif microbatches != reference_microbatches.get(iteration_id):
+                failures.append(
+                    _failure(
+                        "trace.gpt.microbatches",
+                        f"microbatches {list(microbatches)!r} differ from rank 0 "
+                        f"{list(reference_microbatches.get(iteration_id, ()))!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+
+            expected_calls = len(microbatches)
+            failures.extend(
+                gpt_probe_contract._validate_iteration(
+                    iteration,
+                    rank=rank,
+                    expected_counts={
+                        "forward-step": expected_calls,
+                        "decoder": expected_calls,
+                        "decoder-postprocess": expected_calls,
+                        "output_layer": expected_calls,
+                        "loss": expected_calls,
+                    },
+                )
+            )
+            failures.extend(
+                gpt_probe_contract._validate_eager_layers(
+                    iteration,
+                    rank=rank,
+                    expected_layers=28,
+                    expected_calls=expected_calls,
+                )
+            )
+            for name in ("forward-step-calc-loss", "backward-step"):
+                failures.extend(
+                    gpt_probe_contract._validate_single_scope(
+                        iteration,
+                        name,
+                        rank=rank,
+                        expected=expected_calls,
+                    )
+                )
+            failures.extend(
+                gpt_probe_contract._validate_microbatch_ids(
+                    iteration,
+                    ("forward-step", "forward-step-calc-loss", "backward-step"),
+                    rank=rank,
+                    expected=Counter(microbatches),
+                )
+            )
+            failures.extend(
+                gpt_probe_contract._validate_optimizer_phases(
+                    iteration,
+                    rank=rank,
+                )
+            )
+            iteration_failures, payloads = _validate_qwen3_distopt_iteration(
+                iteration,
+                rank=rank,
+                context_parallel_size=1,
+                data_parallel_size=16,
+            )
+            failures.extend(iteration_failures)
+            for name, values in payloads.items():
+                signatures[(iteration_id, name)][rank] = values
+
+    for (iteration_id, name), rank_payloads in sorted(signatures.items()):
+        if set(rank_payloads) == set(expected_ranks) and len(
+            set(rank_payloads.values())
+        ) != 1:
+            failures.append(
+                Failure(
+                    "trace.cp.distopt_payload",
+                    f"iteration {iteration_id} {name!r} payload/bucket sequences "
+                    f"differ across DP16 ranks: {rank_payloads}",
+                    f"iteration={iteration_id}",
+                )
+            )
+    return tuple(failures)
+
+
 def validate_qwen3_cp2_distopt_coexistence(
     trace_root: Path,
 ) -> tuple[Failure, ...]:
