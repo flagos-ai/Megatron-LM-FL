@@ -53,15 +53,6 @@ _COMM_NAMES = (
     "tp-reduce-scatter-last",
 )
 
-_LIFECYCLE_NAMES = (
-    "dp-param-all-gather",
-    "dp-reduce-scatter",
-    "dp-allreduce",
-    "dp-param-sync-complete",
-    "dp-grad-sync-complete",
-)
-
-
 def _span(
     name: str,
     ts: int,
@@ -136,10 +127,7 @@ def test_public_signatures_and_lazy_reporting_import_match_port_contract() -> No
         "comm_event_names",
         "iteration",
     )
-    assert tuple(inspect.signature(DPAnalyzer.analyze_collective_lifecycle).parameters) == (
-        "self",
-        "iteration",
-    )
+    assert not hasattr(DPAnalyzer, "analyze_collective_lifecycle")
 
     master = inspect.signature(analyze_dp_traces)
     assert tuple(master.parameters) == ("traces", "output_dir")
@@ -197,13 +185,6 @@ def test_source_default_event_lists_and_exact_name_queries_are_preserved() -> No
     assert _queried_names(loader, 0) == _COMPUTE_NAMES + _COMM_NAMES
     assert _queried_names(loader, 1) == _COMPUTE_NAMES + _COMM_NAMES
     assert {query_iteration for _, _, query_iteration in loader.calls} == {7}
-
-    loader.calls.clear()
-    analyzer.analyze_collective_lifecycle(iteration=7)
-    assert _queried_names(loader, 0) == _LIFECYCLE_NAMES
-    assert _queried_names(loader, 1) == _LIFECYCLE_NAMES
-    assert {query_iteration for _, _, query_iteration in loader.calls} == {7}
-
 
 def test_grad_sync_preserves_source_raw_sum_for_nested_events() -> None:
     row = DPAnalyzer(
@@ -272,66 +253,6 @@ def test_comm_overlap_preserves_interval_union_and_tp_default_names() -> None:
     ]
 
 
-def test_typed_lifecycle_is_additive_to_source_grad_sync_metrics() -> None:
-    operation_id = "dp:allreduce:analyzer"
-    analyzer = DPAnalyzer(
-        _loader(
-            _span("iteration", 0, 1_000),
-            _span(
-                "dp-allreduce",
-                100,
-                10,
-                api_async_op=True,
-                async_op=True,
-                completion_included=False,
-                op="all_reduce",
-                operation_id=operation_id,
-                operation_id_scope="rank_local",
-                overlap_enabled=True,
-                stage="main_bucket_allreduce",
-                timing_phase="async_dispatch",
-            ),
-            _span(
-                "dp-grad-sync-complete",
-                200,
-                20,
-                completed=True,
-                completion_guarantee="current_stream_after_wait",
-                completion_included=True,
-                completion_kind="work_wait",
-                completion_site="finish_grad_sync",
-                host_blocking_guaranteed=False,
-                launch_observed=True,
-                op="wait",
-                operation_count=1,
-                operation_ids=[operation_id],
-                operation_id_scope="rank_local",
-                operations=[
-                    {
-                        "event_name": "dp-allreduce",
-                        "operation_id": operation_id,
-                        "stage": "main_bucket_allreduce",
-                    }
-                ],
-                stage="gradient_collective_completion",
-                timing_phase="stream_dependency",
-            ),
-        )
-    )
-
-    source_row = analyzer.analyze_grad_sync_overhead()[0]
-    assert source_row["grad_sync_us"] == 10.0
-    assert source_row["sync_ratio"] == 0.01
-
-    lifecycle_row = analyzer.analyze_collective_lifecycle()[0]
-    assert lifecycle_row["status"] == "available"
-    assert lifecycle_row["dispatch_attempt_count"]["value"] == 1
-    assert lifecycle_row["completion_attempt_count"]["value"] == 1
-    assert lifecycle_row["current_stream_guaranteed_operation_count"]["value"] == 1
-    assert lifecycle_row["exposed_dependency_union_us"]["value"] == 20
-    assert lifecycle_row["operations"][0]["state"] == "current-stream-guaranteed"
-
-
 def test_empty_inputs_and_master_result_keys_are_preserved(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -343,7 +264,6 @@ def test_empty_inputs_and_master_result_keys_are_preserved(
     assert analyzer.analyze_grad_sync_overhead() == []
     assert analyzer.analyze_memory_efficiency() == []
     assert analyzer.analyze_comm_overlap() == []
-    assert analyzer.analyze_collective_lifecycle() == []
 
     monkeypatch.setattr(dp_module, "_load_reporting_dependencies", lambda: (None, None))
     monkeypatch.setattr(paper_style, "apply_global_rcparams", lambda: None)
@@ -355,7 +275,7 @@ def test_empty_inputs_and_master_result_keys_are_preserved(
         "sync_data",
         "mem_data",
         "overlap_data",
-        "lifecycle_data",
     )
     assert all(value == [] for value in result.values())
-    assert (tmp_path / "dp_diagnostic_report.txt").is_file()
+    report = (tmp_path / "dp_diagnostic_report.txt").read_text(encoding="utf-8")
+    assert "DP Collective Lifecycle Evidence Report" not in report

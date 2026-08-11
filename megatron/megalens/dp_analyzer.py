@@ -21,14 +21,11 @@ from __future__ import annotations
 
 import collections
 import os
-from dataclasses import asdict
-from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
 from megatron.megalens.data_loader import TraceDataLoader, SpanEvent
-from megatron.megalens.dp_lifecycle import aggregate_dp_lifecycle_partition
 from megatron.megalens.paper_style import (
     FIG_W_SINGLE, FIG_W_DOUBLE, FIG_H, FIG_H_TALL, FIG_H_SHORT,
 )
@@ -85,32 +82,12 @@ def _overlap_length(
 _THERMAL_THROTTLE_TEMP_C: float = 80.0
 _CLOCK_DROP_RATIO: float = 0.92   # current / base < 0.92 → throttling
 
-_DP_LIFECYCLE_EVENT_NAMES: Tuple[str, ...] = (
-    "dp-param-all-gather",
-    "dp-reduce-scatter",
-    "dp-allreduce",
-    "dp-param-sync-complete",
-    "dp-grad-sync-complete",
-)
-
-
 def _load_reporting_dependencies() -> Tuple[Any, Any]:
     """Load optional plotting/reporting dependencies only when required."""
     import matplotlib.pyplot as plt
     import pandas as pd
 
     return plt, pd
-
-
-def _json_value(value: Any) -> Any:
-    """Convert frozen reducer output into plain JSON-compatible values."""
-    if isinstance(value, Enum):
-        return value.value
-    if isinstance(value, dict):
-        return {key: _json_value(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_json_value(item) for item in value]
-    return value
 
 
 # ============================================================================
@@ -596,54 +573,6 @@ class DPAnalyzer:
                 })
 
         return results
-
-    # ------------------------------------------------------------------
-    # 6. Typed Collective Lifecycle Evidence
-    # ------------------------------------------------------------------
-
-    def analyze_collective_lifecycle(
-        self,
-        iteration: Optional[int] = None,
-    ) -> List[Dict[str, Any]]:
-        """Correlate DP dispatch and current-stream completion evidence.
-
-        This target-specific semantic view is additive: the five source
-        analyses above retain their original event lists and calculations.
-        Dispatch span durations are excluded from lifecycle timing.  A
-        successful completion proves only its declared current-stream
-        dependency, and a multi-operation stream-join boundary contributes
-        its interval once.
-        """
-        dp_ranks = self.loader.get_dp_ranks()
-        if not dp_ranks:
-            dp_ranks = self.loader.get_ranks()
-
-        partitions: Dict[Tuple[int, int, int], List[SpanEvent]] = collections.defaultdict(list)
-        invalid_partition_sequence = 0
-        for rank in dp_ranks:
-            for event_name in _DP_LIFECYCLE_EVENT_NAMES:
-                for event in self.loader.get_events_by_name(
-                    event_name, rank=rank, iteration=iteration
-                ):
-                    event_iteration = event.iteration
-                    if (
-                        type(event.rank) is int
-                        and event.rank >= 0
-                        and type(event_iteration) is int
-                        and event_iteration >= 0
-                    ):
-                        key = (0, event.rank, event_iteration)
-                    else:
-                        key = (1, invalid_partition_sequence, 0)
-                        invalid_partition_sequence += 1
-                    partitions[key].append(event)
-
-        results: List[Dict[str, Any]] = []
-        for key in sorted(partitions):
-            lifecycle = aggregate_dp_lifecycle_partition(partitions[key])
-            results.append(_json_value(asdict(lifecycle)))
-        return results
-
 
 # ============================================================================
 # Report Logger (mirrors pp_analyzer.ReportLogger)
@@ -1198,53 +1127,6 @@ def _write_overlap_report(
     logger.log("=" * 90 + "\n")
 
 
-def _lifecycle_metric_value(row: Dict[str, Any], name: str) -> Any:
-    return row[name]["value"]
-
-
-def _write_lifecycle_report(
-    lifecycle_data: List[Dict[str, Any]], logger: _ReportLogger
-) -> None:
-    logger.log("\n" + "=" * 90)
-    logger.log("[DP Collective Lifecycle Evidence Report]")
-    logger.log("=" * 90)
-
-    if not lifecycle_data:
-        logger.log("  No typed DP lifecycle data available.")
-        return
-
-    status_counts = collections.Counter(row["status"] for row in lifecycle_data)
-    logger.log(
-        "  Partitions: "
-        + ", ".join(
-            f"{status}={status_counts[status]}" for status in sorted(status_counts)
-        )
-    )
-    logger.log("")
-    for row in lifecycle_data:
-        logger.log(
-            f"  Rank {row['rank']} | Iter {row['iteration']} | {row['status']} | "
-            f"dispatch={_lifecycle_metric_value(row, 'dispatch_attempt_count')} | "
-            f"completion={_lifecycle_metric_value(row, 'completion_attempt_count')} | "
-            "current-stream-ready="
-            f"{_lifecycle_metric_value(row, 'current_stream_guaranteed_operation_count')} | "
-            f"pending={_lifecycle_metric_value(row, 'pending_operation_count')} | "
-            "failed-attempts="
-            f"{_lifecycle_metric_value(row, 'failed_completion_attempt_count')} | "
-            f"orphan-boundaries={_lifecycle_metric_value(row, 'orphan_completion_count')} | "
-            f"dependency-union-us={_lifecycle_metric_value(row, 'exposed_dependency_union_us')}"
-        )
-        if row["status"] in ("partial", "unknown"):
-            logger.log(f"    Evidence reason: {row['reason']}")
-
-    logger.log("")
-    logger.log(
-        "  Completion guarantees are current-stream dependencies only; "
-        "dispatch spans are excluded from physical communication duration."
-    )
-    logger.log("=" * 90 + "\n")
-
-
 # ============================================================================
 # Master Orchestrator
 # ============================================================================
@@ -1260,8 +1142,7 @@ def analyze_dp_traces(
         output_dir: Directory for PDF plots and TXT report.
 
     Returns:
-        Dict containing the five source analysis result lists plus the
-        target-specific ``"lifecycle_data"`` evidence list.
+        Dict containing the five source analysis result lists.
     """
     os.makedirs(output_dir, exist_ok=True)
     _, pd = _load_reporting_dependencies()
@@ -1278,43 +1159,38 @@ def analyze_dp_traces(
                f"DP ranks: {loader.get_dp_ranks() or 'all'}")
 
     # 1. Straggler diagnosis
-    logger.log("\n[Step 1/6] Running Straggler Diagnosis...")
+    logger.log("\n[Step 1/5] Running Straggler Diagnosis...")
     straggler_data = analyzer.diagnose_stragglers()
     _write_straggler_report(straggler_data, logger)
 
     # 2. Step time balance (DP load imbalance)
-    logger.log("[Step 2/6] Running Step Time Balance Analysis...")
+    logger.log("[Step 2/5] Running Step Time Balance Analysis...")
     balance_data = analyzer.analyze_step_time_balance()
     _write_step_balance_report(balance_data, logger)
 
     # 3. Gradient sync overhead
-    logger.log("[Step 3/6] Running Gradient Sync Overhead Analysis...")
+    logger.log("[Step 3/5] Running Gradient Sync Overhead Analysis...")
     sync_data = analyzer.analyze_grad_sync_overhead()
     _write_grad_sync_report(sync_data, logger)
 
     # 4. Memory efficiency
-    logger.log("[Step 4/6] Running Memory Efficiency Analysis...")
+    logger.log("[Step 4/5] Running Memory Efficiency Analysis...")
     mem_data = analyzer.analyze_memory_efficiency()
     _write_memory_report(mem_data, logger)
 
     # 5. Comm overlap analysis
-    logger.log("[Step 5/6] Running Comm/Compute Overlap Analysis...")
+    logger.log("[Step 5/5] Running Comm/Compute Overlap Analysis...")
     overlap_data = analyzer.analyze_comm_overlap()
     _write_overlap_report(overlap_data, logger)
 
-    # 6. Typed collective lifecycle evidence
-    logger.log("[Step 6/6] Reducing Typed Collective Lifecycle Evidence...")
-    lifecycle_data = analyzer.analyze_collective_lifecycle()
-    _write_lifecycle_report(lifecycle_data, logger)
-
-    # 7. Visualizations
+    # 6. Visualizations
     logger.log("\n[DP Analyzer] Generating visualizations...")
     generate_straggler_plots(straggler_data, output_dir)
     generate_step_balance_plots(balance_data, output_dir)
     generate_grad_sync_plots(sync_data, output_dir)
     generate_overlap_plots(overlap_data, output_dir)
 
-    # 8. CSV export
+    # 7. CSV export
     if straggler_data:
         pd.DataFrame(straggler_data).drop(
             columns=["per_rank_start_ts", "hw_detail"], errors="ignore"
@@ -1337,5 +1213,4 @@ def analyze_dp_traces(
         "sync_data": sync_data,
         "mem_data": mem_data,
         "overlap_data": overlap_data,
-        "lifecycle_data": lifecycle_data,
     }
