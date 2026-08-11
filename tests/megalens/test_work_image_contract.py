@@ -90,6 +90,35 @@ def test_flagscale_patch_preserves_graph_compatibility_and_is_pinned() -> None:
     ) == 3
 
 
+def test_flagscale_archive_source_contract_matches_enforced_checks() -> None:
+    dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
+    flagscale_run = dockerfile.split("# FlagScale's runner", 1)[1].split(
+        "# Build stages do not receive GPUs", 1
+    )[0]
+
+    git_guard = re.search(
+        r"if git -C .*?; then \\\n(?P<body>.*?)\n    fi \\",
+        flagscale_run,
+        re.DOTALL,
+    )
+    assert git_guard is not None
+    assert '"${FLAGSCALE_REVISION}"' in git_guard.group("body")
+    assert '"${FLAGSCALE_TREE}"' in git_guard.group("body")
+
+    before_patch, after_patch = flagscale_run.split(
+        'git -C "${FLAGSCALE_ROOT}" apply /tmp/flagscale-megalens.patch', 1
+    )
+    file_pattern = (
+        r'"[0-9a-f]{64}" "\$\{FLAGSCALE_ROOT\}/flagscale/train/'
+        r'megatron/training/([^"/]+)"'
+    )
+    expected_files = {"arguments.py", "global_vars.py", "training.py", "utils.py"}
+    assert set(re.findall(file_pattern, before_patch)) == expected_files
+    assert set(re.findall(file_pattern, after_patch)) == expected_files
+    assert "| sha256sum -c -" in before_patch
+    assert "| sha256sum -c -" in after_patch
+
+
 def test_flagscale_range_skip_traces_only_the_actual_training_iteration() -> None:
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
     patch = _FLAGSCALE_PATCH.read_text(encoding="utf-8")

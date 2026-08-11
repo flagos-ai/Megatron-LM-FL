@@ -249,9 +249,10 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
 # PYTHONPATH. Apply the reviewable compatibility diff that mirrors the
 # Megatron-LM-FL MegaLens arguments, runtime lifecycle, iteration scope,
 # optimizer probes, and dense-batch Graph compatibility.
-# The baseline hashes prevent this patch from being applied to an unreviewed
-# FlagScale source revision. FlagScale is installed without cuda-train extras
-# so its MCore 0.16 pin cannot replace the validated MCore 0.17.1 source.
+# Revision and tree are checked when Git metadata is present. Archive builds
+# record them as provenance metadata; the patch and pre/post hashes pin the
+# four reviewed vendored files. FlagScale is installed without cuda-train
+# extras so its MCore 0.16 pin cannot replace the validated MCore 0.17.1 source.
 RUN source /root/miniconda3/etc/profile.d/conda.sh \
     && conda activate flagscale-train \
     && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
