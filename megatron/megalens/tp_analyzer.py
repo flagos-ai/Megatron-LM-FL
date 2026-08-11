@@ -1370,9 +1370,9 @@ def generate_nvlink_plots(
     # ---- Panel 3: Per-rank avg utilisation bar chart ----
     ax = axes[1, 0]
     if nvlink_summary:
-        sdf = pd.DataFrame(nvlink_summary)
+        sdf = pd.DataFrame(nvlink_summary).dropna(subset=["mean_utilisation_pct"])
         x = np.arange(len(sdf))
-        vals = sdf["mean_utilisation_pct"].fillna(0).values
+        vals = sdf["mean_utilisation_pct"].values
         bar_cols = [
             "salmon" if v < _NVLINK_LOW_UTIL_RATIO * 100 else "mediumseagreen" for v in vals
         ]

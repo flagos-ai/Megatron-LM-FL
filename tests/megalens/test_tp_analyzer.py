@@ -620,6 +620,45 @@ def test_nvlink_payload_evidence_skips_unjustified_utilisation_judgement() -> No
     assert malformed_payload["diagnosis"] == "Payload unavailable: skip low-util judgement"
 
 
+def test_nvlink_plot_omits_missing_utilisation_and_preserves_zero(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plt, _ = tp_module._load_reporting_dependencies()
+    from matplotlib.axes import Axes
+
+    original_bar = Axes.bar
+    bar_calls: list[tuple[list[float], list[str]]] = []
+
+    def record_bar(self: Axes, x: Any, height: Any, *args: Any, **kwargs: Any) -> Any:
+        if x is not None:
+            bar_calls.append((list(height), list(kwargs["color"])))
+        return original_bar(self, x, height, *args, **kwargs)
+
+    monkeypatch.setattr(Axes, "bar", record_bar)
+    monkeypatch.setattr(plt, "savefig", lambda *args, **kwargs: None)
+
+    tp_module.generate_nvlink_plots(
+        [
+            {
+                "rank": 0,
+                "ts": 0,
+                "achieved_bw_mbs": 1_000.0,
+                "utilisation_pct": 10.0,
+                "event_name": "tp-allreduce",
+            }
+        ],
+        [
+            {"rank": 0, "mean_utilisation_pct": None},
+            {"rank": 1, "mean_utilisation_pct": 0.0},
+            {"rank": 2, "mean_utilisation_pct": 30.0},
+        ],
+        10_000.0,
+        str(tmp_path),
+    )
+
+    assert bar_calls == [([0.0, 30.0], ["salmon", "mediumseagreen"])]
+
+
 def test_straggler_uses_physical_leaf_and_normalises_legacy_alias() -> None:
     analyzer = TPAnalyzer(
         _loader(
