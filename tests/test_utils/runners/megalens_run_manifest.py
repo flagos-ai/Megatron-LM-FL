@@ -98,13 +98,20 @@ def _trace_records(payload: Any) -> list[Mapping[str, Any]]:
     return list(rows)
 
 
-def _rank_from_records(records: Sequence[Mapping[str, Any]]) -> int | None:
-    ranks = {
-        row["g_rk"]
-        for row in records
-        if isinstance(row.get("g_rk"), int) and not isinstance(row.get("g_rk"), bool)
-    }
-    return next(iter(ranks)) if len(ranks) == 1 else None
+def _ranks_from_records(
+    records: Sequence[Mapping[str, Any]],
+) -> tuple[frozenset[int], bool]:
+    ranks: set[int] = set()
+    invalid = False
+    for row in records:
+        if "g_rk" not in row:
+            continue
+        rank = row["g_rk"]
+        if isinstance(rank, int) and not isinstance(rank, bool):
+            ranks.add(rank)
+        else:
+            invalid = True
+    return frozenset(ranks), invalid
 
 
 def _rank_from_path(path: Path) -> int | None:
@@ -170,9 +177,29 @@ def validate_trace(
             continue
 
         path_rank = _rank_from_path(path)
-        record_rank = _rank_from_records(records)
-        rank = path_rank if path_rank is not None else record_rank
-        if rank is None:
+        record_ranks, invalid_record_rank = _ranks_from_records(records)
+        record_rank = next(iter(record_ranks)) if len(record_ranks) == 1 else None
+        rank = record_rank if record_rank is not None else path_rank
+        if invalid_record_rank:
+            failures.append(
+                Failure(
+                    "trace.rank_unknown",
+                    "trace shard records contain a non-integer global rank",
+                    str(path),
+                )
+            )
+            rank = None
+        elif len(record_ranks) > 1:
+            failures.append(
+                Failure(
+                    "trace.rank_unknown",
+                    "trace shard records contain multiple global ranks "
+                    f"{tuple(sorted(record_ranks))}",
+                    str(path),
+                )
+            )
+            rank = None
+        elif rank is None:
             failures.append(
                 Failure(
                     "trace.rank_unknown",
@@ -182,6 +209,19 @@ def validate_trace(
             )
         else:
             observed_ranks.add(rank)
+            if (
+                record_rank is not None
+                and path_rank is not None
+                and path_rank != record_rank
+            ):
+                failures.append(
+                    Failure(
+                        "trace.rank_mismatch",
+                        f"trace shard path identifies rank {path_rank}, "
+                        f"but records identify rank {record_rank}",
+                        str(path),
+                    )
+                )
         shards.append(
             TraceShard(
                 path=path.as_posix(),
@@ -192,12 +232,13 @@ def validate_trace(
         all_records.extend(records)
 
     ranks = tuple(sorted(observed_ranks))
-    if len(ranks) != profile.rank_count:
+    expected_ranks = tuple(range(profile.rank_count))
+    if ranks != expected_ranks:
         failures.append(
             Failure(
                 "trace.rank_count",
-                f"profile {profile.name!r} expects {profile.rank_count} ranks; "
-                f"observed {len(ranks)}",
+                f"profile {profile.name!r} expects global ranks {expected_ranks}; "
+                f"observed {ranks}",
                 ",".join(str(rank) for rank in ranks),
             )
         )

@@ -48,7 +48,9 @@ def _write_shard(
 def test_trace_report_records_shards_ranks_events_and_fields(tmp_path: Path) -> None:
     trace_root = tmp_path / "traces"
     _write_shard(trace_root, 0)
-    _write_shard(trace_root, 1)
+    _write_shard(trace_root, 1).rename(
+        trace_root / "benchmark-data-1-pipeline-0-tensor-0.json"
+    )
 
     report = manifest.validate_trace(trace_root, _PROFILE, trace_enabled=True)
 
@@ -56,10 +58,72 @@ def test_trace_report_records_shards_ranks_events_and_fields(tmp_path: Path) -> 
     assert report.ranks == (0, 1)
     assert report.total_records == 4
     assert report.event_counts["target-event"] == 4
-    assert [(shard.rank, shard.record_count) for shard in report.shards] == [
+    assert sorted((shard.rank, shard.record_count) for shard in report.shards) == [
         (0, 2),
         (1, 2),
     ]
+
+
+def test_trace_report_rejects_mismatched_and_noncanonical_ranks(tmp_path: Path) -> None:
+    mismatch_root = tmp_path / "mismatch"
+    _write_shard(mismatch_root, 0).rename(
+        mismatch_root / "benchmark-global-1-data-0-pipeline-0-tensor-0.json"
+    )
+
+    mismatch = manifest.validate_trace(
+        mismatch_root,
+        manifest.TraceProfile("one-rank", 1),
+        trace_enabled=True,
+    )
+
+    assert mismatch.ranks == (0,)
+    assert [failure.code for failure in mismatch.failures] == ["trace.rank_mismatch"]
+
+    mixed_root = tmp_path / "mixed"
+    mixed_path = _write_shard(mixed_root, 0)
+    mixed_rows = json.loads(mixed_path.read_text(encoding="utf-8"))
+    mixed_rows[-1]["g_rk"] = 1
+    mixed_path.write_text(json.dumps(mixed_rows), encoding="utf-8")
+
+    mixed = manifest.validate_trace(
+        mixed_root,
+        manifest.TraceProfile("one-rank", 1),
+        trace_enabled=True,
+    )
+
+    assert mixed.shards[0].rank is None
+    assert {failure.code for failure in mixed.failures} == {
+        "trace.rank_count",
+        "trace.rank_unknown",
+    }
+
+    invalid_root = tmp_path / "invalid"
+    invalid_path = _write_shard(invalid_root, 0)
+    invalid_rows = json.loads(invalid_path.read_text(encoding="utf-8"))
+    for row in invalid_rows:
+        row["g_rk"] = "0"
+    invalid_path.write_text(json.dumps(invalid_rows), encoding="utf-8")
+
+    invalid = manifest.validate_trace(
+        invalid_root,
+        manifest.TraceProfile("one-rank", 1),
+        trace_enabled=True,
+    )
+
+    assert invalid.shards[0].rank is None
+    assert {failure.code for failure in invalid.failures} == {
+        "trace.rank_count",
+        "trace.rank_unknown",
+    }
+
+    shifted_root = tmp_path / "shifted"
+    _write_shard(shifted_root, 4)
+    _write_shard(shifted_root, 5)
+
+    shifted = manifest.validate_trace(shifted_root, _PROFILE, trace_enabled=True)
+
+    assert shifted.ranks == (4, 5)
+    assert [failure.code for failure in shifted.failures] == ["trace.rank_count"]
 
 
 def test_trace_report_explains_missing_field_and_rank(tmp_path: Path) -> None:
