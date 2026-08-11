@@ -210,12 +210,15 @@ def test_ep_correlations_ignore_nullable_expert_cv() -> None:
     assert ep_dp["_ep_cv_series"] == [0.2, 0.0]
 
 
-def test_ep_tp_contention_uses_interval_union_and_legacy_tp_names() -> None:
+def test_ep_tp_contention_uses_canonical_names_and_interval_union() -> None:
     sizes = {"dp": 1, "pp": 1, "tp": 2, "ep": 2}
     rows = _analyzer(
         _span("ep-alltoall-dispatch", 0, 100),
-        _span("tp-allreduce", 0, 100),
-        _span("allreduce", 50, 100),
+        _span("tp-allreduce", 0, 10),
+        _span("tp-all-gather-first", 20, 10),
+        _span("tp-all-gather-last", 40, 10),
+        _span("tp-reduce-scatter", 65, 10),
+        _span("tp-reduce-scatter-last", 60, 20),
         sizes=sizes,
     ).analyze_ep_tp_comm_contention()
 
@@ -224,9 +227,9 @@ def test_ep_tp_contention_uses_interval_union_and_legacy_tp_names() -> None:
             "rank": 0,
             "iteration": 7,
             "ep_comm_us": 100.0,
-            "tp_comm_us": 100.0,
+            "tp_comm_us": 50.0,
             "contention_us": 50.0,
-            "contention_ratio": 0.25,
+            "contention_ratio": 0.3333,
             "severity": "WARNING",
         }
     ]

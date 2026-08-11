@@ -227,7 +227,13 @@ class HybridAnalyzer:
             return []
         ep_comm_names = ["ep-alltoall-dispatch", "ep-alltoall-combine",
                          "ep-allgather-dispatch", "ep-allgather-combine"]
-        tp_comm_names = ["allreduce", "all-gather", "reduce-scatter"]
+        tp_comm_names = [
+            "tp-allreduce",
+            "tp-all-gather-first",
+            "tp-all-gather-last",
+            "tp-reduce-scatter",
+            "tp-reduce-scatter-last",
+        ]
         results: List[Dict[str, Any]] = []
 
         for rank in self.loader.get_ranks():
