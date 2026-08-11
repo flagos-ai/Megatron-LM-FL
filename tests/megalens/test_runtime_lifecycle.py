@@ -366,13 +366,20 @@ def test_tracer_abort_discards_only_incomplete_iteration_records() -> None:
     tracer._records = [{"iteration": 1}, {"iteration": 2, "partial": True}]
     tracer._iteration_record_start = 1
     tracer._iteration_open = True
-    tracer._stop_kernel_profiler_and_extract = lambda: tracer._records.append(
-        {"iteration": 2, "record_type": "cuda_kernel"}
+    tracer.iter = 2
+    tracer._stop_kernel_profiler_and_extract = lambda: tracer._records.extend(
+        (
+            {"iteration": 1, "record_type": "cuda_kernel"},
+            {"iteration": 2, "record_type": "cuda_kernel"},
+        )
     )
 
     tracer.abort_iteration()
 
-    assert tracer._records == [{"iteration": 1}]
+    assert tracer._records == [
+        {"iteration": 1},
+        {"iteration": 1, "record_type": "cuda_kernel"},
+    ]
     tracer.shutdown(graceful=False)
 
 
@@ -385,7 +392,6 @@ def test_tracer_abort_discards_only_incomplete_iteration_records() -> None:
         {"trace_interval": 2, "continuous_trace_iterations": 3},
         {"sentinel_hw_sample_ms": 0},
         {"sentinel_flush_interval": 0},
-        {"trace_interval": 2, "continuous_trace_iterations": 2, "trace_cupti_kernels": "on"},
         {"trace_cupti_kernels": "on", "profile": True, "use_pytorch_profiler": True},
     ],
 )
@@ -393,6 +399,92 @@ def test_tracer_rejects_unsafe_runtime_configuration(overrides) -> None:
     tracer = Tracer()
     with pytest.raises(ValueError):
         tracer.configure(_args(**overrides))
+    tracer.shutdown(graceful=False)
+
+
+def test_continuous_kernel_window_attributes_both_iterations(monkeypatch) -> None:
+    from torch.autograd import DeviceType
+
+    from megatron.megalens import trace as trace_module
+    from megatron.training.arguments import _validate_megalens_args
+
+    args = _args(
+        trace_interval=2,
+        continuous_trace_iterations=2,
+        trace_cupti_kernels="on",
+    )
+    _validate_megalens_args(args)
+
+    tracer = Tracer()
+    tracer.configure(args)
+    calls: list[str] = []
+    flushed: list[dict[str, Any]] = []
+    events = [
+        SimpleNamespace(
+            device_type=DeviceType.CUDA,
+            device_index=0,
+            dur=10,
+            name=f"kernel-{iteration}",
+            time_range=SimpleNamespace(start=start, end=start + 10),
+        )
+        for iteration, start in ((1, 150), (2, 250))
+    ]
+    profiler = SimpleNamespace(
+        __exit__=lambda *_: calls.append("stop"),
+        events=lambda: events,
+    )
+
+    def start_profiler() -> None:
+        calls.append("start")
+        tracer._kernel_profiler = profiler
+        tracer._kernel_profiler_anchor_ns = 1_000_000
+
+    def add_cuda_event(*_args, **_kwargs) -> None:
+        assert tracer._pendings is not None
+        tracer._pendings.append(
+            SimpleNamespace(event=SimpleNamespace(synchronize=lambda: None))
+        )
+
+    def process_pending(*_args) -> int:
+        tracer._records.append({"iteration": tracer.iter, "rel_ts": 1})
+        assert tracer._pendings is not None
+        return len(tracer._pendings)
+
+    def log() -> None:
+        calls.append("log")
+        flushed.extend(tracer._records)
+        tracer._records = []
+
+    monkeypatch.setattr(
+        trace_module.time,
+        "time_ns",
+        iter((1_100_000, 1_200_000)).__next__,
+    )
+    tracer._start_kernel_profiler = start_profiler
+    tracer._calibrate = lambda: 0
+    tracer._add_cuda_event = add_cuda_event
+    tracer._process_pending_scope = process_pending
+    tracer._cached_dp_rank = 0
+    tracer._cached_pp_rank = 0
+    tracer._cached_tp_rank = 0
+    tracer._cached_device = 0
+    tracer._cached_global_rank = 0
+    tracer._cache_ranks = lambda: None
+    tracer.log = log
+
+    tracer.iteration_begin(1)
+    tracer.iteration_end()
+    assert calls == ["start"]
+
+    tracer.iteration_begin(2)
+    tracer.iteration_end()
+
+    kernels = [row for row in flushed if row.get("record_type") == "cuda_kernel"]
+    assert calls == ["start", "stop", "log"]
+    assert [row["iteration"] for row in kernels] == [1, 2]
+    assert [row["duration_us"] for row in kernels] == [10, 10]
+    assert [row["iter_rel_start_us"] for row in kernels] == [50, 50]
+    assert [row["iter_rel_end_us"] for row in kernels] == [60, 60]
     tracer.shutdown(graceful=False)
 
 

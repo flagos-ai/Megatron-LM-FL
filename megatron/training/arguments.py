@@ -154,14 +154,6 @@ def _validate_megalens_args(args):
     kernel_capture_requested = (
         args.trace_mode != 0 and args.trace_cupti_kernels != 'off'
     )
-    if (
-        kernel_capture_requested
-        and args.continuous_trace_iterations != 1
-    ):
-        raise ValueError(
-            'MegaLens kernel capture currently requires '
-            '--continuous-trace-iterations=1 for unambiguous kernel ownership'
-        )
     if args.cuda_graph_impl != 'none':
         warnings.warn(
             'MegaLens tracing with CUDA Graphs records eager and graph-external '

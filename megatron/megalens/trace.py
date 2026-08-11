@@ -424,11 +424,6 @@ class Tracer:
         kernel_capture_requested = (
             getattr(args, "trace_mode", 1) != 0 and cupti_mode != "off"
         )
-        if kernel_capture_requested and continuous != 1:
-            raise ValueError(
-                "MegaLens kernel capture currently requires "
-                "continuous_trace_iterations=1 for unambiguous kernel ownership"
-            )
         if (
             kernel_capture_requested
             and getattr(args, "profile", False)
@@ -1007,7 +1002,14 @@ class Tracer:
             self._hw_monitor.stop()
             self._stop_kernel_profiler_and_extract()
         finally:
+            completed_kernel_records = [
+                record
+                for record in self._records[self._iteration_record_start :]
+                if record.get("record_type") == "cuda_kernel"
+                and record.get("iteration") != self.iter
+            ]
             del self._records[self._iteration_record_start :]
+            self._records.extend(completed_kernel_records)
             self._pendings = None
             self._scopes = []
             self._pending_pad_before = None
