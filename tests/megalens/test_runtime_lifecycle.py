@@ -262,6 +262,17 @@ def test_training_iteration_admission_restores_the_source_mode1_barrier() -> Non
         "getattr(args, 'trace', False) and (not skip_iteration)"
     )
 
+    close_branch = next(
+        statement
+        for statement in loop.body
+        if isinstance(statement, ast.If)
+        and ast.unparse(statement.test)
+        == "skip_iteration and getattr(args, 'trace', False)"
+    )
+    assert [ast.unparse(statement) for statement in close_branch.body] == [
+        "get_megalens_runtime().tracer.close_trace_window()"
+    ]
+
     trace_branch = next(
         statement
         for statement in loop.body
@@ -307,6 +318,53 @@ def test_training_iteration_admission_restores_the_source_mode1_barrier() -> Non
         and node.items[0].context_expr.id == "megalens_iteration"
     )
     assert barrier.lineno < scope.lineno
+    assert close_branch.lineno < trace_branch.lineno
+
+
+def test_skipped_iteration_closes_a_retained_continuous_window() -> None:
+    tracer = Tracer()
+    tracer.configure(
+        _args(
+            trace_interval=2,
+            continuous_trace_iterations=2,
+            trace_cupti_kernels="on",
+        )
+    )
+    calls: list[str] = []
+    tracer.iter = 1
+    tracer._pendings = []
+    tracer._records = [{"iteration": 1, "name": "iteration"}]
+
+    def stop() -> None:
+        calls.append("stop")
+        tracer._records.append(
+            {"record_type": "cuda_kernel", "iteration": 1, "name": "kernel-1"}
+        )
+
+    flushed: list[dict[str, Any]] = []
+
+    def log() -> None:
+        calls.append("log")
+        flushed.extend(tracer._records)
+        tracer._records = []
+
+    tracer._stop_kernel_profiler_and_extract = stop
+    tracer.log = log
+    tracer.close_trace_window()
+
+    assert calls == ["stop", "log"]
+    assert tracer._pendings is None
+    assert [record["iteration"] for record in flushed] == [1, 1]
+
+    tracer._start_kernel_profiler = lambda: calls.append("start")
+    tracer._calibrate = lambda: 0
+    tracer._add_cuda_event = lambda *_args, **_kwargs: None
+    tracer._iteration_begin_impl(3)
+
+    assert calls == ["stop", "log", "start"]
+    tracer._pendings = None
+    tracer._stop_kernel_profiler_and_extract = lambda: None
+    tracer.shutdown(graceful=False)
 
 
 def test_tracer_discards_partial_records_when_iteration_finalization_fails() -> None:

@@ -2930,6 +2930,8 @@ def train(
     buffered_rollouts = None
     while iteration < args.train_iters:
         skip_iteration = (iteration + 1) in args.iterations_to_skip
+        if skip_iteration and getattr(args, 'trace', False):
+            get_megalens_runtime().tracer.close_trace_window()
         trace_iteration = getattr(args, 'trace', False) and not skip_iteration
         if trace_iteration:
             megalens_runtime = get_megalens_runtime()

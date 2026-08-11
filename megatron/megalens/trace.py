@@ -770,6 +770,16 @@ class Tracer:
             self.abort_iteration()
             raise
 
+    def close_trace_window(self) -> None:
+        """Flush a retained mode-1 window before skipped training work."""
+        if self._iteration_open:
+            raise RuntimeError("Cannot close a trace window during an open iteration")
+        if self.is_mode0() or self._pendings is None:
+            return
+        self._stop_kernel_profiler_and_extract()
+        self.log()
+        self._pendings = None
+
     def _iteration_begin_impl(self, iteration: int, enable_hw_monitor: bool = False) -> None:
         """Start collecting one iteration.
 
