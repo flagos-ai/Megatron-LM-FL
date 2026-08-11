@@ -385,7 +385,6 @@ def test_tracer_abort_discards_only_incomplete_iteration_records() -> None:
         {"trace_interval": 2, "continuous_trace_iterations": 3},
         {"sentinel_hw_sample_ms": 0},
         {"sentinel_flush_interval": 0},
-        {"trace_mode": 0, "trace_cupti_kernels": "on"},
         {"trace_interval": 2, "continuous_trace_iterations": 2, "trace_cupti_kernels": "on"},
         {"trace_cupti_kernels": "on", "profile": True, "use_pytorch_profiler": True},
     ],
@@ -394,6 +393,26 @@ def test_tracer_rejects_unsafe_runtime_configuration(overrides) -> None:
     tracer = Tracer()
     with pytest.raises(ValueError):
         tracer.configure(_args(**overrides))
+    tracer.shutdown(graceful=False)
+
+
+@pytest.mark.parametrize("cupti_mode", ("auto", "on", "off"))
+def test_mode0_ignores_kernel_capture_settings(cupti_mode: str) -> None:
+    from megatron.training.arguments import _validate_megalens_args
+
+    args = _args(
+        trace_mode=0,
+        trace_cupti_kernels=cupti_mode,
+        trace_interval=2,
+        continuous_trace_iterations=2,
+        profile=True,
+        use_pytorch_profiler=True,
+    )
+    _validate_megalens_args(args)
+
+    tracer = Tracer()
+    tracer.configure(args)
+    assert not tracer._resolve_kernel_capture_mode()
     tracer.shutdown(graceful=False)
 
 

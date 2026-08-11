@@ -421,15 +421,16 @@ class Tracer:
             raise ValueError("sentinel_flush_interval must be greater than zero")
         if getattr(args, "hardware_monitor", False) and not getattr(args, "trace", False):
             raise ValueError("hardware_monitor requires trace")
-        if getattr(args, "trace_mode", 1) == 0 and cupti_mode != "off":
-            raise ValueError("trace mode 0 requires trace_cupti_kernels=off")
-        if cupti_mode != "off" and continuous != 1:
+        kernel_capture_requested = (
+            getattr(args, "trace_mode", 1) != 0 and cupti_mode != "off"
+        )
+        if kernel_capture_requested and continuous != 1:
             raise ValueError(
                 "MegaLens kernel capture currently requires "
                 "continuous_trace_iterations=1 for unambiguous kernel ownership"
             )
         if (
-            cupti_mode != "off"
+            kernel_capture_requested
             and getattr(args, "profile", False)
             and getattr(args, "use_pytorch_profiler", False)
         ):

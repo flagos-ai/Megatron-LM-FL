@@ -151,10 +151,11 @@ def _validate_megalens_args(args):
         raise ValueError('--sentinel-hw-sample-ms must be greater than zero')
     if args.sentinel_flush_interval <= 0:
         raise ValueError('--sentinel-flush-interval must be greater than zero')
-    if args.trace_mode == 0 and args.trace_cupti_kernels != 'off':
-        raise ValueError('trace mode 0 requires --trace-cupti-kernels=off')
+    kernel_capture_requested = (
+        args.trace_mode != 0 and args.trace_cupti_kernels != 'off'
+    )
     if (
-        args.trace_cupti_kernels != 'off'
+        kernel_capture_requested
         and args.continuous_trace_iterations != 1
     ):
         raise ValueError(
@@ -170,7 +171,7 @@ def _validate_megalens_args(args):
             stacklevel=2,
         )
     if (
-        args.trace_cupti_kernels != 'off'
+        kernel_capture_requested
         and args.profile
         and args.use_pytorch_profiler
     ):
