@@ -430,14 +430,10 @@ def test_continuous_kernel_window_attributes_both_iterations(monkeypatch) -> Non
         for iteration, start in ((1, 150), (2, 250))
     ]
     profiler = SimpleNamespace(
+        __enter__=lambda: calls.append("start"),
         __exit__=lambda *_: calls.append("stop"),
         events=lambda: events,
     )
-
-    def start_profiler() -> None:
-        calls.append("start")
-        tracer._kernel_profiler = profiler
-        tracer._kernel_profiler_anchor_ns = 1_000_000
 
     def add_cuda_event(*_args, **_kwargs) -> None:
         assert tracer._pendings is not None
@@ -455,12 +451,14 @@ def test_continuous_kernel_window_attributes_both_iterations(monkeypatch) -> Non
         flushed.extend(tracer._records)
         tracer._records = []
 
-    monkeypatch.setattr(
-        trace_module.time,
-        "time_ns",
-        iter((1_100_000, 1_200_000)).__next__,
-    )
-    tracer._start_kernel_profiler = start_profiler
+    clock = iter((1_000_000, 1_100_000, 1_200_000))
+
+    def time_ns() -> int:
+        assert calls and calls[0] == "start"
+        return next(clock)
+
+    monkeypatch.setattr(trace_module.time, "time_ns", time_ns)
+    monkeypatch.setattr("torch.profiler.profile", lambda **_kwargs: profiler)
     tracer._calibrate = lambda: 0
     tracer._add_cuda_event = add_cuda_event
     tracer._process_pending_scope = process_pending

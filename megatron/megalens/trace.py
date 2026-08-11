@@ -501,8 +501,8 @@ class Tracer:
             # Record wall-clock at enter so kernel start_us (profiler-relative)
             # can be mapped to the same wall-clock timeline used by framework
             # events. Anchor goes into each cuda_kernel record.
-            self._kernel_profiler_anchor_ns = time.time_ns()
             self._kernel_profiler.__enter__()
+            self._kernel_profiler_anchor_ns = time.time_ns()
         except Exception as e:
             print(f"Warning: failed to start kernel profiler: {e}", flush=True)
             self._kernel_profiler = None
