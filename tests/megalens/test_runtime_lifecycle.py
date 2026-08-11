@@ -232,6 +232,51 @@ def test_training_iteration_scope_matches_the_source_envelope() -> None:
         assert call.lineno > scope.end_lineno
 
 
+def test_controlled_training_exit_flushes_megalens_before_system_exit() -> None:
+    training_path = Path(__file__).resolve().parents[2] / "megatron/training/training.py"
+    module = ast.parse(training_path.read_text(encoding="utf-8"))
+    train = next(
+        node
+        for node in module.body
+        if isinstance(node, ast.FunctionDef) and node.name == "train"
+    )
+    controlled_exit = next(
+        node
+        for node in ast.walk(train)
+        if isinstance(node, ast.If)
+        and ast.unparse(node.test) == "should_exit"
+        and any(
+            isinstance(child, ast.Call) and ast.unparse(child) == "sys.exit(exit_code)"
+            for child in ast.walk(node)
+        )
+    )
+
+    assert [ast.unparse(statement) for statement in controlled_exit.body[-2:]] == [
+        "shutdown_megalens_runtime(graceful=True)",
+        "sys.exit(exit_code)",
+    ]
+
+
+def test_arbitrary_system_exit_remains_non_graceful(monkeypatch) -> None:
+    from megatron.training import training as training_module
+
+    shutdowns: list[bool] = []
+    monkeypatch.setattr(
+        training_module,
+        "shutdown_megalens_runtime",
+        lambda *, graceful: shutdowns.append(graceful),
+    )
+
+    @training_module._owns_megalens_runtime
+    def exit_outside_the_controlled_training_branch() -> None:
+        raise SystemExit(23)
+
+    with pytest.raises(SystemExit, match="23"):
+        exit_outside_the_controlled_training_branch()
+
+    assert shutdowns == [False]
+
+
 def test_training_iteration_admission_restores_the_source_mode1_barrier() -> None:
     training_path = Path(__file__).resolve().parents[2] / "megatron/training/training.py"
     module = ast.parse(training_path.read_text(encoding="utf-8"))

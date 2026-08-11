@@ -3329,6 +3329,7 @@ def train(
         one_logger_utils.finish()
         if args.perform_rl_step:
             rl_utils.rl_inference_interface_shutdown()
+        shutdown_megalens_runtime(graceful=True)
         sys.exit(exit_code)
 
     return iteration, num_floating_point_operations_so_far
