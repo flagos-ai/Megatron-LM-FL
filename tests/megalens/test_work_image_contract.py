@@ -130,8 +130,14 @@ def test_flagscale_range_skip_traces_only_the_actual_training_iteration() -> Non
         "args.consumed_train_samples + current_global_batch_size",
         "elif args.skip_iters_range:",
         "args.skip_iters_range[0] <= iteration < args.skip_iters_range[1]",
+        "get_megalens_runtime() if getattr(args, 'trace', False) else None",
+        "if megalens_runtime is not None and (skip_iteration or range_skip_active):",
+        "megalens_runtime.tracer.close_trace_window()",
+        "with ExitStack() as iteration_stack:",
         "if trace_iteration and not range_skip_active:",
         "if args.use_pytorch_profiler:",
+        "if skip_iteration:",
+        "dummy_train_step(train_data_iterator)",
         "while iteration >= start_skip_iteration and iteration < end_skip_iteration:",
         "if trace_iteration and range_skip_active:",
         ") = train_step(",
@@ -148,9 +154,18 @@ def test_flagscale_range_skip_traces_only_the_actual_training_iteration() -> Non
     assert "MegaLens tracing does not support --skip-samples-range" in patch
     assert "if trace_iteration and not range_skip_enabled:" not in patch
     assert (
-        '"c79538410f1ada613d5230c0f7e2aa2dc1be3a6d11edde0cb90aab9fbe0ec153" '
+        '"23ab0aa9c33b6c56972bc7299c51634fc3826d499bf4cd66695404d962bec883" '
         '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py"'
         in dockerfile
+    )
+
+
+def test_flagscale_controlled_exit_flushes_megalens_before_system_exit() -> None:
+    patch = _FLAGSCALE_PATCH.read_text(encoding="utf-8")
+    assert (
+        "+        shutdown_megalens_runtime(graceful=True)\n"
+        "         sys.exit(exit_code)"
+        in patch
     )
 
 

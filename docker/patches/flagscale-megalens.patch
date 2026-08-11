@@ -225,7 +225,7 @@ index 530030c8f3db745d98349b13d2d5f862f07ab168..c0678ead56f705db6bcf6024c9c2dfd9
      _GLOBAL_ARGS = None
  
 diff --git a/flagscale/train/megatron/training/training.py b/flagscale/train/megatron/training/training.py
-index d48ddfb2b83a5d9ec775371b903684ecb090f789..521d2bebfd89809d93b957d5222a2c0de8a3c148 100644
+index d48ddfb2b83a5d9ec775371b903684ecb090f789..983bc4d597bc7cafc5677be5d21c93a6dea19bb8 100644
 --- a/flagscale/train/megatron/training/training.py
 +++ b/flagscale/train/megatron/training/training.py
 @@ -44,12 +44,13 @@ import math
@@ -419,7 +419,7 @@ index d48ddfb2b83a5d9ec775371b903684ecb090f789..521d2bebfd89809d93b957d5222a2c0d
  
  
  def training_log(
-@@ -3264,212 +3299,273 @@ def train(
+@@ -3264,212 +3299,277 @@ def train(
      # Run training iterations till done.
      buffered_rollouts = None
 +    if args.trace and args.skip_samples_range and args.rampup_batch_size is not None:
@@ -481,7 +481,11 @@ index d48ddfb2b83a5d9ec775371b903684ecb090f789..521d2bebfd89809d93b957d5222a2c0d
 +                range_skip_active = (
 +                    args.skip_iters_range[0] <= iteration < args.skip_iters_range[1]
 +                )
-+        megalens_runtime = get_megalens_runtime() if trace_iteration else None
++        megalens_runtime = (
++            get_megalens_runtime() if getattr(args, 'trace', False) else None
++        )
++        if megalens_runtime is not None and (skip_iteration or range_skip_active):
++            megalens_runtime.tracer.close_trace_window()
 +        with ExitStack() as iteration_stack:
 +            if trace_iteration and not range_skip_active:
 +                if not megalens_runtime.tracer.is_mode0():
@@ -885,6 +889,13 @@ index d48ddfb2b83a5d9ec775371b903684ecb090f789..521d2bebfd89809d93b957d5222a2c0d
 +                            cuda_graph_helper.cuda_graph_set_manual_hooks()
  
          iteration += 1
+
+@@ -3745,4 +3845,5 @@ def train(
+         one_logger_utils.finish()
+         if args.perform_rl_step:
+             rl_utils.rl_inference_interface_shutdown()
++        shutdown_megalens_runtime(graceful=True)
+         sys.exit(exit_code)
 
 diff --git a/flagscale/train/megatron/training/utils.py b/flagscale/train/megatron/training/utils.py
 index 7c5d65730020c110573a3d3bfd982532f4c9e8b5..16749a9f5332ada8b43187a582cef8a04f066e3e 100644
