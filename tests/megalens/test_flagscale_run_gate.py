@@ -29,6 +29,9 @@ _FIXTURES = Path(__file__).parent / "fixtures"
 _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_smoke.yaml": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke.yaml": "gpt-eager-full",
+    "flagscale_single_node_gpt_eager_continuous_cupti_smoke.yaml": (
+        "gpt-eager-continuous-cupti"
+    ),
     "flagscale_single_node_cp2_te_smoke.yaml": "cp2-te",
     "flagscale_single_node_cp4_te_smoke.yaml": "cp4-te",
     "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
@@ -1070,6 +1073,40 @@ def test_gpt_eager_profile_disables_persistent_layernorm() -> None:
     assert payload["train"]["model"]["no_persist_layer_norm"] is True
 
 
+def test_gpt_eager_continuous_cupti_profile_only_changes_the_trace_window() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_gpt_eager_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    continuous = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_gpt_eager_continuous_cupti_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = continuous["experiment"]["exp_name"]
+    baseline["train"]["system"].update(
+        {
+            "trace_interval": 2,
+            "continuous_trace_iterations": 2,
+            "trace_cupti_kernels": "on",
+        }
+    )
+
+    assert continuous == baseline
+    profile = gate.PROFILES["gpt-eager-continuous-cupti"]
+    assert profile.rank_count == 1
+    assert profile.events == gate.PROFILES["gpt-eager-full"].events
+    assert profile.contract is (
+        gpt_probe_contract.validate_gpt_pp1_eager_continuous_kernel_phases
+    )
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_continuous_cuda_kernel_checkpoint
+    )
+
+
 def test_te_attention_mlp_recompute_profile_only_adds_recompute() -> None:
     baseline = yaml.safe_load(
         (
@@ -1726,6 +1763,40 @@ def test_training_contract_requires_the_terminal_checkpoint(
         training_run_contract.validate_two_iteration_checkpoint(tmp_path, False)
         == ()
     )
+
+
+def test_continuous_cupti_training_contract_requires_one_window_extraction(
+    tmp_path: Path,
+) -> None:
+    _write_terminal_checkpoint(tmp_path)
+    launcher_log = tmp_path / "launcher.log"
+    arguments = "\n".join(
+        (
+            "[default0]:  trace_interval ...................... 2",
+            "[default0]:  continuous_trace_iterations ........ 2",
+            "[default0]:  trace_cupti_kernels ................. on",
+        )
+    )
+    launcher_log.write_text(arguments, encoding="utf-8")
+    contract = training_run_contract.validate_two_iteration_continuous_cuda_kernel_checkpoint
+    assert contract(tmp_path, False) == ()
+
+    launcher_log.write_text(
+        arguments
+        + "\n[default0]:[trace] extracted 200 cuda kernel events at iter 2\n",
+        encoding="utf-8",
+    )
+    assert contract(tmp_path, True) == ()
+
+    launcher_log.write_text(
+        arguments
+        + "\n[default0]:[trace] extracted 200 cuda kernel events at iter 1\n",
+        encoding="utf-8",
+    )
+    failures = contract(tmp_path, True)
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_kernel_capture"
+    ]
 
 
 def test_transformer_engine_training_contract_requires_the_parsed_model_route(
@@ -2505,6 +2576,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-userbuffer",
         "tp2-sp-te-op-fuser",
         "te-attn-mlp-recompute-cuda-graph",
+        "gpt-eager-continuous-cupti",
         "te-full-cuda-graph",
         "te-full-cuda-kernels",
         "local-layerwise-full-cuda-graph",
@@ -3370,6 +3442,35 @@ def test_gpt_eager_profile_rejects_an_incomplete_layer_sequence(
     assert [failure.evidence for failure in failures] == [
         "rank=0 iteration=1",
         "rank=0 iteration=2",
+    ]
+
+
+def test_gpt_eager_continuous_cupti_profile_uses_one_profiler_window(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "continuous-cupti"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        kernel_iterations=frozenset((1, 2)),
+    )
+    profile = gate.PROFILES["gpt-eager-continuous-cupti"]
+    assert profile.contract(trace_root) == ()
+
+    trace_path = next(trace_root.glob("*.json"))
+    rows = json.loads(trace_path.read_text(encoding="utf-8"))
+    for row in rows:
+        if row.get("record_type") == "cuda_kernel" and row.get("iteration") == 2:
+            row["wall_start_us"] += 100
+            row["wall_end_us"] += 100
+    trace_path.write_text(json.dumps(rows), encoding="utf-8")
+
+    failures = profile.contract(trace_root)
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.continuous_kernel_window"
     ]
 
 

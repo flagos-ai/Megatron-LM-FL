@@ -677,6 +677,19 @@ _LAYERWISE_FULL_CUDA_GRAPH_EVENTS = _events(
     "optimizer-postprocess",
 )
 
+_GPT_EAGER_EVENTS = _events(
+    "forward-step",
+    "decoder",
+    "decoder-postprocess",
+    "output_layer",
+    "loss",
+    "transformer_layer",
+    "_forward_attention",
+    "attention",
+    "_forward_mlp",
+    "MLP.forward",
+)
+
 
 # Profiles selectable by the loopback runner. Multi-node validation profiles
 # remain separate and are applied only to already completed run artifacts.
@@ -689,20 +702,16 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "gpt-eager-full": manifest.TraceProfile(
         "gpt-eager-full",
         1,
-        _events(
-            "forward-step",
-            "decoder",
-            "decoder-postprocess",
-            "output_layer",
-            "loss",
-            "transformer_layer",
-            "_forward_attention",
-            "attention",
-            "_forward_mlp",
-            "MLP.forward",
-        ),
+        _GPT_EAGER_EVENTS,
         gpt_probe_contract.validate_gpt_pp1_eager_phases,
         training_run_contract.validate_two_iteration_checkpoint,
+    ),
+    "gpt-eager-continuous-cupti": manifest.TraceProfile(
+        "gpt-eager-continuous-cupti",
+        1,
+        _GPT_EAGER_EVENTS,
+        gpt_probe_contract.validate_gpt_pp1_eager_continuous_kernel_phases,
+        training_run_contract.validate_two_iteration_continuous_cuda_kernel_checkpoint,
     ),
     "cp2-te": manifest.TraceProfile(
         "cp2-te",
@@ -1326,6 +1335,9 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
 _CONFIG_PROFILES = {
     "flagscale_single_node_smoke": "pp1",
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
+    "flagscale_single_node_gpt_eager_continuous_cupti_smoke": (
+        "gpt-eager-continuous-cupti"
+    ),
     "flagscale_single_node_cp2_te_smoke": "cp2-te",
     "flagscale_single_node_cp4_te_smoke": "cp4-te",
     "flagscale_single_node_tp2_sp_local_smoke": "tp2-sp-local",

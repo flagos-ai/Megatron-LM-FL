@@ -127,6 +127,14 @@ _CUPTI_KERNEL_ARGUMENT = re.compile(
     r"^\[[^]]+\]:\s*trace_cupti_kernels\s+\.+\s+on\s*$",
     re.MULTILINE,
 )
+_TRACE_INTERVAL_TWO_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*trace_interval\s+\.+\s+2\s*$",
+    re.MULTILINE,
+)
+_CONTINUOUS_TRACE_TWO_ARGUMENT = re.compile(
+    r"^\[[^]]+\]:\s*continuous_trace_iterations\s+\.+\s+2\s*$",
+    re.MULTILINE,
+)
 _CUDA_KERNEL_EXTRACTION = re.compile(
     r"\[trace\] extracted (?P<count>\d+) cuda kernel events at iter "
     r"(?P<iteration>[12])"
@@ -164,6 +172,88 @@ _TE_OP_FUSER_SPEC_ARGUMENT = re.compile(
     r"\['megalens_te_op_fuser_spec',\s*'te_op_fuser_spec'\]\s*$",
     re.MULTILINE,
 )
+
+
+def validate_two_iteration_continuous_cuda_kernel_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require a two-iteration CUPTI window and terminal checkpoint."""
+
+    failures = list(validate_two_iteration_checkpoint(run_root, trace_enabled))
+    launcher_log = run_root / "launcher.log"
+    try:
+        log_text = launcher_log.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        failures.append(
+            Failure(
+                "run.training.log",
+                f"cannot read the training launcher log: {error}",
+                str(launcher_log),
+            )
+        )
+        return tuple(failures)
+
+    for pattern, code, message in (
+        (
+            _TRACE_INTERVAL_TWO_ARGUMENT,
+            "run.training.trace_interval",
+            "Megatron did not report trace_interval=2",
+        ),
+        (
+            _CONTINUOUS_TRACE_TWO_ARGUMENT,
+            "run.training.continuous_trace_iterations",
+            "Megatron did not report continuous_trace_iterations=2",
+        ),
+        (
+            _CUPTI_KERNEL_ARGUMENT,
+            "run.training.trace_cupti_kernels",
+            "Megatron did not report trace_cupti_kernels=on",
+        ),
+    ):
+        if pattern.search(log_text) is None:
+            failures.append(Failure(code, message, str(launcher_log)))
+
+    extractions = tuple(
+        (int(match.group("iteration")), int(match.group("count")))
+        for match in _CUDA_KERNEL_EXTRACTION.finditer(log_text)
+    )
+    if trace_enabled:
+        if len(extractions) != 1 or extractions[0][0] != 2 or extractions[0][1] <= 0:
+            failures.append(
+                Failure(
+                    "run.training.cuda_kernel_capture",
+                    "continuous CUPTI run must extract one positive kernel batch "
+                    f"at iteration 2; observed {list(extractions)}",
+                    str(launcher_log),
+                )
+            )
+    elif extractions:
+        failures.append(
+            Failure(
+                "run.training.cuda_kernel_capture",
+                "trace-off continuous CUPTI run unexpectedly extracted CUDA "
+                f"kernels; observed {list(extractions)}",
+                str(launcher_log),
+            )
+        )
+
+    profiler_warnings = tuple(
+        marker
+        for marker in (
+            "Warning: failed to start kernel profiler",
+            "Warning: failed to stop kernel profiler",
+        )
+        if marker in log_text
+    )
+    if profiler_warnings:
+        failures.append(
+            Failure(
+                "run.training.cuda_kernel_profiler",
+                f"kernel profiler reported failures: {list(profiler_warnings)!r}",
+                str(launcher_log),
+            )
+        )
+    return tuple(failures)
 
 
 def validate_two_iteration_transformer_engine_checkpoint(

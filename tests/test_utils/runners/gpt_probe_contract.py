@@ -535,6 +535,134 @@ def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
+def validate_gpt_pp1_eager_continuous_kernel_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate one CUPTI window spanning two eager GPT iterations."""
+
+    failures = list(validate_gpt_pp1_eager_phases(trace_root))
+    iterations = _load_iterations(trace_root).get(0, ())
+    profiler_anchors: set[int] = set()
+    iteration_anchors: dict[int, set[int]] = defaultdict(set)
+    kernel_starts: dict[int, list[int]] = defaultdict(list)
+
+    for iteration in iterations:
+        iteration_id = int(iteration.iteration_id)
+        kernels = [event for event in iteration.events if event.name == "cuda_kernel"]
+        if not kernels:
+            failures.append(
+                _failure(
+                    "trace.gpt.continuous_kernel_capture",
+                    "continuous CUPTI window has no CUDA kernel records",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+            continue
+
+        missing_fields: set[str] = set()
+        ownership_errors = 0
+        timeline_errors = 0
+        positive_duration_kernels = 0
+        for event in kernels:
+            attrs = event.attrs
+            event_missing = _CUDA_KERNEL_REQUIRED_FIELDS - attrs.keys()
+            missing_fields.update(event_missing)
+            if event_missing:
+                continue
+            if (
+                event.ph != "X"
+                or attrs["record_type"] != "cuda_kernel"
+                or attrs["device"] != 0
+                or attrs["iteration"] != iteration_id
+                or tuple(
+                    attrs[field] for field in ("g_rk", "dp_rk", "pp_rk", "tp_rk")
+                )
+                != (0, 0, 0, 0)
+            ):
+                ownership_errors += 1
+            try:
+                start = int(attrs["start_us"])
+                end = int(attrs["end_us"])
+                wall_start = int(attrs["wall_start_us"])
+                wall_end = int(attrs["wall_end_us"])
+                iter_start = int(attrs["iter_rel_start_us"])
+                iter_end = int(attrs["iter_rel_end_us"])
+                duration = int(attrs["duration_us"])
+            except (TypeError, ValueError):
+                timeline_errors += 1
+                continue
+            if (
+                end < start
+                or wall_end < wall_start
+                or iter_end < iter_start
+                or duration < 0
+                or wall_start - start != wall_end - end
+                or wall_start - iter_start != wall_end - iter_end
+            ):
+                timeline_errors += 1
+                continue
+            profiler_anchors.add(wall_start - start)
+            iteration_anchors[iteration_id].add(wall_start - iter_start)
+            kernel_starts[iteration_id].append(wall_start)
+            positive_duration_kernels += duration > 0
+
+        if missing_fields:
+            failures.append(
+                _failure(
+                    "trace.gpt.continuous_kernel_fields",
+                    "CUDA kernel records lack required ownership or timeline fields: "
+                    f"{sorted(missing_fields)}",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+        if ownership_errors:
+            failures.append(
+                _failure(
+                    "trace.gpt.continuous_kernel_ownership",
+                    f"{ownership_errors} CUDA kernel record(s) use an unexpected "
+                    "rank, device, iteration, phase, or record type",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+        if timeline_errors or positive_duration_kernels == 0:
+            failures.append(
+                _failure(
+                    "trace.gpt.continuous_kernel_timeline",
+                    f"{timeline_errors} CUDA kernel record(s) have an invalid "
+                    "rank-local device interval or no positive duration",
+                    rank=0,
+                    iteration=iteration_id,
+                )
+            )
+
+    anchors_are_valid = (
+        len(profiler_anchors) == 1
+        and set(iteration_anchors) == {1, 2}
+        and all(len(anchors) == 1 for anchors in iteration_anchors.values())
+    )
+    if anchors_are_valid:
+        first_anchor = next(iter(iteration_anchors[1]))
+        second_anchor = next(iter(iteration_anchors[2]))
+        anchors_are_valid = (
+            first_anchor < second_anchor
+            and all(start < second_anchor for start in kernel_starts[1])
+            and all(start >= second_anchor for start in kernel_starts[2])
+        )
+    if not anchors_are_valid:
+        failures.append(
+            Failure(
+                "trace.gpt.continuous_kernel_window",
+                "continuous CUPTI records do not share one profiler anchor and "
+                "two ordered iteration anchors",
+                "rank=0 iterations=[1, 2]",
+            )
+        )
+    return tuple(failures)
+
+
 def _validate_layerwise_full_cuda_graph_phases(
     trace_root: Path, *, owner: str, profile_name: str
 ) -> tuple[Failure, ...]:
