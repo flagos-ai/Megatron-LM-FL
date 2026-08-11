@@ -33,6 +33,9 @@ _CONFIG_PROFILE_CASES = {
     "flagscale_single_node_gpt_eager_continuous_cupti_smoke.yaml": (
         "gpt-eager-continuous-cupti"
     ),
+    "flagscale_single_node_gpt_eager_interrupted_cupti_smoke.yaml": (
+        "gpt-eager-interrupted-cupti"
+    ),
     "flagscale_single_node_cp2_te_smoke.yaml": "cp2-te",
     "flagscale_single_node_cp4_te_smoke.yaml": "cp4-te",
     "flagscale_single_node_tp2_sp_local_smoke.yaml": "tp2-sp-local",
@@ -1106,6 +1109,41 @@ def test_gpt_eager_continuous_cupti_profile_only_changes_the_trace_window() -> N
     )
     assert profile.run_contract is (
         training_run_contract.validate_two_iteration_continuous_cuda_kernel_checkpoint
+    )
+
+
+def test_gpt_eager_interrupted_cupti_profile_only_adds_skip_and_exit() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_gpt_eager_continuous_cupti_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    interrupted = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_gpt_eager_interrupted_cupti_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = interrupted["experiment"]["exp_name"]
+    baseline["train"]["system"].update(
+        {"skip_iters_range": [1, 2], "exit_interval": 3}
+    )
+    baseline["train"]["model"]["train_iters"] = 4
+    baseline["train"]["model"]["optimizer"]["lr_scheduler"][
+        "lr_decay_iters"
+    ] = 4
+
+    assert interrupted == baseline
+    profile = gate.PROFILES["gpt-eager-interrupted-cupti"]
+    assert profile.events == gate.PROFILES["gpt-eager-continuous-cupti"].events
+    assert profile.contract is (
+        gpt_probe_contract.validate_gpt_pp1_eager_interrupted_kernel_phases
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_three_iteration_checkpoint
     )
 
 
@@ -2579,6 +2617,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-op-fuser",
         "te-attn-mlp-recompute-cuda-graph",
         "gpt-eager-continuous-cupti",
+        "gpt-eager-interrupted-cupti",
         "te-full-cuda-graph",
         "te-full-cuda-kernels",
         "local-layerwise-full-cuda-graph",
@@ -3470,6 +3509,41 @@ def test_gpt_eager_continuous_cupti_profile_uses_one_profiler_window(
             row["wall_end_us"] += 100
     trace_path.write_text(json.dumps(rows), encoding="utf-8")
 
+    failures = profile.contract(trace_root)
+    assert [failure.code for failure in failures] == [
+        "trace.gpt.continuous_kernel_window"
+    ]
+
+
+def test_gpt_eager_interrupted_cupti_profile_uses_two_profiler_windows(
+    tmp_path: Path,
+) -> None:
+    trace_root = tmp_path / "interrupted-cupti"
+    _write_gpt_phase_trace(
+        trace_root,
+        rank=0,
+        pipeline_rank=0,
+        include_postprocess=True,
+        eager_layers=2,
+        iteration_ids=(1, 3),
+        kernel_iterations=frozenset((1, 3)),
+    )
+    trace_path = next(trace_root.glob("*.json"))
+    rows = json.loads(trace_path.read_text(encoding="utf-8"))
+    for row in rows:
+        if row.get("record_type") == "cuda_kernel" and row.get("iteration") == 3:
+            row["wall_start_us"] += 5_000
+            row["wall_end_us"] += 5_000
+    trace_path.write_text(json.dumps(rows), encoding="utf-8")
+
+    profile = gate.PROFILES["gpt-eager-interrupted-cupti"]
+    assert profile.contract(trace_root) == ()
+
+    for row in rows:
+        if row.get("record_type") == "cuda_kernel" and row.get("iteration") == 3:
+            row["wall_start_us"] -= 5_000
+            row["wall_end_us"] -= 5_000
+    trace_path.write_text(json.dumps(rows), encoding="utf-8")
     failures = profile.contract(trace_root)
     assert [failure.code for failure in failures] == [
         "trace.gpt.continuous_kernel_window"

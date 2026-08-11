@@ -713,6 +713,13 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         gpt_probe_contract.validate_gpt_pp1_eager_continuous_kernel_phases,
         training_run_contract.validate_two_iteration_continuous_cuda_kernel_checkpoint,
     ),
+    "gpt-eager-interrupted-cupti": manifest.TraceProfile(
+        "gpt-eager-interrupted-cupti",
+        1,
+        _GPT_EAGER_EVENTS,
+        gpt_probe_contract.validate_gpt_pp1_eager_interrupted_kernel_phases,
+        training_run_contract.validate_three_iteration_checkpoint,
+    ),
     "cp2-te": manifest.TraceProfile(
         "cp2-te",
         2,
@@ -1337,6 +1344,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_gpt_eager_full_smoke": "gpt-eager-full",
     "flagscale_single_node_gpt_eager_continuous_cupti_smoke": (
         "gpt-eager-continuous-cupti"
+    ),
+    "flagscale_single_node_gpt_eager_interrupted_cupti_smoke": (
+        "gpt-eager-interrupted-cupti"
     ),
     "flagscale_single_node_cp2_te_smoke": "cp2-te",
     "flagscale_single_node_cp4_te_smoke": "cp4-te",

@@ -425,6 +425,7 @@ def _validate_gpt_model_phases(
     postprocess_ranks: frozenset[int],
     eager_layers_by_rank: Mapping[int, int] | None = None,
     validate_optimizer: bool = False,
+    expected_iterations: tuple[int, ...] = (1, 2),
 ) -> tuple[Failure, ...]:
     failures: list[Failure] = []
     by_rank = _load_iterations(trace_root)
@@ -443,11 +444,11 @@ def _validate_gpt_model_phases(
     for rank in expected_ranks:
         iterations = by_rank.get(rank, ())
         iteration_ids = tuple(item.iteration_id for item in iterations)
-        if iteration_ids != (1, 2):
+        if iteration_ids != expected_iterations:
             failures.append(
                 Failure(
                     "trace.gpt.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
+                    f"rank {rank} expects iterations {list(expected_iterations)}, "
                     f"observed {list(iteration_ids)}",
                     f"rank={rank}",
                 )
@@ -535,14 +536,25 @@ def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
-def validate_gpt_pp1_eager_continuous_kernel_phases(
+def _validate_gpt_pp1_eager_kernel_windows(
     trace_root: Path,
+    *,
+    expected_iterations: tuple[int, int],
+    shared_profiler_window: bool,
 ) -> tuple[Failure, ...]:
-    """Validate one CUPTI window spanning two eager GPT iterations."""
+    """Validate CUPTI ownership across two eager GPT iterations."""
 
-    failures = list(validate_gpt_pp1_eager_phases(trace_root))
+    failures = list(
+        _validate_gpt_model_phases(
+            trace_root,
+            expected_pipeline_ranks={0: 0},
+            postprocess_ranks=frozenset((0,)),
+            eager_layers_by_rank={0: 2},
+            expected_iterations=expected_iterations,
+        )
+    )
     iterations = _load_iterations(trace_root).get(0, ())
-    profiler_anchors: set[int] = set()
+    profiler_anchors: dict[int, set[int]] = defaultdict(set)
     iteration_anchors: dict[int, set[int]] = defaultdict(set)
     kernel_starts: dict[int, list[int]] = defaultdict(list)
 
@@ -602,7 +614,7 @@ def validate_gpt_pp1_eager_continuous_kernel_phases(
             ):
                 timeline_errors += 1
                 continue
-            profiler_anchors.add(wall_start - start)
+            profiler_anchors[iteration_id].add(wall_start - start)
             iteration_anchors[iteration_id].add(wall_start - iter_start)
             kernel_starts[iteration_id].append(wall_start)
             positive_duration_kernels += duration > 0
@@ -638,29 +650,75 @@ def validate_gpt_pp1_eager_continuous_kernel_phases(
                 )
             )
 
+    expected_iteration_set = set(expected_iterations)
     anchors_are_valid = (
-        len(profiler_anchors) == 1
-        and set(iteration_anchors) == {1, 2}
+        set(profiler_anchors) == expected_iteration_set
+        and set(iteration_anchors) == expected_iteration_set
+        and all(len(anchors) == 1 for anchors in profiler_anchors.values())
         and all(len(anchors) == 1 for anchors in iteration_anchors.values())
     )
     if anchors_are_valid:
-        first_anchor = next(iter(iteration_anchors[1]))
-        second_anchor = next(iter(iteration_anchors[2]))
-        anchors_are_valid = (
-            first_anchor < second_anchor
-            and all(start < second_anchor for start in kernel_starts[1])
-            and all(start >= second_anchor for start in kernel_starts[2])
-        )
+        profiler_values = [
+            next(iter(profiler_anchors[iteration]))
+            for iteration in expected_iterations
+        ]
+        iteration_values = [
+            next(iter(iteration_anchors[iteration]))
+            for iteration in expected_iterations
+        ]
+        anchors_are_valid = iteration_values[0] < iteration_values[1]
+        if shared_profiler_window:
+            anchors_are_valid = (
+                anchors_are_valid
+                and len(set(profiler_values)) == 1
+                and all(
+                    start < iteration_values[1]
+                    for start in kernel_starts[expected_iterations[0]]
+                )
+                and all(
+                    start >= iteration_values[1]
+                    for start in kernel_starts[expected_iterations[1]]
+                )
+            )
+        else:
+            anchors_are_valid = (
+                anchors_are_valid
+                and len(set(profiler_values)) == len(expected_iterations)
+            )
     if not anchors_are_valid:
         failures.append(
             Failure(
                 "trace.gpt.continuous_kernel_window",
-                "continuous CUPTI records do not share one profiler anchor and "
-                "two ordered iteration anchors",
-                "rank=0 iterations=[1, 2]",
+                "CUPTI records do not use the expected profiler windows and "
+                "ordered iteration anchors",
+                f"rank=0 iterations={list(expected_iterations)}",
             )
         )
     return tuple(failures)
+
+
+def validate_gpt_pp1_eager_continuous_kernel_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate one CUPTI window spanning two eager GPT iterations."""
+
+    return _validate_gpt_pp1_eager_kernel_windows(
+        trace_root,
+        expected_iterations=(1, 2),
+        shared_profiler_window=True,
+    )
+
+
+def validate_gpt_pp1_eager_interrupted_kernel_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate separate CUPTI windows around a skipped eager iteration."""
+
+    return _validate_gpt_pp1_eager_kernel_windows(
+        trace_root,
+        expected_iterations=(1, 3),
+        shared_profiler_window=False,
+    )
 
 
 def _validate_layerwise_full_cuda_graph_phases(
