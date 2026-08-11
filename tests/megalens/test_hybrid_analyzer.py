@@ -143,20 +143,15 @@ def test_ep_pp_correlation_keeps_source_iteration_key_contract_and_formula() -> 
         ],
     }
     sizes = {"dp": 1, "pp": 2, "tp": 1, "ep": 2}
-    actual_pp_producer_shape = {"bubble_stats": [{"Iteration": 1, "Bubble_Rate": 0.2}]}
-
-    producer_shape_result = _analyzer(pp=actual_pp_producer_shape, ep=ep, sizes=sizes)
-    assert producer_shape_result.analyze_ep_pp_bubble_amplification()["num_common_iterations"] == 0
-
-    hybrid_accepted_shape = {
+    actual_pp_producer_shape = {
         "bubble_stats": [
-            {"iteration": 1, "Bubble_Rate": 0.1},
-            {"iteration": 2, "Bubble_Rate": 0.2},
-            {"iteration": 3, "Bubble_Rate": 0.3},
+            {"Iteration": 1, "Bubble_Rate": 0.1},
+            {"Iteration": 2, "Bubble_Rate": 0.2},
+            {"Iteration": 3, "Bubble_Rate": 0.3},
         ]
     }
     result = _analyzer(
-        pp=hybrid_accepted_shape, ep=ep, sizes=sizes
+        pp=actual_pp_producer_shape, ep=ep, sizes=sizes
     ).analyze_ep_pp_bubble_amplification()
 
     assert result == {
@@ -172,6 +167,16 @@ def test_ep_pp_correlation_keeps_source_iteration_key_contract_and_formula() -> 
         "_pp_bubble_series": [0.1, 0.2, 0.3],
         "_common_iters": [1, 2, 3],
     }
+
+    lowercase = {"bubble_stats": [{"iteration": 1, "Bubble_Rate": 0.1}]}
+    assert _analyzer(pp=lowercase, ep=ep, sizes=sizes).analyze_ep_pp_bubble_amplification()[
+        "_common_iters"
+    ] == [1]
+
+    no_common = {"bubble_stats": [{"Iteration": 9, "Bubble_Rate": 0.1}]}
+    assert _analyzer(pp=no_common, ep=ep, sizes=sizes).analyze_ep_pp_bubble_amplification()[
+        "num_common_iterations"
+    ] == 0
 
 
 def test_ep_correlations_ignore_nullable_expert_cv() -> None:

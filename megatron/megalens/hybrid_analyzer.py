@@ -169,7 +169,7 @@ class HybridAnalyzer:
         bubble_stats: List[Dict] = self.pp.get("bubble_stats", [])
         pp_bubble_by_iter: Dict[int, float] = {}
         for d in bubble_stats:
-            it = d.get("iteration", d.get("iter", -1))
+            it = d.get("iteration", d.get("iter", d.get("Iteration", -1)))
             rate = d.get("bubble_rate", d.get("Bubble_Rate", None))
             if it >= 0 and rate is not None:
                 pp_bubble_by_iter[it] = float(rate)
