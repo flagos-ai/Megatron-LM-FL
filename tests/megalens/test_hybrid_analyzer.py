@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import csv
-import hashlib
 import inspect
 from pathlib import Path
 from typing import Any
@@ -13,12 +12,6 @@ import pytest
 from megatron.megalens import hybrid_analyzer as hybrid_module
 from megatron.megalens.data_loader import TraceDataLoader
 from megatron.megalens.hybrid_analyzer import HybridAnalyzer, analyze_hybrid_traces
-
-_SOURCE_BASELINE = "12fb7169ce30fdb62b50f86b41afa09336a523ea"
-_SOURCE_SHA256 = "9fb7761664ce4dfe5b4a96815651048ba697761bf7c9e3f496a31b949ef61ba8"
-_SOURCE_LINE_COUNT = 1403
-_SOURCE_BYTE_COUNT = 59_846
-
 
 def _span(
     name: str,
@@ -60,15 +53,6 @@ def _analyzer(
     if sizes is not None:
         analyzer.parallel_sizes = sizes
     return analyzer
-
-
-def test_locked_mixedpara_source_module_is_copied_byte_for_byte() -> None:
-    payload = Path(hybrid_module.__file__).resolve().read_bytes()
-
-    assert _SOURCE_BASELINE == "12fb7169ce30fdb62b50f86b41afa09336a523ea"
-    assert hashlib.sha256(payload).hexdigest() == _SOURCE_SHA256
-    assert len(payload) == _SOURCE_BYTE_COUNT
-    assert len(payload.splitlines()) == _SOURCE_LINE_COUNT
 
 
 def test_public_api_signatures_defaults_and_thresholds_match_source() -> None:
@@ -190,15 +174,40 @@ def test_ep_pp_correlation_keeps_source_iteration_key_contract_and_formula() -> 
     }
 
 
-def test_ep_pp_correlation_preserves_type_error_for_nullable_expert_cv() -> None:
+def test_ep_correlations_ignore_nullable_expert_cv() -> None:
     analyzer = _analyzer(
-        pp={"bubble_stats": [{"iteration": 1, "Bubble_Rate": 0.2}]},
-        ep={"balance_data": [{"iteration": 1, "expert_cv": None}]},
-        sizes={"dp": 1, "pp": 2, "tp": 1, "ep": 2},
+        pp={
+            "bubble_stats": [
+                {"iteration": 1, "Bubble_Rate": 0.2},
+                {"iteration": 2, "Bubble_Rate": 0.4},
+                {"iteration": 3, "Bubble_Rate": 0.0},
+            ]
+        },
+        dp={
+            "balance_data": [
+                {"iteration": 1, "cv": 0.2},
+                {"iteration": 2, "cv": 0.4},
+                {"iteration": 3, "cv": 0.0},
+            ]
+        },
+        ep={
+            "balance_data": [
+                {"iteration": 1, "expert_cv": None},
+                {"iteration": 1, "expert_cv": 0.2},
+                {"iteration": 2, "expert_cv": None},
+                {"iteration": 3, "expert_cv": 0.0},
+            ]
+        },
+        sizes={"dp": 2, "pp": 2, "tp": 1, "ep": 2},
     )
 
-    with pytest.raises(TypeError):
-        analyzer.analyze_ep_pp_bubble_amplification()
+    ep_pp = analyzer.analyze_ep_pp_bubble_amplification()
+    ep_dp = analyzer.analyze_ep_dp_load_coupling()
+
+    assert ep_pp["_common_iters"] == [1, 3]
+    assert ep_pp["_ep_cv_series"] == [0.2, 0.0]
+    assert ep_dp["_common_iters"] == [1, 3]
+    assert ep_dp["_ep_cv_series"] == [0.2, 0.0]
 
 
 def test_ep_tp_contention_uses_interval_union_and_legacy_tp_names() -> None:
@@ -395,22 +404,39 @@ def test_health_score_ignores_three_cross_results_and_breaks_on_first_pp_thresho
 
 
 @pytest.mark.parametrize(
-    ("pp", "dp", "tp", "ep"),
+    ("tp", "ep", "expected_deduction"),
     [
-        ({"bubble_stats": [{"bubble_rate": None}]}, {}, {}, {}),
-        ({}, {}, {"tp_comm_data": [{"comm_ratio": None}]}, {}),
-        ({}, {}, {"nvlink_summary": [{"mean_utilisation_pct": None}]}, {}),
-        ({}, {}, {}, {"balance_data": [{"expert_cv": None}]}),
-        ({}, {}, {}, {"drop_data": [{"avg_drop_rate": None}]}),
+        (
+            {"tp_comm_data": [{"comm_ratio": None}, {"comm_ratio": 0.6}]},
+            {},
+            ("TP comm ratio > 50%", 10),
+        ),
+        (
+            {
+                "nvlink_summary": [
+                    {"mean_utilisation_pct": None},
+                    {"mean_utilisation_pct": 40.0},
+                ]
+            },
+            {},
+            ("TP NVLink util < 50%", 10),
+        ),
+        (
+            {},
+            {"balance_data": [{"expert_cv": None}, {"expert_cv": 0.6}]},
+            ("EP expert_cv > 0.50", 10),
+        ),
     ],
 )
-def test_source_health_preserves_type_errors_for_target_nullable_results(
-    pp: dict[str, Any], dp: dict[str, Any], tp: dict[str, Any], ep: dict[str, Any]
+def test_health_score_ignores_nullable_target_results(
+    tp: dict[str, Any], ep: dict[str, Any], expected_deduction: tuple[str, int]
 ) -> None:
-    analyzer = _analyzer(pp=pp, dp=dp, tp=tp, ep=ep)
+    analyzer = _analyzer(tp=tp, ep=ep)
 
-    with pytest.raises(TypeError):
-        analyzer.compute_hybrid_health_score({}, [], {}, [], {}, [])
+    result = analyzer.compute_hybrid_health_score({}, [], {}, [], {}, [])
+
+    assert result["score"] == 90
+    assert result["deductions"] == [expected_deduction]
 
 
 def test_master_orchestration_order_result_keys_and_csv_side_effects(

@@ -161,7 +161,9 @@ class HybridAnalyzer:
         balance_data: List[Dict] = self.ep.get("balance_data", [])
         ep_by_iter: Dict[int, List[float]] = collections.defaultdict(list)
         for d in balance_data:
-            ep_by_iter[d["iteration"]].append(d["expert_cv"])
+            expert_cv = d["expert_cv"]
+            if expert_cv is not None:
+                ep_by_iter[d["iteration"]].append(expert_cv)
         ep_cv_by_iter = {it: float(np.mean(v)) for it, v in ep_by_iter.items()}
 
         bubble_stats: List[Dict] = self.pp.get("bubble_stats", [])
@@ -288,7 +290,9 @@ class HybridAnalyzer:
         balance_data: List[Dict] = self.ep.get("balance_data", [])
         ep_by_iter: Dict[int, List[float]] = collections.defaultdict(list)
         for d in balance_data:
-            ep_by_iter[d["iteration"]].append(d["expert_cv"])
+            expert_cv = d["expert_cv"]
+            if expert_cv is not None:
+                ep_by_iter[d["iteration"]].append(expert_cv)
         ep_cv_by_iter = {it: float(np.mean(v)) for it, v in ep_by_iter.items()}
 
         dp_cv_by_iter: Dict[int, float] = {}
@@ -731,25 +735,34 @@ class HybridAnalyzer:
 
         # TP comm ratio
         for d in self.tp.get("tp_comm_data", self.tp.get("overhead_data", [])):
-            if d.get("comm_ratio", 0.0) > 0.50:
+            comm_ratio = d.get("comm_ratio")
+            if comm_ratio is None:
+                continue
+            if comm_ratio > 0.50:
                 deduct("TP comm ratio > 50%", 10)
                 break
-            elif d.get("comm_ratio", 0.0) > 0.30:
+            elif comm_ratio > 0.30:
                 deduct("TP comm ratio > 30%", 5)
                 break
 
         # TP NVLink
         for d in self.tp.get("nvlink_summary", self.tp.get("nvlink_data", [])):
-            if d.get("mean_utilisation_pct", 100.0) < 50.0:
+            utilisation = d.get("mean_utilisation_pct")
+            if utilisation is None:
+                continue
+            if utilisation < 50.0:
                 deduct("TP NVLink util < 50%", 10)
                 break
 
         # EP expert balance
         for d in self.ep.get("balance_data", []):
-            if d.get("expert_cv", 0.0) > 0.50:
+            expert_cv = d.get("expert_cv")
+            if expert_cv is None:
+                continue
+            if expert_cv > 0.50:
                 deduct("EP expert_cv > 0.50", 10)
                 break
-            elif d.get("expert_cv", 0.0) > 0.30:
+            elif expert_cv > 0.30:
                 deduct("EP expert_cv > 0.30", 5)
                 break
 
