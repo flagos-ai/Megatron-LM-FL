@@ -29,8 +29,8 @@ from megatron.megalens.pp_analyzer import (
 _SOURCE_BASELINE = "12fb7169ce30fdb62b50f86b41afa09336a523ea"
 _SOURCE_SHA256 = "38c1bb91c0677505169bbe742776de4dc07db2462b5f80479d47da1cde5c6bc7"
 _SOURCE_LINE_COUNT = 1711
-_ADAPTED_SHA256 = "9af4503bab41589117e4aa8556b3c011df65fd80da7c5b093435a7586d00f3f3"
-_ADAPTED_LINE_COUNT = 1774
+_ADAPTED_SHA256 = "28a58f24bd75bddedf3a971bcf8e606b0455e26cfabd13a4b574bc25de82551d"
+_ADAPTED_LINE_COUNT = 1784
 
 
 def _span(
@@ -467,6 +467,48 @@ def test_compute_and_jitter_analysis_keep_source_workload_normalization_and_muta
     assert "event_ref" not in jitter_data[-1]
     assert events[-1]["args"]["Analysis_Slowdown_Ratio"] == "2.00x"
     assert events[-1]["args"]["Analysis_Diagnosis"] == "True Hardware Jitter Spike"
+
+
+def test_workload_analyses_skip_explicitly_missing_samples_and_preserve_zero() -> None:
+    missing_forward = _span(
+        "forward-step", 100, 1_000, current_microbatch=0, num_tokens=None, sum_sq_seq_len=16_384
+    )
+    zero_forward = _span(
+        "forward-step", 1_200, 1_000, current_microbatch=1, num_tokens=0, sum_sq_seq_len=0.0
+    )
+    missing_backward = _span(
+        "backward-step", 2_300, 1_000, current_microbatch=2, num_tokens=128, sum_sq_seq_len=None
+    )
+    valid_backward = _span(
+        "backward-step", 3_400, 1_000, current_microbatch=3, num_tokens=128, sum_sq_seq_len=16_384
+    )
+    default_forward = _span("forward-step", 4_500, 1_000, current_microbatch=4)
+    none_optimizer = _span(
+        "optimizer", 5_600, 1_000, num_tokens=None, sum_sq_seq_len=None
+    )
+    graph = TraceGraph(
+        [
+            _span("iteration", 0, 7_000),
+            missing_forward,
+            zero_forward,
+            missing_backward,
+            valid_backward,
+            default_forward,
+            none_optimizer,
+        ]
+    )
+
+    compute_stats, raw_dfs = compute_load_analysis(graph, _MemoryLogger())  # type: ignore[arg-type]
+    jitter_data = hardware_jitter_analysis(graph, _MemoryLogger())  # type: ignore[arg-type]
+
+    assert list(raw_dfs["forward"][0]["tokens_N"]) == [0, 0]
+    assert list(raw_dfs["backward"][0]["tokens_N"]) == [128]
+    assert list(raw_dfs["optimizer"][0]["tokens_N"]) == [None]
+    assert len(compute_stats["forward"]) == len(compute_stats["backward"]) == 1
+    assert len(compute_stats["optimizer"]) == 1
+    assert [row["microbatch_id"] for row in jitter_data] == [1, 4, 3]
+    assert "Analysis_Diagnosis" not in missing_forward["args"]
+    assert "Analysis_Diagnosis" not in missing_backward["args"]
 
 
 def test_master_orchestrator_preserves_source_order_result_shape_and_report(

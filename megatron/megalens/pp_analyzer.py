@@ -721,6 +721,8 @@ def compute_load_analysis(graph: TraceGraph, logger: ReportLogger) -> Tuple[List
         n_tokens = ev.args.get("num_tokens", 0)
         # 优先读取 sum_sq_seq_len，如果没有，则降级兼容传统的 seq_len 平方
         s_sq = ev.args.get("sum_sq_seq_len", ev.args.get("seq_len", ev.args.get("max_seq_len", 0)) ** 2)
+        if phase != "optimizer" and (n_tokens is None or s_sq is None):
+            continue
         
         pure_dur_ms = get_pure_compute_dur(ev, graph) / 1000.0
         compute_data[phase][ev.rank].append({
@@ -879,7 +881,15 @@ def hardware_jitter_analysis(graph: TraceGraph, logger: ReportLogger) -> List[Di
         
         ranks = sorted(list(set(ev.rank for ev in phase_events)))
         for rank in ranks:
-            rank_events = [ev for ev in phase_events if ev.rank == rank]
+            rank_events = [
+                ev
+                for ev in phase_events
+                if ev.rank == rank
+                and ev.args.get("num_tokens", 0) is not None
+                and ev.args.get("sum_sq_seq_len", 0.0) is not None
+            ]
+            if not rank_events:
+                continue
             
             workload_buckets = collections.defaultdict(list)
             for ev in rank_events:
