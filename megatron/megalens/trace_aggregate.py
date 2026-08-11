@@ -1,3 +1,4 @@
+import heapq
 import json
 import os
 import warnings
@@ -331,9 +332,11 @@ def aggregate_benchmark_data(
         # event.rel_ts = event.rel_ts + (iteration.pad_before - iter_pad_before)
         rank_pad_before = [iteration.pad_before - iter_pad_before for iteration in rank_iterations]
         # update event rel_ts
-        events: List[Event] = []
+        event_streams: List[List[Event]] = []
+        independent_events: List[Event] = []
         for content_idx, iteration in enumerate(rank_iterations):
             pad_before = rank_pad_before[content_idx]
+            causal_stream: List[Event] = []
             for event in iteration.events:
                 updated_event = Event(
                     rel_ts=event.rel_ts + pad_before,
@@ -343,9 +346,32 @@ def aggregate_benchmark_data(
                     attrs=event.attrs,
                     cat=event.cat,
                 )
-                events.append(updated_event)
+                if event.ph in ("B", "E"):
+                    causal_stream.append(updated_event)
+                else:
+                    independent_events.append(updated_event)
+            if causal_stream:
+                event_streams.append(causal_stream)
+        independent_events.sort(key=lambda event: event.rel_ts)
+        if independent_events:
+            event_streams.append(independent_events)
 
-        events.sort(key=lambda event: event.rel_ts)
+        # CUDA event timestamps can cross at adjacent scope boundaries, so only
+        # advance a rank's B/E stream after emitting its previous record.
+        events: List[Event] = []
+        heads: List[Tuple[int, int, int]] = []
+        for stream_index, stream in enumerate(event_streams):
+            if stream:
+                heapq.heappush(heads, (stream[0].rel_ts, stream_index, 0))
+        while heads:
+            _, stream_index, event_index = heapq.heappop(heads)
+            stream = event_streams[stream_index]
+            events.append(stream[event_index])
+            next_index = event_index + 1
+            if next_index < len(stream):
+                heapq.heappush(
+                    heads, (stream[next_index].rel_ts, stream_index, next_index)
+                )
         duration = max(
             pad_before + iteration.duration
             for pad_before, iteration in zip(rank_pad_before, rank_iterations)

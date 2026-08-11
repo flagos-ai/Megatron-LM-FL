@@ -96,6 +96,56 @@ def test_aggregate_joins_ranks_by_iteration_id_and_preserves_id() -> None:
     assert iterations[0].duration == 1_100
 
 
+def test_aggregate_preserves_per_rank_scope_order_when_cuda_timestamps_cross() -> None:
+    rank0 = Rank(data=0, pipeline=0, tensor=0, global_rank=0)
+    rank1 = Rank(data=1, pipeline=0, tensor=0, global_rank=1)
+    attrs0 = {"g_rk": 0, "dp_rk": 0, "pp_rk": 0, "tp_rk": 0}
+    attrs1 = {"g_rk": 1, "dp_rk": 1, "pp_rk": 0, "tp_rk": 0}
+    rank0_iteration = Iteration(
+        pad_before=0,
+        events=[
+            Event(100_000, rank0, "optimizer", "B", attrs0),
+            Event(301_888, rank0, "optimizer", "E", attrs0),
+            Event(301_156, rank0, "optimizer-postprocess", "B", attrs0),
+            Event(401_156, rank0, "optimizer-postprocess", "E", attrs0),
+        ],
+        duration=500_000,
+        iteration_id=1,
+        ranks=(rank0,),
+    )
+    rank1_iteration = Iteration(
+        pad_before=0,
+        events=[
+            Event(200_000, rank1, "forward", "B", attrs1),
+            Event(250_000, rank1, "forward", "E", attrs1),
+        ],
+        duration=500_000,
+        iteration_id=1,
+        ranks=(rank1,),
+    )
+
+    iterations, _, _, _ = aggregate_benchmark_data(
+        [[rank0_iteration], [rank1_iteration]]
+    )
+    assert [
+        (event.rank.global_rank, event.name, event.ph)
+        for event in iterations[0].events
+    ] == [
+        (0, "optimizer", "B"),
+        (1, "forward", "B"),
+        (1, "forward", "E"),
+        (0, "optimizer", "E"),
+        (0, "optimizer-postprocess", "B"),
+        (0, "optimizer-postprocess", "E"),
+    ]
+    traces = benchmark_to_chrome_trace(iterations)
+
+    spans = {trace["name"]: trace for trace in traces if trace.get("ph") == "X"}
+    assert spans["optimizer"]["dur"] == 201
+    assert spans["optimizer-postprocess"]["dur"] == 100
+    assert spans["forward"]["dur"] == 50
+
+
 @pytest.mark.parametrize(
     ("contents", "message"),
     [
