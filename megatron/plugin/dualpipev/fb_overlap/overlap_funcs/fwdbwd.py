@@ -141,7 +141,9 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
     run_graph_backward(bwd_layer_graph.perm2_graph, keep_graph=True)  # keep for dw
     run_graph_backward(bwd_layer_graph.perm2_append_graph, keep_graph=True)
 
-    backward_shared = bwd_layer_graph.shared_experts_graph[1].grad
+    has_backward_shared_experts = bwd_layer_graph.shared_experts_graph[0] is not None
+    if has_backward_shared_experts:
+        backward_shared = bwd_layer_graph.shared_experts_graph[1].grad
 
     _, perm1_out1_grad, bwd_perm_a2a_handle1 = async_all_to_all(
         bwd_layer_graph.perm_a2a_graph[1].grad,
@@ -186,10 +188,11 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
     perm1_out1_grad.untyped_storage().resize_(0)
     perm1_out2_grad.untyped_storage().resize_(0)
 
-    turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=True)
-    run_graph_backward(
-        bwd_layer_graph.shared_experts_graph, backward_shared, keep_grad=True
-    )  # dw computation
+    if has_backward_shared_experts:
+        turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=True)
+        run_graph_backward(
+            bwd_layer_graph.shared_experts_graph, backward_shared, keep_grad=True
+        )  # dw computation
 
     run_graph_backward(bwd_layer_graph.router_graph)
     run_graph_backward(bwd_layer_graph.pre_mlp_layernorm_graph, keep_graph=True)
@@ -242,8 +245,9 @@ def transformer_layer_forward_dense_backward_moe_overlapping(
     turn_experts_delay_wgrad_compute(bwd_layer_graph, enable=False)
 
     # process shared_experts, backward for weight
-    call_shared_experts_backward_dw(bwd_layer_graph)
-    turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=False)
+    if has_backward_shared_experts:
+        call_shared_experts_backward_dw(bwd_layer_graph)
+        turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=False)
 
     # process attention, backward for weight
     call_attention_backward_dw(bwd_layer_graph)
@@ -920,7 +924,9 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
     )
     last_comm_handle_1 = bwd_perm_a2a_handle1
 
-    backward_shared = bwd_layer_graph.shared_experts_graph[1].grad
+    has_backward_shared_experts = bwd_layer_graph.shared_experts_graph[0] is not None
+    if has_backward_shared_experts:
+        backward_shared = bwd_layer_graph.shared_experts_graph[1].grad
     # Grouped MLP dw computation
     call_experts_backward_dw(bwd_layer_graph)
     turn_experts_delay_wgrad_compute(bwd_layer_graph, enable=False)
@@ -966,10 +972,11 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         )
         bwd_perm_a2a_handle2 = None
 
-    turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=True)
-    run_graph_backward(
-        bwd_layer_graph.shared_experts_graph, backward_shared, keep_grad=True
-    )  # dw computation
+    if has_backward_shared_experts:
+        turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=True)
+        run_graph_backward(
+            bwd_layer_graph.shared_experts_graph, backward_shared, keep_grad=True
+        )  # dw computation
 
     with checkpoint_context:
         # launch async all2all in the middle of attention graph backward
@@ -1072,8 +1079,9 @@ def transformer_layer_forward_moe_backward_moe_overlapping(
         )
 
     # process shared experts, backward for weights
-    call_shared_experts_backward_dw(bwd_layer_graph)
-    turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=False)
+    if has_backward_shared_experts:
+        call_shared_experts_backward_dw(bwd_layer_graph)
+        turn_shared_experts_delay_wgrad_compute(bwd_layer_graph, enable=False)
 
     # process attention, backward for weights
     call_attention_backward_dw(bwd_layer_graph)
