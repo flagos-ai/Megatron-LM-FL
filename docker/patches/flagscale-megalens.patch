@@ -1,7 +1,7 @@
 # FlagScale baseline: 6d775cd01d5c822f9413b9952a81652c917d273e
 # Purpose: preserve the Megatron-LM-FL MegaLens lifecycle and dense-batch Graph compatibility through FlagScale's vendored training overlay.
 diff --git a/flagscale/train/megatron/training/arguments.py b/flagscale/train/megatron/training/arguments.py
-index 2105958a79d5f1adbd61344a78a42c92ecc8d450..c9800931aa5b5cb2d0920b064877c83dffb5d105 100644
+index 2105958a79d5f1adbd61344a78a42c92ecc8d450..41bf0666bc7b7d484ab6685afeb6b930df15751d 100644
 --- a/flagscale/train/megatron/training/arguments.py
 +++ b/flagscale/train/megatron/training/arguments.py
 @@ -9,6 +9,7 @@ import os
@@ -12,7 +12,7 @@ index 2105958a79d5f1adbd61344a78a42c92ecc8d450..c9800931aa5b5cb2d0920b064877c83d
  
  import torch
  import torch.nn.functional as F
-@@ -86,9 +87,102 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
+@@ -86,9 +87,103 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
      parser = _add_msc_args(parser)
      parser = _add_kitchen_quantization_arguments(parser)
      parser = _add_sft_args(parser)
@@ -84,10 +84,11 @@ index 2105958a79d5f1adbd61344a78a42c92ecc8d450..c9800931aa5b5cb2d0920b064877c83d
 +        raise ValueError('--sentinel-hw-sample-ms must be greater than zero')
 +    if args.sentinel_flush_interval <= 0:
 +        raise ValueError('--sentinel-flush-interval must be greater than zero')
-+    if args.trace_mode == 0 and args.trace_cupti_kernels != 'off':
-+        raise ValueError('trace mode 0 requires --trace-cupti-kernels=off')
++    kernel_capture_requested = (
++        args.trace_mode != 0 and args.trace_cupti_kernels != 'off'
++    )
 +    if (
-+        args.trace_cupti_kernels != 'off'
++        kernel_capture_requested
 +        and args.continuous_trace_iterations != 1
 +    ):
 +        raise ValueError(
@@ -103,7 +104,7 @@ index 2105958a79d5f1adbd61344a78a42c92ecc8d450..c9800931aa5b5cb2d0920b064877c83d
 +            stacklevel=2,
 +        )
 +    if (
-+        args.trace_cupti_kernels != 'off'
++        kernel_capture_requested
 +        and args.profile
 +        and args.use_pytorch_profiler
 +    ):
@@ -115,7 +116,7 @@ index 2105958a79d5f1adbd61344a78a42c92ecc8d450..c9800931aa5b5cb2d0920b064877c83d
  def parse_args(extra_args_provider=None, ignore_unknown_args=False):
      """Parse all arguments."""
      parser = argparse.ArgumentParser(description='Megatron-LM Arguments',
-@@ -322,6 +416,8 @@ def tuple_type(x):
+@@ -322,6 +417,8 @@ def tuple_type(x):
  
  def validate_args(args, defaults={}):
  

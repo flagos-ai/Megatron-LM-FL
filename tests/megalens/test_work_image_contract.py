@@ -65,12 +65,18 @@ def test_flagscale_patch_preserves_graph_compatibility_and_is_pinned() -> None:
 
     assert dockerfile.count(f'"{patch_sha256}"') == 2
     assert "requires --trace-cupti-kernels=off until the GPU gate" not in patch
+    assert "trace mode 0 requires --trace-cupti-kernels=off" not in patch
+    assert "args.trace_mode != 0 and args.trace_cupti_kernels != 'off'" in patch
     assert "Python scopes inside managed capture/replay are" in patch
     assert (
         "broadcast_packed_sequence_metadata = "
         "args.hybrid_context_parallel or args.sft"
     ) in patch
     assert patch.count("if broadcast_packed_sequence_metadata:") == 5
+    assert (
+        '"70ac041c0a34abb2cb3bf21d1a61db74bc477ba8708db9b25dcb6dc0100aca1f" '
+        '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py"'
+    ) in dockerfile
     assert (
         '"f4a31581bd93b6e53500e520a72312adf2f069e23634d176c97d707a0558c45c" '
         '"${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py"'

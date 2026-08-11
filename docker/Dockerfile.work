@@ -260,7 +260,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         && test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})" = "${FLAGSCALE_TREE}"; \
     fi \
     && printf '%s  %s\n' \
-        "cb78a041b21cd5a8dac747eee4a780e052113661bb7be5f264414ab6908d0f1b" "/tmp/flagscale-megalens.patch" \
+        "8d8e45ecc5f4acd2a6b869b85d35afa247ae7b04eb73c07a9ac6152bf5fde721" "/tmp/flagscale-megalens.patch" \
         "913b47495a8e58ed4aac8d4c72cede063afbbaa79ed61ee900e90979e9441667" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "d7c73b0764c4b192cd2e5e3cc46fc2cffbdca3dc3beeef703139e8b3f9b9914e" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "d3eace40ed2bbc2e24e51f801201aaaa406a3d68cbde8614981c0643169a36a2" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
@@ -269,7 +269,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
     && git -C "${FLAGSCALE_ROOT}" apply --check /tmp/flagscale-megalens.patch \
     && git -C "${FLAGSCALE_ROOT}" apply /tmp/flagscale-megalens.patch \
     && printf '%s  %s\n' \
-        "374793cd1bc17562cd43b574866ffafe3d5543752082c8dc745d1efba1db3e6c" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "70ac041c0a34abb2cb3bf21d1a61db74bc477ba8708db9b25dcb6dc0100aca1f" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
         "b1e4ee2eff25440bc1265438c082d53e39061c61d6e979af9828a4e7e7f5ee81" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
         "c79538410f1ada613d5230c0f7e2aa2dc1be3a6d11edde0cb90aab9fbe0ec153" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
         "e5e6166aca7a7ac7db62e261217cc5e8eb6bdc829d5637c4f5f8cf2094968cf9" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
@@ -293,7 +293,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
         "${MEGATRON_CODE_PARENT}" \
         "${FLAGSCALE_REVISION}" \
         "${FLAGSCALE_TREE}" \
-        "cb78a041b21cd5a8dac747eee4a780e052113661bb7be5f264414ab6908d0f1b" \
+        "8d8e45ecc5f4acd2a6b869b85d35afa247ae7b04eb73c07a9ac6152bf5fde721" \
         "${EMERGING_OPTIMIZERS_REVISION}" \
         "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
         "${DEEP_EP_REVISION}" \
