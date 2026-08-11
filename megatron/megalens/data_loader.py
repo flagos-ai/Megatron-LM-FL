@@ -132,8 +132,8 @@ class CounterSample:
     name: str
     ts: int  # timestamp in microseconds
     rank: int  # global rank (pid)
-    iteration: int = -1
     metrics: Dict[str, float] = field(default_factory=dict)
+    iteration: int = -1
 
 
 @dataclass

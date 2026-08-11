@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from megatron.megalens.data_loader import TraceDataLoader
+from megatron.megalens.data_loader import CounterSample, TraceDataLoader
 from megatron.megalens.trace_aggregate import (
     Event,
     Iteration,
@@ -421,6 +421,10 @@ def test_canonical_iteration_overrides_event_attrs() -> None:
 
 
 def test_counter_and_kernel_keep_iteration_without_metric_pollution(tmp_path: Path) -> None:
+    source_sample = CounterSample("GPU_Metrics", 10, 2, {"SM_Util_pct": 42.0})
+    assert source_sample.metrics == {"SM_Util_pct": 42.0}
+    assert source_sample.iteration == -1
+
     rank = Rank(0, 0, 0, global_rank=0)
     rows = _raw_iteration(rank, 137)
     rows.insert(
