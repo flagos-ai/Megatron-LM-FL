@@ -167,12 +167,13 @@ class HybridAnalyzer:
         ep_cv_by_iter = {it: float(np.mean(v)) for it, v in ep_by_iter.items()}
 
         bubble_stats: List[Dict] = self.pp.get("bubble_stats", [])
-        pp_bubble_by_iter: Dict[int, float] = {}
+        pp_by_iter: Dict[int, List[float]] = collections.defaultdict(list)
         for d in bubble_stats:
             it = d.get("iteration", d.get("iter", d.get("Iteration", -1)))
             rate = d.get("bubble_rate", d.get("Bubble_Rate", None))
             if it >= 0 and rate is not None:
-                pp_bubble_by_iter[it] = float(rate)
+                pp_by_iter[it].append(float(rate))
+        pp_bubble_by_iter = {it: float(np.mean(v)) for it, v in pp_by_iter.items()}
 
         common = sorted(set(ep_cv_by_iter) & set(pp_bubble_by_iter))
         ep_s = [ep_cv_by_iter[i] for i in common]

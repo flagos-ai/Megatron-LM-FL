@@ -130,12 +130,12 @@ def test_constructor_normalizes_non_dict_results_and_disabled_dimensions() -> No
     assert analyzer.diagnose_global_straggler() == []
 
 
-def test_ep_pp_correlation_keeps_source_iteration_key_contract_and_formula() -> None:
+def test_ep_pp_correlation_averages_multirank_producer_rows() -> None:
     ep = {
         "balance_data": [
-            {"iteration": 1, "expert_cv": 0.2},
-            {"iteration": 2, "expert_cv": 0.4},
-            {"iteration": 3, "expert_cv": 0.6},
+            {"iteration": 1, "expert_cv": 0.125},
+            {"iteration": 2, "expert_cv": 0.5},
+            {"iteration": 3, "expert_cv": 0.75},
         ],
         "straggler_data": [
             {"iteration": 3, "straggler_rank": 5, "gap_us": 300.0},
@@ -143,35 +143,41 @@ def test_ep_pp_correlation_keeps_source_iteration_key_contract_and_formula() -> 
         ],
     }
     sizes = {"dp": 1, "pp": 2, "tp": 1, "ep": 2}
-    actual_pp_producer_shape = {
-        "bubble_stats": [
-            {"Iteration": 1, "Bubble_Rate": 0.1},
-            {"Iteration": 2, "Bubble_Rate": 0.2},
-            {"Iteration": 3, "Bubble_Rate": 0.3},
-        ]
-    }
+    bubble_rows = [
+        {"Iteration": 1, "Rank": 0, "PP_Rank": 0, "Bubble_Rate": 0.0},
+        {"Iteration": 1, "Rank": 1, "PP_Rank": 1, "Bubble_Rate": 0.25},
+        {"Iteration": 2, "Rank": 0, "PP_Rank": 0, "Bubble_Rate": 0.25},
+        {"Iteration": 2, "Rank": 1, "PP_Rank": 1, "Bubble_Rate": 0.75},
+        {"Iteration": 3, "Rank": 0, "PP_Rank": 0, "Bubble_Rate": 0.5},
+        {"Iteration": 3, "Rank": 1, "PP_Rank": 1, "Bubble_Rate": 1.0},
+    ]
     result = _analyzer(
-        pp=actual_pp_producer_shape, ep=ep, sizes=sizes
+        pp={"bubble_stats": bubble_rows}, ep=ep, sizes=sizes
     ).analyze_ep_pp_bubble_amplification()
 
     assert result == {
         "correlation_ep_cv_pp_bubble": 1.0,
-        "avg_ep_expert_cv": 0.4,
-        "avg_pp_bubble_rate": 0.2,
+        "avg_ep_expert_cv": 0.4583,
+        "avg_pp_bubble_rate": 0.4583,
         "num_common_iterations": 3,
         "worst_iteration": 3,
         "root_ep_rank": 5,
         "estimated_bubble_overhead_us": 400.0,
         "severity": "CRITICAL",
-        "_ep_cv_series": [0.2, 0.4, 0.6],
-        "_pp_bubble_series": [0.1, 0.2, 0.3],
+        "_ep_cv_series": [0.125, 0.5, 0.75],
+        "_pp_bubble_series": [0.125, 0.5, 0.75],
         "_common_iters": [1, 2, 3],
     }
+    assert _analyzer(
+        pp={"bubble_stats": list(reversed(bubble_rows))}, ep=ep, sizes=sizes
+    ).analyze_ep_pp_bubble_amplification() == result
 
     lowercase = {"bubble_stats": [{"iteration": 1, "Bubble_Rate": 0.1}]}
-    assert _analyzer(pp=lowercase, ep=ep, sizes=sizes).analyze_ep_pp_bubble_amplification()[
-        "_common_iters"
-    ] == [1]
+    lowercase_result = _analyzer(
+        pp=lowercase, ep=ep, sizes=sizes
+    ).analyze_ep_pp_bubble_amplification()
+    assert lowercase_result["_common_iters"] == [1]
+    assert lowercase_result["_pp_bubble_series"] == [0.1]
 
     no_common = {"bubble_stats": [{"Iteration": 9, "Bubble_Rate": 0.1}]}
     assert _analyzer(pp=no_common, ep=ep, sizes=sizes).analyze_ep_pp_bubble_amplification()[
