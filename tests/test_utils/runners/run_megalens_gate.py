@@ -46,7 +46,6 @@ def _profile_checks(
     timeout: float,
     *,
     source_repo: Path | None = None,
-    contract_path: Path | None = None,
 ) -> list[Check]:
     scanner = root / "tools/probe_contract_scan.py"
     scanner_fixture = root / "tests/megalens/fixtures/probe_scan_gate.json"
@@ -54,8 +53,6 @@ def _profile_checks(
     if source_repo is not None:
         static_argv.extend(("--source-repo", str(source_repo)))
     static_argv.extend(("--target-repo", str(root), "--fixture", str(scanner_fixture)))
-    if contract_path is not None:
-        static_argv.extend(("--contract", str(contract_path)))
     static = Check(
         name="megalens-static-probe-contract",
         argv=tuple(static_argv),
@@ -214,21 +211,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         type=Path,
         help="recompute the locked MixedPara source snapshot in addition to the target gate",
     )
-    parser.add_argument(
-        "--probe-contract",
-        type=Path,
-        help="validate the external probe contract against the repository fixture",
-    )
     args = parser.parse_args(argv)
 
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
-    if args.target and (args.source_repo is not None or args.probe_contract is not None):
-        parser.error("--source-repo/--probe-contract only apply to profile checks")
+    if args.target and args.source_repo is not None:
+        parser.error("--source-repo only applies to profile checks")
 
     root = args.root.resolve()
     source_repo = args.source_repo.resolve() if args.source_repo is not None else None
-    contract_path = args.probe_contract.resolve() if args.probe_contract is not None else None
     checks = (
         _target_checks(args.target, root, args.python, args.timeout)
         if args.target
@@ -238,7 +229,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.python,
             args.timeout,
             source_repo=source_repo,
-            contract_path=contract_path,
         )
     )
     env = _check_environment(root)

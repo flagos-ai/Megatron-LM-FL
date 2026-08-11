@@ -452,11 +452,9 @@ def _read_fixture(
 def run_target_gate(
     target_repo: Path,
     fixture_path: Path,
-    contract_path: Path | None = None,
 ) -> GateResult:
-    """Validate the target tree; contract_path remains an ignored CLI compatibility option."""
+    """Validate the target tree against the reviewed fixture."""
 
-    del contract_path
     _, _, _, expected_target, errors = _read_fixture(fixture_path)
     target_scan = scan_repo(target_repo)
     if target_scan["parse_errors"]:
@@ -471,11 +469,10 @@ def run_full_gate(
     fixture_path: Path,
     *,
     source_ref: str | None = None,
-    contract_path: Path | None = None,
 ) -> GateResult:
     """Validate the locked MixedPara commit and the current target tree."""
 
-    target_result = run_target_gate(target_repo, fixture_path, contract_path)
+    target_result = run_target_gate(target_repo, fixture_path)
     _, baseline, expected_source, _, _ = _read_fixture(fixture_path)
     errors = list(target_result.errors)
     if source_ref is not None and source_ref != baseline:
@@ -503,9 +500,6 @@ def _parser() -> argparse.ArgumentParser:
     target = subparsers.add_parser("target", help="validate the current target tree")
     target.add_argument("--target-repo", type=Path, required=True)
     target.add_argument("--fixture", type=Path, required=True)
-    target.add_argument(
-        "--contract", type=Path, help="accepted for runner compatibility"
-    )
 
     gate = subparsers.add_parser(
         "gate", help="validate the locked source and current target"
@@ -514,7 +508,6 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument("--source-ref")
     gate.add_argument("--target-repo", type=Path, required=True)
     gate.add_argument("--fixture", type=Path, required=True)
-    gate.add_argument("--contract", type=Path, help="accepted for runner compatibility")
 
     rebuild = subparsers.add_parser("rebuild", help="rebuild the review fixture")
     rebuild.add_argument("--source-repo", type=Path, required=True)
@@ -538,14 +531,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "target":
-            result = run_target_gate(args.target_repo, args.fixture, args.contract)
+            result = run_target_gate(args.target_repo, args.fixture)
         elif args.command == "gate":
             result = run_full_gate(
                 args.source_repo,
                 args.target_repo,
                 args.fixture,
                 source_ref=args.source_ref,
-                contract_path=args.contract,
             )
         else:
             fixture = write_fixture(

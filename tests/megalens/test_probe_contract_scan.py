@@ -6,6 +6,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from tools import probe_contract_scan as gate
 
 REPOSITORY_ROOT = Path(__file__).parents[2]
@@ -239,21 +241,34 @@ def test_source_ref_override_must_match_the_locked_commit(tmp_path: Path) -> Non
     ) in result.errors
 
 
-def test_contract_argument_is_accepted_without_external_file_binding(
-    tmp_path: Path,
-) -> None:
-    source_repo = tmp_path / "source"
-    target_repo = tmp_path / "target"
-    _write_module(source_repo, producers=("event-a",))
-    _write_module(target_repo, producers=("event-a",))
-    fixture_path = tmp_path / "fixture.json"
-    _build_fixture(fixture_path, source_repo, target_repo)
-
-    result = gate.run_target_gate(
-        target_repo, fixture_path, tmp_path / "missing-contract.json"
-    )
-
-    assert result.errors == ()
+@pytest.mark.parametrize(
+    "argv",
+    (
+        (
+            "target",
+            "--target-repo",
+            ".",
+            "--fixture",
+            "fixture.json",
+            "--contract",
+            "missing.json",
+        ),
+        (
+            "gate",
+            "--source-repo",
+            ".",
+            "--target-repo",
+            ".",
+            "--fixture",
+            "fixture.json",
+            "--contract",
+            "missing.json",
+        ),
+    ),
+)
+def test_scanner_rejects_the_removed_contract_option(argv: tuple[str, ...]) -> None:
+    with pytest.raises(SystemExit, match="2"):
+        gate._parser().parse_args(argv)
 
 
 def test_target_parse_errors_are_reported(tmp_path: Path) -> None:

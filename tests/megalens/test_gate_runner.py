@@ -69,9 +69,8 @@ def test_cpu_profile_wires_static_contract_before_cpu_tests() -> None:
     } <= set(checks[1].argv)
 
 
-def test_cpu_profile_can_wire_locked_source_and_compatibility_argument() -> None:
+def test_cpu_profile_can_wire_locked_source() -> None:
     source_repo = REPOSITORY_ROOT.parent / "MixedPara"
-    contract = REPOSITORY_ROOT / "tests/megalens/fixtures/ignored-compatibility-input.json"
 
     checks = gate._profile_checks(
         "cpu",
@@ -79,7 +78,6 @@ def test_cpu_profile_can_wire_locked_source_and_compatibility_argument() -> None
         sys.executable,
         300.0,
         source_repo=source_repo,
-        contract_path=contract,
     )
 
     assert checks[0].argv == (
@@ -92,18 +90,23 @@ def test_cpu_profile_can_wire_locked_source_and_compatibility_argument() -> None
         str(REPOSITORY_ROOT),
         "--fixture",
         str(REPOSITORY_ROOT / "tests/megalens/fixtures/probe_scan_gate.json"),
-        "--contract",
-        str(contract),
     )
 
 
-def test_runner_rejects_contract_options_for_custom_targets(tmp_path: Path) -> None:
+def test_runner_rejects_source_repo_for_custom_targets(tmp_path: Path) -> None:
     passing = _write_script(tmp_path / "pass.py", "raise SystemExit(0)\n")
 
     result = _run_runner(tmp_path, "--target", str(passing), "--source-repo", str(tmp_path))
 
     assert result.returncode == 2
-    assert "only apply to profile checks" in result.stderr
+    assert "--source-repo only applies to profile checks" in result.stderr
+
+
+def test_runner_rejects_the_removed_probe_contract_option(tmp_path: Path) -> None:
+    result = _run_runner(tmp_path, "--probe-contract", str(tmp_path / "missing.json"))
+
+    assert result.returncode == 2
+    assert "unrecognized arguments: --probe-contract" in result.stderr
 
 
 def test_runner_preserves_first_failure_and_runs_later_targets(tmp_path: Path) -> None:
