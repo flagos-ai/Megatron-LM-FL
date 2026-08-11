@@ -660,6 +660,24 @@ FLAGCX_DP2_DISTOPT_OFFLINE_PROFILE = manifest.TraceProfile(
 )
 
 
+_LAYERWISE_FULL_CUDA_GRAPH_EVENTS = _events(
+    "forward-step",
+    "backward-step",
+    "decoder",
+    "decoder-postprocess",
+    "output_layer",
+    "loss",
+    "transformer_layer",
+    "_forward_attention",
+    "attention",
+    "_forward_mlp",
+    "MLP.forward",
+    "optimizer",
+    "optimizer-step",
+    "optimizer-postprocess",
+)
+
+
 # Profiles selectable by the loopback runner. Multi-node validation profiles
 # remain separate and are applied only to already completed run artifacts.
 PROFILES: Mapping[str, manifest.TraceProfile] = {
@@ -1174,66 +1192,28 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
     "te-full-cuda-graph": manifest.TraceProfile(
         "te-full-cuda-graph",
         1,
-        _events(
-            "forward-step",
-            "backward-step",
-            "decoder",
-            "decoder-postprocess",
-            "output_layer",
-            "loss",
-            "transformer_layer",
-            "_forward_attention",
-            "attention",
-            "_forward_mlp",
-            "MLP.forward",
-            "optimizer",
-            "optimizer-step",
-            "optimizer-postprocess",
-        ),
+        _LAYERWISE_FULL_CUDA_GRAPH_EVENTS,
         gpt_probe_contract.validate_te_full_cuda_graph_phases,
         training_run_contract.validate_two_iteration_te_full_cuda_graph_checkpoint,
+    ),
+    "te-full-cuda-kernels": manifest.TraceProfile(
+        "te-full-cuda-kernels",
+        1,
+        _LAYERWISE_FULL_CUDA_GRAPH_EVENTS,
+        gpt_probe_contract.validate_te_full_cuda_graph_kernel_phases,
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_kernel_checkpoint,
     ),
     "local-layerwise-full-cuda-graph": manifest.TraceProfile(
         "local-layerwise-full-cuda-graph",
         1,
-        _events(
-            "forward-step",
-            "backward-step",
-            "decoder",
-            "decoder-postprocess",
-            "output_layer",
-            "loss",
-            "transformer_layer",
-            "_forward_attention",
-            "attention",
-            "_forward_mlp",
-            "MLP.forward",
-            "optimizer",
-            "optimizer-step",
-            "optimizer-postprocess",
-        ),
+        _LAYERWISE_FULL_CUDA_GRAPH_EVENTS,
         gpt_probe_contract.validate_local_layerwise_full_cuda_graph_phases,
         training_run_contract.validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint,
     ),
     "local-layerwise-cuda-kernels": manifest.TraceProfile(
         "local-layerwise-cuda-kernels",
         1,
-        _events(
-            "forward-step",
-            "backward-step",
-            "decoder",
-            "decoder-postprocess",
-            "output_layer",
-            "loss",
-            "transformer_layer",
-            "_forward_attention",
-            "attention",
-            "_forward_mlp",
-            "MLP.forward",
-            "optimizer",
-            "optimizer-step",
-            "optimizer-postprocess",
-        ),
+        _LAYERWISE_FULL_CUDA_GRAPH_EVENTS,
         gpt_probe_contract.validate_local_layerwise_cuda_graph_kernel_phases,
         training_run_contract.validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint,
     ),
@@ -1417,6 +1397,9 @@ _CONFIG_PROFILES = {
         "te-attn-mlp-recompute-cuda-graph"
     ),
     "flagscale_single_node_te_cuda_graph_full_smoke": "te-full-cuda-graph",
+    "flagscale_single_node_te_cuda_graph_full_cupti_smoke": (
+        "te-full-cuda-kernels"
+    ),
     "flagscale_single_node_local_cuda_graph_full_smoke": (
         "local-layerwise-full-cuda-graph"
     ),

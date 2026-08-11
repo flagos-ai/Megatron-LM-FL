@@ -126,6 +126,9 @@ _CONFIG_PROFILE_CASES = {
         "te-attn-mlp-recompute-cuda-graph"
     ),
     "flagscale_single_node_te_cuda_graph_full_smoke.yaml": "te-full-cuda-graph",
+    "flagscale_single_node_te_cuda_graph_full_cupti_smoke.yaml": (
+        "te-full-cuda-kernels"
+    ),
     "flagscale_single_node_local_cuda_graph_full_smoke.yaml": (
         "local-layerwise-full-cuda-graph"
     ),
@@ -1131,6 +1134,34 @@ def test_te_full_cuda_graph_profile_only_changes_the_graph_lifecycle() -> None:
     )
 
 
+def test_te_full_cuda_graph_kernel_profile_only_enables_cupti() -> None:
+    baseline = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_te_cuda_graph_full_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    cupti = yaml.safe_load(
+        (
+            _FIXTURES
+            / "flagscale_single_node_te_cuda_graph_full_cupti_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+
+    baseline["experiment"]["exp_name"] = cupti["experiment"]["exp_name"]
+    baseline["train"]["system"]["trace_cupti_kernels"] = "on"
+
+    assert cupti == baseline
+    profile = gate.PROFILES["te-full-cuda-kernels"]
+    assert profile.rank_count == 1
+    assert profile.events == gate.PROFILES["te-full-cuda-graph"].events
+    assert profile.contract is (
+        gpt_probe_contract.validate_te_full_cuda_graph_kernel_phases
+    )
+    assert profile.run_contract is (
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_kernel_checkpoint
+    )
+
+
 def test_local_layerwise_full_cuda_graph_profile_only_changes_the_graph_owner() -> None:
     baseline = yaml.safe_load(
         (
@@ -1761,6 +1792,38 @@ def test_te_full_cuda_graph_training_contract_requires_capture_and_replay(
         )
         == ()
     )
+
+    kernel_log = "\n".join(
+        (
+            valid_log,
+            "[default0]:  trace_cupti_kernels ............. on",
+            "[default0]:[trace] extracted 120 cuda kernel events at iter 1",
+            "[default0]:[trace] extracted 80 cuda kernel events at iter 2",
+        )
+    )
+    launcher_log.write_text(kernel_log, encoding="utf-8")
+    assert (
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_kernel_checkpoint(
+            tmp_path, True
+        )
+        == ()
+    )
+
+    launcher_log.write_text(
+        kernel_log.replace(
+            "[default0]:[trace] extracted 80 cuda kernel events at iter 2",
+            "",
+        ),
+        encoding="utf-8",
+    )
+    failures = (
+        training_run_contract.validate_two_iteration_te_full_cuda_graph_kernel_checkpoint(
+            tmp_path, True
+        )
+    )
+    assert [failure.code for failure in failures] == [
+        "run.training.cuda_kernel_capture"
+    ]
 
     launcher_log.write_text(
         valid_log.replace(
@@ -2443,6 +2506,7 @@ def test_standard_training_profiles_require_the_terminal_checkpoint() -> None:
         "tp2-sp-te-op-fuser",
         "te-attn-mlp-recompute-cuda-graph",
         "te-full-cuda-graph",
+        "te-full-cuda-kernels",
         "local-layerwise-full-cuda-graph",
         "local-layerwise-cuda-kernels",
         "local-full-iteration-cuda-graph",
@@ -3468,10 +3532,14 @@ def test_local_layerwise_full_profile_rejects_inner_replay_events(
     assert failures[0].evidence == "rank=0 iteration=2"
 
 
-def test_local_cuda_graph_kernel_profile_captures_eager_and_replay_device_work(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "profile_name",
+    ("local-layerwise-cuda-kernels", "te-full-cuda-kernels"),
+)
+def test_cuda_graph_kernel_profiles_capture_eager_and_replay_device_work(
+    tmp_path: Path, profile_name: str
 ) -> None:
-    trace_root = tmp_path / "local-cuda-graph-kernels"
+    trace_root = tmp_path / profile_name
     _write_gpt_phase_trace(
         trace_root,
         rank=0,
@@ -3484,13 +3552,17 @@ def test_local_cuda_graph_kernel_profile_captures_eager_and_replay_device_work(
         kernel_iterations=frozenset((1, 2)),
     )
 
-    assert gate.PROFILES["local-layerwise-cuda-kernels"].contract(trace_root) == ()
+    assert gate.PROFILES[profile_name].contract(trace_root) == ()
 
 
-def test_local_cuda_graph_kernel_profile_requires_replay_device_work(
-    tmp_path: Path,
+@pytest.mark.parametrize(
+    "profile_name",
+    ("local-layerwise-cuda-kernels", "te-full-cuda-kernels"),
+)
+def test_cuda_graph_kernel_profiles_require_replay_device_work(
+    tmp_path: Path, profile_name: str
 ) -> None:
-    trace_root = tmp_path / "local-cuda-graph-missing-replay-kernels"
+    trace_root = tmp_path / f"{profile_name}-missing-replay-kernels"
     _write_gpt_phase_trace(
         trace_root,
         rank=0,
@@ -3503,7 +3575,7 @@ def test_local_cuda_graph_kernel_profile_requires_replay_device_work(
         kernel_iterations=frozenset((1,)),
     )
 
-    failures = gate.PROFILES["local-layerwise-cuda-kernels"].contract(trace_root)
+    failures = gate.PROFILES[profile_name].contract(trace_root)
 
     assert [failure.code for failure in failures] == [
         "trace.gpt.cuda_graph_kernel_capture"

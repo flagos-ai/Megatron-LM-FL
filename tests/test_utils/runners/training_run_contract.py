@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Callable
 
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
@@ -484,16 +485,16 @@ def validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
     return tuple(failures)
 
 
-def validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint(
-    run_root: Path, trace_enabled: bool
+def _validate_two_iteration_cuda_graph_kernel_checkpoint(
+    run_root: Path,
+    trace_enabled: bool,
+    *,
+    framework_contract: Callable[[Path, bool], tuple[Failure, ...]],
+    profile_label: str,
 ) -> tuple[Failure, ...]:
-    """Require local Graph lifecycle and per-iteration CUDA kernel extraction."""
+    """Require Graph lifecycle and per-iteration CUDA kernel extraction."""
 
-    failures = list(
-        validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint(
-            run_root, trace_enabled
-        )
-    )
+    failures = list(framework_contract(run_root, trace_enabled))
     launcher_log = run_root / "launcher.log"
     try:
         log_text = launcher_log.read_text(encoding="utf-8")
@@ -528,7 +529,7 @@ def validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint(
             failures.append(
                 Failure(
                     "run.training.cuda_kernel_capture",
-                    "CUPTI-on local whole-layer run must extract a positive CUDA "
+                    f"CUPTI-on {profile_label} run must extract a positive CUDA "
                     "kernel count exactly once for iterations [1, 2]; observed "
                     f"{list(extractions)}",
                     str(launcher_log),
@@ -538,13 +539,39 @@ def validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint(
         failures.append(
             Failure(
                 "run.training.cuda_kernel_capture",
-                "trace-off local whole-layer run unexpectedly extracted CUDA "
+                f"trace-off {profile_label} run unexpectedly extracted CUDA "
                 f"kernels; observed {list(extractions)}",
                 str(launcher_log),
             )
         )
 
     return tuple(failures)
+
+
+def validate_two_iteration_local_layerwise_cuda_graph_kernel_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require local Graph lifecycle and per-iteration CUDA kernel extraction."""
+
+    return _validate_two_iteration_cuda_graph_kernel_checkpoint(
+        run_root,
+        trace_enabled,
+        framework_contract=validate_two_iteration_local_layerwise_full_cuda_graph_checkpoint,
+        profile_label="local whole-layer",
+    )
+
+
+def validate_two_iteration_te_full_cuda_graph_kernel_checkpoint(
+    run_root: Path, trace_enabled: bool
+) -> tuple[Failure, ...]:
+    """Require TE Graph lifecycle and per-iteration CUDA kernel extraction."""
+
+    return _validate_two_iteration_cuda_graph_kernel_checkpoint(
+        run_root,
+        trace_enabled,
+        framework_contract=validate_two_iteration_te_full_cuda_graph_checkpoint,
+        profile_label="TE whole-layer",
+    )
 
 
 def validate_three_iteration_local_full_cuda_graph_checkpoint(

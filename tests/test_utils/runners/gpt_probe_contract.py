@@ -6,7 +6,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Mapping, Sequence
+from typing import Callable, Iterable, Mapping, Sequence
 
 from megatron.megalens.trace_aggregate import (
     Event,
@@ -695,12 +695,15 @@ def validate_local_layerwise_full_cuda_graph_phases(
     )
 
 
-def validate_local_layerwise_cuda_graph_kernel_phases(
+def _validate_layerwise_cuda_graph_kernel_phases(
     trace_root: Path,
+    *,
+    framework_contract: Callable[[Path], tuple[Failure, ...]],
+    owner: str,
 ) -> tuple[Failure, ...]:
-    """Validate rank-local device work for eager and local Graph replay."""
+    """Validate rank-local device work for eager and layerwise Graph replay."""
 
-    failures = list(validate_local_layerwise_full_cuda_graph_phases(trace_root))
+    failures = list(framework_contract(trace_root))
     iterations = _load_iterations(trace_root).get(0, ())
 
     for iteration in iterations:
@@ -714,7 +717,7 @@ def validate_local_layerwise_cuda_graph_kernel_phases(
             failures.append(
                 _failure(
                     "trace.gpt.cuda_graph_kernel_capture",
-                    "local whole-layer CUDA Graph iteration has no CUDA kernel records",
+                    f"{owner} CUDA Graph iteration has no CUDA kernel records",
                     rank=0,
                     iteration=iteration_id,
                 )
@@ -825,13 +828,37 @@ def validate_local_layerwise_cuda_graph_kernel_phases(
             failures.append(
                 _failure(
                     "trace.gpt.cuda_graph_replay_compute_kernel",
-                    "local whole-layer replay has no recognized model-compute kernel",
+                    f"{owner} replay has no recognized model-compute kernel",
                     rank=0,
                     iteration=iteration_id,
                 )
             )
 
     return tuple(failures)
+
+
+def validate_local_layerwise_cuda_graph_kernel_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate rank-local device work for eager and local Graph replay."""
+
+    return _validate_layerwise_cuda_graph_kernel_phases(
+        trace_root,
+        framework_contract=validate_local_layerwise_full_cuda_graph_phases,
+        owner="local whole-layer",
+    )
+
+
+def validate_te_full_cuda_graph_kernel_phases(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate rank-local device work for eager and TE Graph replay."""
+
+    return _validate_layerwise_cuda_graph_kernel_phases(
+        trace_root,
+        framework_contract=validate_te_full_cuda_graph_phases,
+        owner="TE whole-layer",
+    )
 
 
 def validate_local_full_iteration_cuda_graph_phases(
