@@ -345,13 +345,13 @@ class MoTTransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         has_mot = branch_token_indexes is not None and len(branch_token_indexes) > 0
 
-        if has_mot:
-            validate_branch_token_indexes(
-                hidden_states,
-                branch_token_indexes,
-                self.branch_names,
-                packed_seq_params,
-            )
+        # if has_mot:
+        #     validate_branch_token_indexes(
+        #         hidden_states,
+        #         branch_token_indexes,
+        #         self.branch_names,
+        #         packed_seq_params,
+        #     )
 
         # ==============================================================
         # Multi-branch Input LayerNorm

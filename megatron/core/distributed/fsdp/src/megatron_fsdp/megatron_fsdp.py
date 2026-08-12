@@ -513,6 +513,7 @@ class MegatronFSDP(torch.nn.Module):
         self.forward_hooks = {}
         self.backward_pre_hooks = {}
         self.grad_acc_hooks = {}
+        self._debug_grad_hook_counts = {}
 
         """
         An FSDP unit is a module designed to manage the lifecycle of model parameters
@@ -668,6 +669,35 @@ class MegatronFSDP(torch.nn.Module):
                 - In hybrid FSDP configurations, an outer FSDP group gradient reduction
                 may be triggered.
             """
+
+            # if not hasattr(self, "_debug_grad_hook_counts"):
+            #     self._debug_grad_hook_counts = {}
+
+            # rank = torch.distributed.get_rank()
+
+            # for param in param_list:
+            #     name = self.param_to_name[param]
+            #     count = self._debug_grad_hook_counts.get(name, 0) + 1
+            #     self._debug_grad_hook_counts[name] = count
+
+            #     bucket_id = self.param_and_grad_buffer.param_to_param_group[param]
+            #     ready_names = [
+            #         self.param_to_name[p]
+            #         for p in self.grad_reduce_pipeline.bucket_grad_ready_params[bucket_id]
+            #     ]
+
+            #     if rank == 0:
+            #         print(
+            #             "[FSDP_GRAD_HOOK]",
+            #             f"name={name}",
+            #             f"count={count}",
+            #             f"bucket={bucket_id}",
+            #             f"grad_none={param.grad is None}",
+            #             f"already_ready={name in ready_names}",
+            #             f"ready_before={ready_names}",
+            #             flush=True,
+            #         )
+
             # Filter out shared parameters whose gradients are handled by the root hook.
             param_list = [p for p in param_list if not getattr(p, "_is_shared", False)]
             for param in param_list:
@@ -718,6 +748,7 @@ class MegatronFSDP(torch.nn.Module):
                 fsdp_forward_prefetch = False
             else:
                 module._training_state = TrainingState.FORWARD
+            # print(f"{fsdp_forward_prefetch=}, {input_training_state=}, {module=}")
 
             if isinstance(module, tuple(fsdp_unit_modules)):
                 param_list = list(module.parameters())
@@ -800,6 +831,32 @@ class MegatronFSDP(torch.nn.Module):
 
         def _root_post_backward(*unused):
             # Make sure all the gradients are handled.
+            # if torch.distributed.get_rank() == 0:
+            #     print(
+            #         "[FSDP_ROOT_POST_BACKWARD]",
+            #         f"microbatch_count={self.microbatch_count}",
+            #         "pending_params=",
+            #         [
+            #             self.param_to_name[p]
+            #             for p in self._params_require_handle_grad
+            #         ],
+            #         "hook_counts=",
+            #         getattr(self, "_debug_grad_hook_counts", {}),
+            #         flush=True,
+            #     )
+
+            #     for bucket_id, ready_params in enumerate(
+            #         self.grad_reduce_pipeline.bucket_grad_ready_params
+            #     ):
+            #         if ready_params:
+            #             print(
+            #                 "[FSDP_BUCKET_STATE]",
+            #                 f"bucket={bucket_id}",
+            #                 "ready=",
+            #                 [self.param_to_name[p] for p in ready_params],
+            #                 flush=True,
+            #             )
+
             ordered_params = sorted(
                 list(self._params_require_handle_grad), key=lambda p: self.param_to_name[p]
             )
@@ -874,13 +931,29 @@ class MegatronFSDP(torch.nn.Module):
             and skip weight deallocation / resharding in the post-forward hooks
             during the backward pass, which are instead performed by backward hooks.
             """
+            # if torch.distributed.get_rank() == 0:
+            #     print(
+            #         "[FSDP_ROOT_PRE_BACKWARD]",
+            #         f"module={module.__class__.__name__}",
+            #         f"already_issued={self._root_pre_backward_hook_issued}",
+            #         f"microbatch_count={self.microbatch_count}",
+            #         "hook_counts_before_root=",
+            #         self._debug_grad_hook_counts,
+            #         flush=True,
+            #     )
+
             if self._root_pre_backward_hook_issued:
                 return
             self._root_pre_backward_hook_issued = True
 
             if self.data_parallel_sharding_strategy == "optim_grads_params":
                 for module in root_module.modules():
-                    if isinstance(module, tuple(fsdp_unit_modules)):
+                    # if isinstance(module, tuple(fsdp_unit_modules)):
+                    if isinstance(module, tuple(fsdp_unit_modules)) and any(
+                        param.requires_grad for param in module.parameters()
+                    ):
+                        # Fully frozen FSDP units do not run backward and cannot reset
+                        # PRE_BACKWARD via the module post-backward hook.
                         # Set PRE_BACKWARD state to skip resharding and forward pre-fetching
                         # when performing activation recomputation / gradient checkpointing.
                         module._training_state = TrainingState.PRE_BACKWARD
@@ -1061,6 +1134,14 @@ class MegatronFSDP(torch.nn.Module):
             self.backward_pre_hooks[f"{name} _root_pre_backward"] = create_custom_backward_hook(
                 module, _root_pre_backward
             )
+        # if torch.distributed.get_rank() == 0:
+        #     print(
+        #         "[FSDP_ROOT_HOOK_TARGET]",
+        #         f"root={root_module.__class__.__name__}",
+        #         f"loop_last_name={name}",
+        #         f"loop_last_module={module.__class__.__name__}",
+        #         flush=True,
+        #     )
         self._root_pre_backward_hook_handle = create_custom_backward_hook(
             module, _root_pre_backward
         )
