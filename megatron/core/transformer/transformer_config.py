@@ -453,6 +453,19 @@ class TransformerConfig(ModelParallelConfig):
     linear_num_value_heads: Optional[int] = 32
     """Number of value and gate heads for the gated delta net."""
 
+    linear_cp_mode: Optional[str] = "chunkwise"
+    """Context parallel mode for gated delta net. Options: 'headwise' (Ulysses-style all-to-all)
+    or 'chunkwise' (FLA ring CP). Headwise is bitwise-exact with CP-off; chunkwise is
+    approximate at bf16 floor but has better memory efficiency."""
+
+    gdn_conv_pad_alignment: Optional[int] = None
+    """Alignment for causal conv1d input padding in GDN packed sequence mode.
+    When set, pads the conv input to a multiple of this value. Incompatible with chunkwise CP."""
+
+    gdn_pre_gated_delta_rule_fusion: bool = False
+    """Whether to use fused pre_gated_delta_rule kernel for GDN. Requires custom CUDA extension.
+    When False, falls back to non-fused implementation."""
+
     ####################
     # initialization
     ####################
@@ -1313,11 +1326,40 @@ class TransformerConfig(ModelParallelConfig):
                 self.linear_num_value_heads % self.tensor_model_parallel_size == 0
             ), "linear_num_value_heads must be a multiple of tensor_model_parallel_size."
 
-            # Do not support yet, but coming soon.
-            assert self.context_parallel_size == 1, (
-                f"Gated delta net does not support context parallel for now,"
-                f" but got {self.context_parallel_size=}."
-            )
+            # Context parallel validation
+            if self.context_parallel_size > 1:
+                assert self.linear_cp_mode in ("headwise", "chunkwise"), (
+                    f"linear_cp_mode must be one of 'headwise' or 'chunkwise', "
+                    f"got {self.linear_cp_mode!r}."
+                )
+                if self.linear_cp_mode == "headwise":
+                    linear_head_parallel_size = (
+                        self.linear_num_key_heads // self.tensor_model_parallel_size
+                    )
+                    assert linear_head_parallel_size % self.context_parallel_size == 0, (
+                        f"GDN headwise CP requires num_key_heads_per_tp "
+                        f"({linear_head_parallel_size}) to be divisible by "
+                        f"context_parallel_size ({self.context_parallel_size})."
+                    )
+                    linear_head_parallel_size_v = (
+                        self.linear_num_value_heads // self.tensor_model_parallel_size
+                    )
+                    assert linear_head_parallel_size_v % self.context_parallel_size == 0, (
+                        f"GDN headwise CP requires num_value_heads_per_tp "
+                        f"({linear_head_parallel_size_v}) to be divisible by "
+                        f"context_parallel_size ({self.context_parallel_size})."
+                    )
+                if self.gdn_conv_pad_alignment is not None:
+                    assert self.linear_cp_mode != "chunkwise", (
+                        "gdn_conv_pad_alignment is incompatible with "
+                        "linear_cp_mode='chunkwise' when context_parallel_size > 1."
+                    )
+            if self.gdn_conv_pad_alignment is not None:
+                assert self.gdn_conv_pad_alignment > 0, (
+                    f"gdn_conv_pad_alignment must be positive when set, "
+                    f"got {self.gdn_conv_pad_alignment}."
+                )
+
             tp_cp_size = self.tensor_model_parallel_size * self.context_parallel_size
             assert self.linear_num_value_heads % tp_cp_size == 0, (
                 f"{self.linear_num_value_heads=} must be a multiple of "
