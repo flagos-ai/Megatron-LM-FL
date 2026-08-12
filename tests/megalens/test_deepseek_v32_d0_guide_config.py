@@ -166,6 +166,7 @@ def test_v32_d0_requires_the_real_guide_inputs_and_flagos_backends() -> None:
         "gather_backward",
         "index_add_",
         "slice_backward",
+        "mul",
     ]
     assert model["profile"] is True
     assert (model["profile_step_start"], model["profile_step_end"]) == (3, 5)
