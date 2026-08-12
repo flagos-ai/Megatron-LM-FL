@@ -425,6 +425,7 @@ RUN source /root/miniconda3/etc/profile.d/conda.sh \
 RUN source /root/miniconda3/etc/profile.d/conda.sh \
     && conda activate flagscale-train \
     && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && export TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
     && python -c \
     'import importlib.metadata as md, importlib.util, pathlib, runpy, sys; root = pathlib.Path("/workspace/Megatron-LM-FL").resolve(); modules = ("megatron.core", "megatron.megalens", "megatron.training"); origins = [pathlib.Path(importlib.util.find_spec(name).origin).resolve() for name in modules]; source_version = runpy.run_path(root / "megatron/core/package_info.py")["__version__"]; helpers = list((root / "megatron/core/datasets").glob("helpers_cpp*.so")); assert sys.executable == "/root/miniconda3/envs/flagscale-train/bin/python"; assert all(path.is_relative_to(root) for path in origins), origins; assert source_version == md.version("megatron-core"); assert len(list(md.distributions(name="megatron-core"))) == 1; assert len(helpers) == 1, helpers' \
     && python -c \

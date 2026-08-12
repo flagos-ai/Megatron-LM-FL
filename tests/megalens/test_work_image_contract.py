@@ -283,6 +283,15 @@ def test_work_image_artifact_manifest_matches_the_docker_arguments() -> None:
     ):
         assert f'"{field}": "%s"' in dockerfile
 
+    final_check = dockerfile.split(
+        "# Build stages do not receive GPUs", 1
+    )[1]
+    assert dockerfile.count("export TORCH_DEVICE_BACKEND_AUTOLOAD=0") == 1
+    assert final_check.index(
+        "export TORCH_DEVICE_BACKEND_AUTOLOAD=0"
+    ) < final_check.index("python -c")
+    assert "ENV TORCH_DEVICE_BACKEND_AUTOLOAD" not in dockerfile
+
 
 def test_installed_userbuffer_adapter_verifier_checks_every_required_snippet(
     tmp_path: Path,
