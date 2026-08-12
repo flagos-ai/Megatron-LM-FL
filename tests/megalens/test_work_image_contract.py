@@ -93,6 +93,32 @@ def test_flagscale_patch_preserves_graph_compatibility_and_is_pinned() -> None:
 
 def test_flagscale_archive_source_contract_matches_enforced_checks() -> None:
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
+    assert '#   CONTEXT="$(mktemp -d /tmp/flagos-work-context.XXXXXXXX)"' in dockerfile
+    assert "#   DOCKER_BUILDKIT=0 docker build --network=none" in dockerfile
+    assert '#   docker image inspect "${BASE_IMAGE}" >/dev/null' in dockerfile
+    assert "EMERGING_OPTIMIZERS_ROOT" not in dockerfile
+    assert "EMERGING_OPTIMIZERS_SOURCE_DATE_EPOCH" not in dockerfile
+    assert "uv build" not in dockerfile
+    assert (
+        "#   EMERGING_OPTIMIZERS_REVISION="
+        "d5363b4a418128cd8111983b191c4b8869a9766b"
+        in dockerfile
+    )
+    assert (
+        "#   EMERGING_OPTIMIZERS_WHEEL_SHA256="
+        "03c111935f484bb89ca6e1954448130d926b0d3568832fd7181547680837640a"
+        in dockerfile
+    )
+    assert '#   cp "${EMERGING_OPTIMIZERS_WHEEL}" "${CONTEXT}/wheels/"' in dockerfile
+    assert (
+        "#   FLAGSCALE_REVISION=6d775cd01d5c822f9413b9952a81652c917d273e"
+        in dockerfile
+    )
+    assert (
+        "#   FLAGSCALE_TREE=198de8867fee8bce6e140d100910c7899ab84690"
+        in dockerfile
+    )
+    assert 'FLAGSCALE_REVISION="$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD)"' not in dockerfile
     flagscale_run = dockerfile.split("# FlagScale's runner", 1)[1].split(
         "# Build stages do not receive GPUs", 1
     )[0]
@@ -169,19 +195,93 @@ def test_flagscale_controlled_exit_flushes_megalens_before_system_exit() -> None
     )
 
 
-def test_work_image_wheel_manifest_matches_the_docker_argument() -> None:
+def test_work_image_artifact_manifest_matches_the_docker_arguments() -> None:
     dockerfile = _DOCKERFILE.read_text(encoding="utf-8")
-    wheel_sha256 = _docker_arg(dockerfile, "TE_FL_WHEEL_SHA256")
     manifest = dict(
         line.split(maxsplit=1)[::-1]
         for line in _WHEEL_MANIFEST.read_text(encoding="utf-8").splitlines()
         if line.strip()
     )
 
-    assert (
-        manifest["transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl"]
-        == wheel_sha256
+    expected = {
+        "transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl": (
+            "TE_FL_WHEEL_SHA256"
+        ),
+        "flag_gems-5.0.2-py3-none-any.whl": "FLAG_GEMS_WHEEL_SHA256",
+        "flagcx-0.13.0-cp312-cp312-linux_x86_64.whl": "FLAGCX_WHEEL_SHA256",
+        "libflagcx.so": "FLAGCX_LIBRARY_SHA256",
+    }
+    assert {name: manifest[name] for name in expected} == {
+        name: _docker_arg(dockerfile, argument) for name, argument in expected.items()
+    }
+    pip_installs = dockerfile.split("python -m pip install")[1:]
+    assert len(pip_installs) == 6
+    assert "ENV PIP_NO_INDEX=1" in dockerfile
+    assert all("--no-index" in install.split("&&", 1)[0] for install in pip_installs)
+    assert dockerfile.index("sha256sum -c /tmp/flagos-work-wheels.sha256") < (
+        dockerfile.index("python -m pip install")
     )
+
+    assert "ARG FLAGCX_SOURCE_TAG=v0.13.0" in dockerfile
+    assert (
+        _docker_arg(dockerfile, "FLAGCX_SOURCE_REVISION")
+        == "0beba7aa7e76cc0885a9929f1975857bcd310d5e"
+    )
+    assert (
+        _docker_arg(dockerfile, "FLAGCX_SOURCE_ARCHIVE_SHA256")
+        == "9186f5fcfcbaceac834812e35423072ea45a8579c362c7e0cb51c3ae645000aa"
+    )
+    assert '"${FLAGCX_SOURCE_ARCHIVE}" | sha256sum -c -' in dockerfile
+    assert (
+        'install -m 0755 /tmp/flagos-wheels/libflagcx.so '
+        '"${FLAGOS_ENV}/lib/libflagcx.so"'
+        in dockerfile
+    )
+    assert (
+        "libnccl.so.2 => ${FLAGOS_ENV}/lib/python3.12/site-packages/"
+        "nvidia/nccl/lib/libnccl.so.2"
+        in dockerfile
+    )
+    assert (
+        'expected = {"flag-gems": "5.0.2", "flagcx": "0.13.0", '
+        '"greenlet": "3.5.4", "grpcio": "1.83.0", "Markdown": "3.10.3", '
+        '"packaging": "26.0", "PyYAML": "6.0.3", "SQLAlchemy": "2.0.48", '
+        '"tensorboard": "2.20.0", "tensorboard-data-server": "0.7.2", '
+        '"nvidia-nccl-cu12": "2.27.5"}'
+        in dockerfile
+    )
+    for dependency in (
+        "absl_py-2.4.0-py3-none-any.whl",
+        "greenlet-3.5.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl",
+        "grpcio-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl",
+        "markdown-3.10.3-py3-none-any.whl",
+        "nvidia_ml_py-13.595.45-py3-none-any.whl",
+        "packaging-26.0-py3-none-any.whl",
+        "pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "sqlalchemy-2.0.48-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+        "tensorboard-2.20.0-py3-none-any.whl",
+        "tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl",
+    ):
+        assert dependency in manifest
+        assert f"/tmp/flagos-wheels/{dependency}" in dockerfile
+    for label in (
+        "org.flagos.flag-gems.wheel.sha256",
+        "org.flagos.flagcx.source.tag",
+        "org.flagos.flagcx.source.revision",
+        "org.flagos.flagcx.source.archive.sha256",
+        "org.flagos.flagcx.wheel.sha256",
+        "org.flagos.flagcx.library.sha256",
+    ):
+        assert label in dockerfile
+    for field in (
+        "flag_gems_wheel_sha256",
+        "flagcx_source_tag",
+        "flagcx_source_revision",
+        "flagcx_source_archive_sha256",
+        "flagcx_wheel_sha256",
+        "flagcx_library_sha256",
+    ):
+        assert f'"{field}": "%s"' in dockerfile
 
 
 def test_installed_userbuffer_adapter_verifier_checks_every_required_snippet(
