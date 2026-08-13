@@ -322,6 +322,8 @@ def _write_tp2_pp4_multimicrobatch_trace(
     trace_root: Path,
     *,
     wrong_peer: bool = False,
+    missing_launch_end: bool = False,
+    mismatched_payload: bool = False,
 ) -> None:
     for rank in range(8):
         pipeline_rank, tensor_rank = divmod(rank, 2)
@@ -388,10 +390,25 @@ def _write_tp2_pp4_multimicrobatch_trace(
                         "direction": send_or_recv,
                         "pipeline_direction": pipeline_direction,
                         "peer_rank": peer_rank,
-                        "data_bytes": 32768,
+                        "data_bytes": (
+                            65536
+                            if mismatched_payload
+                            and rank == 2
+                            and iteration == 1
+                            and direction == "recv-forward"
+                            and microbatch == 0
+                            else 32768
+                        ),
                     }
                     event("p2p-launch", "B", operations=[operation])
-                    event("p2p-launch", "E")
+                    if not (
+                        missing_launch_end
+                        and rank == 0
+                        and iteration == 1
+                        and direction == "send-forward"
+                        and microbatch == 0
+                    ):
+                        event("p2p-launch", "E")
                     event(direction, "B", operation_id=operation_id)
                     event(direction, "E")
 
@@ -437,6 +454,26 @@ def test_tp2_pp4_multimicrobatch_contract_rejects_cross_lane_peer(
     failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
 
     assert "trace.tp_pp.p2p_operation" in {failure.code for failure in failures}
+
+
+def test_tp2_pp4_multimicrobatch_contract_requires_closed_p2p_scopes(
+    tmp_path: Path,
+) -> None:
+    _write_tp2_pp4_multimicrobatch_trace(tmp_path, missing_launch_end=True)
+
+    failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
+
+    assert "trace.tp.unmatched_begin" in {failure.code for failure in failures}
+
+
+def test_tp2_pp4_multimicrobatch_contract_matches_link_payloads(
+    tmp_path: Path,
+) -> None:
+    _write_tp2_pp4_multimicrobatch_trace(tmp_path, mismatched_payload=True)
+
+    failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
+
+    assert "trace.tp_pp.p2p_payload" in {failure.code for failure in failures}
 
 
 def test_tp2_collective_contract_requires_nested_physical_reduce_scatter(

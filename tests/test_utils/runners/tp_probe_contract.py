@@ -1420,6 +1420,8 @@ def validate_tp2_pp4_multimicrobatch(
         "recv-forward": -1,
         "send-backward": -1,
     }
+    sent_payloads: dict[tuple[int, int, int, str], Counter[int]] = defaultdict(Counter)
+    received_payloads: dict[tuple[int, int, int, str], Counter[int]] = defaultdict(Counter)
     for (pipeline_rank, tensor_rank), rank in coordinates.items():
         iterations = by_rank[rank]
         iteration_ids = tuple(item.iteration_id for item in iterations)
@@ -1438,46 +1440,71 @@ def validate_tp2_pp4_multimicrobatch(
         }
         for iteration in iterations:
             iteration_id = int(iteration.iteration_id)
+            compute_spans, pairing_failures = _pair_spans(
+                iteration, ("forward-step", "backward-step"), rank=rank
+            )
+            failures.extend(pairing_failures)
             for name in ("forward-step", "backward-step"):
-                begins = [
-                    event
-                    for event in iteration.events
-                    if event.name == name and event.ph == "B"
-                ]
-                ends = [
-                    event
-                    for event in iteration.events
-                    if event.name == name and event.ph == "E"
-                ]
+                spans = compute_spans.get(name, ())
                 microbatches = [
-                    event.attrs.get("current_microbatch") for event in begins
+                    span.begin.attrs.get("current_microbatch") for span in spans
                 ]
-                operation_ids = {event.attrs.get("operation_id") for event in ends}
-                expected_ids = {
+                operation_ids = [span.end.attrs.get("operation_id") for span in spans]
+                expected_ids = [
                     f"pp:microbatch={microbatch}:vp=none" for microbatch in range(4)
-                }
+                ]
                 if microbatches != list(range(4)) or operation_ids != expected_ids:
                     failures.append(
                         _failure(
                             "trace.tp_pp.microbatches",
                             f"{name} microbatches={microbatches!r}, "
-                            f"operation_ids={sorted(map(str, operation_ids))}",
+                            f"operation_ids={operation_ids!r}",
                             rank=rank,
                             iteration=iteration_id,
                         )
                     )
 
-            launches = [
-                event
-                for event in iteration.events
-                if event.name == "p2p-launch" and event.ph == "B"
-            ]
+            p2p_spans, pairing_failures = _pair_spans(
+                iteration,
+                (
+                    "p2p-launch",
+                    "p2p-batch-complete",
+                    "p2p-batch-device-sync",
+                    *peer_stage,
+                ),
+                rank=rank,
+            )
+            failures.extend(pairing_failures)
+            launches = [span.begin for span in p2p_spans.get("p2p-launch", ())]
             operations = [
                 operation
                 for launch in launches
                 for operation in launch.attrs.get("operations", ())
                 if isinstance(operation, Mapping)
             ]
+            launched_ids = [operation.get("operation_id") for operation in operations]
+            completed_ids = [
+                span.begin.attrs.get("operation_id")
+                for name in peer_stage
+                for span in p2p_spans.get(name, ())
+            ]
+            completed_ids.extend(
+                operation_id
+                for span in p2p_spans.get("p2p-batch-complete", ())
+                for operation_id in span.begin.attrs.get("operation_ids", ())
+            )
+            if (
+                any(not isinstance(operation_id, str) for operation_id in launched_ids)
+                or Counter(launched_ids) != Counter(completed_ids)
+            ):
+                failures.append(
+                    _failure(
+                        "trace.tp_pp.p2p_completion",
+                        "P2P launch and completion operation IDs differ",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
             directions = Counter(
                 f"{operation.get('direction')}-{operation.get('pipeline_direction')}"
                 for operation in operations
@@ -1516,6 +1543,19 @@ def validate_tp2_pp4_multimicrobatch(
                             iteration=iteration_id,
                         )
                     )
+                    continue
+                key = (
+                    iteration_id,
+                    rank if operation.get("direction") == "send" else expected_peer,
+                    expected_peer if operation.get("direction") == "send" else rank,
+                    str(operation.get("pipeline_direction")),
+                )
+                payloads = (
+                    sent_payloads
+                    if operation.get("direction") == "send"
+                    else received_payloads
+                )
+                payloads[key][data_bytes] += 1
 
             tp_events = [
                 event
@@ -1543,6 +1583,14 @@ def validate_tp2_pp4_multimicrobatch(
                     )
                 )
 
+    if sent_payloads != received_payloads:
+        failures.append(
+            Failure(
+                "trace.tp_pp.p2p_payload",
+                "adjacent-stage send and receive payload multisets differ",
+                "tp2-pp4-multimicrobatch",
+            )
+        )
     return tuple(failures)
 
 
