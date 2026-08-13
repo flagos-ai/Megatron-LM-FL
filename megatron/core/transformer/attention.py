@@ -1393,7 +1393,7 @@ class Attention(MegatronModule, ABC):
 
         nvtx_range_push(suffix="core_attention")
         if self.config.attention_backend == AttnBackend.fsa:
-            # print(f"Attention.py, {query.shape=}, {key.shape=}, {value.shape=}")
+            print(f"Attention.py, {query.shape=}, {key.shape=}, {value.shape=}")
             core_attn_out = self._flash_sparse_attention(
                 query,
                 key,
