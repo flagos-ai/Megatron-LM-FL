@@ -159,12 +159,15 @@ python -m megatron.megalens.analyzer \
 ```
 
 `--align-framework-timeline` applies an optional cross-rank framework calibration when matching
-synchronous TP AllReduce anchors exist. Event durations and CUDA kernel timestamps remain unchanged.
+synchronous TP AllReduce anchors exist. Viewer-derived CUDA kernel timestamps receive the same
+per-rank shift; event durations and raw profiler coordinates remain unchanged.
 
 ## Supported Probe families
 
 Framework records commonly include `name`, `ph`, `iteration`, `g_rk`, `dp_rk`, `pp_rk`, `tp_rk`,
 `dev`, and `rel_ts`. Aggregated events add Chrome Trace fields such as `pid`, `tid`, `ts`, and `dur`.
+CUPTI kernel events keep their raw profiler fields and add iteration-anchored `ts` and `dur` when
+`iter_rel_start_us` and `duration_us` are available.
 Fields for EP, CP, virtual pipeline stages, workload, payload, or async operations appear when the
 executed producer supplies them.
 

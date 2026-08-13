@@ -741,10 +741,9 @@ class TraceDataLoader:
 
     def _ingest(self, raw_events: Sequence[Dict[str, Any]]) -> None:
         for ev in raw_events:
-            # Tier-2 cuda_kernel records carry record_type and ph=X but use
-            # top-level start_us/end_us (profiler-relative) instead of ts/dur.
-            # Route them to kernel_events to avoid polluting the span index
-            # with ts=0 placeholder entries.
+            # Tier-2 cuda_kernel records keep profiler-relative start_us/end_us;
+            # aggregated traces may also carry viewer-derived ts/dur. Route
+            # them to kernel_events to keep device records out of span queries.
             if ev.get("record_type") == "cuda_kernel":
                 self.kernel_events.append(
                     KernelEvent(

@@ -593,8 +593,9 @@ def align_framework_trace_timeline(
     communication group, matching synchronous ``tp-allreduce`` complete events
     are paired by their rank-local order.  A robust per-rank constant offset is
     estimated from their completion boundaries and applied to every framework
-    span and same-origin hardware counter on that rank.  Event duration, name,
-    arguments, nesting, and CUDA-kernel records are left unchanged.
+    span, same-origin hardware counter, and viewer-derived CUDA-kernel timestamp
+    on that rank.  Event duration, name, arguments, nesting, and raw profiler
+    coordinates are left unchanged.
     """
 
     aligned = [dict(trace) for trace in traces]
@@ -788,17 +789,28 @@ def align_framework_trace_timeline(
         )
 
     for trace in aligned:
-        if not _is_framework_timeline_record(trace):
+        is_kernel = trace.get("record_type") == "cuda_kernel"
+        if not is_kernel and not _is_framework_timeline_record(trace):
             continue
-        args = trace.get("args")
-        if not isinstance(args, dict):
-            continue
-        iteration_id = args.get("iteration")
+        args = trace.get("args") if isinstance(trace.get("args"), dict) else {}
+        iteration_id = (
+            trace.get("iteration", args.get("iteration"))
+            if is_kernel
+            else args.get("iteration")
+        )
         if not isinstance(iteration_id, int) or isinstance(iteration_id, bool):
             continue
-        rank = _framework_trace_rank(trace)
+        rank = (
+            trace.get("g_rk", args.get("g_rk", trace.get("pid")))
+            if is_kernel
+            else _framework_trace_rank(trace)
+        )
+        if not isinstance(rank, int) or isinstance(rank, bool):
+            continue
         shift = applied_shifts.get((iteration_id, rank))
         if shift is not None:
+            if is_kernel and ("ts" not in trace or "dur" not in trace):
+                continue
             start, _ = _framework_trace_interval(trace)
             trace["ts"] = start + shift
 
@@ -859,13 +871,27 @@ def benchmark_to_chrome_trace(iterations: List[Iteration]) -> List[Dict[str, Any
 
         for event in iteration.events:
             event_pid = event.attrs.get("g_rk", rank_pid[event.rank])
-            # Round 4: cuda_kernel records pass through verbatim (carry their
-            # own start_us / wall_start_us; no need to splice into chrome ts).
+            # Keep the profiler coordinates used by analyzers and add the
+            # iteration-anchored Chrome fields required by Perfetto.
             if event.cat == "cuda_kernel" or event.name == "cuda_kernel":
                 kr = dict(event.attrs)
-                kr.setdefault("pid", kr.get("g_rk", -1))
+                kr.setdefault("pid", event_pid)
                 kr.setdefault("tid", "cuda_kernel")
                 kr.setdefault("iteration", actual_iter)
+                iter_rel_start_us = kr.get("iter_rel_start_us")
+                duration_us = kr.get("duration_us")
+                if (
+                    isinstance(iter_rel_start_us, int)
+                    and not isinstance(iter_rel_start_us, bool)
+                    and isinstance(duration_us, int)
+                    and not isinstance(duration_us, bool)
+                    and duration_us >= 0
+                ):
+                    kr.setdefault(
+                        "ts", int((timeline + event.rel_ts) / 1e3) + iter_rel_start_us
+                    )
+                    kr.setdefault("dur", duration_us)
+                    kr.setdefault("cat", "cuda_kernel")
                 traces.append(kr)
                 continue
             if event.ph == "C":

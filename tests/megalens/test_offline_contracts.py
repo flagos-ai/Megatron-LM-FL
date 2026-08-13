@@ -253,6 +253,19 @@ def _framework_alignment_trace() -> list[dict[str, Any]]:
             "args": {"iteration": 2, "g_rk": 0},
         }
     )
+    traces.append(
+        {
+            "record_type": "cuda_kernel",
+            "name": "rank1Kernel",
+            "ph": "X",
+            "ts": 900 + offsets[1],
+            "dur": 50,
+            "pid": 1,
+            "iteration": 2,
+            "g_rk": 1,
+            "iter_rel_start_us": 900,
+        }
+    )
     return traces
 
 
@@ -298,8 +311,12 @@ def test_framework_timeline_alignment_removes_rank_offset_only() -> None:
     assert {event["ts"] for event in counters} == {700}
     iterations = [event for event in aligned if event.get("name") == "iteration"]
     assert {(event["ts"], event["dur"]) for event in iterations} == {(0, 10_000)}
-    kernel = next(event for event in aligned if event.get("record_type") == "cuda_kernel")
-    assert (kernel["ts"], kernel["dur"]) == (900, 50)
+    kernels = [event for event in aligned if event.get("record_type") == "cuda_kernel"]
+    assert {(kernel["pid"], kernel["ts"], kernel["dur"]) for kernel in kernels} == {
+        (0, 900, 50),
+        (1, 900, 50),
+    }
+    assert next(kernel for kernel in kernels if kernel["pid"] == 1)["iter_rel_start_us"] == 900
     assert [event.get("name") for event in aligned] == [event.get("name") for event in traces]
     assert [event.get("args") for event in aligned] == [event.get("args") for event in traces]
     assert [event.get("dur") for event in aligned] == [event.get("dur") for event in traces]
@@ -511,6 +528,51 @@ def test_counter_and_kernel_keep_iteration_without_metric_pollution(tmp_path: Pa
     assert loader.counter_samples[0].metrics == {"SM_Util_pct": 42.0}
     assert loader.kernel_events[0].iteration == 137
     assert loader.kernel_events[0].duration_us == 5
+
+
+def test_raw_cuda_kernel_exports_viewer_complete_event() -> None:
+    rank0 = Rank(0, 0, 0)
+    rank1 = Rank(1, 0, 0)
+    rank0_rows = _raw_iteration(rank0, 137) + _raw_iteration(rank0, 138)
+    rank1_rows = _raw_iteration(rank1, 137) + _raw_iteration(rank1, 138)
+    rank1_rows.extend(
+        [
+            {
+                "record_type": "cuda_kernel",
+                "name": f"kernel-{iteration}",
+                "ph": "X",
+                "iteration": iteration,
+                "dp_rk": rank1.data,
+                "pp_rk": 0,
+                "tp_rk": 0,
+                "start_us": 12,
+                "end_us": 17,
+                "iter_rel_start_us": 2,
+                "iter_rel_end_us": 7,
+                "duration_us": 5,
+                "device": 0,
+            }
+            for iteration in (137, 138)
+        ]
+    )
+
+    rank0_contents = read_benchmark_file(rank0, json.dumps(rank0_rows))
+    rank1_contents = read_benchmark_file(rank1, json.dumps(rank1_rows))
+    rank0_contents[0].pad_before = 1_000
+    rank0_contents[1].pad_before = 20_000
+    rank1_contents[0].pad_before = 4_000
+    rank1_contents[1].pad_before = 25_000
+    iterations, _, _, _ = aggregate_benchmark_data([rank0_contents, rank1_contents])
+    traces = benchmark_to_chrome_trace(iterations)
+    kernels = [trace for trace in traces if trace.get("record_type") == "cuda_kernel"]
+
+    assert [(kernel["pid"], kernel["ts"], kernel["dur"]) for kernel in kernels] == [
+        (1, 6, 5),
+        (1, 41, 5),
+    ]
+    assert all(kernel["cat"] == "cuda_kernel" for kernel in kernels)
+    assert all(kernel["start_us"] == 12 for kernel in kernels)
+    assert all(kernel["iter_rel_start_us"] == 2 for kernel in kernels)
 
 
 def test_transform_rejects_unbalanced_or_mismatched_spans() -> None:

@@ -258,8 +258,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Explicitly calibrate rank-local framework timestamps from matching "
-            "synchronous TP AllReduce completion boundaries. CUDA-kernel records "
-            "and event durations are unchanged."
+            "synchronous TP AllReduce completion boundaries. Viewer-derived "
+            "CUDA-kernel timestamps receive the same shift; raw profiler "
+            "coordinates and event durations are unchanged."
         ),
     )
     parser.add_argument(
