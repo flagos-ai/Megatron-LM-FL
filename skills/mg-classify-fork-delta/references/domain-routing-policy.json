@@ -1,0 +1,137 @@
+{
+  "category_domains": {
+    "build-packaging": "build-packaging",
+    "cicd-common": "cicd",
+    "cicd-vendor": "cicd",
+    "examples-tools-docs": "repository-support",
+    "invasive-runtime": "runtime-feature",
+    "plugin-contract": "plugin-override",
+    "plugin-feature": "runtime-feature",
+    "plugin-platform": "platform",
+    "plugin-vendor": "plugin-override",
+    "repository-metadata": "repository-support",
+    "tests-common": "test-hardware",
+    "tests-vendor": "test-hardware",
+    "training": "training-integration"
+  },
+  "coordinator_priority": [
+    "plugin-override",
+    "platform",
+    "training-integration",
+    "runtime-feature",
+    "build-packaging",
+    "cicd",
+    "repository-support",
+    "test-hardware",
+    "upstream-conflict"
+  ],
+  "domain_requirements": {
+    "build-packaging": {
+      "evidence": [
+        "build manifest",
+        "package/import smoke test"
+      ],
+      "invariants": [
+        "target build and install graph remains valid"
+      ]
+    },
+    "cicd": {
+      "evidence": [
+        "CI manifest",
+        "static workflow validation"
+      ],
+      "invariants": [
+        "workflow graph and intended backend coverage remain valid"
+      ]
+    },
+    "platform": {
+      "evidence": [
+        "platform manifest",
+        "capability matrix",
+        "CUDA-specific allowlist"
+      ],
+      "invariants": [
+        "device behavior is capability-driven and vendor-neutral where supported"
+      ]
+    },
+    "plugin-override": {
+      "evidence": [
+        "override manifest",
+        "API contract test"
+      ],
+      "invariants": [
+        "registry, signature, forwarding, and default behavior stay compatible"
+      ]
+    },
+    "repository-support": {
+      "evidence": [
+        "reference/path audit"
+      ],
+      "invariants": [
+        "support files describe and invoke the integrated tree accurately"
+      ]
+    },
+    "runtime-feature": {
+      "evidence": [
+        "feature call-chain ledger",
+        "observing test"
+      ],
+      "invariants": [
+        "configuration-to-output feature semantics remain observable"
+      ]
+    },
+    "test-hardware": {
+      "evidence": [
+        "test matrix",
+        "test logs or external gate owner"
+      ],
+      "invariants": [
+        "required capability/backend/hardware rows are neither omitted nor falsely passed"
+      ]
+    },
+    "training-integration": {
+      "evidence": [
+        "downstream contract ledger",
+        "E2E evidence"
+      ],
+      "invariants": [
+        "training consumers and launch paths remain compatible with the target API"
+      ]
+    },
+    "upstream-conflict": {
+      "evidence": [
+        "three-way semantic ledger",
+        "provenance",
+        "observing test"
+      ],
+      "invariants": [
+        "target architecture and approved FL behavior both survive"
+      ]
+    }
+  },
+  "observer_domains": [
+    "test-hardware",
+    "repository-support",
+    "finalization"
+  ],
+  "recommended_specialists": {
+    "build-packaging": "mg-integrate-build-packaging",
+    "cicd": "mg-audit-cicd",
+    "platform": "mg-preserve-platform-patches",
+    "plugin-override": "mg-audit-plugin-overrides",
+    "runtime-feature": "mg-integrate-runtime-features",
+    "test-hardware": "mg-run-upgrade-test-matrix",
+    "training-integration": "mg-audit-training-integration",
+    "upstream-conflict": "mg-integrate-upstream-conflicts"
+  },
+  "risk_secondary_domains": {
+    "both_changed": "upstream-conflict",
+    "device_abstraction": "platform",
+    "flagscale_block": "runtime-feature",
+    "overridable": "plugin-override",
+    "override_registry": "plugin-override",
+    "raw_cuda_assumption": "platform",
+    "runtime_semantics": "runtime-feature"
+  },
+  "schema_version": "1.0"
+}

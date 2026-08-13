@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Fork Delta Classifier"
+  short_description: "Classify Megatron fork changes and upgrade risks"
+  default_prompt: "Use $mg-classify-fork-delta to inventory and classify this Megatron-LM-FL fork before an upstream upgrade."
