@@ -1014,28 +1014,49 @@ class Attention(MegatronModule, ABC):
                 print(f"flash sparse attention, setting fsa window sizes...")
             local_window_sizes = self._fsa_cached_window_sizes
 
-            output = flash_sparse_attn_func(
-                query,
-                key,
-                value,
-                is_causal=is_causal,
-                softmax_scale=softmax_scale,
-                query_scale=None,
-                key_scale=None,
-                value_scale=None,
-                window_sizes=local_window_sizes,
-                softmax_threshold=softmax_threshold,
-                is_local=is_local,
-                is_quant=is_quant,
-                is_split_kv=True,
-                is_split_qo=True,
-                pack_gqa=False,
-                is_autotune=is_autotune,
-                skip_checks=True,
-            )
+            # Context parallel routing
+            cp_size = self.config.context_parallel_size
+            if cp_size > 1 and self.config.linear_cp_mode == "headwise":
+                # Use headwise CP wrapper
+                from megatron.core.extensions.flash_sparse_attention import (
+                    _fsa_headwise_cp_forward,
+                )
 
-            # Convert output back from [b, sq, np, hn] to [sq, b, np, hn]
-            output = output.transpose(0, 1).contiguous()
+                output = _fsa_headwise_cp_forward(
+                    query=query,
+                    key=key,
+                    value=value,
+                    window_sizes=local_window_sizes,
+                    cp_group=self.pg_collection.cp,
+                    cp_size=cp_size,
+                    num_q_heads_per_tp=num_q_heads,
+                    num_kv_heads_per_tp=num_kv_heads,
+                    softmax_threshold=softmax_threshold,
+                )
+                # Output is already [sq, b, np, hn], no transpose needed
+            else:
+                # No CP or CP disabled, use standard FSA
+                output = flash_sparse_attn_func(
+                    query,
+                    key,
+                    value,
+                    is_causal=is_causal,
+                    softmax_scale=softmax_scale,
+                    query_scale=None,
+                    key_scale=None,
+                    value_scale=None,
+                    window_sizes=local_window_sizes,
+                    softmax_threshold=softmax_threshold,
+                    is_local=is_local,
+                    is_quant=is_quant,
+                    is_split_kv=True,
+                    is_split_qo=True,
+                    pack_gqa=False,
+                    is_autotune=is_autotune,
+                    skip_checks=True,
+                )
+                # Convert output back from [b, sq, np, hn] to [sq, b, np, hn]
+                output = output.transpose(0, 1).contiguous()
 
         output = output.reshape(output.size(0), output.size(1), -1)
 

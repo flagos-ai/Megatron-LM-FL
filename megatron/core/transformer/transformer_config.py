@@ -1365,6 +1365,55 @@ class TransformerConfig(ModelParallelConfig):
                 f"{self.linear_num_value_heads=} must be a multiple of "
                 f"({self.tensor_model_parallel_size=} * {self.context_parallel_size=})."
             )
+
+        # FSA (Flash Sparse Attention) headwise CP validation
+        if self.attention_backend == AttnBackend.fsa and self.context_parallel_size > 1:
+            assert self.linear_cp_mode in ("headwise", "chunkwise"), (
+                f"linear_cp_mode must be 'headwise' or 'chunkwise', "
+                f"got {self.linear_cp_mode!r}."
+            )
+
+            if self.linear_cp_mode == "headwise":
+                # Q heads validation: must be divisible by CP size after TP
+                num_q_heads_per_tp = self.num_attention_heads // self.tensor_model_parallel_size
+                assert num_q_heads_per_tp % self.context_parallel_size == 0, (
+                    f"FSA headwise CP requires num_attention_heads per TP rank "
+                    f"({num_q_heads_per_tp}) to be divisible by "
+                    f"context_parallel_size ({self.context_parallel_size}). "
+                    f"Got num_attention_heads={self.num_attention_heads}, "
+                    f"tensor_model_parallel_size={self.tensor_model_parallel_size}, "
+                    f"context_parallel_size={self.context_parallel_size}."
+                )
+
+                # KV heads warning: if not enough, will use AllGather sequence dimension
+                if self.tensor_model_parallel_size > self.num_query_groups:
+                    # Each TP rank holds 1 KV head (via AllGather + indexing)
+                    num_kv_heads_per_tp = 1
+                else:
+                    num_kv_heads_per_tp = self.num_query_groups // self.tensor_model_parallel_size
+
+                if num_kv_heads_per_tp < self.context_parallel_size:
+                    log_single_rank(
+                        logger,
+                        logging.WARNING,
+                        f"FSA headwise CP: num_query_groups per TP rank ({num_kv_heads_per_tp}) "
+                        f"< context_parallel_size ({self.context_parallel_size}). "
+                        f"K/V will use AllGather for sequence dimension (higher communication cost). "
+                        f"This is expected when tp_size > num_kv_heads_global."
+                    )
+
+            elif self.linear_cp_mode == "chunkwise":
+                raise ValueError(
+                    f"FSA does not support chunkwise CP yet. "
+                    f"Use linear_cp_mode='headwise' or context_parallel_size=1 "
+                    f"when attention_backend=AttnBackend.fsa."
+                )
+            else:
+                raise ValueError(
+                    f"linear_cp_mode must be 'headwise' or 'chunkwise' when CP > 1, "
+                    f"got {self.linear_cp_mode!r}."
+                )
+
         elif self.experimental_attention_variant == "dsa":
             pass
         elif self.experimental_attention_variant == "dsv4_hybrid":
