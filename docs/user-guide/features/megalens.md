@@ -23,7 +23,7 @@ when the question requires device-side evidence.
 
 The recorded formal GPU runs use FlagScale revision
 `6d775cd01d5c822f9413b9952a81652c917d273e` and the pinned environment in
-[`docker/Dockerfile.work`](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/docker/Dockerfile.work).
+`docker/Dockerfile.work`.
 Keep that image definition as the reproduction contract for those runs.
 
 Current dev-image acceptance uses a temporary image derived from
@@ -31,23 +31,30 @@ Current dev-image acceptance uses a temporary image derived from
 Megatron-LM-FL revision `13ef6ae7ed8e3ac35143f3e03526674d12194fc6` and FlagScale revision
 `067efe6f1b00bc9416e22cfe46c52990e10bf045` installed.
 FlagScale gives its vendored `megatron.training` package import priority. Apply the
-[`docker/patches/flagscale-megalens.patch` compatibility overlay](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/docker/patches/flagscale-megalens.patch)
+`docker/patches/flagscale-megalens.patch` compatibility overlay
 so that this entry receives the MegaLens arguments, runtime ownership, iteration/optimizer scopes,
 and shutdown lifecycle. The `utils.py` hunk carries the dense-batch metadata-broadcast correction
 used by the separately validated whole-iteration CUDA Graph path. Recheck the patch when using
 another FlagScale revision.
 
-Create a writable container from the dev image and copy clean Megatron-LM-FL and FlagScale checkouts
-into it:
+#### Step 1: prepare a writable derived image
+
+Start from clean Megatron-LM-FL and FlagScale checkouts. The FlagScale checkout must be at the
+revision recorded above. Copy both checkouts into a writable container because the editable build
+creates compiled files in the Megatron-LM-FL source tree.
 
 ```bash
 export BASE=harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856
-export IMAGE=<derived-image-tag>
+export IMAGE=megalens-dev-pp4:local
+export MEGATRON_SRC=/absolute/path/to/Megatron-LM-FL
+export FLAGSCALE_SRC=/absolute/path/to/FlagScale
 
 docker create --name megalens-dev-build "$BASE" sleep infinity
 docker start megalens-dev-build
-docker cp /path/to/Megatron-LM-FL megalens-dev-build:/workspace/Megatron-LM-FL
-docker cp /path/to/FlagScale megalens-dev-build:/workspace/FlagScale
+docker exec megalens-dev-build \
+  mkdir -p /workspace/Megatron-LM-FL /workspace/FlagScale
+docker cp "$MEGATRON_SRC/." megalens-dev-build:/workspace/Megatron-LM-FL
+docker cp "$FLAGSCALE_SRC/." megalens-dev-build:/workspace/FlagScale
 docker exec -it megalens-dev-build bash
 ```
 
@@ -71,7 +78,22 @@ PIP_NO_INDEX=1 python -m pip install \
   --no-cache-dir --no-deps --no-build-isolation --no-index \
   -e /workspace/FlagScale
 python -m pip check
-python -c 'import megatron.core, megatron.megalens, megatron.training'
+export PYTHONPATH=/workspace/FlagScale:/workspace/FlagScale/flagscale/train:/workspace/Megatron-LM-FL
+python - <<'PY'
+from pathlib import Path
+
+import megatron.megalens
+import megatron.training.arguments as arguments
+import megatron.training.global_vars as global_vars
+import megatron.training.training as training
+
+root = Path("/workspace/FlagScale/flagscale/train").resolve()
+for module in (arguments, global_vars, training):
+    path = Path(module.__file__).resolve()
+    assert path.is_relative_to(root), path
+assert hasattr(arguments, "_add_megalens_args")
+assert hasattr(global_vars, "get_megalens_runtime")
+PY
 exit
 ```
 
@@ -80,6 +102,8 @@ Commit the prepared container as the derived image used by the acceptance comman
 ```bash
 docker commit megalens-dev-build "$IMAGE"
 ```
+
+#### Step 2: enable Trace in the FlagScale configuration
 
 Add the following keys under `train.system`:
 
@@ -96,8 +120,8 @@ train:
     hardware_monitor: false
 ```
 
-Keep the existing FlagScale launch command. A configuration that needs trace-off and trace-on runs
-can resolve the switch from an environment variable:
+Inside the prepared image, keep the existing FlagScale launch command. A configuration that needs
+trace-off and trace-on runs can resolve the switch from an environment variable:
 
 ```yaml
 trace: ${oc.decode:${oc.env:MEGALENS_TRACE,false}}
@@ -110,15 +134,19 @@ MEGALENS_TRACE=true flagscale run \
   --action=test
 ```
 
-[`tests/megalens/fixtures/flagscale_single_node_pp2_smoke.yaml`](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/tests/megalens/fixtures/flagscale_single_node_pp2_smoke.yaml)
+`tests/megalens/fixtures/flagscale_single_node_pp2_smoke.yaml`
 is a two-GPU configuration that uses the same fields. The focused current-dev acceptance uses
-[`flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml`](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/tests/megalens/fixtures/flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml): eight H100 GPUs,
+`tests/megalens/fixtures/flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml`: eight H100 GPUs,
 TP2×PP4×DP1, four microbatches per iteration, and two iterations. Run it from a clean
 Megatron-LM-FL checkout with a new run directory for each mode:
 
+#### Step 3: run trace-off and trace-on
+
 ```bash
-export IMAGE=<derived-image-tag>
-export RUN_ROOT=/absolute/path/to/new-run-root
+export IMAGE=megalens-dev-pp4:local
+export RUN_ROOT="$PWD/megalens-runs"
+mkdir -p "$RUN_ROOT"
+cd "$MEGATRON_SRC"
 
 for MODE in trace-off trace-on; do
   python3 tests/test_utils/runners/run_flagscale_megalens.py \
@@ -127,9 +155,35 @@ for MODE in trace-off trace-on; do
       tests/megalens/fixtures/flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml \
     --mode "$MODE" \
     --image "$IMAGE" \
-    --megatron-source-root "$(pwd)" \
+    --megatron-source-root "$MEGATRON_SRC" \
     --timeout 1200
 done
+```
+
+The runner starts the derived image with the NVIDIA runtime. It mounts each run directory read/write
+at `/artifacts/run` and mounts `--megatron-source-root` read-only at
+`/workspace/Megatron-LM-FL`.
+
+#### Step 4: verify shards and run the analyzer
+
+```bash
+test "$(find "$RUN_ROOT/tp2-pp4-off" -name 'benchmark-*.json' -type f -size +0c | wc -l)" -eq 0
+test "$(find "$RUN_ROOT/tp2-pp4-on" -name 'benchmark-*.json' -type f -size +0c | wc -l)" -eq 8
+
+docker run --rm \
+  --volume "$RUN_ROOT/tp2-pp4-on:/artifacts/run" \
+  --entrypoint /bin/bash \
+  "$IMAGE" -lc '
+    source /root/miniconda3/etc/profile.d/conda.sh
+    conda activate flagscale-train
+    export PYTHONPATH=/workspace/FlagScale:/workspace/FlagScale/flagscale/train:/workspace/Megatron-LM-FL
+    python -m megatron.megalens.analyzer \
+      --bench-dir /artifacts/run/traces \
+      --run all \
+      --output-dir /artifacts/run/reports
+  '
+
+test -f "$RUN_ROOT/tp2-pp4-on/reports/aggregated_trace.json"
 ```
 
 The accepted trace-off run produced zero shards. Trace-on produced eight non-empty shards with
