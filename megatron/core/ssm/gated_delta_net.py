@@ -186,7 +186,6 @@ class GatedDeltaNet(MegatronModule):
             is_expert=False,
             tp_comm_buffer_name="fc1",
             tp_group=self.pg_collection.tp,
-            name=(name + ".in_proj") if name is not None else None,
         )
 
         # Conv1d for QKV
@@ -266,7 +265,6 @@ class GatedDeltaNet(MegatronModule):
             is_expert=False,
             tp_comm_buffer_name="fc2",
             tp_group=self.pg_collection.tp,
-            name=(name + ".out_proj") if name is not None else None,
         )
 
         # Whole-module recompute: when "gdn" is in recompute_modules (selective granularity),

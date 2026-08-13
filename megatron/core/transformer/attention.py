@@ -920,6 +920,8 @@ class Attention(MegatronModule, ABC):
         attn_mask_type: AttnMaskType,
         packed_seq_params: Optional[PackedSeqParams] = None,
     ) -> Tensor:
+        import sys
+        # print(f"_flash_sparse_attention called: {query.shape=}, {key.shape=}, {value.shape=}", flush=True)
         assert HAVE_FSA, (
             "flash-sparse-attn is not installed. "
             "pip install flash-sparse-attn"
@@ -1393,7 +1395,6 @@ class Attention(MegatronModule, ABC):
 
         nvtx_range_push(suffix="core_attention")
         if self.config.attention_backend == AttnBackend.fsa:
-            print(f"Attention.py, {query.shape=}, {key.shape=}, {value.shape=}")
             core_attn_out = self._flash_sparse_attention(
                 query,
                 key,

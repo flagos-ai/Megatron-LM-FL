@@ -44,6 +44,13 @@ class TestFSAHeadwiseCP:
             # Case 4: TP + CP, insufficient KV heads
             (2, 4, 16, 4, 128, 2, 64),   # num_kv_heads_per_tp (2) < cp_size (4)
             (4, 4, 32, 8, 256, 1, 128),  # num_kv_heads_per_tp (2) < cp_size (4)
+
+            # Case 5: 35B model config variants
+            # Real config: Q=16, KV=2, tp=4 → per TP rank: 4 Q heads, 1 KV head
+            # seq=32768, batch=1, head_dim=256 (scaled down for test)
+            (2, 1, 16, 2, 16384, 1, 64), # CP=1, no CP baseline, 4 Q per TP rank
+            (2, 2, 16, 2, 16384, 1, 64), # CP=2, kv_per_tp(1) < cp(2), 2 Q per CP rank
+            (2, 4, 16, 2, 16384, 1, 64), # TP=2, CP=4, kv_per_tp(1) < cp(4), 2 Q per CP rank
         ],
     )
     def test_cp_vs_no_cp_numerical_equivalence(
