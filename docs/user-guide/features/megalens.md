@@ -21,11 +21,65 @@ when the question requires device-side evidence.
 
 ### FlagScale YAML
 
-The validated FlagScale configuration uses revision
-`6d775cd01d5c822f9413b9952a81652c917d273e`, with the
-`docker/patches/flagscale-megalens.patch` compatibility overlay applied through the reproducible
-image path in `docker/Dockerfile.work`. This revision and overlay define the supported FlagScale
-configuration.
+The recorded formal GPU runs use FlagScale revision
+`6d775cd01d5c822f9413b9952a81652c917d273e` and the pinned environment in
+[`docker/Dockerfile.work`](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/docker/Dockerfile.work).
+Keep that image definition as the reproduction contract for those runs.
+
+Current dev-image acceptance uses a temporary image derived from
+`harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856`, with
+Megatron-LM-FL revision `13ef6ae7ed8e3ac35143f3e03526674d12194fc6` and FlagScale revision
+`067efe6f1b00bc9416e22cfe46c52990e10bf045` installed.
+FlagScale gives its vendored `megatron.training` package import priority. Apply the
+[`docker/patches/flagscale-megalens.patch` compatibility overlay](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/docker/patches/flagscale-megalens.patch)
+so that this entry receives the MegaLens arguments, runtime ownership, iteration/optimizer scopes,
+and shutdown lifecycle. The `utils.py` hunk carries the dense-batch metadata-broadcast correction
+used by the separately validated whole-iteration CUDA Graph path. Recheck the patch when using
+another FlagScale revision.
+
+Create a writable container from the dev image and copy clean Megatron-LM-FL and FlagScale checkouts
+into it:
+
+```bash
+export BASE=harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856
+export IMAGE=<derived-image-tag>
+
+docker create --name megalens-dev-build "$BASE" sleep infinity
+docker start megalens-dev-build
+docker cp /path/to/Megatron-LM-FL megalens-dev-build:/workspace/Megatron-LM-FL
+docker cp /path/to/FlagScale megalens-dev-build:/workspace/FlagScale
+docker exec -it megalens-dev-build bash
+```
+
+Run the following commands inside that container. Installing with `--no-deps` preserves its CUDA,
+PyTorch, Transformer Engine, and NCCL stack.
+
+```bash
+source /root/miniconda3/etc/profile.d/conda.sh
+conda activate flagscale-train
+
+git -C /workspace/FlagScale apply --check \
+  /workspace/Megatron-LM-FL/docker/patches/flagscale-megalens.patch
+git -C /workspace/FlagScale apply \
+  /workspace/Megatron-LM-FL/docker/patches/flagscale-megalens.patch
+
+python -m pip uninstall -y megatron-core
+PIP_NO_INDEX=1 MAX_JOBS=4 python -m pip install \
+  --no-cache-dir --no-deps --no-build-isolation --no-index \
+  -e /workspace/Megatron-LM-FL
+PIP_NO_INDEX=1 python -m pip install \
+  --no-cache-dir --no-deps --no-build-isolation --no-index \
+  -e /workspace/FlagScale
+python -m pip check
+python -c 'import megatron.core, megatron.megalens, megatron.training'
+exit
+```
+
+Commit the prepared container as the derived image used by the acceptance command below:
+
+```bash
+docker commit megalens-dev-build "$IMAGE"
+```
 
 Add the following keys under `train.system`:
 
@@ -56,8 +110,34 @@ MEGALENS_TRACE=true flagscale run \
   --action=test
 ```
 
-`tests/megalens/fixtures/flagscale_single_node_pp2_smoke.yaml` is a runnable two-GPU configuration
-that uses the same fields.
+[`tests/megalens/fixtures/flagscale_single_node_pp2_smoke.yaml`](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/tests/megalens/fixtures/flagscale_single_node_pp2_smoke.yaml)
+is a two-GPU configuration that uses the same fields. The focused current-dev acceptance uses
+[`flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml`](https://github.com/flagos-ai/Megatron-LM-FL/blob/main/tests/megalens/fixtures/flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml): eight H100 GPUs,
+TP2×PP4×DP1, four microbatches per iteration, and two iterations. Run it from a clean
+Megatron-LM-FL checkout with a new run directory for each mode:
+
+```bash
+export IMAGE=<derived-image-tag>
+export RUN_ROOT=/absolute/path/to/new-run-root
+
+for MODE in trace-off trace-on; do
+  python3 tests/test_utils/runners/run_flagscale_megalens.py \
+    --run-dir "$RUN_ROOT/tp2-pp4-${MODE#trace-}" \
+    --input-config \
+      tests/megalens/fixtures/flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml \
+    --mode "$MODE" \
+    --image "$IMAGE" \
+    --megatron-source-root "$(pwd)" \
+    --timeout 1200
+done
+```
+
+The accepted trace-off run produced zero shards. Trace-on produced eight non-empty shards with
+4,864 records. Both runs completed the iteration-2 checkpoint with identical recorded losses. The
+analyzer inferred PP4/TP2/DP1/EP1 and generated the applicable PP, TP, and Hybrid reports.
+After the Megatron-LM-FL change merges, port the same training-entry hooks into FlagScale. Create a
+dedicated image definition only when the released FlagScale dev image still requires project-specific
+assembly.
 
 ### Megatron-LM CLI
 
