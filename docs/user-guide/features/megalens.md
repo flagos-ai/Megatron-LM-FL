@@ -21,6 +21,12 @@ when the question requires device-side evidence.
 
 ### FlagScale YAML
 
+The validated FlagScale configuration uses revision
+`6d775cd01d5c822f9413b9952a81652c917d273e`, with the
+`docker/patches/flagscale-megalens.patch` compatibility overlay applied through the reproducible
+image path in `docker/Dockerfile.work`. This revision and overlay define the supported FlagScale
+configuration.
+
 Add the following keys under `train.system`:
 
 ```yaml
@@ -98,6 +104,10 @@ controlled windows for routine inspection.
 
 The default CUDA kernel setting is `"off"`. `"auto"` enables kernels for mode 1 with `full`
 granularity, while `"on"` enables them for either granularity. Mode 0 always uses sentinel records.
+The analyzer consumes mode-1 `benchmark-*.json` shards. Mode-0
+`mode0-sentinel-*.jsonl` files provide sentinel evidence. CUDA kernel capture is best-effort:
+confirm actual `record_type="cuda_kernel"` records in the relevant shards before making
+kernel-level claims.
 
 Install the offline report dependencies when needed:
 
@@ -119,16 +129,22 @@ Mode 1 uses one file per rank with names such as:
 benchmark-global-3-data-1-pipeline-0-tensor-1.json
 ```
 
-Use an empty, writable `trace_dir` for each run. A shared directory lets all nodes write into one
-location. With node-local storage, collect every rank shard into one directory before aggregation.
+Use an empty, writable `trace_dir` for each run. With the default rank-local writer, a complete
+mode-1 run produces exactly `WORLD_SIZE` non-empty `benchmark-*.json` shards. For multi-node or
+container runs, use a shared, persistent mount visible at the same path to every rank. With
+node-local storage, collect every rank shard into one persistent directory before the job or
+container ends and before aggregation.
 
-Confirm that the run produced non-empty shards:
+Confirm that the run produced non-empty shards and that their count matches the launch world size:
 
 ```bash
 export TRACE_DIR=/absolute/path/to/unique-run/traces
 export REPORT_DIR=/absolute/path/to/unique-run/reports
+: "${WORLD_SIZE:?set WORLD_SIZE to the launch world size}"
 
 find "$TRACE_DIR" -maxdepth 1 -name 'benchmark-*.json' -type f -size +0 -print
+test "$(find "$TRACE_DIR" -maxdepth 1 -name 'benchmark-*.json' -type f -size +0 | wc -l)" \
+  -eq "$WORLD_SIZE"
 ```
 
 Aggregate the shards and run every applicable analyzer:
@@ -158,9 +174,14 @@ python -m megatron.megalens.analyzer \
   --output-dir "$REPORT_DIR"
 ```
 
-`--align-framework-timeline` applies an optional cross-rank framework calibration when matching
-synchronous TP AllReduce anchors exist. Viewer-derived CUDA kernel timestamps receive the same
-per-rank shift; event durations and raw profiler coordinates remain unchanged.
+`--align-framework-timeline` is opt-in and fail-closed. For every discovered iteration and TP group,
+it requires at least three `tp-allreduce` spans with `ph="X"`, `op="all_reduce"`, and
+`timing_phase="collective_call"` from every group member. Peer lists and group sizes must be
+consistent; counts and ordered `(op, timing_phase, data_bytes, reduce_op, payload_role)` signatures
+must match; and each rank must have one iteration bound plus framework events. Missing or ambiguous
+anchors, conflicting shifts, and shifts that do not fit within the recorded iteration are rejected.
+When these prerequisites hold, viewer-derived CUDA kernel timestamps receive the same per-rank
+shift; event durations and raw profiler coordinates remain unchanged.
 
 ## Supported Probe families
 
@@ -179,6 +200,11 @@ executed producer supplies them.
 | DP and optimizer | `dp-allreduce`, `dp-reduce-scatter`, `dp-param-all-gather`, `dp-grad-sync-complete`, `dp-param-sync-complete`, `all-grads-sync`, `optimizer*` | Gradient or parameter role, bucket, DP group, overlap setting, dispatch, and stream dependency |
 | EP and MoE | `moe-router`, `moe-dispatch`, `moe-experts`, `moe-shared-expert`, `moe-combine`, `ep-alltoall-*`, `ep-allgather-*` | Tokens, experts, routing load, dispatcher, capacity, communication payload, and async lifecycle |
 | Hardware and kernels | `CPU_Metrics`, `GPU_Metrics`, `cuda_kernel` | Available CPU/GPU counters and rank-local CUDA kernel start, end, duration, device, and iteration |
+
+Current validated DP Probe and Analysis coverage includes Standard DDP and Megatron Distributed
+Optimizer. Adding Megatron-FSDP to this coverage requires FSDP-specific communication producers,
+Analysis support, and GPU evidence. Torch FSDP2 acceptance follows resolution of the current
+`finish_grad_sync` signature incompatibility and GPU validation.
 
 The machine-checkable producer inventory is
 `tests/megalens/fixtures/probe_scan_gate.json`. `megatron/megalens/event_catalog.py` defines typed
