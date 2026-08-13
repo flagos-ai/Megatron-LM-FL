@@ -912,6 +912,27 @@ PROFILES: Mapping[str, manifest.TraceProfile] = {
         tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync,
         training_run_contract.validate_two_iteration_checkpoint,
     ),
+    "tp2-pp4-multimicrobatch": manifest.TraceProfile(
+        "tp2-pp4-multimicrobatch",
+        8,
+        (
+            *_PP2_UNBATCHED_WARMUP_FLUSH_EVENTS,
+            *_events("optimizer", "optimizer-step", "optimizer-postprocess"),
+            manifest.EventRequirement(
+                "sp-layernorm-allreduce",
+                (
+                    *_COMMON_FIELDS,
+                    "data_bytes",
+                    "group_size",
+                    "reduce_op",
+                    "grad_bucket",
+                ),
+                "B",
+            ),
+        ),
+        tp_probe_contract.validate_tp2_pp4_multimicrobatch,
+        training_run_contract.validate_two_iteration_checkpoint,
+    ),
     "pp2": manifest.TraceProfile(
         "pp2",
         2,
@@ -1365,6 +1386,9 @@ _CONFIG_PROFILES = {
     "flagscale_single_node_deepseek_tp2_sp_mock": "deepseek-tp2-sp-mock",
     "flagscale_single_node_tp2_local_allreduce_smoke": "tp2-local-allreduce",
     "flagscale_single_node_tp2_pp2_embedding_smoke": "tp2-pp2-embedding",
+    "flagscale_single_node_tp2_pp4_multimicrobatch_smoke": (
+        "tp2-pp4-multimicrobatch"
+    ),
     "flagscale_single_node_pp2_smoke": "pp2",
     "flagscale_single_node_pp2_batched_steady_smoke": "pp2-batched-steady",
     "flagscale_single_node_pp2_unbatched_smoke": "pp2-unbatched",

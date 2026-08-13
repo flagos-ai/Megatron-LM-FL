@@ -318,11 +318,125 @@ def _write_collective_trace(
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
+def _write_tp2_pp4_multimicrobatch_trace(
+    trace_root: Path,
+    *,
+    wrong_peer: bool = False,
+) -> None:
+    for rank in range(8):
+        pipeline_rank, tensor_rank = divmod(rank, 2)
+        rows: list[dict[str, object]] = []
+        timestamp = 0
+
+        def event(name: str, phase: str, **attrs: object) -> None:
+            nonlocal timestamp
+            timestamp += 1
+            rows.append(
+                {
+                    "name": name,
+                    "ph": phase,
+                    "rel_ts": timestamp,
+                    "g_rk": rank,
+                    "dp_rk": 0,
+                    "pp_rk": pipeline_rank,
+                    "tp_rk": tensor_rank,
+                    **attrs,
+                }
+            )
+
+        for iteration in (1, 2):
+            rows.append(
+                {
+                    "name": "iteration",
+                    "ph": "B",
+                    "iteration": iteration,
+                    "pad_before": 0,
+                }
+            )
+            for microbatch in range(4):
+                for name in ("forward-step", "backward-step"):
+                    event(name, "B", current_microbatch=microbatch)
+                    event(
+                        name,
+                        "E",
+                        operation_id=f"pp:microbatch={microbatch}:vp=none",
+                    )
+
+            directions = []
+            if pipeline_rank > 0:
+                directions.extend(("recv-forward", "send-backward"))
+            if pipeline_rank < 3:
+                directions.extend(("send-forward", "recv-backward"))
+            for direction in directions:
+                for microbatch in range(4):
+                    peer_rank = rank + (
+                        2 if direction in {"send-forward", "recv-backward"} else -2
+                    )
+                    if (
+                        wrong_peer
+                        and rank == 0
+                        and iteration == 1
+                        and direction == "send-forward"
+                    ):
+                        peer_rank = 3
+                    operation_id = (
+                        f"p2p:{rank}:{iteration}:{direction}:{microbatch}"
+                    )
+                    send_or_recv, pipeline_direction = direction.split("-", 1)
+                    operation = {
+                        "operation_id": operation_id,
+                        "direction": send_or_recv,
+                        "pipeline_direction": pipeline_direction,
+                        "peer_rank": peer_rank,
+                        "data_bytes": 32768,
+                    }
+                    event("p2p-launch", "B", operations=[operation])
+                    event("p2p-launch", "E")
+                    event(direction, "B", operation_id=operation_id)
+                    event(direction, "E")
+
+            event("sp-layernorm-allreduce", "B", group_size=2)
+            event("sp-layernorm-allreduce", "E")
+            rows.append(
+                {
+                    "name": "iteration",
+                    "ph": "E",
+                    "iteration": iteration,
+                    "duration_wall": timestamp,
+                }
+            )
+
+        trace_root.mkdir(parents=True, exist_ok=True)
+        path = trace_root / (
+            f"benchmark-global-{rank}-data-0-"
+            f"pipeline-{pipeline_rank}-tensor-{tensor_rank}.json"
+        )
+        path.write_text(json.dumps(rows), encoding="utf-8")
+
+
 def test_tp2_collective_contract_accepts_first_last_hierarchy(tmp_path: Path) -> None:
     for rank in (0, 1):
         _write_collective_trace(tmp_path, rank=rank)
 
     assert tp_probe_contract.validate_tp2_gqa_collective_hierarchy(tmp_path) == ()
+
+
+def test_tp2_pp4_multimicrobatch_contract_accepts_focused_trace(
+    tmp_path: Path,
+) -> None:
+    _write_tp2_pp4_multimicrobatch_trace(tmp_path)
+
+    assert tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path) == ()
+
+
+def test_tp2_pp4_multimicrobatch_contract_rejects_cross_lane_peer(
+    tmp_path: Path,
+) -> None:
+    _write_tp2_pp4_multimicrobatch_trace(tmp_path, wrong_peer=True)
+
+    failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
+
+    assert "trace.tp_pp.p2p_operation" in {failure.code for failure in failures}
 
 
 def test_tp2_collective_contract_requires_nested_physical_reduce_scatter(

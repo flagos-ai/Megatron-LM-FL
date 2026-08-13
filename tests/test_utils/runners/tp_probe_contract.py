@@ -1368,6 +1368,184 @@ def validate_tp2_pp2_embedding_final_grad_sync(
     return tuple(failures)
 
 
+def validate_tp2_pp4_multimicrobatch(
+    trace_root: Path,
+) -> tuple[Failure, ...]:
+    """Validate the focused eight-rank TP2xPP4 integration smoke."""
+
+    failures: list[Failure] = []
+    by_rank = _load_iterations(trace_root)
+    expected_ranks = tuple(range(8))
+    if tuple(sorted(by_rank)) != expected_ranks:
+        failures.append(
+            Failure(
+                "trace.tp_pp.ranks",
+                f"expected ranks {list(expected_ranks)}, observed {sorted(by_rank)}",
+                "tp2-pp4-multimicrobatch",
+            )
+        )
+
+    coordinates: dict[tuple[int, int], int] = {}
+    for rank, iterations in by_rank.items():
+        observed = {
+            (event.rank.data, event.rank.pipeline, event.rank.tensor)
+            for iteration in iterations
+            for event in iteration.events
+        }
+        if len(observed) == 1:
+            data, pipeline, tensor = next(iter(observed))
+            if data == 0 and pipeline in range(4) and tensor in range(2):
+                coordinates[(int(pipeline), int(tensor))] = rank
+                continue
+        failures.append(
+            Failure(
+                "trace.tp_pp.coordinates",
+                f"rank {rank} has invalid coordinates {sorted(map(str, observed))}",
+                f"rank={rank}",
+            )
+        )
+    expected_coordinates = {(pp, tp) for pp in range(4) for tp in range(2)}
+    if set(coordinates) != expected_coordinates:
+        failures.append(
+            Failure(
+                "trace.tp_pp.coordinates",
+                f"expected {sorted(expected_coordinates)}, observed {sorted(coordinates)}",
+                "tp2-pp4-multimicrobatch",
+            )
+        )
+
+    peer_stage = {
+        "send-forward": 1,
+        "recv-backward": 1,
+        "recv-forward": -1,
+        "send-backward": -1,
+    }
+    for (pipeline_rank, tensor_rank), rank in coordinates.items():
+        iterations = by_rank[rank]
+        iteration_ids = tuple(item.iteration_id for item in iterations)
+        if iteration_ids != (1, 2):
+            failures.append(
+                Failure(
+                    "trace.tp_pp.iterations",
+                    f"expected [1, 2], observed {list(iteration_ids)}",
+                    f"rank={rank}",
+                )
+            )
+        expected_directions = {
+            name
+            for name, delta in peer_stage.items()
+            if 0 <= pipeline_rank + delta < 4
+        }
+        for iteration in iterations:
+            iteration_id = int(iteration.iteration_id)
+            for name in ("forward-step", "backward-step"):
+                begins = [
+                    event
+                    for event in iteration.events
+                    if event.name == name and event.ph == "B"
+                ]
+                ends = [
+                    event
+                    for event in iteration.events
+                    if event.name == name and event.ph == "E"
+                ]
+                microbatches = [
+                    event.attrs.get("current_microbatch") for event in begins
+                ]
+                operation_ids = {event.attrs.get("operation_id") for event in ends}
+                expected_ids = {
+                    f"pp:microbatch={microbatch}:vp=none" for microbatch in range(4)
+                }
+                if microbatches != list(range(4)) or operation_ids != expected_ids:
+                    failures.append(
+                        _failure(
+                            "trace.tp_pp.microbatches",
+                            f"{name} microbatches={microbatches!r}, "
+                            f"operation_ids={sorted(map(str, operation_ids))}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+
+            launches = [
+                event
+                for event in iteration.events
+                if event.name == "p2p-launch" and event.ph == "B"
+            ]
+            operations = [
+                operation
+                for launch in launches
+                for operation in launch.attrs.get("operations", ())
+                if isinstance(operation, Mapping)
+            ]
+            directions = Counter(
+                f"{operation.get('direction')}-{operation.get('pipeline_direction')}"
+                for operation in operations
+            )
+            if set(directions) != expected_directions or any(
+                count != 4 for count in directions.values()
+            ):
+                failures.append(
+                    _failure(
+                        "trace.tp_pp.p2p_directions",
+                        f"P2P operation counts are {dict(directions)!r}",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+            for operation in operations:
+                direction = (
+                    f"{operation.get('direction')}-"
+                    f"{operation.get('pipeline_direction')}"
+                )
+                expected_peer = coordinates.get(
+                    (pipeline_rank + peer_stage.get(direction, 99), tensor_rank)
+                )
+                data_bytes = operation.get("data_bytes")
+                if (
+                    operation.get("peer_rank") != expected_peer
+                    or not isinstance(data_bytes, int)
+                    or isinstance(data_bytes, bool)
+                    or data_bytes <= 0
+                ):
+                    failures.append(
+                        _failure(
+                            "trace.tp_pp.p2p_operation",
+                            f"invalid adjacent-stage operation {operation!r}",
+                            rank=rank,
+                            iteration=iteration_id,
+                        )
+                    )
+
+            tp_events = [
+                event
+                for event in iteration.events
+                if event.ph == "B"
+                and event.name
+                in {
+                    "tp-all-gather-first",
+                    "tp-all-gather-last",
+                    "tp-reduce-scatter",
+                    "tp-reduce-scatter-last",
+                    "tp-allreduce",
+                    "sp-layernorm-allreduce",
+                }
+            ]
+            if not tp_events or any(
+                event.attrs.get("group_size") != 2 for event in tp_events
+            ):
+                failures.append(
+                    _failure(
+                        "trace.tp_pp.tp_group",
+                        "TP collective evidence is missing or has group_size != 2",
+                        rank=rank,
+                        iteration=iteration_id,
+                    )
+                )
+
+    return tuple(failures)
+
+
 def validate_tp2_local_allreduce_profile(
     trace_root: Path,
 ) -> tuple[Failure, ...]:

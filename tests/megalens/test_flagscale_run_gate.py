@@ -67,6 +67,9 @@ _CONFIG_PROFILE_CASES = {
         "tp2-local-allreduce"
     ),
     "flagscale_single_node_tp2_pp2_embedding_smoke.yaml": "tp2-pp2-embedding",
+    "flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml": (
+        "tp2-pp4-multimicrobatch"
+    ),
     "flagscale_single_node_pp2_smoke.yaml": "pp2",
     "flagscale_single_node_pp2_batched_steady_smoke.yaml": (
         "pp2-batched-steady"
@@ -3410,6 +3413,48 @@ def test_tp2_pp2_embedding_profile_only_adds_pp_and_shared_weights() -> None:
         profile.contract
         is tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync
     )
+
+
+def test_tp2_pp4_multimicrobatch_profile_selects_the_focused_contract() -> None:
+    config = yaml.safe_load(
+        (
+            _FIXTURES / "flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    assert config["experiment"]["runner"]["nproc_per_node"] == 8
+    assert config["train"]["system"]["tensor_model_parallel_size"] == 2
+    assert config["train"]["system"]["pipeline_model_parallel_size"] == 4
+    assert config["train"]["model"]["micro_batch_size"] == 1
+    assert config["train"]["model"]["global_batch_size"] == 4
+    assert config["train"]["model"]["train_iters"] == 2
+
+    profile = gate.PROFILES["tp2-pp4-multimicrobatch"]
+
+    assert profile.rank_count == 8
+    assert (
+        profile.contract
+        is tp_probe_contract.validate_tp2_pp4_multimicrobatch
+    )
+    assert (
+        profile.run_contract
+        is training_run_contract.validate_two_iteration_checkpoint
+    )
+    assert gate._CONFIG_PROFILES[
+        "flagscale_single_node_tp2_pp4_multimicrobatch_smoke"
+    ] == "tp2-pp4-multimicrobatch"
+    assert {requirement.name for requirement in profile.events} == {
+        "forward-step",
+        "backward-step",
+        "p2p-launch",
+        "send-forward",
+        "recv-forward",
+        "send-backward",
+        "recv-backward",
+        "optimizer",
+        "optimizer-step",
+        "optimizer-postprocess",
+        "sp-layernorm-allreduce",
+    }
 
 
 def test_gpt_pp1_and_pp2_profiles_enforce_stage_specific_model_phases(
