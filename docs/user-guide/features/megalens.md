@@ -44,6 +44,8 @@ revision recorded above. Copy both checkouts into a writable container because t
 creates compiled files in the Megatron-LM-FL source tree.
 
 ```bash
+set -euo pipefail
+
 export BASE=harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856
 export IMAGE=megalens-dev-pp4:local
 export MEGATRON_SRC=/absolute/path/to/Megatron-LM-FL
@@ -62,6 +64,8 @@ Run the following commands inside that container. Installing with `--no-deps` pr
 PyTorch, Transformer Engine, and NCCL stack.
 
 ```bash
+set -euo pipefail
+
 source /root/miniconda3/etc/profile.d/conda.sh
 conda activate flagscale-train
 
@@ -79,6 +83,7 @@ PIP_NO_INDEX=1 python -m pip install \
   -e /workspace/FlagScale
 python -m pip check
 export PYTHONPATH=/workspace/FlagScale:/workspace/FlagScale/flagscale/train:/workspace/Megatron-LM-FL
+export TORCH_DEVICE_BACKEND_AUTOLOAD=0
 python - <<'PY'
 from pathlib import Path
 
@@ -143,6 +148,8 @@ Megatron-LM-FL checkout with a new run directory for each mode:
 #### Step 3: run trace-off and trace-on
 
 ```bash
+set -euo pipefail
+
 export IMAGE=megalens-dev-pp4:local
 export RUN_ROOT="$PWD/megalens-runs"
 mkdir -p "$RUN_ROOT"
@@ -167,6 +174,8 @@ at `/artifacts/run` and mounts `--megatron-source-root` read-only at
 #### Step 4: verify shards and run the analyzer
 
 ```bash
+set -euo pipefail
+
 test "$(find "$RUN_ROOT/tp2-pp4-off" -name 'benchmark-*.json' -type f -size +0c | wc -l)" -eq 0
 test "$(find "$RUN_ROOT/tp2-pp4-on" -name 'benchmark-*.json' -type f -size +0c | wc -l)" -eq 8
 
@@ -177,6 +186,7 @@ docker run --rm \
     source /root/miniconda3/etc/profile.d/conda.sh
     conda activate flagscale-train
     export PYTHONPATH=/workspace/FlagScale:/workspace/FlagScale/flagscale/train:/workspace/Megatron-LM-FL
+    export TORCH_DEVICE_BACKEND_AUTOLOAD=0
     python -m megatron.megalens.analyzer \
       --bench-dir /artifacts/run/traces \
       --run all \
@@ -184,6 +194,9 @@ docker run --rm \
   '
 
 test -f "$RUN_ROOT/tp2-pp4-on/reports/aggregated_trace.json"
+for MODULE in pp tp hybrid; do
+  test -n "$(find "$RUN_ROOT/tp2-pp4-on/reports/$MODULE" -type f -size +0c -print -quit)"
+done
 ```
 
 The accepted trace-off run produced zero shards. Trace-on produced eight non-empty shards with
