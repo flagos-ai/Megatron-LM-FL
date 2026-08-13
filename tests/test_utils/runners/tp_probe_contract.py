@@ -1495,6 +1495,7 @@ def validate_tp2_pp4_multimicrobatch(
             )
             if (
                 any(not isinstance(operation_id, str) for operation_id in launched_ids)
+                or len(set(launched_ids)) != len(launched_ids)
                 or Counter(launched_ids) != Counter(completed_ids)
             ):
                 failures.append(
@@ -1557,27 +1558,16 @@ def validate_tp2_pp4_multimicrobatch(
                 )
                 payloads[key][data_bytes] += 1
 
-            tp_events = [
-                event
-                for event in iteration.events
-                if event.ph == "B"
-                and event.name
-                in {
-                    "tp-all-gather-first",
-                    "tp-all-gather-last",
-                    "tp-reduce-scatter",
-                    "tp-reduce-scatter-last",
-                    "tp-allreduce",
-                    "sp-layernorm-allreduce",
-                }
-            ]
-            if not tp_events or any(
-                event.attrs.get("group_size") != 2 for event in tp_events
-            ):
+            tp_spans, pairing_failures = _pair_spans(
+                iteration, ("sp-layernorm-allreduce",), rank=rank
+            )
+            failures.extend(pairing_failures)
+            sp_spans = tp_spans.get("sp-layernorm-allreduce", ())
+            if len(sp_spans) != 1 or sp_spans[0].begin.attrs.get("group_size") != 2:
                 failures.append(
                     _failure(
                         "trace.tp_pp.tp_group",
-                        "TP collective evidence is missing or has group_size != 2",
+                        "expected one closed SP LayerNorm AllReduce with group_size=2",
                         rank=rank,
                         iteration=iteration_id,
                     )
