@@ -59,11 +59,62 @@ register(
 )
 
 # =============================================================================
+# Transformer - fusions.fused_bias_swiglu
+# =============================================================================
+register(
+    target="megatron.core.fusions.fused_bias_swiglu.swiglu",
+    impl="megatron.plugin.kunlunxin.fusions.fused_bias_swiglu.swiglu",
+    vendor="kunlunxin",
+)
+register(
+    target="megatron.core.fusions.fused_bias_swiglu.bias_swiglu_impl",
+    impl="megatron.plugin.kunlunxin.fusions.fused_bias_swiglu.bias_swiglu_impl",
+    vendor="kunlunxin",
+)
+register(
+    target="megatron.core.fusions.fused_bias_swiglu.weighted_bias_swiglu_impl",
+    impl="megatron.plugin.kunlunxin.fusions.fused_bias_swiglu.weighted_bias_swiglu_impl",
+    vendor="kunlunxin",
+)
+
+# =============================================================================
+# Transformer - embeddings.rope_utils
+# =============================================================================
+register(
+    target="megatron.core.models.common.embeddings.rope_utils._apply_rotary_pos_emb_bshd",
+    impl="megatron.plugin.kunlunxin.models.common.embeddings.rope_utils._apply_rotary_pos_emb_bshd",
+    vendor="kunlunxin",
+)
+
+# =============================================================================
+# Tensor parallel - layers
+# =============================================================================
+register(
+    target="megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication",
+    impl="megatron.plugin.kunlunxin.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunicationKunlunxin",
+    vendor="kunlunxin",
+)
+register(
+    target="megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
+    impl="megatron.plugin.kunlunxin.tensor_parallel.layers.column_parallel_linear_forward",
+    vendor="kunlunxin",
+)
+
+# =============================================================================
 # Tensor parallel - random
 # =============================================================================
 register(
     target="megatron.core.tensor_parallel.random.CudaRNGStatesTracker",
     impl="megatron.plugin.kunlunxin.tensor_parallel.random.CudaRNGStatesTrackerKunlunxin",
+    vendor="kunlunxin",
+)
+
+# =============================================================================
+# Transformer Engine - TEGroupedLinear
+# =============================================================================
+register(
+    target="megatron.core.extensions.transformer_engine.TEGroupedLinear._sharded_state_dict_grouped",
+    impl="megatron.plugin.kunlunxin.extensions.transformer_engine._sharded_state_dict_grouped",
     vendor="kunlunxin",
 )
 

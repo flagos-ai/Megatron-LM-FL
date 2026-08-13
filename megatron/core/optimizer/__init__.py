@@ -787,6 +787,13 @@ def get_megatron_optimizer(
     model_chunk_offset = 0
     ddp_config = model_chunks[0].ddp_config  # Use the first model chunk's DDP config
     if ddp_config.use_megatron_fsdp:
+        # For no_shard, gradients are replicated across DP ranks after all-reduce, so grad stats
+        # should only be reduced over TP/PP (model_parallel_group) to avoid inflating the norm.
+        effective_intra_dist_opt_group = (
+            mp_group
+            if ddp_config.data_parallel_sharding_strategy == 'no_shard'
+            else intra_dist_opt_group
+        )
         for model_chunk, overlap_param_gather_with_optimizer_step in zip(
             all_dense_model_chunks, overlap_param_gather_with_optimizer_step_flags
         ):
@@ -799,21 +806,32 @@ def get_megatron_optimizer(
                 buffer_name='buffers',
             )
 
-            optimizers.append(
-                _get_megatron_optimizer_based_on_param_groups(
-                    config=config,
-                    model_chunks=model_chunk,
-                    param_groups=param_groups,
-                    per_model_buffers=buffers,
-                    model_parallel_group=mp_group,
-                    data_parallel_group=dp_cp_group,
-                    data_parallel_group_gloo=intra_dp_cp_group_gloo,
-                    data_parallel_group_idx=model_parallel_rank,
-                    intra_dist_opt_group=intra_dist_opt_group,
-                    distributed_optimizer_instance_id=distributed_optimizer_instance_id,
-                    pg_collection=pg_collection,
-                )
+            optimizer_part = _get_megatron_optimizer_based_on_param_groups(
+                config=config,
+                model_chunks=model_chunk,
+                param_groups=param_groups,
+                per_model_buffers=buffers,
+                model_parallel_group=mp_group,
+                data_parallel_group=dp_cp_group,
+                data_parallel_group_gloo=intra_dp_cp_group_gloo,
+                data_parallel_group_idx=model_parallel_rank,
+                intra_dist_opt_group=effective_intra_dist_opt_group,
+                distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                pg_collection=pg_collection,
             )
+            if (
+                not USING_PYTORCH_OPTIMIZER
+                and config.use_precision_aware_optimizer
+                and getattr(optimizer_part.optimizer, "master_weights", None) is not None
+            ):
+                # NOTE(@cspades): FusedAdam is provided Megatron-FSDP's main weights as
+                # non-quantized DTensor(s). Megatron-FSDP should NEVER use FusedAdam's
+                # main weights, complete waste of memory as the optimizer step is still
+                # applied to the Megatron-FSDP main weight and extended to FusedAdam
+                # main weights. Override this here.
+                setattr(optimizer_part.optimizer, "master_weights", False)
+
+            optimizers.append(optimizer_part)
             model_chunk_offset += 1
 
         if len(optimizers) == 1:

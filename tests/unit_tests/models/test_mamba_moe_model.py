@@ -35,6 +35,7 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "actual_vocab_size": 131072,
     "add_bias_linear": False,
     "add_qkv_bias": False,
+    "apply_dsa_kernel_fusion": True,
     "apply_query_key_layer_scaling": False,
     "apply_residual_connection_post_layernorm": False,
     "apply_rope_fusion": False,
@@ -66,6 +67,8 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "cpu_offloading_retain_pinned_cpu_buffers": False,
     "cpu_offloading_num_layers": 0,
     "cpu_offloading_weights": False,
+    "chunked_cross_entropy": False,
+    "cross_entropy_chunk_size": 4096,
     "cross_entropy_fusion_impl": "native",
     "cross_entropy_loss_fusion": True,
     "csa_compress_ratios": None,
@@ -80,7 +83,7 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "deallocate_pipeline_outputs": True,
     "defer_embedding_wgrad_compute": False,
     "delay_wgrad_compute": False,
-    "dense_grouped_gemm": False,    ##### FlagScale add #####
+    "dense_grouped_gemm": False,  ##### FlagScale add #####
     "deterministic_mode": False,
     "disable_bf16_reduced_precision_matmul": False,
     "disable_parameter_transpose_cache": False,
@@ -90,6 +93,10 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "dsa_indexer_n_heads": None,
     "dsa_indexer_topk": None,
     "dsa_indexer_use_sparse_loss": False,
+    ##### FlagScale Begin #####
+    "indexer_type_rule": None,
+    "indexer_types": None,
+    ##### FlagScale End #####
     "dualpipev_pipeline_model_parallel_size": None,
     "embedding_init_method": {},
     "embedding_init_method_std": 0.014,
@@ -195,7 +202,6 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "moe_latent_size": None,
     "moe_layer_freq": 1,
     "moe_layer_recompute": False,
-    "moe_mlp_glu_interleave_size": None,
     "moe_n_hash_layers": 0,
     "moe_pad_expert_input_to_capacity": False,
     "moe_pad_experts_for_cuda_graph_inference": False,
@@ -537,7 +543,7 @@ class TestMambaMoEModel:
 
     def setup_method(self, method):
         if torch.cuda.is_available():
-            free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+            free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
             if free_mem < 20:
                 pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
 

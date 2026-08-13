@@ -1,5 +1,5 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
-from .cross_entropy import vocab_parallel_cross_entropy
+from .cross_entropy import vocab_parallel_cross_entropy, vocab_parallel_cross_entropy_chunked
 from .data import broadcast_data
 from .inference_layers import (
     InferenceColumnParallelLinear,
@@ -49,6 +49,7 @@ from .utils import (
 __all__ = [
     # cross_entropy.py
     "vocab_parallel_cross_entropy",
+    "vocab_parallel_cross_entropy_chunked",
     # data.py
     "broadcast_data",
     # layers.py

@@ -311,6 +311,15 @@ def _overridable_class(cls):
                 # (which inherits cls's __init__ and all methods)
                 return object.__new__(OverridableClassProxy)
 
+        @classmethod
+        def apply(proxy_cls, *args, **kwargs):
+            """Dispatch class-level apply calls to the override class when present."""
+            if proxy_cls is OverridableClassProxy:
+                override_cls = _resolve_override_class()
+                if override_cls is not None and hasattr(override_cls, "apply"):
+                    return override_cls.apply(*args, **kwargs)
+            return super(OverridableClassProxy, proxy_cls).apply(*args, **kwargs)
+
         def __init_subclass__(subcls, **kwargs):
             # Allow normal subclassing without interference
             super().__init_subclass__(**kwargs)

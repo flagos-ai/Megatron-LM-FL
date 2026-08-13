@@ -277,6 +277,55 @@ def test_arbitrary_system_exit_remains_non_graceful(monkeypatch) -> None:
     assert shutdowns == [False]
 
 
+def test_successful_pretrain_lifecycle_shuts_down_gracefully(monkeypatch) -> None:
+    from megatron.training import training as training_module
+
+    shutdowns: list[bool] = []
+    result = object()
+    monkeypatch.setattr(
+        training_module,
+        "shutdown_megalens_runtime",
+        lambda *, graceful: shutdowns.append(graceful),
+    )
+
+    @training_module._owns_megalens_runtime
+    def finish_pretrain():
+        return result
+
+    assert finish_pretrain() is result
+    assert shutdowns == [True]
+
+
+def test_pretrain_failure_wins_over_teardown_failure(monkeypatch, caplog) -> None:
+    from megatron.training import training as training_module
+
+    pretrain_failure = RuntimeError("pretrain failed")
+    teardown_failure = OSError("teardown failed")
+
+    def fail_shutdown(*, graceful):
+        assert graceful is False
+        raise teardown_failure
+
+    monkeypatch.setattr(training_module, "shutdown_megalens_runtime", fail_shutdown)
+    caplog.set_level("ERROR", logger=training_module.__name__)
+
+    @training_module._owns_megalens_runtime
+    def fail_pretrain():
+        raise pretrain_failure
+
+    with pytest.raises(RuntimeError, match="pretrain failed") as raised:
+        fail_pretrain()
+
+    assert raised.value is pretrain_failure
+    diagnostics = [
+        record
+        for record in caplog.records
+        if "MegaLens non-graceful shutdown failed" in record.getMessage()
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0].exc_info[1] is teardown_failure
+
+
 def test_training_iteration_admission_restores_the_source_mode1_barrier() -> None:
     training_path = Path(__file__).resolve().parents[2] / "megatron/training/training.py"
     module = ast.parse(training_path.read_text(encoding="utf-8"))

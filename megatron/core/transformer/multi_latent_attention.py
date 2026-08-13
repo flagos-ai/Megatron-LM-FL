@@ -171,6 +171,11 @@ class MultiLatentAttention(Attention):
                 "'rope' and 'yarn'"
             )
 
+        if self.config.experimental_attention_variant == "dsa":
+            core_attn_extra_kwargs = {"is_mtp_layer": is_mtp_layer}
+        else:
+            core_attn_extra_kwargs = {}
+
         self.core_attention = build_module(
             submodules.core_attention,
             config=self.config,
@@ -182,6 +187,7 @@ class MultiLatentAttention(Attention):
             v_channels=self.config.v_head_dim,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
+            **core_attn_extra_kwargs
         )
 
         # Output.
@@ -307,6 +313,9 @@ class MultiLatentAttention(Attention):
                     # query representation.
                     extra_kwargs["x"] = hidden_states
                     extra_kwargs["qr"] = q_compressed
+                    extra_kwargs["prev_topk_indices"] = getattr(
+                        self.core_attention, "current_topk_indices", None
+                    )  # FlagScale Add
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:

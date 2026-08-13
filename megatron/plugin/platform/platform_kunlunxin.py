@@ -6,8 +6,11 @@ XME init is deferred to first use (via _ensure_xme_init) to avoid circular impor
 during platform registration (parallel_state calls get_platform() at module level).
 """
 
+import importlib.util
 import os
 import shutil
+import sys
+from unittest.mock import MagicMock
 
 from .platform_cuda import PlatformCUDA
 
@@ -30,12 +33,21 @@ class PlatformKunLunXin(PlatformCUDA):
         return False
 
     @staticmethod
+    def ensure_modelopt_mocks():
+        """Install XME-compatible modelopt mocks for bridge import paths."""
+        sys.modules["modelopt.torch.distill"] = MagicMock()
+        sys.modules["modelopt.torch.distill.plugins.megatron"] = MagicMock()
+        sys.modules["modelopt.torch.opt.plugins"] = MagicMock()
+
+    @staticmethod
     def ensure_xme_init():
         """Call once after get_platform() to init XME patches. Idempotent."""
         global _XME_INITIALIZED
         if _XME_INITIALIZED:
             return
         _XME_INITIALIZED = True
+        if importlib.util.find_spec("megatron.bridge") is not None:
+            PlatformKunLunXin.ensure_modelopt_mocks()
         try:
             from xmegatron_ext import megatron_plugin_init
             megatron_plugin_init(use_version="0.17.1", check_version=True)

@@ -1,0 +1,41 @@
+name: hygon_tests
+
+on:
+  push:
+    branches:
+      - dev-hygon
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      run_functional_tests:
+        description: Run BW1000 functional and benchmark tests
+        required: false
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.actor }}
+  cancel-in-progress: true
+
+jobs:
+  run_tests:
+    uses: ./.github/workflows/all_tests_common.yml
+    with:
+      platform: hygon
+      run_unit_tests: true
+      run_functional_tests: ${{ github.event_name != 'workflow_dispatch' || inputs.run_functional_tests }}
+
+  all_tests:
+    needs: run_tests
+    runs-on: ubuntu-latest
+    if: always()
+    steps:
+      - name: Verify workflow status
+        run: |
+          if [ "${{ needs.run_tests.result }}" != "success" ]; then
+            echo "Hygon tests workflow failed"
+            exit 1
+          fi
+          echo "All Hygon tests passed"

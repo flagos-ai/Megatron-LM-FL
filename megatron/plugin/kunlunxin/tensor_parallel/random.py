@@ -10,6 +10,7 @@ from megatron.core.tensor_parallel.random import (
     CudaRNGStatesTracker as _CoreCudaRNGStatesTracker,
     _MODEL_PARALLEL_RNG_TRACKER_NAME,
 )
+from megatron.plugin.kunlunxin.debug import log_patch
 
 
 def _gpu_aligned_rng_enabled() -> bool:
@@ -28,6 +29,7 @@ class CudaRNGStatesTrackerKunlunxin(_CoreCudaRNGStatesTracker):
             name: Unique name for the rng state.
             seed: Integer seed for the rng state.
         """
+        log_patch("tensor_parallel.random.CudaRNGStatesTrackerKunlunxin.add")
         if not _gpu_aligned_rng_enabled():
             return super().add(name, seed)
 
@@ -60,6 +62,7 @@ class CudaRNGStatesTrackerKunlunxin(_CoreCudaRNGStatesTracker):
         Args:
             name: Name of the previously added rng state to fork.
         """
+        log_patch("tensor_parallel.random.CudaRNGStatesTrackerKunlunxin.fork")
         if not _gpu_aligned_rng_enabled():
             with super().fork(name):
                 yield

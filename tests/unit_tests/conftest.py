@@ -65,6 +65,7 @@ def bind_local_device():
 
 @pytest.fixture(scope="session", autouse=True)
 def cleanup():
+    """Destroy default process group after all tests complete."""
     yield
     if torch.distributed.is_initialized():
         try:
@@ -180,3 +181,4 @@ def cleanup_gpu_memory():
         gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+

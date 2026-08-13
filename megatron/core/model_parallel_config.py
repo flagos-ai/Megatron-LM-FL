@@ -242,6 +242,22 @@ class ModelParallelConfig:
        from Transformer Engine library is used. Defaults to 'native'.
     """
 
+    chunked_cross_entropy: bool = False
+    """If True, compute vocab parallel cross entropy in chunks along the sequence
+       dimension to reduce peak memory usage. Each chunk is converted to fp32,
+       used, and freed before the next chunk is processed. The backward pass
+       recomputes the softmax per chunk (activation recompute style) instead of
+       storing the full fp32 softmax from the forward pass.
+       Cannot be used together with cross_entropy_loss_fusion.
+       Defaults to False.
+    """
+
+    cross_entropy_chunk_size: int = 4096
+    """Number of sequence positions processed per chunk when chunked_cross_entropy
+       is enabled. Smaller values reduce peak memory further at the cost of more
+       all-reduce calls. Defaults to 4096.
+    """
+
     tp_comm_overlap_disable_qkv: bool = False
     """
        If true, the AllGather -> Gemm overlap for QKV gets disabled

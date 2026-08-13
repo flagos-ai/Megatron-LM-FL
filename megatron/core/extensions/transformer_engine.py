@@ -52,6 +52,7 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.typed_torch import copy_signature
+from megatron.plugin.decorators import overridable  # FlagScale Add
 from megatron.core.utils import (
     get_pg_rank,
     get_pg_size,
@@ -1984,6 +1985,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 extra_states.append(self._encode_extra_state(tmp_state))
             return extra_states
 
+        @overridable  # FlagScale Add
         def _sharded_state_dict_grouped(
             self, tp_axis_map, prefix="", sharded_offsets=(), metadata=None
         ):

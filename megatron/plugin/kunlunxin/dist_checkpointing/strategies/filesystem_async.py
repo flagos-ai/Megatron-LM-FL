@@ -20,6 +20,7 @@ from megatron.core.dist_checkpointing.strategies.filesystem_async import (
     get_write_results_queue,
     logger,
 )
+from megatron.plugin.kunlunxin.debug import debug_patch
 
 
 def _bridge_available() -> bool:
@@ -27,6 +28,7 @@ def _bridge_available() -> bool:
     return importlib.util.find_spec("megatron.bridge") is not None
 
 
+@debug_patch("dist_checkpointing.strategies.filesystem_async.prepare_write_data")
 def prepare_write_data(self, plan: SavePlan, planner: SavePlanner) -> None:
     """Prepare async checkpoint write buckets for KunLunXin bridge path.
 
@@ -100,6 +102,7 @@ def prepare_write_data(self, plan: SavePlan, planner: SavePlanner) -> None:
     logger.debug(f"D2H and push, time: {end - start}")
 
 
+@debug_patch("dist_checkpointing.strategies.filesystem_async.preload_tensors_kunlunxin")
 def preload_tensors_kunlunxin(
     write_buckets: List[WriteBucket], non_blocking=True
 ) -> List[WriteBucket]:
@@ -122,6 +125,7 @@ def preload_tensors_kunlunxin(
     return FileSystemWriterAsync.preload_tensors.__wrapped__(write_buckets, non_blocking=False)
 
 
+@debug_patch("dist_checkpointing.strategies.filesystem_async.write_preloaded_data")
 def write_preloaded_data(
     transform_list,
     local_proc_idx: int,

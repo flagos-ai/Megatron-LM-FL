@@ -1514,18 +1514,6 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             device=hs.device,
         )
 
-        # Add input_ids for hash-based MoE routing under CUDA graphs.
-        # Only add for layers that actually use hash routing,
-        # since other layers (e.g. on later PP stages) receive input_ids=None.
-        if (
-            self.is_moe_layer
-            and self.config.moe_n_hash_layers > 0
-            and getattr(self.mlp.router, 'is_hash_layer', False)
-        ):
-            static_inputs["input_ids"] = torch.zeros(
-                (micro_batch_size, seq_length), dtype=torch.long, device=torch.cuda.current_device()
-            )
-
         return static_inputs
 
     def _get_submodules_under_cudagraphs(self):
@@ -1556,8 +1544,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
     def forward(self, *args, **kwargs):
         """Forward pass with MHC recompute manager support."""
         kwargs.pop("dynamic_inference_decode_only", None)
-
-        mhc_recompute_manager = getattr(self, '_mhc_recompute_manager', None)
+        mhc_recompute_manager = kwargs.pop("mhc_recompute_manager", None)
 
         hidden_states, context = self._forward_attention(
             *args, mhc_recompute_manager=mhc_recompute_manager, **kwargs
