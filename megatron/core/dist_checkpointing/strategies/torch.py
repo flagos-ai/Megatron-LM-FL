@@ -58,8 +58,6 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ######## FlagScale End ########
 
-
-
 if TYPE_CHECKING:
     from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncRequest as NVRxAsyncRequest
     from nvidia_resiliency_ext.checkpointing.async_ckpt.state_dict_saver import (
@@ -92,7 +90,6 @@ from megatron.core.msc_utils import MultiStorageClientFeature
 MSC_PREFIX = "msc://"
 
 _metadata_fn: str = ".metadata"
-
 
 
 # dummy class needed to load mcore v0.15 checkpoints with optim. states

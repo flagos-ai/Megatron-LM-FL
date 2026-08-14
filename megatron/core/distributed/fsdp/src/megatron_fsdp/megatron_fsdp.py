@@ -628,7 +628,6 @@ class MegatronFSDP(torch.nn.Module):
                         param.main_grad.copy_(to_local_if_dtensor(param.grad))
                         del param.grad
                     else:
-                        # Prepare for fused wgrad accumulation.
                         param.main_grad.zero_()
             # Unsharded Gradient Buffer
             else:
@@ -781,8 +780,8 @@ class MegatronFSDP(torch.nn.Module):
         def _register_post_backward_hook(
             post_backward_hook: callable,
             module: nn.Module,
-            args: Optional[Tuple[Any, ...]] = None,
-            kwargs: Optional[Dict[str, Any]] = None,
+            args: Tuple[Any, ...],
+            kwargs: Dict[str, Any],
         ):
             """
             Register a post-backward hook for the given module by inserting an autograd
