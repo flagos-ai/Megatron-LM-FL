@@ -25,7 +25,6 @@ from megatron.core.process_groups_config import (
 )
 from megatron.core.transformer.cuda_graphs import create_cudagraphs, set_current_microbatch
 from megatron.core.transformer.moe.paged_stash import paged_stash_reset
-from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 
 ########## FlagScale Begin ##########
@@ -152,12 +151,12 @@ def get_forward_backward_func(pp_size: Optional[int] = None, vp_size: Optional[i
         vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
 
     if pp_size > 1:
-        if vp_size is not None:
         ######### FlagScale Begin #########
         if parallel_state.get_dualpipev_pipeline_model_parallel_world_size() is not None:
             from megatron.plugin.dualpipev.dualpipev_schedules import (
                 forward_backward_pipelining_with_dualpipev,
             )
+
             forward_backward_func = forward_backward_pipelining_with_dualpipev
         ######### FlagScale End #########
         elif vp_size is not None:  # FlagScale Add
@@ -621,9 +620,6 @@ def backward_step_multimodule(
     return input_tensor_grad
 
 
-        if output_tensor_grad[module_name] is None and config.grad_scale_func is not None:
-        output_tensor_module = output_tensor[module_name]
-        output_tensor_grad_module = output_tensor_grad[module_name]
 def check_first_val_step(first_val_step, forward_only, cond):
     """Check if it is the first validation step."""
     if (first_val_step is not None) and forward_only:
@@ -814,11 +810,6 @@ def forward_backward_no_pipelining(
         config.timers('forward-backward').stop()
 
     if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
         create_cudagraphs()
 
     return forward_data_store
@@ -2062,11 +2053,6 @@ def forward_backward_pipelining_with_interleaving(
         config.timers('forward-backward').stop()
 
     if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
         create_cudagraphs()
     nvtx_range_pop(suffix="misc")
 
@@ -2484,11 +2470,6 @@ def forward_backward_pipelining_without_interleaving(
         config.timers('forward-backward').stop()
 
     if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
         create_cudagraphs()
 
     return forward_data_store
