@@ -1,5 +1,4 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-import copy
 import warnings
 from functools import partial
 from typing import Optional, Union
@@ -38,7 +37,6 @@ from megatron.core.transformer.transformer_block import (
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
     MlpBuilder,
-    HyperConnectionTransformerLayer,
     TransformerLayer,
     TransformerLayerSubmodules,
     get_transformer_layer_offset,
@@ -52,21 +50,9 @@ if HAVE_TE:
         TEFusedMLPWithGroupedLinear,
         TENorm,
     )
-from megatron.core.typed_torch import copy_signature
-    from megatron.core.extensions.transformer_engine import TEFusedMLP, TENorm
     from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
-<<<<<<< TARGET
 else:
     TEFusedMLPWithGroupedLinear, TEFusedMLP, TENorm, TESpecProvider = None, None, None, None
-||||||| BASE
-
-    HAVE_TE = True
-except ImportError:
-    HAVE_TE = False
-=======
-else:
-    TEFusedMLP, TENorm, TESpecProvider = None, None, None
->>>>>>> FORK
 
 try:
     from megatron.core.extensions.kitchen import HAVE_KITCHEN, KitchenSpecProvider
@@ -208,7 +194,6 @@ def get_gpt_layer_with_transformer_engine_submodules(
 ) -> TransformerLayerSubmodules:
     """Use these submodules to use lower-level Transformer Engine modules (required for fp8
     training).
-    enable_hyper_connection: bool = False,
 
 
     Args:
@@ -220,18 +205,9 @@ def get_gpt_layer_with_transformer_engine_submodules(
         qk_l2_norm (bool, optional): To use l2 norm for queries/keys. Defaults to False.
         use_te_op_fuser (bool, optional): Use Transformer Engine's operation-based API, which may
                                           enable certain operation fusions. Defaults to False.
-<<<<<<< TARGET
         mla_down_proj_fusion (bool, optional): Enable fused q/kv down-projection and fused input
                                                layernorm when backend supports. Otherwise fall back
                                                to the unfused MLA.
-||||||| BASE
-=======
-        mla_down_proj_fusion (bool, optional): Enable fused q/kv down-projection and fused input
-                                               layernorm when backend supports. Otherwise fall back
-                                               to the unfused MLA.
-        enable_hyper_connection (bool): Use HyperConnectionTransformerLayer with
-            HyperConnectionModule instead of plain TransformerLayer. Defaults to False.
->>>>>>> FORK
 
     Returns:
         TransformerLayerSubmodules: TE modules to construct a TransformerLayer
@@ -309,7 +285,6 @@ def get_gpt_layer_with_transformer_engine_submodules(
                 pre_mlp_layernorm=backend.layer_norm() if num_experts else IdentityOp,
                 mlp=mlp,
                 mlp_bda=get_bias_dropout_add,
-<<<<<<< TARGET
                 sharded_state_dict_keys_map=(
                     {
                         "self_attention.linear_q_down_proj.layer_norm_": "input_layernorm.",
@@ -336,43 +311,11 @@ def get_gpt_layer_with_transformer_engine_submodules(
                     q_layernorm=IdentityOp,
                     kv_layernorm=IdentityOp,
                 ),
-||||||| BASE
-=======
-                mlp_hyper_connection=hc_module,
-                sharded_state_dict_keys_map=(
-                    {
-                        "self_attention.linear_q_down_proj.layer_norm_": "input_layernorm.",
-                        "self_attention.linear_kv_down_proj.layer_norm_": "input_layernorm.",
-                        "self_attention.linear_qkv_down_proj.layer_norm_": "input_layernorm.",
-                    }
-                    if fuse_input_layernorm
-                    else {}
-                ),
-            )
-        return TransformerLayerSubmodules(
-            input_layernorm=backend.layer_norm(has_residual=True),
-            self_attention=ModuleSpec(
-                module=MLASelfAttention,
-                params={"attn_mask_type": AttnMaskType.causal},
-                submodules=MLASelfAttentionSubmodules(
-                    linear_q_proj=backend.column_parallel_linear(),
-                    linear_q_down_proj=backend.linear(),
-                    linear_q_up_proj=linear_q_up_proj,
-                    linear_kv_down_proj=backend.linear(),
-                    linear_kv_up_proj=linear_kv_up_proj,
-                    core_attention=backend.core_attention(),
-                    linear_proj=backend.row_parallel_linear(),
-                    q_layernorm=IdentityOp,
-                    kv_layernorm=IdentityOp,
-                ),
->>>>>>> FORK
             ),
             self_attn_bda=get_bias_dropout_add,
             pre_mlp_layernorm=backend.layer_norm(has_residual=True) if num_experts else IdentityOp,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
-            self_attention_hyper_connection=hc_module,
-            mlp_hyper_connection=hc_module,
         )
     else:
         qk_norm = backend.layer_norm(for_qk=True)
@@ -404,12 +347,9 @@ def get_gpt_layer_with_transformer_engine_submodules(
                 "mlp.3.basic_ops.0.weight": "mlp.linear_fc2.weight",
                 "mlp.3.basic_ops.1.bias": "mlp.linear_fc2.bias",
             },
-            self_attention_hyper_connection=hc_module,
-            mlp_hyper_connection=hc_module,
         )
 
 
-<<<<<<< TARGET
 @copy_signature(get_gpt_layer_with_transformer_engine_submodules)
 def get_gpt_layer_with_transformer_engine_spec(*args, **kwargs) -> ModuleSpec:
     """Use this spec to use lower-level Transformer Engine modules (required for fp8 training)."""
@@ -420,22 +360,6 @@ def get_gpt_layer_with_transformer_engine_spec(*args, **kwargs) -> ModuleSpec:
 
 
 def get_gpt_layer_local_submodules(
-||||||| BASE
-def get_gpt_layer_local_spec(
-=======
-@copy_signature(get_gpt_layer_with_transformer_engine_submodules)
-def get_gpt_layer_with_transformer_engine_spec(*args, **kwargs) -> ModuleSpec:
-    """Use this spec to use lower-level Transformer Engine modules (required for fp8 training)."""
-    enable_hc = kwargs.get('enable_hyper_connection', False)
-    layer_module = HyperConnectionTransformerLayer if enable_hc else TransformerLayer
-    return ModuleSpec(
-        module=layer_module,
-        submodules=get_gpt_layer_with_transformer_engine_submodules(*args, **kwargs),
-    )
-
-
-def get_gpt_layer_local_submodules(
->>>>>>> FORK
     num_experts: Optional[int] = None,
     moe_grouped_gemm: Optional[bool] = False,
     qk_layernorm: Optional[bool] = False,
@@ -448,7 +372,6 @@ def get_gpt_layer_local_submodules(
     kitchen_attention_backend: str = "sdpa",
 ) -> TransformerLayerSubmodules:
     """Use these submodules for an implementation using only modules in Megatron-Core.
-    enable_hyper_connection: bool = False,
 
 
     Args:
@@ -516,8 +439,6 @@ def get_gpt_layer_local_submodules(
             pre_mlp_layernorm=layer_norm,
             mlp=mlp,
             mlp_bda=get_bias_dropout_add,
-            self_attention_hyper_connection=hc_module,
-            mlp_hyper_connection=hc_module,
         )
     else:
         return TransformerLayerSubmodules(
@@ -545,12 +466,9 @@ def get_gpt_layer_local_submodules(
                 "input_layernorm.": "self_attention.linear_qkv.layer_norm_",
                 "pre_mlp_layernorm.": "mlp.linear_fc1.layer_norm_",
             },
-            self_attention_hyper_connection=hc_module,
-            mlp_hyper_connection=hc_module,
         )
 
 
-<<<<<<< TARGET
 @copy_signature(get_gpt_layer_local_submodules)
 def get_gpt_layer_local_spec(*args, **kwargs) -> ModuleSpec:
     """Use this spec for an implementation using only modules in Megatron-Core."""
@@ -559,19 +477,6 @@ def get_gpt_layer_local_spec(*args, **kwargs) -> ModuleSpec:
     )
 
 
-||||||| BASE
-=======
-@copy_signature(get_gpt_layer_local_submodules)
-def get_gpt_layer_local_spec(*args, **kwargs) -> ModuleSpec:
-    """Use this spec for an implementation using only modules in Megatron-Core."""
-    enable_hc = kwargs.get('enable_hyper_connection', False)
-    layer_module = HyperConnectionTransformerLayer if enable_hc else TransformerLayer
-    return ModuleSpec(
-        module=layer_module, submodules=get_gpt_layer_local_submodules(*args, **kwargs)
-    )
-
-
->>>>>>> FORK
 def _get_mlp_module_spec(
     use_te: Optional[bool] = True,
     num_experts: Optional[int] = None,
@@ -684,7 +589,6 @@ def get_gpt_decoder_layer_specs(
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
             mla_down_proj_fusion=getattr(config, "mla_down_proj_fusion", False),
-            enable_hyper_connection=config.enable_hyper_connections,
         )
         moe_layer_spec = get_gpt_layer_with_transformer_engine_spec(
             num_experts=config.num_moe_experts,
@@ -712,7 +616,6 @@ def get_gpt_decoder_layer_specs(
             num_experts=config.num_moe_experts,
             moe_grouped_gemm=config.moe_grouped_gemm,
             moe_use_legacy_grouped_gemm=config.moe_use_legacy_grouped_gemm,
-            enable_hyper_connection=config.enable_hyper_connections,
         )
     else:
         layer_norm_impl = LNImpl
@@ -726,7 +629,6 @@ def get_gpt_decoder_layer_specs(
             use_kitchen=config.use_kitchen,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
-            enable_hyper_connection=config.enable_hyper_connections,
         )
         moe_layer_spec = get_gpt_layer_local_spec(
             num_experts=config.num_moe_experts,
@@ -738,7 +640,6 @@ def get_gpt_decoder_layer_specs(
             use_kitchen=config.use_kitchen,
             use_kitchen_attention=config.use_kitchen_attention,
             kitchen_attention_backend=config.kitchen_attention_backend,
-            enable_hyper_connection=config.enable_hyper_connections,
         )
 
     # Parse config.moe_layer_freq to determine the pattern of expert/dense layers.
@@ -781,12 +682,12 @@ def get_gpt_decoder_block_spec(
     qk_l2_norm: Optional[bool] = False,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[bool] = None,  # FlagScale Add
 ) -> TransformerBlockSubmodules:
     """GPT block spec."""
     layer_specs = get_gpt_decoder_layer_specs(
         config, use_transformer_engine, normalization, qk_l2_norm
     )
-    dualpipev_stage: Optional[bool] = None,  # FlagScale Add
     # Slice the layer specs to only include the layers that are built in this pipeline stage.
     # Note: MCore layer_number starts at 1
     # FlagScale Begin
@@ -894,9 +795,6 @@ def get_gpt_mtp_block_spec_for_backend(
 
     mtp_layer_spec = get_mtp_layer_spec_for_backend(
         mtp_model_layer_spec=transformer_layer_spec, backend=backend
-        mtp_model_layer_spec=transformer_layer_spec,
-        backend=backend,
-        enable_hyper_connections=config.enable_hyper_connections,
     )
     mtp_num_layers = config.mtp_num_layers if config.mtp_num_layers else 0
     if config.mtp_use_repeated_layer:
@@ -905,7 +803,7 @@ def get_gpt_mtp_block_spec_for_backend(
         mtp_layer_specs = [mtp_layer_spec] * mtp_num_layers
 
     if not config.mtp_use_repeated_layer:
-        offset = get_mtp_layer_offset(config, vp_stage=vp_stage)
+        offset = get_mtp_layer_offset(config, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage)
         # Split the MTP layer specs to only include the layers that are built in this
         # pipeline stage.
         mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]
@@ -914,13 +812,7 @@ def get_gpt_mtp_block_spec_for_backend(
                 len(mtp_layer_specs) == config.mtp_num_layers
             ), f"All MTP layers must reside in the same pipeline stage"
 
-    offset = get_mtp_layer_offset(config, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage)
-    # split the mtp layer specs to only include the layers that are built in this pipeline stage.
-    mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]
     if len(mtp_layer_specs) > 0:
-        assert (
-            len(mtp_layer_specs) == config.mtp_num_layers
-        ), f"currently all of the mtp layers must stage in the same pipeline stage."
         mtp_block_spec = MultiTokenPredictionBlockSubmodules(layer_specs=mtp_layer_specs)
     else:
         mtp_block_spec = None
