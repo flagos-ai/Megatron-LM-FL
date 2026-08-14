@@ -14,7 +14,7 @@ import torch
 from torch import Tensor
 
 from megatron.core import parallel_state
-from megatron.plugin.decorators import overridable  # FlagScale Add
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 logger = logging.getLogger(__name__)
 
@@ -35,11 +35,11 @@ try:
 except ImportError:
     apply_rotary_emb_flash = None
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 __all__ = [
     'apply_rotary_pos_emb',
@@ -65,11 +65,11 @@ def get_pos_emb_on_this_cp_rank(
         raise ValueError("cp_group must be provided to get positional embedding per CP rank")
     cp_size = cp_group.size()
     cp_rank = cp_group.rank()
-    # FlagScale Begin
+    ######## FlagScale Begin ########
     cp_idx = torch.tensor([cp_rank, (2 * cp_size - cp_rank - 1)], device="cpu", pin_memory=True).to(
         device=cur_platform.device(), non_blocking=True
     )
-    # FlagScale End
+    ######## FlagScale End ########
     pos_emb = pos_emb.view(
         *pos_emb.shape[:seq_dim], 2 * cp_size, -1, *pos_emb.shape[(seq_dim + 1) :]
     )
@@ -97,7 +97,7 @@ def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
         return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
-@overridable  # FlagScale Add
+@overridable  # FlagScale Modify
 def _apply_rotary_pos_emb_bshd(
     t: Tensor,
     freqs: Tensor,

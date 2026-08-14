@@ -461,17 +461,16 @@ def _make_dsv4_hash_moe_config():
 
 def _build_dsv4_moe_layer(config, layer_number, pg_collection):
     """Instantiate a TransformerLayer from the DSv4 experimental attention spec."""
-    from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
     from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
-        get_transformer_layer_with_experimental_attention_variant_spec,
+        get_transformer_block_with_experimental_attention_variant_spec,
     )
     from megatron.core.transformer.spec_utils import build_module
 
-    layer_specs = get_transformer_layer_with_experimental_attention_variant_spec(
-        config=config, backend=TESpecProvider()
+    block_submodules = get_transformer_block_with_experimental_attention_variant_spec(
+        config=config
     )
     return build_module(
-        layer_specs[layer_number - 1],
+        block_submodules.layer_specs[layer_number - 1],
         config=config,
         layer_number=layer_number,
         pg_collection=pg_collection,

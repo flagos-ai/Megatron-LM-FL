@@ -4,6 +4,7 @@ build
 .coverage_*
 *.egg-info
 *~
+*.swp
 slurm*
 logs
 .vscode
@@ -26,3 +27,4 @@ docs/apidocs
 
 # MacOS
 .DS_Store
+.claude/worktrees/

@@ -14,12 +14,12 @@ from megatron.core.datasets.gpt_dataset import GPTDatasetConfig
 from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.utils import Split, normalize
 from megatron.core.utils import log_single_rank
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 from megatron.plugin.utils import is_built_on_zero_rank
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 logger = logging.getLogger(__name__)
 
@@ -389,14 +389,14 @@ class BlendedMegatronDatasetBuilder(object):
         ):
             rank = torch.distributed.get_rank()
             # First, build on rank 0
-            if is_built_on_zero_rank():  # FlagScale Add
+            if is_built_on_zero_rank():  # FlagScale Modify
                 num_workers = num_dataset_builder_threads
                 if num_workers > 1:
                     # since only rank 0 is running, scale up the thread count
                     # but not too much to avoid overloading storage on miss path.
                     # if user set num_dataset_builder_threads to 1,
                     # i.e. meant for serial build, do not scale up.
-                    num_workers *= min(2, max(1, cur_platform.device_count()))  # FlagScale Add
+                    num_workers *= min(2, max(1, cur_platform.device_count()))  # FlagScale Modify
                 _threading_helper(
                     megatron_datasets, num_workers, prefixes, split, sizes_per_dataset
                 )
@@ -404,7 +404,7 @@ class BlendedMegatronDatasetBuilder(object):
             torch.distributed.barrier()
 
             # Then, build on other ranks; guaranteed to be data_cache hit
-            if not is_built_on_zero_rank():  # FlagScale Add
+            if not is_built_on_zero_rank():  # FlagScale Modify
                 _threading_helper(
                     megatron_datasets,
                     num_dataset_builder_threads,
@@ -532,7 +532,7 @@ class BlendedMegatronDatasetBuilder(object):
             dataset = None
 
             # First, build on rank 0
-            if is_built_on_zero_rank() and is_built_on_rank():  # FlagScale Add
+            if is_built_on_zero_rank() and is_built_on_rank():  # FlagScale Modify
                 try:
                     dataset = cls(*args)
                 except OSError as err:
@@ -548,7 +548,7 @@ class BlendedMegatronDatasetBuilder(object):
                 torch.distributed.barrier()
 
             # After, build on other ranks
-            if not is_built_on_zero_rank() and is_built_on_rank():  # FlagScale Add
+            if not is_built_on_zero_rank() and is_built_on_rank():  # FlagScale Modify
                 dataset = cls(*args)
 
             return dataset

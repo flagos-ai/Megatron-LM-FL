@@ -1,6 +1,8 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 
 """Utilities for transformer layers."""
+import gc
+import logging
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Dict, Iterable, Optional, Tuple, Union
 
@@ -15,14 +17,16 @@ from megatron.core.utils import (
     make_sharded_tensor_for_checkpoint,
     make_tp_sharded_tensor_for_checkpoint,
 )
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 if TYPE_CHECKING:
     from megatron.core.transformer import TransformerConfig
+
+logger = logging.getLogger(__name__)
 
 
 def get_linear_layer(rows, columns, init_method, perform_initialization=True):
@@ -37,12 +41,12 @@ def get_linear_layer(rows, columns, init_method, perform_initialization=True):
 
 def get_default_causal_mask(sq: int) -> torch.Tensor:
     """Return the causal upper triangular mask for softmax input."""
-    return torch.triu(torch.ones(sq, sq, device=cur_platform.device_name()), diagonal=1).bool()  # FlagScale Add
+    return torch.triu(torch.ones(sq, sq, device=cur_platform.device_name()), diagonal=1).bool()  # FlagScale Modify
 
 
 def get_sliding_window_causal_mask(sq, skv, window_size):
     """Create the equivalent attention mask for SWA in [sq, skv] shape"""
-    m = torch.ones(sq, skv, dtype=torch.bool, device=cur_platform.device_name())  # FlagScale Add
+    m = torch.ones(sq, skv, dtype=torch.bool, device=cur_platform.device_name())  # FlagScale Modify
     mu = torch.triu(m, diagonal=skv - sq - window_size[0])
     ml = torch.tril(mu, diagonal=skv - sq + window_size[1])
     ml = ~ml
@@ -75,6 +79,22 @@ def erf_gelu(x):
     return (
         x * 0.5 * (torch.erf(x / 1.41421).to(dtype=x.dtype) + torch.ones_like(x).to(dtype=x.dtype))
     )
+
+
+@torch.no_grad()
+def cat_with_oom_fallback(sub_state_dict):
+    """Merge sharded tensor pieces, falling back to CPU if device-side cat OOMs."""
+    try:
+        return torch.cat(sub_state_dict)
+    except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+        logger.warning(
+            f"CUDA OutOfMemoryError encountered during tensors merging."
+            f" Switching to CPU merge. (Error: {e})"
+        )
+        merged_sub_state_dict = torch.cat([t.cpu() for t in sub_state_dict])
+        gc.collect()
+        torch.cuda.empty_cache()
+        return merged_sub_state_dict
 
 
 def make_sharded_tensors_for_checkpoint(

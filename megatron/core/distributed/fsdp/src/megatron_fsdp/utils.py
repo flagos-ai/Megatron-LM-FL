@@ -22,13 +22,6 @@ from importlib.metadata import version
 from typing import Callable, Optional, Sequence, Union
 
 try:
-    import megatron.core.parallel_state as parallel_state
-
-    HAVE_MEGATRON_CORE = True
-except (ImportError, ModuleNotFoundError):
-    HAVE_MEGATRON_CORE = False
-
-try:
     import einops
 
     HAVE_EINOPS = True
@@ -44,11 +37,11 @@ from torch.distributed import DeviceMesh, ProcessGroup
 
 logger = logging.getLogger(__name__)
 
-########## FlagScale Begin ##########
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-########## FlagScale End ##########
+######## FlagScale End ########
 
 try:
     import transformer_engine  # pylint: disable=W0611
@@ -57,6 +50,13 @@ try:
 except (ImportError, ModuleNotFoundError):
     # Transformer Engine not found
     HAVE_TE = False
+
+
+try:
+    _torch_version = PkgVersion(torch.__version__)
+except Exception:
+    # This is a WAR for building docs, where torch is not actually imported
+    _torch_version = PkgVersion("0.0.0")
 
 
 _MODEL_PARALLEL_RNG_TRACKER_NAME = "model-parallel-rng"
@@ -91,6 +91,13 @@ def is_te_min_version(vers, check_equality=True):
     return te_version > PkgVersion(vers)
 
 
+def is_torch_min_version(version, check_equality=True):
+    """Check if minimum version of `torch` is installed."""
+    if check_equality:
+        return _torch_version >= PkgVersion(version)
+    return _torch_version > PkgVersion(version)
+
+
 def is_submodule(module, parent_module, strict=True):
     """
     Check if a module is a submodule of another module.
@@ -102,6 +109,23 @@ def is_submodule(module, parent_module, strict=True):
         if m is module:
             return True
     return False
+
+
+def find_megatron_fsdp(model):
+    """Walk the model wrapper chain to find a MegatronFSDP instance, if any."""
+    # Lazy import to avoid a circular import: megatron_fsdp.py transitively imports
+    # this module during its own initialization, so a top-level import of
+    # MegatronFSDP here would fail with a partially-initialized module error.
+    try:
+        from megatron.core.distributed.fsdp.src.megatron_fsdp.megatron_fsdp import MegatronFSDP
+    except (ImportError, ModuleNotFoundError):
+        return None
+    m = model
+    while m is not None:
+        if isinstance(m, MegatronFSDP):
+            return m
+        m = getattr(m, 'module', None)
+    return None
 
 
 def get_mesh_names(
@@ -166,7 +190,7 @@ def contains_submesh(
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = cur_platform.device_name(), clone: bool = False, graph_safe: bool = False  # FlagScale Add
+    device: Union[int, str, torch.device] = cur_platform.device_name(), clone: bool = False, graph_safe: bool = False  # FlagScale Modify
 ) -> torch.Tensor:
     """Return the random number generator state of the specified GPU.
 
@@ -179,18 +203,18 @@ def _get_cuda_rng_state(
 
     # if not using cuda graphs, just use the builtin pytorch function
     if not graph_safe:
-        return cur_platform.random().get_rng_state(device=device)  # FlagScale Add
+        return cur_platform.random().get_rng_state(device=device)  # FlagScale Modify
 
     _lazy_init()
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device(cur_platform.current_device_name())  # FlagScale Add
+        device = torch.device(cur_platform.current_device_name())  # FlagScale Modify
     idx = device.index
     if idx is None:
-        idx = cur_platform.current_device()  # FlagScale Add
+        idx = cur_platform.current_device()  # FlagScale Modify
 
-    default_generator = cur_platform.default_generator(idx)  # FlagScale Add
+    default_generator = cur_platform.default_generator(idx)  # FlagScale Modify
     if clone:
         return default_generator.clone_state()
     return default_generator.graphsafe_get_state()
@@ -217,19 +241,19 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
     else:
         # newer PyTorch
         if device == -1:
-            device = torch.device(cur_platform.device_name())  # FlagScale Add
+            device = torch.device(cur_platform.device_name())  # FlagScale Modify
         elif isinstance(device, str):
             device = torch.device(device)
         elif isinstance(device, int):
-            device = torch.device(cur_platform.device(int))  # FlagScale Add
+            device = torch.device(cur_platform.device(int))  # FlagScale Modify
 
         def cb():
             idx = device.index
             if idx is None:
-                # FlagScale Begin
+                ######## FlagScale Begin ########
                 idx = cur_platform.current_device()
             default_generator = cur_platform.default_generator(idx)
-                # FlagScale End
+                ######## FlagScale End ########
 
             # if graph capturing, set the rng state in a cudagraphable way
             if graph_safe:
@@ -367,12 +391,12 @@ def initialize_rng_tracker(
                     self.states_[name] = new_state
                 else:
                     # Get the current rng state.
-                    orig_rng_state = cur_platform.get_rng_state()  # FlagScale Add
+                    orig_rng_state = cur_platform.get_rng_state()  # FlagScale Modify
                     # Set the new state and store it.
-                    # FlagScale Begin
+                    ######## FlagScale Begin ########
                     cur_platform.manual_seed(seed)
                     self.states_[name] = cur_platform.get_rng_state()
-                    # FlagScale End
+                    ######## FlagScale End ########
                     # Reset rng state to what it was.
                     _set_cuda_rng_state(orig_rng_state)
 
@@ -491,6 +515,8 @@ class FSDPDistributedIndex:
         hybrid_fsdp_expt_group: Optional[torch.distributed.ProcessGroup] = None,
         hsdp_outer_dp_shard: bool = False,
         expt_device_mesh: Optional[DeviceMesh] = None,
+        fsdp_group_ag: Optional[torch.distributed.ProcessGroup] = None,
+        expt_fsdp_group_ag: Optional[torch.distributed.ProcessGroup] = None,
     ):
         """
         Args:
@@ -512,6 +538,13 @@ class FSDPDistributedIndex:
                 just sharding across dp_shard ranks and replicating across dp_outer ranks.
             expt_device_mesh (Optional[DeviceMesh]): The expert parallel device mesh
                 to use for the DistributedIndex.
+            fsdp_group_ag (Optional[torch.distributed.ProcessGroup]): Independent all-gather
+                process group for overlapping all-gather and reduce-scatter operations.
+                When provided, enables AG/RS overlap optimization for regular (non-expert)
+                parameters.
+            expt_fsdp_group_ag (Optional[torch.distributed.ProcessGroup]): Independent all-gather
+                process group for expert parameters in MoE models. When provided, enables AG/RS
+                overlap optimization for expert parameters.
         """
         # Device mesh arguments.
         self.device_mesh = device_mesh
@@ -531,13 +564,9 @@ class FSDPDistributedIndex:
             if contains_submesh(self.device_mesh, self.dp_shard_dim)
             else None
         )
-        # AG group comes from parallel_state, not the mesh
-        # the purpose of this independent group is to overlap all-gather and gradient reduction.
-        self.fsdp_group_ag = None
-        if HAVE_MEGATRON_CORE and parallel_state.has_separate_all_gather_group():
-            self.fsdp_group_ag = parallel_state.get_data_parallel_group(
-                with_context_parallel=True, independent_all_gather=True
-            )
+        # AG groups: supplied via ProcessGroupCollection (Megatron-FSDP entrypoint).
+        self.fsdp_group_ag = fsdp_group_ag
+        self.expt_fsdp_group_ag = expt_fsdp_group_ag
         # Retrieve the outer-FSDP process group from the DeviceMesh.
         self.outer_fsdp_group = (
             self.device_mesh[self.dp_outer_dim].get_group()
@@ -682,6 +711,8 @@ class FSDPDistributedIndex:
     ) -> ProcessGroup:
         """Get the FSDP process group."""
         if is_expert_parallel:
+            if independent_all_gather:
+                return self.expt_fsdp_group_ag
             return self.expt_fsdp_group
         if independent_all_gather:
             return self.fsdp_group_ag
@@ -770,7 +801,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=cur_platform.current_device(),  # FlagScale Add
+                    device=cur_platform.current_device(),  # FlagScale Modify
                     requires_grad=False,
                 )
 
@@ -813,23 +844,35 @@ def is_mcore_tensor_model_parallel(param: torch.Tensor) -> bool:
     """
     Check if the given parameter is Megatron-Core tensor model parallel.
     """
-    return getattr(param, "_mcore_tp", False) or getattr(param, "tensor_model_parallel", False)
+    return get_mcore_tensor_parallel_partition_dim(param) is not None
 
 
 def is_mcore_tensor_parallel_duplicated(param: torch.Tensor) -> bool:
     """
     Check if the given parameter is Megatron-Core tensor model parallel and duplicated.
     """
-    return getattr(param, "_tp_duplicated", False)
+    return get_mcore_tensor_parallel_partition_dim(param) is None
 
 
 def get_mcore_tensor_parallel_partition_dim(param: torch.Tensor) -> Optional[int]:
     """
     Get the partition dimension for a Megatron-Core tensor model parallel parameter.
     """
-    if is_mcore_tensor_model_parallel(param):
-        if hasattr(param, "_tp_partition_dim"):
-            return param._tp_partition_dim
-        else:
-            return param.partition_dim
+    if hasattr(param, "_tensor_parallel_mode"):
+        if param._tensor_parallel_mode == "column":
+            return 0
+        elif param._tensor_parallel_mode == "row":
+            return 1
+    if getattr(param, "tensor_model_parallel", False):
+        partition_dim = getattr(param, "partition_dim", None)
+        if partition_dim is not None and partition_dim >= 0:
+            return int(partition_dim)
     return None
+
+
+def using_tensor_parallel(dist_index, is_expert_parallel: bool = False) -> bool:
+    """
+    Check if tensor parallelism is being used based on the distributed index.
+    """
+    tp_mesh = dist_index.get_submesh(dist_index.tp_dim, is_expert_parallel=is_expert_parallel)
+    return tp_mesh.mesh.numel() > 1

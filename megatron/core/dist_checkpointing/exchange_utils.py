@@ -35,11 +35,11 @@ def is_float8tensor(tensor: torch.Tensor) -> bool:
 
 logger = logging.getLogger(__name__)
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 class ShardDistribution(NamedTuple):
@@ -100,19 +100,19 @@ def _get_empty_tensor_for_exchange(
         orig_device = None  # this tensor will be discarded anyway
         sh_ten = unneeded_shards[shard_id]
         if sh_ten.data is None:
-            sh_ten.init_data(cur_platform.device_name())  # FlagScale Add
+            sh_ten.init_data(cur_platform.device_name())  # FlagScale Modify
             tensor = sh_ten.data
             sh_ten.data = None  # won't be used. free memory
         else:
             tensor = sh_ten.data
             if tensor.device.type == "cpu":
-                tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Add
+                tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Modify
     else:
-        local_unloaded_sh_ten.init_data(cur_platform.device_name())  # FlagScale Add
+        local_unloaded_sh_ten.init_data(cur_platform.device_name())  # FlagScale Modify
         orig_device = local_unloaded_sh_ten.data.device
         tensor = local_unloaded_sh_ten.data
         if tensor.device.type == "cpu":
-            tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Add
+            tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Modify
         loaded_tensors[shard_id] = tensor
     return tensor, orig_device
 
@@ -332,7 +332,7 @@ def exchange_loaded_tensors_gather_rounds(
                 for rank, shard_id in enumerate(round_shard_ids):
                     if shard_id is None:
                         # if no more useful data, the given rank will exchange empty tensor
-                        local_ten = torch.empty(0, dtype=dtype, device=cur_platform.device_name())  # FlagScale Add
+                        local_ten = torch.empty(0, dtype=dtype, device=cur_platform.device_name())  # FlagScale Modify
                         orig_device = None
                     else:
                         assert isinstance(shard_id, tuple), type(shard_id)
@@ -342,11 +342,11 @@ def exchange_loaded_tensors_gather_rounds(
                                 all_loaded_tensors.keys(),
                             )
                             orig_device = all_loaded_tensors[shard_id]
-                            # FlagScale Begin
+                            ######## FlagScale Begin ########
                             all_loaded_tensors[shard_id] = all_loaded_tensors[shard_id].to(
                                 cur_platform.device()
                             )
-                            # FlagScale End
+                            ######## FlagScale End ########
                             local_ten = all_loaded_tensors[shard_id]
                         else:
                             local_ten, orig_device = _get_empty_tensor_for_exchange(
@@ -513,7 +513,7 @@ def exchange_loaded_tensors_broadcast(
         if rank == local_rank:
             assert shard_id in all_loaded_tensors, (shard_id, all_loaded_tensors.keys())
             orig_device = all_loaded_tensors[shard_id].device
-            local_ten = all_loaded_tensors[shard_id].to(cur_platform.device())  # FlagScale Add
+            local_ten = all_loaded_tensors[shard_id].to(cur_platform.device())  # FlagScale Modify
         else:
             local_ten, orig_device = _get_empty_tensor_for_exchange(
                 shard_id, unloaded_shards, shard_to_metadata, all_loaded_tensors

@@ -3,6 +3,10 @@ ENV_VARS:
   NVTE_ALLOW_NONDETERMINISTIC_ALGO: 0
   NCCL_ALGO: Ring
   CUBLAS_WORKSPACE_CONFIG: :4096:8
+  SKIP_PYTEST: 1
+BEFORE_SCRIPT: |
+  pip uninstall -y transformer_engine || true
+  pip uninstall -y Apex || true ## TODO: remove once Apex dependency has been removed completely
 MODEL_ARGS:
   --num-layers: 12
   --hidden-size: 512
@@ -50,4 +54,6 @@ MODEL_ARGS:
   --bf16: true
   --attention-backend: unfused
   --log-memory-to-tensorboard: true
+  --async-save: true
+  --use-persistent-ckpt-worker: true
 TEST_TYPE: regular

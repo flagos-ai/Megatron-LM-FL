@@ -54,11 +54,11 @@ from .optimizer_config import OptimizerConfig
 
 logger = getLogger(__name__)
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 def _zero_grad_group_helper(
@@ -100,7 +100,7 @@ def _multi_tensor_copy_this_to_that(
             that_.copy_(this_)
 
 
-# FlagScale Begin
+######## FlagScale Begin ########
 param_group_identifier_keys = (
     'wd_mult',
     'lr_mult',
@@ -108,8 +108,8 @@ param_group_identifier_keys = (
     'is_decoupled_lr',
     'is_vision_model_param',
     'is_engram_parallel',
-)  ####FlagScale add is_vision_model_param
-# FlagScale End
+)
+######## FlagScale End ########
 
 
 class MegatronOptimizer(ABC):
@@ -402,7 +402,7 @@ class MegatronOptimizer(ABC):
                     if isinstance(v, torch.Tensor) and v.is_cuda:
                         state_dict[k] = v.cpu()
 
-            cur_platform.empty_cache()  # FlagScale Add
+            cur_platform.empty_cache()  # FlagScale Modify
 
     def restore_from_cpu(self):
         """Function used for RL training.
@@ -415,12 +415,12 @@ class MegatronOptimizer(ABC):
             for param_group in self.optimizer.param_groups:
                 for p in param_group['params']:
                     if isinstance(p, torch.Tensor) and not p.is_cuda:
-                        p.data = p.data.to(cur_platform.device())  # FlagScale Add
+                        p.data = p.data.to(cur_platform.device())  # FlagScale Modify
 
             for state_dict in self.optimizer.state.values():
                 for k, v in state_dict.items():
                     if isinstance(v, torch.Tensor) and not v.is_cuda:
-                        state_dict[k] = v.to(cur_platform.device())  # FlagScale Add
+                        state_dict[k] = v.to(cur_platform.device())  # FlagScale Modify
 
     @staticmethod
     def _filter_and_reorder_param_groups(
@@ -513,11 +513,11 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         # Note that we keep this for the cases that grad scaler is none.
         # We still record nan/inf if we have a bfloat16 with a grad scaler.
         if self.grad_scaler:
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             self.found_inf = torch.tensor(
                 [0.0], dtype=torch.float, device=cur_platform.device_name()
             )
-            # FlagScale End
+            ######## FlagScale End ########
 
         # Dummy tensor needed for apex multi-apply tensor.
         # For bfloat, we don't have multi-tensor apply and for now
@@ -525,19 +525,19 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if self.config.bf16:
             self._dummy_overflow_buf = None
         else:
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             self._dummy_overflow_buf = torch.tensor(
                 [0], dtype=torch.int, device=cur_platform.device_name()
             )
-            # FlagScale End
+            ######## FlagScale End ########
 
         # In case grad scaler is not passed, define the unity scale.
         if self.grad_scaler is None:
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             self._scale_one = torch.tensor(
                 [1.0], dtype=torch.float, device=cur_platform.device_name()
             )
-            # FlagScale End
+            ######## FlagScale End ########
 
     def get_loss_scale(self):
         if self.grad_scaler is None:
@@ -564,7 +564,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             )
 
         # Update across all model parallel instances.
-        #### FlagScale Begin ####
+        ######## FlagScale Begin ########
         groups = self.get_grad_stats_parallel_group()
         if isinstance(groups, list):
             if "cpu:gloo" == torch.distributed.get_backend(groups[0]):
@@ -580,7 +580,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             )
         if self.found_inf.device != torch.device(cur_platform.device_name()):
             self.found_inf = self.found_inf.to(cur_platform.device())
-        #### FlagScale End ####
+        ######## FlagScale End ########
 
         # Check for nan.
         found_inf_flag = self.found_inf.item() > 0
@@ -735,13 +735,13 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                     if param.requires_grad:
 
                         # float16 params:
-                        # FlagScale Begin
+                        ######## FlagScale Begin ########
                         # cuda check -> platform check
                         if param.device.type == cur_platform.device_name() and param.dtype in (
                             torch.float16,
                             torch.bfloat16,
                         ):
-                            # FlagScale End
+                            ######## FlagScale End ########
                             float16_params_this_group.append(param)
                             # Create a copy
                             main_param = param.detach().clone().float()
@@ -760,12 +760,12 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                             if param in self.optimizer.state:
                                 self.optimizer.state[main_param] = self.optimizer.state.pop(param)
                         # fp32 params.
-                        # FlagScale Begin
+                        ######## FlagScale Begin ########
                         elif (
                             param.device.type == cur_platform.device_name()
                             and param.dtype == torch.float32
                         ):
-                            # FlagScale End
+                            ######## FlagScale End ########
                             fp32_params_this_group.append(param)
                             param_group['params'][i] = param
 
@@ -774,7 +774,7 @@ class Float16OptimizerWithFloat16Params(MixedPrecisionOptimizer):
                                 'Wrapped parameters must be one of '
                                 'accelerator FloatTensor, '
                                 'accelerator HalfTensor, '
-                                'accelerator BFloat16Tensor. '  # FlagScale Add
+                                'accelerator BFloat16Tensor. '  # FlagScale Modify
                                 'Received {}'.format(param.type())
                             )
 
@@ -984,7 +984,7 @@ class FP32Optimizer(MegatronOptimizer):
 
         self._scale = torch.tensor(
             [1.0], dtype=torch.float, device=cur_platform.device_name()
-        )  # FlagScale Add
+        )  # FlagScale Modify
         self.is_stub_optimizer = True if optimizer is None else False
 
     def zero_grad(self, set_to_none=True):
@@ -1179,7 +1179,7 @@ class ChainedOptimizer(MegatronOptimizer):
             self.is_stub_optimizer = all(
                 getattr(optimizer, 'is_stub_optimizer', False) for optimizer in chained_optimizers
             )
-            self.convert_to_ep = False  # FlagScale Add
+            self.convert_to_ep = False  # FlagScale Modify
 
         else:
             self.is_stub_optimizer = True
@@ -1229,7 +1229,7 @@ class ChainedOptimizer(MegatronOptimizer):
         else:
             return torch.tensor(
                 [1.0], dtype=torch.float32, device=cur_platform.current_device()
-            )  # FlagScale Add
+            )  # FlagScale Modify
 
     def _split_state_dict(self, state_dict):
         """Split the state dict into sub-state dicts according to the chunks of each sub-optimizer
@@ -1279,15 +1279,15 @@ class ChainedOptimizer(MegatronOptimizer):
             return [optimizer.state_dict() for optimizer in self.chained_optimizers]
 
     def sharded_state_dict(
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self,
         model_sharded_state_dict: ShardedStateDict,
         is_loading: bool = False,
         convert_to_ep: bool = False,
         **kwargs,
-        # FlagScale End
+        ######## FlagScale End ########
     ):
-        self.convert_to_ep = convert_to_ep  ########## FlagScale Add ########
+        self.convert_to_ep = convert_to_ep  # FlagScale Modify
         metadata = kwargs.get('metadata') or {}
         # ChainedOptimizer should add its prefix to the tensor state keys only if
         # DistributedOptimizer is used (non-empty 'distrib_optim_sharding_type') and uses
@@ -1306,7 +1306,7 @@ class ChainedOptimizer(MegatronOptimizer):
                 model_sharded_state_dict, is_loading, **kwargs
             )
         else:
-            ######### FlagScale Begin #########
+            ######## FlagScale Begin ########
             if convert_to_ep and is_loading:
                 logger.info(
                     "sharded_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
@@ -1349,8 +1349,8 @@ class ChainedOptimizer(MegatronOptimizer):
                     self.original_sharded_state_dict = sharded_state_dict
                 self.mapping_idx = mapping_idx
                 return fake_sharded_state_dict
-            ######### FlagScale End #########
-            # FlagScale Begin
+            ######## FlagScale End ########
+            ######## FlagScale Begin ########
             else:  # megatron source apply ep
                 self._synchronize_steps()
                 sharded_state_dict = {}
@@ -1362,10 +1362,10 @@ class ChainedOptimizer(MegatronOptimizer):
                         add_prefix_for_sharding(optim_state_dict, f'chained_{optimizer_idx}.')
                     sharded_state_dict[optimizer_idx] = optim_state_dict
                 return sharded_state_dict
-            # FlagScale End
+            ######## FlagScale End ########
 
     def load_state_dict(self, state_dict):
-        #### FlagScale Begin ####
+        ######## FlagScale Begin ########
         if self.convert_to_ep:  # convert tp/pp chained_optimizers to ep chained_optimizers
             logger.info(
                 "load_state_dict:convert tp/pp chained_optimizers to ep chained_optimizers!"
@@ -1394,7 +1394,7 @@ class ChainedOptimizer(MegatronOptimizer):
                 new_state_dict = (v for k, v in sorted(new_state_dict.items()))
             for optimizer, state in zip(self.chained_optimizers, new_state_dict):
                 optimizer.load_state_dict(state)
-        #### FlagScale End ####
+        ######## FlagScale End ########
         else:  # megatron source apply ep
             # If there is only one optimizer, we read the state dict as a single optimizer.
             if len(self.chained_optimizers) == 1:
@@ -1420,9 +1420,8 @@ class ChainedOptimizer(MegatronOptimizer):
 
         return found_inf_flag
 
-    @torch.no_grad()
-    def step_with_ready_grads(self) -> bool:
-        """Step the optimizer with ready gradients, return successful."""
+    def _step(self) -> bool:
+        """Step all optimizers in this chain."""
         success = True
         for optimizer_idx, optimizer in enumerate(self.chained_optimizers):
             success &= optimizer.step_with_ready_grads()
@@ -1430,8 +1429,105 @@ class ChainedOptimizer(MegatronOptimizer):
                 assert success
                 assert len(optimizer.model_chunks) == 1
                 optimizer.model_chunks[0].start_param_sync(force_dispatch=True)
+        return success
+
+    def _should_defer_mxfp8_param_sync(self) -> bool:
+        """Return whether MXFP8 param sync should be deferred until chained steps finish.
+
+        The deferred-sync path is only needed when MXFP8 grad/param buffer reuse is active
+        AND the DDP-level param gather is not overlapped (i.e. the race fixed by PR #4800
+        can occur). The OptimizerConfig.overlap_param_gather field is unreliable as a proxy
+        for the DDP-level setting -- the two configs can diverge -- so probe the underlying
+        DistOpts directly.
+        """
+        if not self.config.reuse_grad_buf_for_mxfp8_param_ag:
+            return False
+
+        from .distrib_optimizer import DistributedOptimizer
+
+        for optimizer in self.chained_optimizers:
+            if not isinstance(optimizer, DistributedOptimizer):
+                continue
+            if not optimizer.ddp_config.overlap_param_gather:
+                return True
+        return False
+
+    def _enable_deferred_mxfp8_param_sync(self) -> List[Tuple[Any, Any]]:
+        """Enable deferred DistOpt param sync and collect bucket groups to sync later."""
+        from .distrib_optimizer import DistributedOptimizer
+        from .layer_wise_optimizer import _bucket_is_managed_by_layer_wise_optimizer
+
+        # With MXFP8 grad-buffer reuse and non-overlap param gather, each DistOpt stages
+        # its own updated main-param shards into its param buffers during step. However,
+        # param sync is a DDP bucket-group operation that copies gathered values into model
+        # weights and zeros the shared MXFP8 param/grad buffers. For MoE, dense and expert
+        # DistOpts may share the same model chunk, so defer param sync until all chained
+        # optimizers have staged their params, then sync each DistOpt-managed bucket group once.
+        deferred_bucket_groups = []
+        deferred_bucket_group_ids = set()
+
+        for optimizer in self.chained_optimizers:
+            if not isinstance(optimizer, DistributedOptimizer):
+                continue
+
+            optimizer._defer_param_sync = True
+            for model_chunk in optimizer.model_chunks:
+                for bucket_group in (
+                    model_chunk.bucket_groups + model_chunk.expert_parallel_bucket_groups
+                ):
+                    if not bucket_group.buckets:
+                        continue
+                    if _bucket_is_managed_by_layer_wise_optimizer(
+                        bucket_group.buckets[0], default_for_untagged=False
+                    ):
+                        continue
+
+                    bucket_group_id = id(bucket_group)
+                    if bucket_group_id in deferred_bucket_group_ids:
+                        continue
+
+                    deferred_bucket_group_ids.add(bucket_group_id)
+                    deferred_bucket_groups.append((model_chunk, bucket_group))
+
+        return deferred_bucket_groups
+
+    def _disable_deferred_mxfp8_param_sync(self) -> None:
+        """Disable deferred DistOpt param sync."""
+        for optimizer in self.chained_optimizers:
+            if hasattr(optimizer, '_defer_param_sync'):
+                optimizer._defer_param_sync = False
+
+    def _start_deferred_mxfp8_param_sync(
+        self, deferred_bucket_groups: List[Tuple[Any, Any]]
+    ) -> None:
+        """Start param sync for deferred bucket groups."""
+        timers = self.config.timers
+        if timers is not None:
+            timers('params-all-gather', log_level=1).start(barrier=self.config.barrier_with_L1_time)
+        for model_chunk, bucket_group in deferred_bucket_groups:
+            model_chunk._start_bucket_group_param_sync(bucket_group, force_sync=False)
+        if timers is not None:
+            timers('params-all-gather').stop()
+
+    def _step_with_deferred_mxfp8_param_sync(self) -> bool:
+        """Step optimizers with MXFP8 param sync deferred until all steps finish."""
+        deferred_bucket_groups = self._enable_deferred_mxfp8_param_sync()
+        try:
+            success = self._step()
+        finally:
+            self._disable_deferred_mxfp8_param_sync()
+
+        if success and deferred_bucket_groups:
+            self._start_deferred_mxfp8_param_sync(deferred_bucket_groups)
 
         return success
+
+    @torch.no_grad()
+    def step_with_ready_grads(self) -> bool:
+        """Step the optimizer with ready gradients, return successful."""
+        if self._should_defer_mxfp8_param_sync():
+            return self._step_with_deferred_mxfp8_param_sync()
+        return self._step()
 
     def grads_states_parallel_group_is_shared(self):
         """Check if all optimizers share the same gradient statistics parallel group."""
@@ -1499,6 +1595,7 @@ class ChainedOptimizer(MegatronOptimizer):
             return False, None, None
 
         grad_norm = self.get_grad_norm()
+        should_skip_update = False
 
         # Clip gradients.
         for optimizer in self.chained_optimizers:
@@ -1517,15 +1614,20 @@ class ChainedOptimizer(MegatronOptimizer):
                         or (
                             # Megatron-FSDP always uses decoupled_grad with FusedAdam.
                             self.config.use_precision_aware_optimizer
-                            and getattr(params[0], "__fsdp_param__", False)
+                            and getattr(parameters[0], "__fsdp_param__", False)
                         )
                     ),
                 )
 
+            if grad_norm > optimizer.config.grad_norm_skip_threshold:
+                log_single_rank(
+                    logger, logging.INFO, "skipping grad norm because it's too large %s", grad_norm
+                )
+                should_skip_update = True
+
         # Count the zeros in the grads.
         num_zeros_in_grad = self.count_zeros() if self.config.log_num_zeros_in_grad else None
-
-        update_successful = self.step_with_ready_grads()
+        update_successful = False if should_skip_update else self.step_with_ready_grads()
 
         return update_successful, grad_norm, num_zeros_in_grad
 

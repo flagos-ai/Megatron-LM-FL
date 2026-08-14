@@ -20,11 +20,11 @@ from megatron.core.tensor_parallel import (
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import get_te_version, is_te_min_version
 from megatron.plugin.decorators import overridable
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 # Check if Transformer Engine is installed
 HAVE_TE = False
@@ -343,7 +343,7 @@ elif HAVE_TE and is_te_min_version("2.0"):
             scale_invs.append(model_param._scale_inv.view(1))
             model_param._reset_caches()
 
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Add
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Modify
 
         # Update scaling factors.
         packed_scales = torch.empty(len(scales), dtype=torch.float32, device=scales[0].device)
@@ -430,7 +430,7 @@ elif HAVE_TE and is_te_min_version("1.0"):
             scale_invs.append(model_param._scale_inv.view(1))
             model_param._reset_caches()
 
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Add
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Modify
 
         # Update scaling factors.
         packed_scales = torch.empty(len(scales), dtype=torch.float32, device=scales[0].device)
@@ -535,6 +535,24 @@ def is_first_last_bf16_layer(config: TransformerConfig, layer_no: int):
         return False
 
 
+def is_mxfp8_output_proj_active(config) -> bool:
+    """Return True when the LM-head output projection should run under MXFP8.
+
+    Active when ``fp8_output_proj=True``, ``fp8=True``, ``fp8_recipe='mxfp8'``,
+    and Transformer Engine is installed.
+    """
+    if not HAVE_TE:
+        return False
+    if not getattr(config, "fp8_output_proj", False):
+        return False
+    if not getattr(config, "fp8", False):
+        return False
+
+    fp8_recipe = getattr(config, "fp8_recipe", None)
+    recipe_value = getattr(fp8_recipe, "value", fp8_recipe)
+    return str(recipe_value).lower() == "mxfp8" or str(fp8_recipe).lower().endswith(".mxfp8")
+
+
 if HAVE_TE:
     from megatron.core import parallel_state
     from megatron.core.extensions.transformer_engine import TEDelayedScaling
@@ -574,7 +592,7 @@ if HAVE_TE:
                 )
             elif config.fp8_recipe == Fp8Recipe.mxfp8:
                 fp8_recipe = transformer_engine.common.recipe.MXFP8BlockScaling(
-                    fp8_format=fp8_format
+                    fp8_format=fp8_format, fp8_dpa=config.fp8_dot_product_attention
                 )
             elif config.fp8_recipe == Fp8Recipe.custom:
                 assert config.fp8_quantizer_factory is not None

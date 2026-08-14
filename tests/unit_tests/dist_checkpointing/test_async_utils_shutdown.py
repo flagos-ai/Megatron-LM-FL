@@ -10,6 +10,9 @@ described in issue #3775).
 from unittest import mock
 import importlib
 
+import pytest
+import torch
+
 from megatron.core.dist_checkpointing.strategies.async_utils import (
     PersistentAsyncCaller,
     TemporalAsyncCaller,

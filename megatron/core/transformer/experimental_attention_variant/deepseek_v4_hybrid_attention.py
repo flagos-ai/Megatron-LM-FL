@@ -70,6 +70,7 @@ class DSv4HybridAttention(Attention):
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
+        name: str | None = None,
         is_mtp_layer: bool = False,
     ) -> None:
 
@@ -81,6 +82,7 @@ class DSv4HybridAttention(Attention):
             attn_mask_type=attn_mask_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+            name=name,
             is_mtp_layer=is_mtp_layer,
         )
         self.config: MLATransformerConfig
@@ -409,6 +411,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
+        name: str | None = None,
         is_mtp_layer: bool = False,
     ):
         if pg_collection is None:
@@ -423,6 +426,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+            name=name,
             is_mtp_layer=is_mtp_layer,
         )
 

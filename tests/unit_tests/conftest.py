@@ -1,7 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-import os
 import gc
+import os
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -68,7 +68,7 @@ def cleanup():
     yield
     if torch.distributed.is_initialized():
         try:
-            torch.distributed.barrier(timeout=timedelta(seconds=300))
+            torch.distributed.barrier()
         except Exception:
             return
         torch.distributed.destroy_process_group()
@@ -117,30 +117,19 @@ def ensure_test_data():
         )
 
     def ensure_data_on_rank_zero():
-        # Check if data directory exists and has content
-        if not data_available():
-            print("Test data not found at /opt/data. Downloading...")
-
-            try:
-                # Download assets to /opt/data
-                download_and_extract_asset(assets_dir=data_path)
-
-                print("Test data downloaded successfully.")
-
-            except ImportError as e:
-                print(f"Failed to import download function: {e}")
-                # Don't fail the tests, just warn
-            except Exception as e:
-                print(f"Failed to download test data: {e}")
-                # Don't fail the tests, just warn
-        else:
-            print("Test data already available at /opt/data")
-
+        ######## FlagScale Begin ########
         try:
-            data_path.mkdir(parents=True, exist_ok=True)
-            ready_file.touch()
+            if not data_available():
+                print("Test data not found at /opt/data. Downloading...")
+                download_and_extract_asset(assets_dir=data_path)
+                print("Test data downloaded successfully.")
+            else:
+                print("Test data already available at /opt/data")
         except Exception as e:
-            print(f"Failed to mark test data readiness: {e}")
+            print(f"Failed to prepare test data: {e}")
+        finally:
+            ready_file.touch()
+        ######## FlagScale End ########
 
     if world_size <= 1 or rank == 0:
         ensure_data_on_rank_zero()

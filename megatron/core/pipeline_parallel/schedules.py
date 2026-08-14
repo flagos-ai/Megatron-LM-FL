@@ -24,14 +24,14 @@ from megatron.core.process_groups_config import (
     ProcessGroupCollection,
 )
 from megatron.core.transformer.cuda_graphs import create_cudagraphs, set_current_microbatch
-from megatron.core.transformer.enums import CudaGraphScope
+from megatron.core.transformer.moe.paged_stash import paged_stash_reset
 from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 
-########## FlagScale Begin ##########
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-########## FlagScale End ##########
+######## FlagScale End ########
 from megatron.core.utils import (
     drain_embedding_wgrad_compute,
     get_attr_wrapped_model,
@@ -151,15 +151,15 @@ def get_forward_backward_func(pp_size: Optional[int] = None, vp_size: Optional[i
         vp_size = parallel_state.get_virtual_pipeline_model_parallel_world_size()
 
     if pp_size > 1:
-        ######### FlagScale Begin #########
+        ######## FlagScale Begin ########
         if parallel_state.get_dualpipev_pipeline_model_parallel_world_size() is not None:
             from megatron.plugin.dualpipev.dualpipev_schedules import (
                 forward_backward_pipelining_with_dualpipev,
             )
 
             forward_backward_func = forward_backward_pipelining_with_dualpipev
-        ######### FlagScale End #########
-        elif vp_size is not None:  # FlagScale Add
+        ######## FlagScale End ########
+        elif vp_size is not None:  # FlagScale Modify
             forward_backward_func = forward_backward_pipelining_with_interleaving
         else:
             forward_backward_func = forward_backward_pipelining_without_interleaving
@@ -273,7 +273,7 @@ def forward_step_calc_loss(
         if is_last_stage:
             assert cp_group_size is not None, "cp_group_size must be provided on last stage"
 
-    num_tokens = torch.tensor(0, dtype=torch.int, device=cur_platform.device_name())  # FlagScale Add
+    num_tokens = torch.tensor(0, dtype=torch.int, device=cur_platform.device_name())  # FlagScale Modify
     if is_last_stage:
         if loss_func is None:
             forward_data_store.append(output_tensor)
@@ -305,10 +305,11 @@ def forward_step_calc_loss(
     # explicitly.
     if hasattr(config, 'num_moe_experts') and config.num_moe_experts is not None:
         # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        device = get_tensor_device(output_tensor)
         loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            config.grad_scale_func(torch.ones(1, device=device))
             if config.grad_scale_func is not None
-            else torch.ones(1, device=output_tensor.device)
+            else torch.ones(1, device=device)
         )
         # Set the loss scale
         if config.calculate_per_token_loss:
@@ -320,10 +321,11 @@ def forward_step_calc_loss(
     # Set the loss scale for Multi-Token Prediction (MTP) loss.
     if hasattr(config, 'mtp_num_layers') and config.mtp_num_layers is not None:
         # Calculate the loss scale based on the grad_scale_func if available, else default to 1.
+        device = get_tensor_device(output_tensor)
         loss_scale = (
-            config.grad_scale_func(torch.ones(1, device=output_tensor.device))
+            config.grad_scale_func(torch.ones(1, device=device))
             if config.grad_scale_func is not None
-            else torch.ones(1, device=output_tensor.device)
+            else torch.ones(1, device=device)
         )
         # Set the loss scale
         if config.calculate_per_token_loss:
@@ -561,6 +563,13 @@ def backward_step_multimodule(
     In multi-module pipelines, tensors are organized as dictionaries with
     module names as keys. Each module's backward pass is performed independently.
     """
+
+    def _unwrap_single_tensor_list(tensor):
+        if isinstance(tensor, list):
+            assert len(tensor) == 1, "expected a single tensor for multimodule backward"
+            return tensor[0]
+        return tensor
+
     # Retain gradients on all input tensors.
     for module_name, tensor in input_tensor.items():
         if isinstance(tensor, list):
@@ -579,13 +588,14 @@ def backward_step_multimodule(
 
     # Apply grad scaling if needed (for last stage only).
     for module_name in output_tensor.keys():
-        if output_tensor_grad[module_name] is None and config.grad_scale_func is not None:
+        output_tensor_grad_module = _unwrap_single_tensor_list(output_tensor_grad[module_name])
+        if output_tensor_grad_module is None and config.grad_scale_func is not None:
             output_tensor[module_name] = config.grad_scale_func(output_tensor[module_name])
 
     # Perform backward pass for each module.
     for module_name in output_tensor.keys():
-        output_tensor_module = output_tensor[module_name]
-        output_tensor_grad_module = output_tensor_grad[module_name]
+        output_tensor_module = _unwrap_single_tensor_list(output_tensor[module_name])
+        output_tensor_grad_module = _unwrap_single_tensor_list(output_tensor_grad[module_name])
 
         # In multi-modal models like VLM, some batches may not have images.
         # In such cases, skip backward while preserving zero gradients.
@@ -652,6 +662,9 @@ def forward_backward_no_pipelining(
         pg_collection.dp_cp = parallel_state.get_data_parallel_group(
             with_context_parallel=True, partial_data_parallel=False
         )
+        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
+            with_context_parallel=True
+        )
 
     elif pg_collection is not None:
         assert hasattr(pg_collection, 'tp'), "pg_collection must have tp"
@@ -673,6 +686,9 @@ def forward_backward_no_pipelining(
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
 
+    if getattr(config, "moe_paged_stash", False):
+        paged_stash_reset(enabled=not forward_only, config=config)
+
     no_sync_func = config.no_sync_func
     if no_sync_func is None:
         no_sync_func = contextlib.nullcontext
@@ -681,7 +697,7 @@ def forward_backward_no_pipelining(
 
     forward_data_store = []
     input_tensor, output_tensor_grad = None, None
-    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Add
+    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Modify
 
     if config.overlap_moe_expert_parallel_comm and not forward_only:
         forward_data_store, total_num_tokens = combined_1f1b_schedule_for_no_pipelining(
@@ -737,6 +753,13 @@ def forward_backward_no_pipelining(
                 total_num_tokens += num_tokens
                 if not forward_only:
                     backward_step(input_tensor, output_tensor, output_tensor_grad, config)
+                    # Release the autograd graph head before the next forward_step.
+                    # Without this, the previous microbatch's output_tensor stays
+                    # live until the next iteration rebinds the variable, deferring
+                    # autograd-node teardown onto the next forward's dispatch path
+                    # and triggering PyTorch's "AccumulateGrad node's stream does
+                    # not match" warning. See issue #4124.
+                    del output_tensor
         # Run computation for last microbatch out of context handler (want to
         # synchronize gradients).
         output_tensor, num_tokens = forward_step(
@@ -759,6 +782,7 @@ def forward_backward_no_pipelining(
 
         if not forward_only:
             backward_step(input_tensor, output_tensor, output_tensor_grad, config)
+            del output_tensor
 
     if config.finalize_model_grads_func is not None and not forward_only:
         # Finalize model grads (perform full grad all-reduce / reduce-scatter for
@@ -772,15 +796,20 @@ def forward_backward_no_pipelining(
 
     if getattr(config, 'fine_grained_activation_offloading', False):
         off_interface.reset()
+    # Reset all_gather_pipeline bucket status before next validation iteration
+    if forward_only:
+        for model_chunk in [model]:
+            if (
+                hasattr(model_chunk, 'ddp_config')
+                and model_chunk.ddp_config.use_megatron_fsdp
+                and model_chunk.ddp_config.overlap_param_gather
+            ):
+                model_chunk.synchronize_param_gather()
 
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
+    if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
         create_cudagraphs()
 
     return forward_data_store
@@ -963,6 +992,9 @@ def forward_backward_pipelining_with_interleaving(
         pg_collection.dp_cp = parallel_state.get_data_parallel_group(
             with_context_parallel=True, partial_data_parallel=False
         )
+        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
+            with_context_parallel=True
+        )
 
     elif p2p_communicator is not None and pg_collection is not None:
         model_type = get_model_type(model[0])
@@ -986,6 +1018,9 @@ def forward_backward_pipelining_with_interleaving(
     assert (
         adjust_tensor_shapes_fn is None
     ), "adjust_tensor_shapes_fn is not supported for interleaved pipeline parallelism"
+
+    if getattr(config, "moe_paged_stash", False):
+        paged_stash_reset(enabled=not forward_only, config=config)
 
     if config.overlap_p2p_comm and config.batch_p2p_comm:
         raise ValueError("Can not use both overlap_p2p_comm and batch_p2p_comm")
@@ -1049,7 +1084,7 @@ def forward_backward_pipelining_with_interleaving(
 
     input_tensors = [[] for _ in range(len(model))]
     output_tensors = [[] for _ in range(len(model))]
-    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Add
+    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Modify
 
     forward_data_store = []
     output_tensor_grads = None
@@ -1593,6 +1628,11 @@ def forward_backward_pipelining_with_interleaving(
                 )
                 if "recv_prev" in fwd_wait_handles:
                     recv_prev_wait_handles.append(fwd_wait_handles.pop("recv_prev"))
+            # isend() copies asynchronously; wait until the copy is done before
+            # freeing the source buffer, otherwise the next PP stage gets corrupted data.
+            if send_next_wait_handle is not None and config.deallocate_pipeline_outputs:
+                send_next_wait_handle.wait()
+                send_next_wait_handle = None
 
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
             if recv_prev:
@@ -1715,6 +1755,11 @@ def forward_backward_pipelining_with_interleaving(
                     )
                     if "recv_prev" in fwd_wait_handles:
                         recv_prev_wait_handles.append(fwd_wait_handles.pop("recv_prev"))
+                # isend() copies asynchronously; wait until the copy is done before
+                # freeing the source buffer, otherwise the next PP stage gets corrupted data.
+                if send_next_wait_handle is not None and config.deallocate_pipeline_outputs:
+                    send_next_wait_handle.wait()
+                    send_next_wait_handle = None
                 # assert fwd_wait_handles is not None
 
                 # Put input_tensor and output_tensor_grad in data structures in the
@@ -2007,11 +2052,7 @@ def forward_backward_pipelining_with_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
+    if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
         create_cudagraphs()
     nvtx_range_pop(suffix="misc")
 
@@ -2045,13 +2086,13 @@ def get_tensor_shapes(
 
     if config.sequence_parallel:
         effective_seq_length = effective_seq_length // tp_group.size()
-    ##### FlagScale begin #####
+    ######## FlagScale Begin ########
     # Determine hidden dimension for P2P communication
     # For hyper connections with multiple PP stages, use n-stream dimension
     hidden_dim = config.hidden_size
     if getattr(config, 'enable_hyper_connections', False):
         hidden_dim = config.hidden_size * getattr(config, 'num_residual_streams', 1)
-    ##### FlagScale end #####
+    ######## FlagScale End ########
     tensor_shapes.append((effective_seq_length, micro_batch_size, hidden_dim))
     return tensor_shapes
 
@@ -2124,6 +2165,9 @@ def forward_backward_pipelining_without_interleaving(
         pg_collection.dp_cp = parallel_state.get_data_parallel_group(
             with_context_parallel=True, partial_data_parallel=False
         )
+        pg_collection.tp_dp_cp = parallel_state.get_tensor_and_data_parallel_group(
+            with_context_parallel=True
+        )
 
     elif p2p_communicator is not None and pg_collection is not None:
         assert hasattr(p2p_communicator, 'config'), "p2p_communicator must have a config"
@@ -2164,6 +2208,9 @@ def forward_backward_pipelining_without_interleaving(
 
     if config.timers is not None:
         config.timers('forward-backward', log_level=1).start(barrier=config.barrier_with_L1_time)
+
+    if getattr(config, "moe_paged_stash", False):
+        paged_stash_reset(enabled=not forward_only, config=config)
 
     # Disable async grad reductions
     no_sync_func = config.no_sync_func
@@ -2237,17 +2284,17 @@ def forward_backward_pipelining_without_interleaving(
     # Input, output tensors only need to be saved when doing backward passes
     input_tensors = None
     output_tensors = None
-    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Add
+    total_num_tokens = torch.zeros([], dtype=torch.int, device=cur_platform.device_name())  # FlagScale Modify
 
     if not forward_only:
         input_tensors = []
         output_tensors = []
     forward_data_store = []
 
-    ######### FlagScale Begin #########
+    ######## FlagScale Begin ########
     if hasattr(p2p_communicator, 'warm_up_comm_group'):
         p2p_communicator.warm_up_comm_group()
-    ######### FlagScale End #########
+    ######## FlagScale End ########
 
     # Run warmup forward passes.
     for i in range(num_warmup_microbatches):
@@ -2422,11 +2469,7 @@ def forward_backward_pipelining_without_interleaving(
     if config.timers is not None:
         config.timers('forward-backward').stop()
 
-    if (
-        hasattr(config, 'cuda_graph_impl')
-        and config.cuda_graph_impl == "local"
-        and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-    ):
+    if hasattr(config, 'cuda_graph_impl') and config.cuda_graph_impl == "local":
         create_cudagraphs()
 
     return forward_data_store

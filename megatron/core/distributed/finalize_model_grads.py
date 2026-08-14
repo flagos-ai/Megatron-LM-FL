@@ -1,7 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from functools import partial
-from typing import Callable, List, Optional, Union
+from typing import Callable, Dict, List, Optional, Union
 
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
@@ -20,7 +20,7 @@ from megatron.core.pipeline_parallel.utils import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -33,6 +33,8 @@ except ImportError:
     def get_device_type_for_comm(group):
         """Fallback: return current platform device name for communication."""
         return cur_platform.device_name()
+
+######## FlagScale End ########
 
 
 from .. import parallel_state
@@ -116,13 +118,13 @@ def _allreduce_conditional_embedding_grads(
     if pp_group is None:
         pp_group = parallel_state.get_pipeline_model_parallel_group()
 
-    ######### FlagScale Begin #########
+    ######## FlagScale Begin ########
     assert not (
         isinstance(pp_group, list) and getattr(config, "has_cond_embedder", False)
     ), f"FlagScale does not support both pp_group is a list and has_cond_embedder is True."
     if isinstance(pp_group, list):
         return
-    ######### FlagScale End #########
+    ######## FlagScale End ########
     if pp_group.size() > 1 and getattr(config, "has_cond_embedder", False):
         grads_dict = {}
         for model_chunk in model:
@@ -245,7 +247,7 @@ def _allreduce_embedding_grad(
             gradient is ``None``. Defaults to True.
     """
 
-    embd_group_is_list = isinstance(embd_group, list)  # FlagScale Add
+    embd_group_is_list = isinstance(embd_group, list)  # FlagScale Modify
     if (
         not embd_group_is_list
         and
@@ -372,6 +374,44 @@ def _allreduce_position_embedding_grads(
     )
 
 
+def _allreduce_router_grads(model: List[torch.nn.Module], config: TransformerConfig):
+    """
+    All-reduce router grads.
+
+    Reduce grads across all the pp stages to ensure that parameters of the router stay in sync.
+    """
+
+    if parallel_state.get_pipeline_model_parallel_world_size() > 1:
+        grads_dict: Dict[str, List[torch.Tensor]] = {}
+        for model_chunk in model:
+            for name, param in get_attr_wrapped_model(model_chunk, 'named_parameters')():
+                if param.requires_grad and getattr(param, 'flextron_router_pp_sync', False):
+                    grad = param.main_grad
+                    if name in grads_dict:
+                        # Add all the virtual PP rank's gradients to
+                        # the first local virtual PP rank.
+                        grads_dict[name][0].add_(grad)
+                        # Append to the end for later update after cross-rank reduce.
+                        grads_dict[name].append(grad)
+                    else:
+                        grads_dict[name] = [grad]
+
+        if grads_dict:
+            # All-reduce the gradient on the first VPP rank.
+            grads = [param_grad[0] for _, param_grad in grads_dict.items()]
+            coalesced = _flatten_dense_tensors(grads)
+            torch.distributed.all_reduce(
+                coalesced, group=parallel_state.get_pipeline_model_parallel_group()
+            )
+            for buf, synced in zip(grads, _unflatten_dense_tensors(coalesced, grads)):
+                buf.copy_(synced)
+
+            # Update the gradients on other VPP ranks.
+            for grads in grads_dict.values():
+                for grad in grads[1:]:
+                    grad.copy_(grads[0])
+
+
 def reset_model_temporary_tensors(config: TransformerConfig, model: List[torch.nn.Module]):
     """
     Reset the temporary tensors of the model.
@@ -391,7 +431,11 @@ def reset_model_temporary_tensors(config: TransformerConfig, model: List[torch.n
                 module.reset_global_aux_loss_tracker()
 
 
-def _update_router_expert_bias(model: List[torch.nn.Module], config: TransformerConfig):
+def _update_router_expert_bias(
+    model: List[torch.nn.Module],
+    config: TransformerConfig,
+    tp_dp_cp_group: Optional[torch.distributed.ProcessGroup] = None,
+):
     """
     Update the expert bias of the router for a global batch.
     This requires all-reduce of local_tokens_per_expert across TPxCPxDP ranks
@@ -417,7 +461,10 @@ def _update_router_expert_bias(model: List[torch.nn.Module], config: Transformer
     stacked_tokens_per_expert = torch.stack(tokens_per_expert_list, dim=0)
     stacked_expert_bias = torch.stack(expert_bias_list, dim=0)
     stacked_updated_expert_bias = get_updated_expert_bias(
-        stacked_tokens_per_expert, stacked_expert_bias, config.moe_router_bias_update_rate
+        stacked_tokens_per_expert,
+        stacked_expert_bias,
+        config.moe_router_bias_update_rate,
+        tp_dp_cp_group=tp_dp_cp_group,
     )
 
     for expert_bias, updated_expert_bias in zip(expert_bias_list, stacked_updated_expert_bias):
@@ -515,6 +562,7 @@ def finalize_model_grads(
     """
 
     config = get_model_config(model[0])
+    tp_dp_cp_group = None
     if pg_collection is not None:
         assert hasattr(pg_collection, 'tp')
         assert hasattr(pg_collection, 'pp')
@@ -533,6 +581,11 @@ def finalize_model_grads(
             "If you don't need pos_embd_group, you need to explicitly set it to None."
         )
         assert hasattr(pg_collection, 'dp_cp')
+        if config.moe_router_enable_expert_bias:
+            assert hasattr(pg_collection, 'tp_dp_cp') and pg_collection.tp_dp_cp is not None, (
+                "pg_collection must have tp_dp_cp when " "moe_router_enable_expert_bias is enabled."
+            )
+            tp_dp_cp_group = pg_collection.tp_dp_cp
         tp_group = pg_collection.tp
         pp_group = pg_collection.pp
         embd_group = pg_collection.embd
@@ -562,6 +615,9 @@ def finalize_model_grads(
     if config.timers is not None:
         config.timers('conditional-embedder-grads-all-reduce').stop()
 
+    if getattr(config, 'flextron', False):
+        _allreduce_router_grads(model, config)
+
     # All-reduce layer-norm grads (for sequence parallelism) and non-tensor parallel modules.
     if config.timers is not None:
         config.timers('non-tensor-parallel-grads-all-reduce', log_level=1).start(
@@ -583,7 +639,11 @@ def finalize_model_grads(
         config.timers('embedding-grads-all-reduce').stop()
 
     if config.moe_router_enable_expert_bias:
-        _update_router_expert_bias(model, config)
+        if pg_collection is None:
+            tp_dp_cp_group = parallel_state.get_tensor_and_data_parallel_group(
+                with_context_parallel=True
+            )
+        _update_router_expert_bias(model, config, tp_dp_cp_group=tp_dp_cp_group)
 
     reset_model_temporary_tensors(config, model)
 
@@ -600,7 +660,10 @@ def finalize_model_grads(
 
         # all-reduce across DP ranks.
         torch.distributed.all_reduce(num_tokens, group=dp_cp_group)
+
+        # Clamp to avoid div-by-zero without a host-side branch on a device tensor,
+        # which would otherwise cause a sync that is illegal during CUDA graph capture.
+        safe_num_tokens = torch.clamp(num_tokens, min=1)
+        scaling = 1.0 / safe_num_tokens
         for model_chunk in model:
-            if num_tokens > 0:
-                scaling = 1.0 / num_tokens
-                model_chunk.scale_gradients(scaling)
+            model_chunk.scale_gradients(scaling)

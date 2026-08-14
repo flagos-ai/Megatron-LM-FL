@@ -51,7 +51,7 @@ from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
 from ..transformer.module import param_is_not_shared
 from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
 
-########## FlagScale Begin ##########
+######## FlagScale Begin ########
 from megatron.plugin.decorators import overridable  # isort: skip
 from megatron.plugin.platform import get_platform  # isort: skip
 
@@ -67,10 +67,10 @@ except ImportError:
         return cur_platform.device_name()
 
 
-########## FlagScale End ##########
+######## FlagScale End ########
 
 
-@overridable  # FlagScale Add
+@overridable  # FlagScale Modify
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
     norm_type: Union[int, float] = 2,
@@ -257,7 +257,7 @@ def count_zeros_fp32(
     #   - should not be a replica due to tensor model parallelism
     total_num_zeros = torch.zeros(
         1, dtype=torch.int64, device=cur_platform.device_name()
-    )  # FlagScale Add
+    )  # FlagScale Modify
     data_parallel_group = None
     use_megatron_fsdp = False
     for param in parameters:
@@ -292,7 +292,7 @@ def count_zeros_fp32(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
         )
     # Sum across all model-parallel GPUs.
-    #### FlagScale Begin ####
+    ######## FlagScale Begin ########
     comm_device = get_device_type_for_comm(grad_stats_parallel_group)
     if comm_device == "cpu":
         total_num_zeros = total_num_zeros.cpu()
@@ -304,7 +304,7 @@ def count_zeros_fp32(
             torch.distributed.all_reduce(
                 total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
             )
-    #### FlagScale End ####
+    ######## FlagScale End ########
     else:
         torch.distributed.all_reduce(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group

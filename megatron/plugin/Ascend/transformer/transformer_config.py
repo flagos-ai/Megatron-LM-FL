@@ -845,12 +845,6 @@ class NPUTransformerConfig(TransformerConfig):
     """Padded actual vocabulary size. Required when moe_n_hash_layers > 0 for the
     tid2eid lookup buffer in hash-based MoE routing."""
 
-    dense_grouped_gemm: bool = False
-    """Use GroupedLinear(num_groups=1) for dense MLP to trigger the
-    ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8 fusion on SM100+ with MXFP8 recipe.
-    Requires ``use_te_op_fuser=True`` and SwiGLU activation.
-    """
-
     log_moe_overload_factor: bool = False
     """When True, log MoE overload metrics (avg/max vs balanced token count per step; max cum
     overload = peak cumulative actual tokens / peak cumulative balanced count over interleaved

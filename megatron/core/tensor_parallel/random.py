@@ -23,7 +23,7 @@ from megatron.core.parallel_state import (
     get_tensor_model_parallel_rank,
 )
 from megatron.core.utils import is_te_min_version, safely_set_viewless_tensor_data
-from megatron.plugin.decorators import overridable  # FlagScale Add
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 from megatron.plugin.decorators import overridable
 
@@ -89,11 +89,11 @@ try:
 except ModuleNotFoundError:
     HAVE_TE = False
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 # Default name for the model parallel rng tracker.
 _MODEL_PARALLEL_RNG_TRACKER_NAME = 'model-parallel-rng'
@@ -115,7 +115,7 @@ def _get_cuda_rng_state(
 
     # if not using cuda graphs, just use the builtin pytorch function
     if not graph_safe:
-        return cur_platform.get_rng_state(device=device)  # FlagScale Add
+        return cur_platform.get_rng_state(device=device)  # FlagScale Modify
 
     _lazy_init()
     if isinstance(device, str):
@@ -124,9 +124,9 @@ def _get_cuda_rng_state(
         device = torch.device("cuda", device)
     idx = device.index
     if idx is None:
-        idx = cur_platform.current_device()  # FlagScale Add
+        idx = cur_platform.current_device()  # FlagScale Modify
 
-    default_generator = cur_platform.default_generators[idx]  # FlagScale Add
+    default_generator = cur_platform.default_generators[idx]  # FlagScale Modify
     if clone:
         return default_generator.clone_state()
     return default_generator.graphsafe_get_state()
@@ -162,10 +162,10 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
         def cb():
             idx = device.index
             if idx is None:
-                # FlagScale Begin
+                ######## FlagScale Begin ########
                 idx = cur_platform.current_device()
             default_generator = cur_platform.default_generators[idx]
-                # FlagScale End
+                ######## FlagScale End ########
 
             # if graph capturing, set the rng state in a cudagraphable way
             if graph_safe:
@@ -223,7 +223,7 @@ def get_data_parallel_rng_tracker_name():
     return _DATA_PARALLEL_RNG_TRACKER_NAME
 
 
-@overridable  # FlagScale Add
+@overridable  # FlagScale Modify
 class CudaRNGStatesTracker:
     """Tracker for the cuda RNG states.
 
@@ -298,12 +298,12 @@ class CudaRNGStatesTracker:
             self.states_[name] = new_state
         else:
             # Get the current rng state.
-            orig_rng_state = cur_platform.get_rng_state()  # FlagScale Add
+            orig_rng_state = cur_platform.get_rng_state()  # FlagScale Modify
             # Set the new state and store it.
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             cur_platform.manual_seed(seed)
             self.states_[name] = cur_platform.get_rng_state()
-            # FlagScale End
+            ######## FlagScale End ########
             # Reset rng state to what it was.
             _set_cuda_rng_state(orig_rng_state)
 
@@ -487,7 +487,7 @@ def model_parallel_cuda_manual_seed(
     )
     _CUDA_RNG_STATE_TRACKER.reset()
     # Set the default state.
-    cur_platform.manual_seed(data_parallel_seed)  # FlagScale Add
+    cur_platform.manual_seed(data_parallel_seed)  # FlagScale Modify
     _CUDA_RNG_STATE_TRACKER.add(_DATA_PARALLEL_RNG_TRACKER_NAME, data_parallel_seed)
 
     # and model parallel state.
@@ -654,6 +654,13 @@ def checkpoint(
 ) -> _R:
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
+    from megatron.core.transformer.cuda_graphs import is_graph_capturing, is_graph_warmup
+
+    # Skip checkpointing during CUDA graph warmup and capture, matching the behavior of
+    # CheckpointWithoutOutput. The graph captures all ops directly; recomputation cannot
+    # run inside a captured graph.
+    if is_graph_warmup() or is_graph_capturing():
+        return function(*args)
     return CheckpointFunction.apply(function, distribute_saved_activations, *args)
 
 

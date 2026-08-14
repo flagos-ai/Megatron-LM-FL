@@ -48,12 +48,12 @@ except ImportError:
 
 _results_queue = None
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 @_disable_gc()
@@ -118,7 +118,7 @@ class FileSystemWriterAsync(FileSystemWriter):
         self.results_queue: Optional[mp.Queue] = None
         self.separation_hint = separation_hint
 
-    @overridable  # FlagScale Add
+    @overridable  # FlagScale Modify
     def prepare_write_data(self, plan: SavePlan, planner: SavePlanner) -> None:
         """
         First stage of async saving. Copy data to CPU and plan the local saving.
@@ -232,7 +232,7 @@ class FileSystemWriterAsync(FileSystemWriter):
         )
 
     @staticmethod
-    @overridable  # FlagScale Add
+    @overridable  # FlagScale Modify
     def preload_tensors(write_buckets: List[WriteBucket], non_blocking=True) -> List[WriteBucket]:
         """
         Preloads tensors in `state_dict` to host memory via CPU memory.
@@ -254,7 +254,7 @@ class FileSystemWriterAsync(FileSystemWriter):
                 del tensor
             result.append((file_name, storage_key, (bytes_data, tensor_list)))
         if non_blocking:
-            cur_platform.synchronize()  # FlagScale Add
+            cur_platform.synchronize()  # FlagScale Modify
         return result
 
     @staticmethod
@@ -369,7 +369,7 @@ class FileSystemWriterAsync(FileSystemWriter):
         logger.debug(f"{w_end}, rank: {rank}, write(sync,threads): {w_end - w_start}")
 
     @staticmethod
-    @overridable  # FlagScale Add
+    @overridable  # FlagScale Modify
     @_disable_gc()
     def write_preloaded_data(
         transform_list: List[_StorageWriterTransforms],

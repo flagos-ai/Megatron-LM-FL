@@ -1,4 +1,4 @@
-# Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
+# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import torch
 
@@ -18,11 +18,11 @@ except:
     dist_all_gather_func = torch.distributed._all_gather_base
     dist_reduce_scatter_func = torch.distributed._reduce_scatter_base
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 def _reduce(input_, group):
@@ -94,7 +94,7 @@ def _gather_along_last_dim(input_, group):
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+    output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
     dist_all_gather_func(output, input_.contiguous(), group=group)
     tensor_list = output.chunk(world_size, dim=0)
     output = torch.cat(tensor_list, dim=-1).contiguous()
@@ -144,14 +144,14 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
         dist_all_gather_func(output, input_.contiguous(), group=group)
     else:
         dim_size[0] = sum(output_split_sizes)
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(output_tensor_list, input_, group=group)
 
@@ -184,7 +184,7 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
         dist_reduce_scatter_func(output, input_.contiguous(), group=group)
     else:
         rank = group.rank()
@@ -425,11 +425,12 @@ class _ReduceScatterToTensorParallelRegion(torch.autograd.Function):
 
 class _AllToAll(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, group, input, output_split_sizes, input_split_sizes):
+    def forward(ctx, group, input, output_split_sizes, input_split_sizes, use_nccl_stream=False):
         """Forward function."""
         ctx.group = group
         ctx.output_split_sizes = output_split_sizes
         ctx.input_split_sizes = input_split_sizes
+        ctx.use_nccl_stream = use_nccl_stream
 
         world_size = group.size()
         # Bypass the function if we are using only 1 GPU.
@@ -445,15 +446,26 @@ class _AllToAll(torch.autograd.Function):
             output = input.new_empty(
                 size=[sum(output_split_sizes)] + list(input.size()[1:]),
                 dtype=input.dtype,
-                device=cur_platform.current_device(),  # FlagScale Add
+                device=cur_platform.current_device(),  # FlagScale Modify
             )
-        torch.distributed.all_to_all_single(
-            output,
-            input,
-            output_split_sizes=output_split_sizes,
-            input_split_sizes=input_split_sizes,
-            group=group,
-        )
+        if use_nccl_stream:
+            handle = torch.distributed.all_to_all_single(
+                output,
+                input,
+                output_split_sizes=output_split_sizes,
+                input_split_sizes=input_split_sizes,
+                group=group,
+                async_op=True,
+            )
+            handle.wait()
+        else:
+            torch.distributed.all_to_all_single(
+                output,
+                input,
+                output_split_sizes=output_split_sizes,
+                input_split_sizes=input_split_sizes,
+                group=group,
+            )
         return output
 
     @staticmethod
@@ -461,7 +473,14 @@ class _AllToAll(torch.autograd.Function):
         """Backward function."""
         return (
             None,
-            _AllToAll.apply(ctx.group, *grad_output, ctx.input_split_sizes, ctx.output_split_sizes),
+            _AllToAll.apply(
+                ctx.group,
+                *grad_output,
+                ctx.input_split_sizes,
+                ctx.output_split_sizes,
+                ctx.use_nccl_stream,
+            ),
+            None,
             None,
             None,
         )
@@ -538,10 +557,12 @@ def reduce_scatter_last_dim_to_tensor_parallel_region(input_, group=None):
     return _ReduceScatterToTensorParallelRegion.apply(input_, group)
 
 
-def all_to_all(group, input_, output_split_sizes_=None, input_split_sizes=None):
+def all_to_all(
+    group, input_, output_split_sizes_=None, input_split_sizes=None, use_nccl_stream=False
+):
     """Wrapper for autograd function"""
     assert group is not None, "group should not be None"
-    return _AllToAll.apply(group, input_, output_split_sizes_, input_split_sizes)
+    return _AllToAll.apply(group, input_, output_split_sizes_, input_split_sizes, use_nccl_stream)
 
 
 def all_to_all_sp2hp(input_, group=None):

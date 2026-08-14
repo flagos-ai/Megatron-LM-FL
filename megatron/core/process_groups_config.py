@@ -2,7 +2,7 @@
 
 """Dataclasses for organizing model parallelism and gradient communication process groups."""
 
-import logging  # FlagScale Add
+import logging  # FlagScale Modify
 from dataclasses import dataclass, field, fields
 from functools import partial
 from typing import Dict, List, Optional
@@ -10,11 +10,11 @@ from typing import Dict, List, Optional
 import torch
 
 from megatron.core import parallel_state
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.core.utils import log_single_rank
 
 logger = logging.getLogger(__name__)
-# FlagScale End
+######## FlagScale End ########
 
 
 class ProcessGroupHelperMeta(type):
@@ -120,12 +120,18 @@ class ProcessGroupCollection:
     # _DATA_PARALLEL_GROUP_WITH_CP
     dp_cp: torch.distributed.ProcessGroup = field(init=False)
 
+    # Separate dp_cp communicator for param all-gather (AG/RS overlap)
+    dp_cp_ag: torch.distributed.ProcessGroup = field(init=False)
+
     # MoE layers need expt_dp group for sharded state dict
     # we need this workaround until distributed checkpoint is refactored
     # to have sharded_state_dict can take the PG and pass it down
     # TODO (Hepteract): remove this once distributed checkpoint is refactored
     # _EXPERT_DATA_PARALLEL_GROUP
     expt_dp: torch.distributed.ProcessGroup = field(init=False)
+
+    # _EXPERT_DATA_PARALLEL_GROUP_AG
+    expt_dp_ag: torch.distributed.ProcessGroup = field(init=False)
 
     # _INTRA_PARTIAL_DATA_PARALLEL_GROUP_WITH_CP
     intra_dp_cp: torch.distributed.ProcessGroup = field(init=False)
@@ -139,7 +145,7 @@ class ProcessGroupCollection:
     # _INTRA_DISTRIBUTED_OPTIMIZER_INSTANCE_GROUP
     intra_dist_opt: torch.distributed.ProcessGroup = field(init=False)
 
-    # FlagScale Begin
+    ######## FlagScale Begin ########
     # _ENGRAM_DATA_PARALLEL_GROUP
     engram_dp: torch.distributed.ProcessGroup = field(init=False)
 
@@ -148,7 +154,7 @@ class ProcessGroupCollection:
 
     # _ENGRAM_MODEL_PARALLEL_GROUP
     engram_mp: torch.distributed.ProcessGroup = field(init=False)
-    # FlagScale End
+    ######## FlagScale End ########
 
     def __init__(self, **kwargs):
         for key in kwargs:
@@ -163,11 +169,13 @@ class ProcessGroupCollection:
         for field_info in fields(self):
             if hasattr(self, field_info.name):
                 pg = getattr(self, field_info.name)
-                if pg is not None:
-                    active_pgs.append(f"{field_info.name}({pg.size()})")
-                else:
-                    # Field exists but is None
+                if pg is None:
                     active_pgs.append(f"{field_info.name}(None)")
+                elif isinstance(pg, list):
+                    sizes = [g.size() for g in pg]
+                    active_pgs.append(f"{field_info.name}({sizes})")
+                else:
+                    active_pgs.append(f"{field_info.name}({pg.size()})")
         return (
             f"ProcessGroupCollection({', '.join(active_pgs)})"
             if active_pgs
@@ -227,6 +235,7 @@ class ProcessGroupCollection:
             ),
             'dp': parallel_state.get_data_parallel_group,
             'dp_cp': partial(parallel_state.get_data_parallel_group, with_context_parallel=True),
+            'dp_cp_ag': lambda: None,
             'intra_dp_cp': partial(
                 parallel_state.get_data_parallel_group,
                 with_context_parallel=True,
@@ -249,17 +258,18 @@ class ProcessGroupCollection:
             'expt_dp': partial(
                 parallel_state.get_expert_data_parallel_group, check_initialized=False
             ),
+            'expt_dp_ag': lambda: None,
             'tp_dp_cp': partial(
                 parallel_state.get_tensor_and_data_parallel_group,
                 check_initialized=False,
                 with_context_parallel=True,
             ),
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             # TODO: check_initialize
             'engram_dp': parallel_state.get_engram_data_parallel_group,
             'engram_embed': parallel_state.get_engram_embedding_parallel_group,
             'engram_mp': parallel_state.get_engram_model_parallel_group,
-            # FlagScale End
+            ######## FlagScale End ########
         }
 
         assert all(
@@ -321,7 +331,7 @@ class ProcessGroupCollection:
             )
             intra_dist_opt_group = parallel_state.get_intra_distributed_optimizer_instance_group()
 
-            engram_dp_group = parallel_state.get_engram_data_parallel_group()  # FlagScale Add
+            engram_dp_group = parallel_state.get_engram_data_parallel_group()  # FlagScale Modify
 
             # Gloo groups
             if use_gloo_process_groups:
@@ -331,19 +341,19 @@ class ProcessGroupCollection:
                 intra_expt_dp_group_gloo = parallel_state.get_expert_data_parallel_group_gloo(
                     partial_expert_data_parallel=True
                 )
-                engram_dp_group_gloo = parallel_state.get_engram_data_parallel_group_gloo()  # FlagScale Add
+                engram_dp_group_gloo = parallel_state.get_engram_data_parallel_group_gloo()  # FlagScale Modify
             else:
                 intra_dp_cp_group_gloo = None
                 intra_expt_dp_group_gloo = None
-                engram_dp_group_gloo = None  # FlagScale Add
+                engram_dp_group_gloo = None  # FlagScale Modify
 
             # Model communication groups
             mp_group = parallel_state.get_model_parallel_group()
             expt_tp_pp_group = parallel_state.get_expert_tensor_model_pipeline_parallel_group()
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             engram_embed_group = parallel_state.get_engram_embedding_parallel_group()
             engram_mp_group = parallel_state.get_engram_model_parallel_group()
-            # FlagScale End
+            ######## FlagScale End ########
 
             # Inter distributed optimizer group
             if hasattr(model_chunks[0], 'ddp_config'):
@@ -456,7 +466,7 @@ class ProcessGroupCollection:
                 )
             intra_dp_cp_group_gloo = None
             intra_expt_dp_group_gloo = None
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             # Engram data parallel group and embedding_parallel_group
             if not hasattr(pg_collection, "engram_dp"):
                 pg_collection.engram_dp = None
@@ -483,7 +493,7 @@ class ProcessGroupCollection:
                 )
             engram_mp_group = pg_collection.engram_mp
             engram_dp_group_gloo = None
-            # FlagScale End
+            ######## FlagScale End ########
 
         return {
             'dp_group': dp_group,
@@ -497,12 +507,12 @@ class ProcessGroupCollection:
             'intra_dist_opt_group': intra_dist_opt_group,
             'intra_dp_cp_group_gloo': intra_dp_cp_group_gloo,
             'intra_expt_dp_group_gloo': intra_expt_dp_group_gloo,
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             'engram_dp_group': engram_dp_group,
             'engram_embed_group': engram_embed_group,
             'engram_dp_group_gloo': engram_dp_group_gloo,
             'engram_mp_group': engram_mp_group,
-            # FlagScale End
+            ######## FlagScale End ########
         }
 
     @staticmethod
@@ -558,11 +568,11 @@ class ProcessGroupCollection:
                     if ddp_config.use_distributed_optimizer
                     else None
                 ),
-                # FlagScale Begin
+                ######## FlagScale Begin ########
                 'engram_dp_group': parallel_state.get_engram_data_parallel_group(),
                 'engram_embed_group': parallel_state.get_engram_embedding_parallel_group(),
                 'engram_mp_group': parallel_state.get_engram_model_parallel_group(),
-                # FlagScale End
+                ######## FlagScale End ########
             }
         else:
             # Use provided process group collection with validation and fallbacks
@@ -637,7 +647,7 @@ class ProcessGroupCollection:
             result['tp_group'] = pg_collection.tp
             result['pp_group'] = pg_collection.pp
             result['ep_group'] = pg_collection.ep
-            # FlagScale Begin
+            ######## FlagScale Begin ########
             # 6. Engram data parallel group and embedding_parallel_group
             if not hasattr(pg_collection, "engram_dp"):
                 pg_collection.engram_dp = None
@@ -663,7 +673,7 @@ class ProcessGroupCollection:
             result['engram_dp_group'] = pg_collection.engram_dp
             result['engram_embed_group'] = pg_collection.engram_embed
             result['engram_mp_group'] = pg_collection.engram_mp
-            # FlagScale End
+            ######## FlagScale End ########
             return result
 
 

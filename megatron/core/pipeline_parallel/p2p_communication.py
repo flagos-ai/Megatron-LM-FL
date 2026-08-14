@@ -1,7 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 
-from functools import partial  # FlagScale Add
+from functools import partial  # FlagScale Modify
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.core.utils import get_pg_rank, get_pg_size, nvtx_decorator
 from megatron.plugin.hetero.p2p_communication import (
     recv_backward_hetero,
@@ -19,16 +19,16 @@ from megatron.plugin.hetero.p2p_communication import (
     send_forward_hetero,
     send_forward_recv_backward_hetero,
 )
-# FlagScale End
+######## FlagScale End ########
 
 # Types
 Shape = Union[List[int], torch.Size]
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 def _batched_p2p_ops(
@@ -165,7 +165,7 @@ class P2PCommunicator:
         # Basic attrs
         self.pp_group = pp_group
         self.config = config
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if not isinstance(self.pp_group, list):
             world_size = self.pp_group.size()
             curr_rank_in_pg = self.pp_group.rank()
@@ -180,7 +180,7 @@ class P2PCommunicator:
                 if config.virtual_pipeline_model_parallel_size is not None
                 else None
             )
-        # FlagScale End
+        ######## FlagScale End ########
 
     @property
     def is_pp_first_stage(self) -> bool:
@@ -195,12 +195,32 @@ class P2PCommunicator:
     @property
     def total_stages(self) -> int:
         """Return total number of pipeline stages."""
-        return get_pg_size(self.pp_group)  # FlagScale Add
+        return get_pg_size(self.pp_group)  # FlagScale Modify
 
     @property
     def current_stage(self) -> int:
         """Return current pipeline stage index (0-indexed)."""
-        return get_pg_rank(self.pp_group)  # FlagScale Add
+        return get_pg_rank(self.pp_group)  # FlagScale Modify
+
+    @property
+    def is_pp_first_stage(self) -> bool:
+        """Return True if pp first stage."""
+        return is_pp_first_stage(self.pp_group)
+
+    @property
+    def is_pp_last_stage(self) -> bool:
+        """Return True if pp last stage."""
+        return is_pp_last_stage(self.pp_group)
+
+    @property
+    def total_stages(self) -> int:
+        """Return total number of pipeline stages."""
+        return self.pp_group.size()
+
+    @property
+    def current_stage(self) -> int:
+        """Return current pipeline stage index (0-indexed)."""
+        return self.pp_group.rank()
 
     def _communicate_shapes(self, tensor_send_next, tensor_send_prev, recv_prev, recv_next):
         """Communicate tensor shapes between stages. Used to communicate
@@ -227,19 +247,19 @@ class P2PCommunicator:
         send_next_shape_tensor = None
         if recv_prev:
             recv_prev_shape_tensor = torch.empty(
-                (3,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
+                (3,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
             )
         if recv_next:
             recv_next_shape_tensor = torch.empty(
-                (3,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
+                (3,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
             )
         if tensor_send_prev is not None:
             send_prev_shape_tensor = torch.tensor(
-                tensor_send_prev.size(), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
+                tensor_send_prev.size(), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
             )
         if tensor_send_next is not None:
             send_next_shape_tensor = torch.tensor(
-                tensor_send_next.size(), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Add
+                tensor_send_next.size(), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
             )
 
         if config.use_ring_exchange_p2p:
@@ -279,7 +299,7 @@ class P2PCommunicator:
 
             # To protect against race condition when using batch_isend_irecv().
             # should take this out once the bug with batch_isend_irecv is resolved.
-            cur_platform.synchronize()  # FlagScale Add
+            cur_platform.synchronize()  # FlagScale Modify
 
         recv_prev_shape = [0, 0, 0]
         if recv_prev_shape_tensor is not None:
@@ -300,7 +320,7 @@ class P2PCommunicator:
         recv_next: bool,
         tensor_shape: Shape,
         wait_on_reqs: bool = True,
-        group=None,  ######## FlagScale Add ########
+        group=None,  # FlagScale Modify
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Communicate tensors between stages. Used as helper method in other
         communication methods that are used in megatron/schedules.py.
@@ -351,7 +371,7 @@ class P2PCommunicator:
             return torch.empty(
                 recv_prev_shape,
                 requires_grad=True,
-                device=cur_platform.current_device(),  # FlagScale Add
+                device=cur_platform.current_device(),  # FlagScale Modify
                 dtype=config.pipeline_dtype,
             )
 
@@ -359,7 +379,7 @@ class P2PCommunicator:
             return torch.empty(
                 recv_next_shape,
                 requires_grad=True,
-                device=cur_platform.current_device(),  # FlagScale Add
+                device=cur_platform.current_device(),  # FlagScale Modify
                 dtype=config.pipeline_dtype,
             )
 
@@ -397,7 +417,7 @@ class P2PCommunicator:
         else:
             p2p_func = _p2p_ops
 
-        ######### FlagScale Begin #########
+        ######## FlagScale Begin ########
         if group is not None:
             pp_group = group
             curr_rank_in_pg = pp_group.rank()
@@ -406,13 +426,13 @@ class P2PCommunicator:
             prev_rank_pg = (curr_rank_in_pg - 1) % world_size
             next_rank: int | None = dist.get_global_rank(pp_group, next_rank_pg)
             prev_rank: int | None = dist.get_global_rank(pp_group, prev_rank_pg)
-        ######### FlagScale End #########
-        # FlagScale Begin
+        ######## FlagScale End ########
+        ######## FlagScale Begin ########
         else:
             pp_group = self.pp_group
             next_rank = self.next_rank
             prev_rank = self.prev_rank
-        # FlagScale End
+        ######## FlagScale End ########
 
         if config.use_ring_exchange_p2p or config.batch_p2p_comm:
             reqs = []
@@ -449,7 +469,7 @@ class P2PCommunicator:
         if config.batch_p2p_comm and config.batch_p2p_sync:
             # To protect against race condition when using batch_isend_irecv().
             # User should assert that we have a modern enough PyTorch to not need this
-            cur_platform.synchronize()  # FlagScale Add
+            cur_platform.synchronize()  # FlagScale Modify
 
         return tensor_recv_prev, tensor_recv_next, reqs
 
@@ -458,12 +478,12 @@ class P2PCommunicator:
         self, tensor_shapes, is_first_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Receive tensor from previous rank in pipeline (forward receive)."""
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if self.config.enable_hetero:
             return recv_forward_hetero(
                 tensor_shapes, is_first_stage, self.config, partial(self._communicate)
             )
-        # FlagScale End
+        ######## FlagScale End ########
         unwrap_tensor_shapes = False
         if is_single_shape(tensor_shapes):
             unwrap_tensor_shapes = True
@@ -495,12 +515,12 @@ class P2PCommunicator:
         self, tensor_shapes, is_last_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Receive tensor from next rank in pipeline (backward receive)."""
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if self.config.enable_hetero:
             return recv_backward_hetero(
                 tensor_shapes, is_last_stage, self.config, partial(self._communicate)
             )
-        # FlagScale End
+        ######## FlagScale End ########
         unwrap_tensor_shapes = False
         if is_single_shape(tensor_shapes):
             unwrap_tensor_shapes = True
@@ -530,12 +550,12 @@ class P2PCommunicator:
     @nvtx_decorator()
     def send_forward(self, output_tensors, is_last_stage: bool) -> None:
         """Send tensor to next rank in pipeline (forward send)."""
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if self.config.enable_hetero:
             return send_forward_hetero(
                 output_tensors, is_last_stage, self.config, partial(self._communicate)
             )
-        # FlagScale End
+        ######## FlagScale End ########
         config = self.config
         if not isinstance(output_tensors, list):
             output_tensors = [output_tensors]
@@ -557,12 +577,12 @@ class P2PCommunicator:
     @nvtx_decorator()
     def send_backward(self, input_tensor_grads, is_first_stage: bool) -> None:
         """Send tensor to previous rank in pipeline (backward send)."""
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if self.config.enable_hetero:
             return send_backward_hetero(
                 input_tensor_grads, is_first_stage, self.config, partial(self._communicate)
             )
-        # FlagScale End
+        ######## FlagScale End ########
         if not isinstance(input_tensor_grads, list):
             input_tensor_grads = [input_tensor_grads]
         config = self.config
@@ -585,7 +605,7 @@ class P2PCommunicator:
         self, output_tensors, tensor_shapes, is_last_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Batched send and recv with next rank in pipeline."""
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if self.config.enable_hetero:
             return send_forward_recv_backward_hetero(
                 output_tensors,
@@ -594,7 +614,7 @@ class P2PCommunicator:
                 self.config,
                 partial(self._communicate),
             )
-        # FlagScale End
+        ######## FlagScale End ########
         config = self.config
         unwrap_output_tensors = False
         if not isinstance(output_tensors, list):
@@ -628,7 +648,7 @@ class P2PCommunicator:
         self, input_tensor_grads, tensor_shapes, is_first_stage: bool
     ) -> Union[torch.Tensor, list[torch.Tensor]]:
         """Batched send and recv with previous rank in pipeline."""
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if self.config.enable_hetero:
             return send_backward_recv_forward_hetero(
                 input_tensor_grads,
@@ -637,7 +657,7 @@ class P2PCommunicator:
                 self.config,
                 partial(self._communicate),
             )
-        # FlagScale End
+        ######## FlagScale End ########
         config = self.config
         unwrap_input_tensor_grads = False
         if not isinstance(input_tensor_grads, list):
@@ -742,7 +762,7 @@ class P2PCommunicator:
             config.timers('forward-backward-send-forward-backward-recv').stop()
         return input_tensor, output_tensor_grad
 
-    ########## FlagScale Begin ##########
+    ######## FlagScale Begin ########
     def warm_up_comm_group(self):
         """Warm up the communication group by performing a dummy send and recv."""
         if self.config.enable_hetero:
@@ -867,4 +887,4 @@ class P2PCommunicator:
                     group=pp_g,
                 )
 
-    ########## FlagScale End ##########
+    ######## FlagScale End ########

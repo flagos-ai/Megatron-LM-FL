@@ -1,8 +1,8 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-from collections import deque
+from collections import defaultdict, deque
 from contextlib import nullcontext
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 import torch
 
@@ -11,11 +11,11 @@ DEBUG = False
 DEBUG_RANK = 0
 
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 def debug_rank(message):
@@ -323,10 +323,10 @@ class GPUTensorPool:
         self._stats['current_in_use'] = 0
 
         # Trigger GPU cache cleanup
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         if cur_platform.is_available():
             cur_platform.empty_cache()
-        # FlagScale End
+        ######## FlagScale End ########
 
         debug_rank("GPUTensorPool: Clear complete")
 
@@ -343,10 +343,10 @@ class OffloadTensorGroup:
     def __init__(self, name):
         self._name = name
         self._tensors = {}
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self._offload_event = cur_platform.Event()
         self._reload_event = cur_platform.Event()
-        # FlagScale End
+        ######## FlagScale End ########
         self.offload = True
         self.total_offload_bytes = 0
         self.total_tensor_count = 0
@@ -417,10 +417,10 @@ class PipelineOffloadManager:
         # Cache chunk handlers for each virtual pipeline stage
         self._stages = None
         # allocate streams and events for synchronization
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self._d2h_stream = cur_platform.Stream()
         self._h2d_stream = cur_platform.Stream()
-        # FlagScale End
+        ######## FlagScale End ########
         # Shared CPU tensor pool for all chunks to improve reuse efficiency
         self._cpu_tensor_pool = GPUTensorPool(device="cpu", pin_memory=True)
 
@@ -618,7 +618,11 @@ class PipelineOffloadManager:
         return None
 
     def init_model_chunk_offload_handler(
-        self, vp_size, vp_stage, min_offloaded_tensor_size=1024 * 1024
+        self,
+        vp_size,
+        vp_stage,
+        min_offloaded_tensor_size=1024 * 1024,
+        max_inflight_offloads: Optional[int] = None,
     ):
         """
         Initialize a chunk offload handler for a model chunk (microbatch).
@@ -627,6 +631,9 @@ class PipelineOffloadManager:
             vp_size: Virtual pipeline size
             vp_stage: Virtual pipeline stage index (None means stage 0)
             min_offloaded_tensor_size: Minimum tensor size (in elements) to offload
+            max_inflight_offloads: If set, cap pending offloads per group name before main
+                wait_event; see ``fine_grained_offloading_max_inflight_offloads`` on
+                ``TransformerConfig``.
         """
         if not self._is_warmup:
             return
@@ -646,7 +653,11 @@ class PipelineOffloadManager:
             self.flush()
 
         # Use shared CPU tensor pool for better reuse across chunks
-        cur_chunk = ChunkOffloadHandler(min_offloaded_tensor_size, self._cpu_tensor_pool)
+        cur_chunk = ChunkOffloadHandler(
+            min_offloaded_tensor_size,
+            self._cpu_tensor_pool,
+            max_inflight_offloads=max_inflight_offloads,
+        )
         debug_rank(f"init_model_chunk_offload_handler {cur_chunk}")
         self._stages[cur_vpp_rank].append(cur_chunk)
         # For the last stage, push immediately and flush
@@ -773,7 +784,12 @@ class ChunkOffloadHandler:
             self.cpu_tensor_pool.free(cpu_backup)
         return gpu_tensor
 
-    def __init__(self, min_offloaded_tensor_size, cpu_tensor_pool):
+    def __init__(
+        self,
+        min_offloaded_tensor_size,
+        cpu_tensor_pool,
+        max_inflight_offloads: Optional[int] = None,
+    ):
         self.do_offload = True
 
         # Group management for batching offload/reload operations
@@ -796,6 +812,10 @@ class ChunkOffloadHandler:
         self.min_offloaded_tensor_size = min_offloaded_tensor_size
         self.cpu_tensor_pool = cpu_tensor_pool
         self.is_warmup = True
+        # Max per-group-name inflight offloads not yet joined on the main stream (None = off).
+        self._max_inflight_offloads = max_inflight_offloads
+        # group_name -> FIFO of offload events for that name (same cap for every name).
+        self._offload_pending_by_name: Dict[str, deque] = defaultdict(deque)
 
     def reset(self):
         """Reset the chunk offload handler."""
@@ -804,6 +824,9 @@ class ChunkOffloadHandler:
         self._groups_to_reload = []
         self._tensor_count_current_group = 0
         self._reloading_group = []
+        # Clear the pending-event FIFO at iter boundary so we never wait on
+        # an event recorded in a previous (non-captured) iteration.
+        self._offload_pending_by_name.clear()
 
     def find_group_with_name(self, name: str, start_index: int = 0):
         """Find the group with the given name starting from the given index."""
@@ -884,8 +907,9 @@ class ChunkOffloadHandler:
         """offload a group of tensors recorded in tensor_push()."""
         debug_rank("------bulk_offload_group")
         group_to_offload = self._groups_to_offload[-1]
-        torch.cuda.nvtx.range_push("activation offloading " + group_to_offload._name)
-        with cur_platform.stream(self.d2h_stream):  # FlagScale Add
+        nvtx_msg = "activation offloading " + group_to_offload._name
+        cur_platform.range_push(nvtx_msg)  # FlagScale Modify
+        with cur_platform.stream(self.d2h_stream):  # FlagScale Modify
             for tensor_tag, tensor_on_device in group_to_offload._tensors.items():
                 if self.tensor_need_offloading_checker(tensor_on_device):
                     state = self.offload(
@@ -897,7 +921,15 @@ class ChunkOffloadHandler:
                     group_to_offload.push_tensor(tensor_tag, state)
             group_to_offload.record_offload_event(self.d2h_stream)
         self._groups_to_offload.pop()
-        torch.cuda.nvtx.range_pop()
+        cur_platform.range_pop()  # FlagScale Modify
+        # Under full-iteration CG capture, the main stream may not wait on d2h
+        # events; optional max-inflight enqueues each group's offload event and
+        # has main wait on older events for this group name when its pending
+        # count exceeds the cap (each name is tracked separately).
+        if self._max_inflight_offloads is not None:
+            gname = group_to_offload._name
+            self._offload_pending_by_name[gname].append(group_to_offload._offload_event)
+            self._drain_offload_pending(gname)
 
     def get_max_deduplicated_groups(self):
         """Get the maximum number of deduplicated groups."""
@@ -911,8 +943,9 @@ class ChunkOffloadHandler:
         """Bulk reload group."""
         debug_rank("----bulk_reload_group")
         group_to_reload = self._groups_to_reload[-1]
-        torch.cuda.nvtx.range_push("activation reloading " + group_to_reload._name)
-        with cur_platform.stream(self.h2d_stream):  # FlagScale Add
+        nvtx_msg = "activation reloading " + group_to_reload._name
+        cur_platform.range_push(nvtx_msg)  # FlagScale Modify
+        with cur_platform.stream(self.h2d_stream):  # FlagScale Modify
             # Wait for offload to complete before reloading
             if not is_graph_capturing():
                 group_to_reload.wait_offload_event(self.h2d_stream)
@@ -926,7 +959,7 @@ class ChunkOffloadHandler:
         self._groups_to_reload.pop()
         # Add the group to the reloading group to wait for the reload event.
         self._reloading_group.append(group_to_reload)
-        torch.cuda.nvtx.range_pop()
+        cur_platform.range_pop()  # FlagScale Modify
 
     def pre_reload_last_layer(self):
         """Pre-reload the last layer of this chunk to hide reload latency."""
@@ -968,12 +1001,24 @@ class ChunkOffloadHandler:
             self.bulk_offload_group()
             # Manually release tensors not auto-freed by torch GC
             if len(forced_released_tensors) > 0:
-                cur_stream = cur_platform.current_stream()  # FlagScale Add
+                cur_stream = cur_platform.current_stream()  # FlagScale Modify
                 for release_tensor in forced_released_tensors:
                     if self.tensor_need_offloading_checker(release_tensor):
                         # Ensure tensor is not in use before freeing
                         release_tensor.record_stream(cur_stream)
                         release_tensor.untyped_storage().resize_(0)
+
+    def _drain_offload_pending(self, group_name: str) -> None:
+        """For ``group_name``, have the main stream wait on older D2H events
+        when that name's pending count exceeds ``_max_inflight_offloads``
+        (same cap for every name; 0 = wait on each commit for that name)."""
+        if self._max_inflight_offloads is None:
+            return
+        cur = torch.cuda.current_stream()
+        q = self._offload_pending_by_name[group_name]
+        while len(q) > self._max_inflight_offloads:
+            old_evt = q.popleft()
+            cur.wait_event(old_evt)
 
     def on_group_commit_forward(self, forced_released_tensors):
         """Called at the end of a layer group's forward pass to trigger offloading."""
@@ -981,7 +1026,7 @@ class ChunkOffloadHandler:
             return
         debug_rank("--on_group_commit_forward")
         # Wait for compute to finish before starting offload
-        self.d2h_stream.wait_stream(cur_platform.current_stream())  # FlagScale Add
+        self.d2h_stream.wait_stream(cur_platform.current_stream())  # FlagScale Modify
         self.bulk_offload(forced_released_tensors)
 
     def bulk_reload(self):
@@ -1019,7 +1064,7 @@ class ChunkOffloadHandler:
         if not is_graph_capturing() and len(self._reloading_group) > 0:
             for reloading_group in self._reloading_group:
                 if reloading_group._name == name:
-                    reloading_group.wait_reload_event(cur_platform.current_stream())  # FlagScale Add
+                    reloading_group.wait_reload_event(cur_platform.current_stream())  # FlagScale Modify
                     self._reloading_group.remove(reloading_group)
                     break
 
@@ -1054,7 +1099,7 @@ class ChunkOffloadHandler:
             return
         debug_rank(f"--on_group_start_backward {self}")
         # Wait for compute to finish before starting reload
-        self.h2d_stream.wait_stream(cur_platform.current_stream())  # FlagScale Add
+        self.h2d_stream.wait_stream(cur_platform.current_stream())  # FlagScale Modify
         self.bulk_reload()
 
 
@@ -1186,10 +1231,10 @@ def fine_grained_offloading_group_start(tensor, name=None):
 def fine_grained_offloading_forward_record(event: torch.cuda.Event) -> None:
     """Record the forward event for cuda graph capture."""
     d2h_stream = PipelineOffloadManager.get_instance().d2h_stream
-    # FlagScale Begin
+    ######## FlagScale Begin ########
     cur_platform.current_stream().record_event(event)
     cur_platform.current_stream().wait_stream(d2h_stream)
-    # FlagScale End
+    ######## FlagScale End ########
 
 
 class FineGrainedOffloadingBackwardRecordFunction(torch.autograd.Function):
@@ -1208,10 +1253,10 @@ class FineGrainedOffloadingBackwardRecordFunction(torch.autograd.Function):
     def backward(ctx, grad_output):
         """Record the backward event and wait for the h2d stream on cuda graph stream."""
         h2d_stream = PipelineOffloadManager.get_instance().h2d_stream
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         cur_platform.current_stream().record_event(ctx.event)
         cur_platform.current_stream().wait_stream(h2d_stream)
-        # FlagScale End
+        ######## FlagScale End ########
         return grad_output, None
 
 
@@ -1241,10 +1286,15 @@ class FineGrainedActivationOffloadingInterface:
             PipelineOffloadManager.get_instance().__exit__()
 
     @staticmethod
-    def init_chunk_handler(vp_size, vp_stage, min_offloaded_tensor_size):
+    def init_chunk_handler(
+        vp_size, vp_stage, min_offloaded_tensor_size, max_inflight_offloads: Optional[int] = None
+    ):
         """Initialize the chunk handler, called at the start of a microbatch forward pass."""
         PipelineOffloadManager.get_instance().init_model_chunk_offload_handler(
-            vp_size, vp_stage, min_offloaded_tensor_size
+            vp_size,
+            vp_stage,
+            min_offloaded_tensor_size,
+            max_inflight_offloads=max_inflight_offloads,
         )
 
     @staticmethod
@@ -1268,10 +1318,10 @@ class FineGrainedActivationOffloadingInterface:
     def forward_record(event: torch.cuda.Event) -> None:
         """Record the forward event for cuda graph capture."""
         d2h_stream = PipelineOffloadManager.get_instance().d2h_stream
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         cur_platform.current_stream().record_event(event)
         cur_platform.current_stream().wait_stream(d2h_stream)
-        # FlagScale End
+        ######## FlagScale End ########
 
     @staticmethod
     def reset():

@@ -20,6 +20,7 @@ Slack user groups to match.
 """
 
 import os
+import re
 import sys
 import argparse
 import requests
