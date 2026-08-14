@@ -17,8 +17,10 @@ import torch
 from megatron.core._rank_utils import log_single_rank, safe_get_rank
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.typed_torch import copy_signature
+
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
@@ -438,9 +440,6 @@ class RerunStateMachine:
                 "Exiting now. The job can be resumed from a previous checkpoint",
             )
             return False, True, EXIT_CODE_FAILED_ON_RESULT_VALIDATION
-                "Exiting now. A checkpoint at the last iteration is being saved "
-                "if further examination is needed",
-            return True, True, EXIT_CODE_FAILED_ON_RESULT_VALIDATION
         elif self.state == RerunState.WILL_RERUN_FROM_CHECKPOINT:
             log_single_rank(
                 logger,
@@ -573,7 +572,7 @@ class RerunStateMachine:
         def log_failure(message: str, fatal: bool = True) -> None:
             rank: int = safe_get_rank()
             node: str = os.uname()[1]
-            device: int = torch.cuda.current_device()
+            device: int = cur_platform.current_device()  # FlagScale Add
             if fatal:
                 logger.error(
                     f"Rank {rank}, node {node}, device {device}, "
@@ -584,7 +583,6 @@ class RerunStateMachine:
                     f"Rank {rank}, node {node}, device {device}, "
                     f"iteration #{self.current_iteration + 1}: {message}!"
                 )
-            device: int = cur_platform.current_device()  # FlagScale Add
 
         # Emit message in log so that we can identify which jobs have this instrumentation
         # enabled. We do this from the validate_result() method because some jobs may run with
@@ -667,7 +665,6 @@ class RerunStateMachine:
             elif self.state == RerunState.RERUNNING_FROM_CHECKPOINT:
                 # Ensure we're not on the same GPU as the first rerun.
                 node = os.uname()[1]
-                device = torch.cuda.current_device()
                 device = cur_platform.current_device()  # FlagScale Add
                 if node == self.suspicious_node and device == self.suspicious_device:
                     logger.error(

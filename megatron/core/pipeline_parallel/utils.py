@@ -17,12 +17,13 @@ from megatron.core.utils import (
     nvtx_range_push,
 )
 
-logger = logging.getLogger(__name__)
-from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_viewless_tensor
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 ########## FlagScale End ##########
+
+logger = logging.getLogger(__name__)
 
 
 def is_pp_first_stage(pp_group: torch.distributed.ProcessGroup):
@@ -310,33 +311,6 @@ class ScheduleNode:
             grad = grad[0]
         return grad
 
-<<<<<<< TARGET
-    @contextmanager
-    def stream_acquire_context(self, name=None):
-        """Stream acquire context that handles event synchronization,
-            NVTX profiling, and stream context.
-
-        This context manager consolidates:
-        1. Event wait/record for synchronization between streams
-        2. NVTX range for profiling (if name is provided)
-        3. torch.cuda.stream context for execution on the specified stream
-
-        Args:
-            name: Optional name for NVTX range profiling
-        """
-        self.event.wait(self.stream)
-        if name:
-            nvtx_range_push(name)
-        try:
-            with torch.cuda.stream(self.stream):
-                yield
-        finally:
-            if name:
-                nvtx_range_pop(name)
-            self.event.record(self.stream)
-
-||||||| BASE
-=======
     @contextmanager
     def stream_acquire_context(self, name=None):
         """Stream acquire context that handles event synchronization,
@@ -361,7 +335,6 @@ class ScheduleNode:
                 cur_platform.range_pop()  # FlagScale Add
             self.event.record(self.stream)
 
->>>>>>> FORK
     def _release_state(self):
         """Clear the state of the node"""
         self.inputs = None
@@ -399,36 +372,25 @@ _COMM_STREAM = None
 
 def set_streams(comm_stream=None, high_priority=False):
     """Set the stream for communication operations."""
-def set_streams(comm_stream=None):
     global _COMM_STREAM
 
-<<<<<<< TARGET
     # Set communication stream
     if _COMM_STREAM is None:
         if comm_stream is None:
+            # FlagScale Begin
             if high_priority:
-                _, high = torch.cuda.Stream.priority_range()
-                comm_stream = torch.cuda.Stream(device="cuda", priority=high)
+                _, high = cur_platform.Stream.priority_range()
+                comm_stream = cur_platform.Stream(
+                    device=cur_platform.device_name(), priority=high
+                )
             else:
-                comm_stream = torch.cuda.Stream(device="cuda")
+                comm_stream = cur_platform.Stream(device=cur_platform.device_name())
+            # FlagScale End
         _COMM_STREAM = comm_stream
-||||||| BASE
-    assert _COMP_STREAM is None
-    assert _COMM_STREAM is None
-    _COMP_STREAM = comp_stream
-    _COMM_STREAM = comm_stream
-=======
-    # Set communication stream
-    if _COMM_STREAM is None:
-        if comm_stream is None:
-            comm_stream = cur_platform.Stream(device=cur_platform.device_name())  # FlagScale Add
-        _COMM_STREAM = comm_stream
->>>>>>> FORK
 
 
 def get_comp_stream():
     """Get the stream for computation"""
-    return torch.cuda.current_stream()
     return cur_platform.current_stream()  # FlagScale Add
 
 

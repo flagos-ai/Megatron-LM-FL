@@ -31,7 +31,7 @@ def get_shared_capture_stream():
     """
     global _shared_capture_stream
     if _shared_capture_stream is None:
-        _shared_capture_stream = torch.cuda.Stream()
+        _shared_capture_stream = cur_platform.Stream()  # FlagScale
     return _shared_capture_stream
 
 
@@ -118,8 +118,6 @@ class StaticBufferLoader:
 
         assert isinstance(inputs, dict)
         if microbatch == len(StaticBufferLoader.static_buffers[stage]):
-            self.stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(self.stream):
             # FlagScale Begin
             self.stream.wait_stream(cur_platform.current_stream())
             with cur_platform.stream(self.stream):
@@ -136,8 +134,6 @@ class StaticBufferLoader:
                     else:
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = inputs[k]
 
-            self.stream.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(self.stream):
             # FlagScale Begin
             self.stream.wait_stream(cur_platform.current_stream())
             with cur_platform.stream(self.stream):
@@ -226,11 +222,9 @@ class FullCudaGraphWrapper:
             FullCudaGraphWrapper.cuda_graph[training_str] = torch.cuda.CUDAGraph()
             for _, state in get_all_rng_states().items():
                 FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
-            torch.cuda.synchronize()
-            capture_stream = get_shared_capture_stream()
             # FlagScale Begin
             cur_platform.synchronize()
-            capture_stream = cur_platform.Stream()
+            capture_stream = get_shared_capture_stream()
             # FlagScale End
             with torch.cuda.graph(
                 FullCudaGraphWrapper.cuda_graph[training_str],
@@ -244,6 +238,7 @@ class FullCudaGraphWrapper:
             cur_platform.synchronize()  # FlagScale Add
             torch.distributed.barrier()
             logger.info(f'CUDA graph capture done for {training_str}!!!')
+
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
         else:

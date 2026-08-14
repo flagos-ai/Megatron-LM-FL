@@ -18,7 +18,6 @@ from megatron.core.tensor_parallel import (
     reduce_scatter_to_sequence_parallel_region,
 )
 from megatron.core.transformer.enums import CudaGraphModule
-from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.fused_a2a import (
     fused_combine,
     fused_dispatch,
@@ -260,7 +259,6 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         # as cudagraph outputs when the cuda_graph_modules contains moe_preprocess.
         self.cudagraph_attrs = ['routing_map']
 
-        # as cudagraph outputs when the cuda_graph_scope contains moe_preprocess.
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
     ):
@@ -460,20 +458,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             "no_sync": 4,
         }
         self.cuda_dtoh_point = "before_permutation_1"
-<<<<<<< TARGET
         if config.cuda_graph_impl != "none" and (
             CudaGraphModule.moe_preprocess in config.cuda_graph_modules
             or not self.config.cuda_graph_modules
         ):
             self.cuda_dtoh_point = "before_ep_alltoall"
-||||||| BASE
-=======
-        if config.cuda_graph_impl != "none" and (
-            CudaGraphScope.moe_preprocess in config.cuda_graph_scope
-            or not self.config.cuda_graph_scope
-        ):
-            self.cuda_dtoh_point = "before_ep_alltoall"
->>>>>>> FORK
         if MoEAlltoAllTokenDispatcher.cuda_dtoh_stream is None:
             MoEAlltoAllTokenDispatcher.cuda_dtoh_stream = cur_platform.Stream()  # FlagScale Add
 

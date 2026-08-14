@@ -19,11 +19,6 @@ import operator
 from contextlib import nullcontext
 from functools import reduce
 from importlib.metadata import version
-<<<<<<< TARGET
-from typing import Callable, Optional, Sequence, Union
-||||||| BASE
-from typing import Callable, List, Optional, Sequence, Union
-=======
 from typing import Callable, Optional, Sequence, Union
 
 try:
@@ -32,7 +27,6 @@ try:
     HAVE_MEGATRON_CORE = True
 except (ImportError, ModuleNotFoundError):
     HAVE_MEGATRON_CORE = False
->>>>>>> FORK
 
 try:
     import einops
@@ -104,7 +98,6 @@ def is_te_min_version(vers, check_equality=True):
     return te_version > PkgVersion(vers)
 
 
-<<<<<<< TARGET
 def is_torch_min_version(version, check_equality=True):
     """Check if minimum version of `torch` is installed."""
     if check_equality:
@@ -112,55 +105,6 @@ def is_torch_min_version(version, check_equality=True):
     return _torch_version > PkgVersion(version)
 
 
-||||||| BASE
-# Check if Transformer Engine has class for fp8 tensors.
-try:
-    if is_te_min_version("2.0"):
-        # In TE2.x, QuantizedTensor is the base class for all different type of fp8 tensors,
-        # including fp8 tensor for delayed scaling, current scaling and mxfp8, etc.
-        from transformer_engine.pytorch.tensor import QuantizedTensor as FP8_TENSOR_CLASS
-    else:
-        from transformer_engine.pytorch.float8_tensor import Float8Tensor as FP8_TENSOR_CLASS
-
-    HAVE_TE_FP8_TENSOR_CLASS = True
-except (ImportError, ModuleNotFoundError):
-    # FP8 tensor class not found
-    HAVE_TE_FP8_TENSOR_CLASS = False
-
-try:
-    from transformer_engine.pytorch.optimizers import multi_tensor_applier, multi_tensor_scale
-
-    multi_tensor_scale_impl = multi_tensor_scale
-except ImportError:
-    try:
-        import amp_C
-        from apex.multi_tensor_apply import multi_tensor_applier
-
-        multi_tensor_scale_impl = amp_C.multi_tensor_scale
-    except ImportError:
-        import warnings
-
-        warnings.warn(
-            "Transformer Engine and Apex are not installed. "
-            "Falling back to local implementations of "
-            "multi_tensor_applier and multi_tensor_scale"
-        )
-
-        def local_multi_tensor_applier(op, noop_flag_buffer, tensor_lists, *args):
-            """Multi tensor op applier"""
-            return op(2048 * 32, noop_flag_buffer, tensor_lists, *args)
-
-        def local_multi_tensor_scale(chunk_size, noop_flag, tensor_lists, scale):
-            """Works as a drop-in replacement for amp_C.multi_tensor_scale."""
-            for src, dst in zip(tensor_lists[0], tensor_lists[1]):
-                dst.copy_(src * scale)
-
-        multi_tensor_applier = local_multi_tensor_applier
-        multi_tensor_scale_impl = local_multi_tensor_scale
-
-
-=======
->>>>>>> FORK
 def is_submodule(module, parent_module, strict=True):
     """
     Check if a module is a submodule of another module.
@@ -174,7 +118,6 @@ def is_submodule(module, parent_module, strict=True):
     return False
 
 
-<<<<<<< TARGET
 def find_megatron_fsdp(model):
     """Walk the model wrapper chain to find a MegatronFSDP instance, if any."""
     # Lazy import to avoid a circular import: megatron_fsdp.py transitively imports
@@ -198,30 +141,6 @@ def get_mesh_names(
     """
     Get all the sub-mesh ("dp", "cp", etc.) and flattened-mesh ("dp_cp", etc.) names
     in the DeviceMesh. When only_submesh_dims=True, only checks for sub-mesh dimensions.
-||||||| BASE
-def is_float8tensor(tensor: torch.Tensor) -> bool:
-    """Check if a tensor is a Transformer Engine Float8Tensor.
-
-    Note that in TE2.x, in order to support more recipes, the design of the fp8 tensor class has
-    changed. Now Float8Tensor is only used for current scaling and delayed scaling. And mxfp8
-    and blockwise scaling have their own fp8 tensor classes. These different fp8 tensor classes
-    are both inherited from QuantizedTensor. So, for TE1.x, FP8_TENSOR_CLASS is Float8Tensor,
-    and for TE2.x, FP8_TENSOR_CLASS is QuantizedTensor.
-    """
-    return HAVE_TE_FP8_TENSOR_CLASS and isinstance(tensor, FP8_TENSOR_CLASS)
-
-
-def get_mesh_names(device_mesh: Optional[DeviceMesh] = None) -> list[str]:
-    """
-    Get all the sub-mesh names in the DeviceMesh.
-=======
-def get_mesh_names(
-    device_mesh: Optional[DeviceMesh] = None, only_submesh_dims: bool = False
-) -> list[str]:
-    """
-    Get all the sub-mesh ("dp", "cp", etc.) and flattened-mesh ("dp_cp", etc.) names
-    in the DeviceMesh. When only_submesh_dims=True, only checks for sub-mesh dimensions.
->>>>>>> FORK
     """
     if device_mesh is None:
         # Device mesh does not exist.
@@ -655,13 +574,6 @@ class FSDPDistributedIndex:
         # AG groups: supplied via ProcessGroupCollection (Megatron-FSDP entrypoint).
         self.fsdp_group_ag = fsdp_group_ag
         self.expt_fsdp_group_ag = expt_fsdp_group_ag
-        # AG group comes from parallel_state, not the mesh
-        # the purpose of this independent group is to overlap all-gather and gradient reduction.
-        self.fsdp_group_ag = None
-        if HAVE_MEGATRON_CORE and parallel_state.has_separate_all_gather_group():
-            self.fsdp_group_ag = parallel_state.get_data_parallel_group(
-                with_context_parallel=True, independent_all_gather=True
-            )
         # Retrieve the outer-FSDP process group from the DeviceMesh.
         self.outer_fsdp_group = (
             self.device_mesh[self.dp_outer_dim].get_group()
