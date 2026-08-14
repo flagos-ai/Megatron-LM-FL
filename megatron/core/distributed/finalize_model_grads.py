@@ -446,7 +446,6 @@ def _update_router_expert_bias(
             # cases where only the student is in training mode but the teacher is in eval mode
             # when using online knoweldge-distillation with Model-Optimizer. In this case, we want
             # to avoid updating teacher's expert_bias.
-            if hasattr(module, 'expert_bias') and module.training:
             if (
                 hasattr(module, 'expert_bias')
                 and module.training

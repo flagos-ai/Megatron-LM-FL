@@ -209,7 +209,6 @@ class FullyShardedDataParallel(_BaseDataParallel):
                     config.overlap_moe_expert_parallel_comm
                     and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
                 ),
-                    config.fp8_recipe == "mxfp8" and ddp_config.fp8_param_gather
             ),
         )
         self.param_and_grad_buffer = self.module.param_and_grad_buffer

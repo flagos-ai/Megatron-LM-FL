@@ -151,10 +151,6 @@ class BlendedDataset(torch.utils.data.Dataset):
         else:
             cache_hit = False
 
-        if not path_to_cache or (
-            not cache_hit
-            and (not torch.distributed.is_initialized() or torch.distributed.get_rank() == 0)
-        ):
         if not path_to_cache or (not cache_hit and is_built_on_zero_rank()):  # FlagScale Add
             log_single_rank(
                 logger, logging.INFO, f"Build and save the {type(self).__name__} indices"
