@@ -1016,6 +1016,8 @@ class CheckpointWithoutOutput(object):
         # When ckpt_manager is set, this is a no-op.
         # Manager handles all discarding and hook registration uniformly.
         if self.ckpt_manager is not None or is_graph_warmup():
+            return
+
         # use resize to release the output tensor memory and still keep the metadata in the tensors.
         # the metadata is still needed for backward
         for output in self.outputs:

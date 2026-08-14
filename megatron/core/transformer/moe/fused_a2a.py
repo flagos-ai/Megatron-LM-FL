@@ -371,8 +371,6 @@ class HybridEPDispatch(torch.autograd.Function):
         probs,
         group,
         num_local_experts,
-        num_sms_dispatch_api=None,
-        num_sms_combine_api=None,
         num_blocks_permute=None,
         num_blocks_unpermute=None,
         fused=False,
@@ -477,7 +475,6 @@ class HybridEPDispatch(torch.autograd.Function):
             None,
             None,
             None,
-            hidden=grad_x, probs=grad_probs, handle=handle, pad_multiple=ctx.pad_multiple
         )
 
 
@@ -489,7 +486,6 @@ class HybridEPCombine(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, handle, num_permuted_tokens=None, pad_multiple=None, fused=False):
-    def forward(ctx, x, handle, num_permuted_tokens=None, pad_multiple=None):
         '''
         Forward pass of fused combine of the HybridEP backend
         '''
@@ -498,7 +494,6 @@ class HybridEPCombine(torch.autograd.Function):
             handle=handle,
             pad_multiple=pad_multiple,
             **({"fuse_unpermute_combine": fused} if fused else {}),
-            hidden=x, handle=handle, pad_multiple=pad_multiple
         )
         ctx.handle = handle
         ctx.pad_multiple = pad_multiple
@@ -532,8 +527,6 @@ if HAVE_HYBRIDEP:
         probs,
         group,
         num_local_experts,
-        num_sms_dispatch_api=None,
-        num_sms_combine_api=None,
         num_blocks_permute=None,
         num_blocks_unpermute=None,
         fused=False,
@@ -562,18 +555,10 @@ if HAVE_HYBRIDEP:
                 Number of SMs used by the dispatch API.
             num_sms_combine_api (Optional[int]):
                 Number of SMs used by the combine API.
-<<<<<<< TARGET
             num_blocks_permute (Optional[int]):
                 Number of blocks used by the permute part.
             num_blocks_unpermute (Optional[int]):
                 Number of blocks used by the unpermute part.
-||||||| BASE
-            num_dispatched_tokens (int):
-                Number of tokens after dispatch but before permute. HybridEP uses this
-                to allocate buffers. If not provided, HybridEP obtains the size from
-                a GPU tensor, which causes a D2H synchronization.
-=======
->>>>>>> FORK
             num_permuted_tokens (int):
                 Number of tokens after permute. HybridEP uses this to allocate buffers.
                 If not provided, HybridEP obtains the size from a GPU tensor,
@@ -600,15 +585,8 @@ if HAVE_HYBRIDEP:
             num_sms_preprocessing_api,
         )
 
-<<<<<<< TARGET
     @internal_api
     def hybrid_ep_combine(x, handle, num_permuted_tokens, pad_multiple, fused=False):
-||||||| BASE
-    def hybrid_ep_combine(x, handle, num_dispatched_tokens, num_permuted_tokens, pad_multiple):
-=======
-    @internal_api
-    def hybrid_ep_combine(x, handle, num_permuted_tokens, pad_multiple):
->>>>>>> FORK
         '''
         Perform fused combine operation for unpermute + combine a2a + unpermute
         using the HybridEP backend
