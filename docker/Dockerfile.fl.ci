@@ -1,0 +1,192 @@
+# Dockerfile for Megatron-LM-FL GitHub CI Testing
+# Build: docker build -f docker/Dockerfile.ci -t megatron-lm-fl:ci .
+# Build with proxy: docker build -f docker/Dockerfile.ci --build-arg HTTPS_PROXY=http://host:port -t megatron-lm-fl:ci .
+# Usage: docker run --gpus all --shm-size=500g -it megatron-lm-fl:ci
+
+# Base image: NVIDIA PyTorch NGC Container
+ARG BASE_IMAGE=nvcr.io/nvidia/pytorch:25.03-py3
+FROM ${BASE_IMAGE} AS base
+
+# Disable pip constraints from NGC container
+ENV PIP_CONSTRAINT=""
+ENV DEBIAN_FRONTEND=noninteractive
+
+# Environment variables
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PROJECT_ROOT=/workspace/Megatron-LM-FL
+
+# Tool versions
+ARG UV_VERSION=0.7.2
+ARG YQ_VERSION=4.45.1
+
+# Proxy settings (optional, set via --build-arg HTTPS_PROXY=http://host:port)
+ARG HTTPS_PROXY=""
+
+# Add uv to PATH
+ENV PATH="/root/.local/bin:$PATH"
+
+# ============================================
+# Stage 1: Install system dependencies
+# ============================================
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        gettext \
+        python3-venv \
+        psmisc \
+        git \
+        wget \
+        curl \
+        vim \
+        htop \
+        tmux \
+        openssh-client && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install yq for YAML parsing
+RUN if [ -n "${HTTPS_PROXY}" ]; then \
+        https_proxy=${HTTPS_PROXY} wget -q https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64 -O /usr/local/bin/yq; \
+    else \
+        wget -q https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}/yq_linux_amd64 -O /usr/local/bin/yq; \
+    fi && \
+    chmod a+x /usr/local/bin/yq
+
+# Install uv package manager
+RUN curl -LsSf https://astral.sh/uv/${UV_VERSION}/install.sh | sh
+
+# ============================================
+# Stage 2: Setup Python virtual environment
+# ============================================
+ARG UV_PROJECT_ENVIRONMENT=/opt/venv
+ENV UV_PROJECT_ENVIRONMENT=${UV_PROJECT_ENVIRONMENT}
+ENV VIRTUAL_ENV=${UV_PROJECT_ENVIRONMENT}
+ENV PATH="${UV_PROJECT_ENVIRONMENT}/bin:$PATH"
+ENV UV_LINK_MODE=copy
+
+# Create virtual environment with system site packages (to use NGC PyTorch)
+RUN /root/.local/bin/uv venv ${UV_PROJECT_ENVIRONMENT} --system-site-packages
+
+# ============================================
+# Stage 3: Install Megatron-LM-FL dependencies
+# ============================================
+WORKDIR /workspace
+
+# Copy project configuration files first for better caching
+COPY README.md pyproject.toml /workspace/
+COPY megatron/core/__init__.py /workspace/megatron/core/
+COPY megatron/core/package_info.py /workspace/megatron/core/
+
+# Copy uv.lock if exists (optional, for reproducible builds)
+COPY uv.loc[k] /workspace/
+
+# Install build dependencies and project dependencies
+ARG IMAGE_TYPE=dev
+ENV NVTE_CUDA_ARCHS="80;90;100"
+ENV UV_HTTP_TIMEOUT=3600
+
+RUN if [ -n "${HTTPS_PROXY}" ]; then \
+        export https_proxy=${HTTPS_PROXY} http_proxy=${HTTPS_PROXY}; \
+    fi && \
+    uv sync --only-group build || true
+
+# Install project dependencies with test/linting/ci groups from pyproject.toml
+RUN uv sync \
+    --extra ${IMAGE_TYPE} --extra mlm \
+    --group test --group linting --group ci \
+    --link-mode copy \
+    # === Packages pre-installed in NGC, use base image version === \
+    --no-install-package torch \
+    --no-install-package torchvision \
+    --no-install-package triton \
+    --no-install-package numpy \
+    --no-install-package tensorboard \
+    # === CUDA-related packages, install compatible versions manually === \
+    --no-install-package transformer-engine \
+    --no-install-package transformer-engine-torch \
+    --no-install-package transformer-engine-cu12 \
+    --no-install-package mamba-ssm \
+    --no-install-package causal-conv1d \
+    --no-install-package nv-grouped-gemm \
+    --no-install-package flashinfer-python \
+    --no-install-package flash-mla \
+    --no-install-package nvidia-modelopt \
+    --no-install-package nvidia-modelopt-core \
+    --no-install-package numpy \
+    # === NVIDIA CUDA libraries, use NGC base image version === \
+    --no-install-package nvidia-cublas-cu12 \
+    --no-install-package nvidia-cuda-cupti-cu12 \
+    --no-install-package nvidia-cuda-nvrtc-cu12 \
+    --no-install-package nvidia-cuda-runtime-cu12 \
+    --no-install-package nvidia-cudnn-cu12 \
+    --no-install-package nvidia-cufft-cu12 \
+    --no-install-package nvidia-cufile-cu12 \
+    --no-install-package nvidia-curand-cu12 \
+    --no-install-package nvidia-cusolver-cu12 \
+    --no-install-package nvidia-cusparse-cu12 \
+    --no-install-package nvidia-cusparselt-cu12 \
+    --no-install-package nvidia-nccl-cu12
+
+# ============================================
+# Stage 3: Install CUDA 12 compatible packages
+# ============================================
+# Build environment for CUDA packages
+ENV CAUSAL_CONV1D_FORCE_BUILD=1
+ENV MAMBA_FORCE_BUILD=1
+ENV MAX_JOBS=4
+
+# transformer-engine for CUDA 12 (install from NVIDIA PyPI)
+# This installs the full PyPI package with proper metadata to pass sanity checks
+RUN pip uninstall transformer_engine transformer-engine-torch -y 2>/dev/null || true && \
+    rm -rf /usr/local/lib/python3.12/dist-packages/transformer_engine* || true && \
+    git clone --recursive https://github.com/NVIDIA/TransformerEngine.git && \
+    cd TransformerEngine && \
+    git checkout e9a5fa4e && \
+    # TransformerEngine commit: e9a5fa4e (Thu Sep 4 22:39:53 2025 +0200)
+    /root/.local/bin/uv pip install --no-build-isolation --verbose . && \
+    cd .. && \
+    rm -rf TransformerEngine && \
+    # Fix: remove duplicate .so files in wheel_lib/ (keep root level version)
+    rm -rf ${UV_PROJECT_ENVIRONMENT}/lib/python3.12/site-packages/transformer_engine/wheel_lib/
+
+# nv-grouped-gemm (build from source)
+RUN uv pip install nv-grouped-gemm==1.1.4.post6 --no-build-isolation
+
+# flash-mla (build from git)
+# RUN pip install git+https://github.com/deepseek-ai/FlashMLA@47c35a712362f11bc235854ead51819ad76f5a81 --no-build-isolation
+
+# causal-conv1d and mamba-ssm (require CUDA compilation)
+RUN uv pip install causal-conv1d==1.5.3.post1 --no-build-isolation
+RUN uv pip install mamba-ssm==2.2.6.post3 --no-build-isolation
+
+# flashinfer (match CUDA and torch version, adjust URL as needed)
+# Reference: https://docs.flashinfer.ai/installation.html
+# RUN pip install flashinfer-python -i https://flashinfer.ai/whl/cu124/torch2.7/
+
+# ============================================
+# Stage 4: Copy full project
+# ============================================
+COPY . /tmp/Megatron-LM-FL
+WORKDIR /tmp/Megatron-LM-FL
+
+# Install project (non-editable mode)
+RUN uv pip install numpy==1.26.4 boto3==1.42.1 && \
+    pip install . --no-deps && \
+    rm -rf /tmp/Megatron-LM-FL && \
+    # Clean up files from uv sync stage
+    rm -rf /workspace/*
+
+WORKDIR /workspace
+
+# ============================================
+# Stage 5: Download test data
+# ============================================
+RUN mkdir -p /opt/data && \
+    wget -O /opt/data/datasets.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/datasets.zip && \
+    unzip -o /opt/data/datasets.zip -d /opt/data && \
+    rm /opt/data/datasets.zip && \
+    wget -O /opt/data/tokenizers.zip https://baai-flagscale.ks3-cn-beijing.ksyuncs.com/temp/tokenizers.zip && \
+    unzip -o /opt/data/tokenizers.zip -d /opt/data && \
+    rm /opt/data/tokenizers.zip
+
+ENV PYTHONPATH=${UV_PROJECT_ENVIRONMENT}/lib/python3.12/site-packages/:$PYTHONPATH

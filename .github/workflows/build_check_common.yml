@@ -1,0 +1,69 @@
+name: Common Build Check
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+      device:
+        required: false
+        type: string
+        default: generic
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+      setup_script:
+        required: true
+        type: string
+        description: Repository-relative platform environment setup script
+      nproc_per_node:
+        required: false
+        type: string
+        default: '1'
+
+jobs:
+  build_check:
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    container:
+      image: ${{ inputs.image }}
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup platform environment
+        env:
+          CI_TEST_SUITE: build
+          CI_PLATFORM: ${{ inputs.platform }}
+          CI_DEVICE: ${{ inputs.device }}
+          CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+        run: |
+          set -euo pipefail
+
+          SETUP_SCRIPT='${{ inputs.setup_script }}'
+          if [[ "$SETUP_SCRIPT" = /* || "$SETUP_SCRIPT" == *".."* ]]; then
+            echo "::error::setup_script must be a repository-relative path"
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/$SETUP_SCRIPT" ]; then
+            echo "::error::Platform setup script not found: $SETUP_SCRIPT"
+            exit 1
+          fi
+
+          bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+
+      - name: Verify imports
+        run: |
+          python -c "import megatron.core; print(f'megatron.core {megatron.core.__version__}')"
+          python -c "from megatron.core.transformer import TransformerConfig; print('TransformerConfig OK')"
+          python -c "from megatron.core.models.gpt import GPTModel; print('GPTModel OK')"

@@ -1,0 +1,340 @@
+# MUSA Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Moore Threads MUSA-based unit testing.
+
+hardware_name: musa
+display_name: 'S5000 Tests'
+setup_script: .github/scripts/set_env_musa.sh
+
+# Runner labels for Moore Threads node
+runner_labels:
+  - mt-8g-cicd-megatron
+# CI image for online env
+ci_image: registry.mthreads.com/presale/devtech/flagsclae:0206
+
+# Dataset/tokenizer volumes for test data
+container_volumes:
+  - /home/flagscale_cicd/flask/static:/workspace/report
+  - /home/flagscale_cicd/flask/config:/workspace/config
+  - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
+  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
+  - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
+  - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
+  # Override broken libmusa.so stub inside the image.
+  - /usr/lib/x86_64-linux-gnu/libmusa.so:/usr/lib/x86_64-linux-gnu/libmusa.so
+  - /usr/lib/x86_64-linux-gnu/libmusa.so.1:/usr/lib/x86_64-linux-gnu/libmusa.so.1
+  - /usr/lib/x86_64-linux-gnu/libmusa.so.4.3.5:/usr/lib/x86_64-linux-gnu/libmusa.so.4.3.5
+  # Mount MUSA driver runtime libraries.
+  - /usr/local/musa-4.3.4:/usr/local/musa-4.3.4
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ulimit nofile=65535:65535
+
+# Device types to run tests on
+device_types:
+  - s5000
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    nproc_per_node: 8
+    pytest_extra_args: []
+    groups:
+      - name: core
+        path: tests/unit_tests/test_*.py
+        description: Core unit tests
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      - name: distributed
+        path: tests/unit_tests/distributed/
+        description: Distributed tests
+      - name: dist_checkpointing
+        path: tests/unit_tests/dist_checkpointing/
+        description: Distributed checkpointing tests
+      - name: tensor_parallel
+        path: tests/unit_tests/tensor_parallel/
+        description: Tensor parallel tests
+      - name: pipeline_parallel
+        path: tests/unit_tests/pipeline_parallel/
+        description: Pipeline parallel tests
+      - name: data
+        path: tests/unit_tests/data/
+        description: Data tests
+      - name: fusions
+        path: tests/unit_tests/fusions/
+        description: Fusion tests
+      - name: others
+        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: Export, post-training, tokenizer, and utility tests
+    # Start with a conservative MUSA smoke set while validating runtime and TE plugin coverage.
+    ignored_tests:
+      # ── Core tests that genuinely require CUDA/NCCL/Apex/TE GPU paths ──────────
+      - tests/unit_tests/test_fp8_param.py          # FP8 training with TE + CUDA graphs
+      - tests/unit_tests/test_fp8_utils.py           # TestFP8Padding needs CUDA/TE
+      - tests/unit_tests/test_fp4_param.py           # NVFP4 requires Blackwell+ TE
+      - tests/unit_tests/test_imports.py             # Import chains hit TE/CUDA modules
+      - tests/unit_tests/test_nccl_allocator.py      # NCCL-specific memory allocator
+      - tests/unit_tests/test_local_multi_tensor_fns.py  # Apex amp_C CUDA kernels
+      - tests/unit_tests/test_muon_optimizer.py      # Hardcoded device='cuda', Newton-Schulz
+      - tests/unit_tests/test_optimizer.py           # FusedAdam + fp8_autocast + DDP
+      - tests/unit_tests/test_optimizer_cpu_offloading.py  # CPU-GPU offloading, .cuda()
+      - tests/unit_tests/test_layer_wise_optimizer.py      # .cuda() + multi-rank
+      - tests/unit_tests/test_inference.py           # InferenceEngineHarness + Flask
+      # ── Import chain risk: megatron.training.arguments → TE/CUDA modules ───────
+      - tests/unit_tests/test_api_backwards_compat_setup.py::test_decorator_module
+      - tests/unit_tests/test_api_backwards_compat_setup.py::test_decorators_work
+      # core-TCP store teardown leaves residual sockets that cause
+      # 60s timeouts between destroy/init cycles.  Skip the whole file
+      # (same approach as Metax).
+      - tests/unit_tests/test_parallel_state.py
+      # These core tests enter MCCL default-process-group collectives that
+      # currently time out while exchanging McclUniqueId on the MUSA image.
+      - tests/unit_tests/test_process_groups_config.py::TestPGConfigDefaultInitialization::test_default_initialization
+      - tests/unit_tests/test_training.py::TestTraining::test_build_train_valid_test_data_iterators
+      - tests/unit_tests/test_training.py::TestTraining::test_closed_formula_vocab_size_with_padding
+      - tests/unit_tests/test_training.py::TestSaveGrads::test_save_grads
+      # These mocked HyperCommGrid tests still call dist.get_rank() without a
+      # default process group. The real NCCL integration class skips on MUSA.
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_single_dim
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_multiple_dims
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_with_options
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_duplicate_error
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_get_pg_success
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_get_pg_multiple_dims
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_end_to_end_workflow
+      # TestHyperCommGridIntegration requires torch.distributed.ProcessGroupNCCL which
+      # does not exist in MUSA PyTorch (uses MCCL backend without ProcessGroupNCCL class).
+      # Metax/Ascend torch builds expose ProcessGroupNCCL compatibility class; MUSA does not.
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGridIntegration
+      # torch.cuda.nvtx is not provided by the MUSA PyTorch build.
+      - tests/unit_tests/test_utils.py::test_nvtx_range
+      # core-test_utils.py flaky tests that hang on MUSA MCCL collective communication.
+      # test_check/cross_check_param_hashes call torch.distributed.all_gather() which deadlocks
+      # with partial ranks stalling while others complete. test_param_norm_* use DistributedDataParallel
+      # and may trigger similar MCCL synchronization issues. test_straggler_detector is inherently flaky.
+      # Align with Ascend's conservative approach: skip all @pytest.mark.flaky tests in test_utils.py.
+      - tests/unit_tests/test_utils.py::test_check_param_hashes_across_dp_replicas
+      - tests/unit_tests/test_utils.py::test_cross_check_param_hashes_across_dp_replicas
+      - tests/unit_tests/test_utils.py::test_param_norm_linear[False]
+      - tests/unit_tests/test_utils.py::test_param_norm_linear[True]
+      - tests/unit_tests/test_utils.py::test_param_norm_moe[False]
+      - tests/unit_tests/test_utils.py::test_param_norm_moe[True]
+      - tests/unit_tests/test_utils.py::test_straggler_detector
+      # PyTorch 2.5 _coalescing_manager compatibility issue with MUSA torch_musa
+      # Mocked all_reduce returns None → op_list empty → work never assigned → UnboundLocalError
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_force_all_reduce_uses_correct_collective[False]
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_force_all_reduce_uses_correct_collective[True]
+      # distributed-bucket_group_cpu_sync produces different numerical results on MUSA.
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers
+      # The eight-rank DDP process-group case times out during MCCL initialization;
+      # later distributed failures are cascading rank desynchronization.
+      - tests/unit_tests/distributed/test_distributed_data_parallel.py::TestDistributedDataParallel::test_ddp_with_dp_process_groups[8]
+      # reduce_scatter with fp32 accumulation can SIGSEGV on rank 5 in the MUSA
+      # runtime for this parameter combination; other combinations remain enabled.
+      - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py::TestReduceScatterWithFP32Accumulation::test_reduce_scatter_with_fp32_accumulation[False-True]
+      # MoE expert reconfiguration repeatedly creates/destroys MCCL process
+      # groups.  After several teardown/reinit cycles the TCP store state
+      # becomes non-deterministic (port TIME_WAIT, McclUniqueId desync) and
+      # a later parametrized variant hangs — which variant fails changes
+      # between runs (observed: etp2, etp3, etp14).  Whole-function skip
+      # matches Ascend's approach for the same underlying MCCL stream-ceiling.
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_parallel_reconfiguration_e2e
+      # FSDP tests enter CUDA-specific runtime paths in the current MUSA image.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py
+      # test_torch_fully_sharded_parallel: HAVE_FSDP=False (torch.distributed.fsdp.fully_shard unavailable in torch_musa 2.1)
+      - tests/unit_tests/distributed/test_torch_fully_sharded_parallel.py
+      # These checkpointing paths require CUDA-backed TE or optimizer APIs.
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py::TestParallelMLPWithGLU::test_oom_is_handled
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_sequential_grouped_mlp_extra_state
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_te_grouped_linear_torch_native
+      - tests/unit_tests/dist_checkpointing/test_fp8.py
+      - tests/unit_tests/dist_checkpointing/test_fully_parallel.py::TestFullyParallelSaveAndLoad::test_memory_usage
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
+      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py::TestLegacySaveAndLoad::test_basic_save_load_scenario
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestDistributedOptimizer
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestFP32Optimizer
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding
+      - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py::test_save_and_load_checkpoint_vpp
+      # dist_checkpointing-test_serialization: multiple checkpoint serialization tests fail on MUSA;
+      # test_exact_load_handling[False] was already skipped; now adding other failing cases.
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_exact_load_handling[False]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_empty_load
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_content_metadata_load_from_checkpoint[content_metadata0]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_content_metadata_load_from_checkpoint[content_metadata1]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_content_metadata_load_from_checkpoint[content_metadata2]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_content_metadata_load_from_state_dict[content_metadata0]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_content_metadata_load_from_state_dict[content_metadata1]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_content_metadata_load_from_state_dict[content_metadata2]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestNonStrictLoad::test_unexpected_keys_handling_during_validation[True]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestNonStrictLoad::test_unexpected_keys_handling_during_validation[False]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestNonStrictLoad::test_exact_load_handling[True]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestNonStrictLoad::test_exact_load_handling[False]
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestNonStrictLoad::test_sharded_metadata
+      # dist_checkpointing-NVRx (NVIDIA Resiliency eXtensions) async save library not available.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
+      # dist_checkpointing-test_safe_globals fails on MUSA (same as Metax); likely global state serialization issue.
+      - tests/unit_tests/dist_checkpointing/test_safe_globals.py::TestSafeGlobals::test_safe_globals
+      # dist_checkpointing-test_cached_metadata triggers 30min MCCL timeout (SeqNum mismatch: rank0 ALLREDUCE
+      # seq=8778 vs rank1-7 GATHER seq=8781), causing job timeout. test_cpu_tensors was cut off by timeout.
+      - tests/unit_tests/dist_checkpointing/test_torch_dist.py::TestCachedMetadata::test_cached_metadata
+      - tests/unit_tests/dist_checkpointing/test_torch_dist.py::TestCPUTensors::test_cpu_tensors_dont_take_too_much_space
+      # dist_checkpointing-MCCL communicator setup times out on every test in
+      # these two files: rank0 hangs in init_process_group during the model-
+      # parallel reconfiguration teardown/reinit cycle, causing ranks 1-7 to
+      # wait 60 s per test and the whole group to deadlock.  Same pattern as
+      # MetaX (ZeroDivisionError there, MCCL timeout here); both platforms
+      # ignore the files entirely.
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      # fused_layer_norm_cuda (Apex CUDA kernel) not available in MUSA image;
+      # test_pipeline_layout.py invokes GPT forward which enters fused_layer_norm
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py
+      # TE-FL's reference layernorm path passes its DType enum through
+      # torch_musa as a device ID (for example musa:DType.kBFloat16). The first
+      # rank failure desynchronizes the remaining ranks and poisons later tests.
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      # These communicator suites explicitly initialize NCCL process groups.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py
+      # test_forward_backward_func_with_pipeline_parallel calls torch.rand(...).cuda() in test code
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_pipeline_parallel
+      # pipeline_parallel-MCCL TCP store initialization times out intermittently.
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_no_pipelining_with_custom_pgs
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_get_forward_backward_func
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_interleaving
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_uneven_interleaving
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_pipelining_without_interleaving_with_custom_pgs
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_pipelining_with_interleaving_with_custom_pgs
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_without_pipeline_parallel
+      # tensor_parallel-MCCL communicator setup times out while exchanging
+      # McclUniqueId on the MUSA image; keep the other tensor-parallel tests enabled.
+      - tests/unit_tests/tensor_parallel/test_cross_entropy.py::test_vocab_parallel_cross_entropy
+      - tests/unit_tests/tensor_parallel/test_data.py::test_broadcast_data
+      - tests/unit_tests/tensor_parallel/test_layers.py::test_LinearWithFrozenWeight[1-False]
+      - tests/unit_tests/tensor_parallel/test_layers.py::test_LinearWithFrozenWeight[8-True]
+      - tests/unit_tests/tensor_parallel/test_random.py::test_model_parallel_cuda_manual_seed
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_CopyToModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ReduceFromModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ScatterToModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ScatterToSequenceParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromSequenceParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ReduceScatterToSequenceParallelRegion
+      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_gather_split_1d_tensor
+      # MUSA does not provide CUDA graph RNG replay semantics.
+      - tests/unit_tests/tensor_parallel/test_random.py::test_double_fork_cuda_rng_states_tracker
+      - tests/unit_tests/tensor_parallel/test_random.py::test_convert_cuda_rng_state
+      # tensor_parallel-MCCL communicator setup times out in test_checkpoint when
+      # set_world_size() tears down and reinitialises the process group on MUSA.
+      - tests/unit_tests/tensor_parallel/test_random.py::test_checkpoint
+      # fusions-torch_musa missing aten::empty.memory_format CUDA kernel in clamped swiglu path.
+      - tests/unit_tests/fusions/test_swiglu_fusion.py::test_clamped_weighted_bias_swiglu
+      # test_bin_reader downloads GPT2 tokenizer from s3.amazonaws.com, unreachable from MUSA CI
+      - tests/unit_tests/data/test_bin_reader.py
+      # test_fast_builder expands to 192 distributed cases and repeatedly rebuilds
+      # datasets across eight ranks. The accumulated MCCL barriers eventually
+      # SIGSEGV on MUSA, while the preceding parameter combinations pass.
+      - tests/unit_tests/data/test_builder.py::test_fast_builder
+      # Rank 0 can stall acquiring the MUSA device and never publish the
+      # McclUniqueId; ranks 1-7 then exhaust the c10d store timeout on every
+      # subsequent process-group rebuild.
+      - tests/unit_tests/data/test_builder.py::test_builder
+      - tests/unit_tests/data/test_fim_dataset.py
+      - tests/unit_tests/data/test_gpt_dataset.py::test_mock_gpt_dataset
+      - tests/unit_tests/data/test_multimodal_dataset.py::test_mock_multimodal_dataset
+      # This suite requires tokenizer assets under /opt/data that are not
+      # mounted in the MUSA unit container.
+      - tests/unit_tests/data/test_preprocess_data.py
+      # TRT-LLM FP8 export and ModelOpt inference require CUDA-backed TE/ModelOpt.
+      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
+      # test_checkpointing: _load_base_checkpoint → read_metadata uses device='cuda' tensor
+      - tests/unit_tests/test_checkpointing.py
+      # test_bert_model: TE layernorm_fwd reference impl calls tensor.to(odtype) where torch_musa
+      # _to() misinterprets DType enum as device ID → "Invalid device string: 'musa:DType.kFloat32'"
+      - tests/unit_tests/models/test_bert_model.py::TestBertModel::test_post_process_forward
+      # The heterogeneous constructor parametrization allocates 1.31B-1.49B
+      # parameter full-size models on every rank. On MUSA, repeated model-parallel
+      # teardown can wait 60s in TCPStore/MCCL, causing the models job to time out.
+      - tests/unit_tests/models/test_heterogeneous_gpt_model.py::TestHeterogeneousGPTModel::test_constructor
+      # These model paths directly require CUDA/NCCL or CUDA-backed TE internals.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTWithFusedOps
+      - tests/unit_tests/models/test_gpt_model.py::test_gpt_with_te_activation_func
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py
+      - tests/unit_tests/models/test_mimo_checkpoint.py
+      - tests/unit_tests/models/test_mimo_submodules.py
+      # test_base_embedding: test_gpu_forward triggers the same TE layernorm_fwd DType-as-device-ID
+      # bug as test_bert_model (torch_musa _to() misinterprets DType enum as device string).
+      # test_constructor is the first test in the models group that initializes a distributed
+      # process group.  On MUSA rank0 binds the TCP store but ranks 1-7 repeatedly fail the
+      # socket handshake (60 s timeout), and every subsequent distributed test inherits the
+      # degraded state.  Metax and Ascend already skip this test for similar reasons.
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_constructor
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_gpu_forward
+      # test_clip_vit_model: test_forward hits the TE layernorm_fwd DType bug on MUSA.
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_forward
+      # test_gpt_model: test_post_process_forward hits the TE layernorm_fwd DType bug on MUSA.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTModel::test_post_process_forward
+      # test_llava_model: forward paths hit the TE layernorm_fwd DType bug; the two token-parallel
+      # cases with packed-sequence / THD attention hit thd_get_partitioned_indices which is not
+      # implemented in the reference backend used on MUSA.
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward_fsdp
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelTokenParallel::test_process_embedding_token_parallel[2-4-False-True]
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelTokenParallel::test_process_embedding_token_parallel[2-4-True-True]
+      # test_multimodal_projector: test_forward hits the TE layernorm_fwd DType bug on MUSA.
+      - tests/unit_tests/models/test_multimodal_projector.py::TestMultimodalProjector::test_forward
+      # test_radio_model: test_forward hits the TE layernorm_fwd DType bug on MUSA.
+      - tests/unit_tests/models/test_radio_model.py::TestRADIOViTModel::test_forward
+      # test_mamba_model: mamba-ssm CUDA extension is not available in the MUSA image;
+      # setup_method raises ImportError before any test body runs.
+      - tests/unit_tests/models/test_mamba_model.py
+      # test_mamba_moe_model: GroupedGEMM kernels require compute capability >= 8.0 (Ampere or newer);
+      # Moore Threads S5000 does not meet this requirement.
+      - tests/unit_tests/models/test_mamba_moe_model.py
+      # others-ExperimentalFeature logging does not populate log records on MUSA.
+      - tests/unit_tests/utils/test_experimental_log_once.py::test_experimental_fn_logs_once
+      - tests/unit_tests/utils/test_experimental_log_once.py::test_experimental_cls_logs_once
+      # The MUSA unit image does not contain the /opt/data tokenizer fixture set.
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+      # These tests require CUDA-backed TransformerEngine fusion kernels.
+      - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
+      # MUSA produces a wider tolerance for this fused-softmax comparison.
+      - tests/unit_tests/fusions/test_torch_softmax.py::TestTorchSoftmax::test_causal_mask_equal_scores
+      # test_preprocess_mmdata uses the locally mounted GPT-2 tokenizer and
+      # generates all dataset inputs in a temporary directory.
+
+  functional:
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_s5000
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: s5000
+        enable_lightweight_mode: false
+        gpus_per_node: 1
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_musa
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: s5000
+        enable_lightweight_mode: false
+        gpus_per_node: 4

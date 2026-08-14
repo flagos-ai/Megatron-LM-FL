@@ -1,0 +1,144 @@
+name: Common Unit Tests
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+        description: Platform configuration name
+      device:
+        required: true
+        type: string
+        description: Device type
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+      setup_script:
+        required: true
+        type: string
+        description: Repository-relative platform environment setup script
+      test_groups:
+        required: true
+        type: string
+        description: JSON array of unit test groups
+      nproc_per_node:
+        required: true
+        type: string
+        description: Number of distributed test processes
+      pytest_extra_args:
+        required: false
+        type: string
+        default: '[]'
+        description: JSON array of additional pytest arguments
+      ignored_tests:
+        required: false
+        type: string
+        default: '[]'
+        description: JSON array of test files or node IDs to ignore
+
+jobs:
+  unit_test:
+    defaults:
+      run:
+        shell: bash
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_group: ${{ fromJson(inputs.test_groups) }}
+    name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
+    container:
+      image: ${{ inputs.image }}
+      ports:
+        - 80
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+    steps:
+      - name: Checkout Source Code (attempt 1)
+        id: checkout1
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Checkout Source Code (attempt 2)
+        id: checkout2
+        if: steps.checkout1.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Checkout Source Code (attempt 3)
+        id: checkout3
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Setup platform environment
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_TEST_SUITE: unit
+          CI_TEST_GROUP: ${{ matrix.test_group.name }}
+          CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+        run: |
+          set -euo pipefail
+
+          SETUP_SCRIPT='${{ inputs.setup_script }}'
+          if [[ "$SETUP_SCRIPT" = /* || "$SETUP_SCRIPT" == *".."* ]]; then
+            echo "::error::setup_script must be a repository-relative path"
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/$SETUP_SCRIPT" ]; then
+            echo "::error::Platform setup script not found: $SETUP_SCRIPT"
+            exit 1
+          fi
+
+          bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+        timeout-minutes: 30
+
+      - name: Run unit tests - ${{ matrix.test_group.name }}
+        id: unit_test
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_PLATFORM: ${{ inputs.platform }}
+          CI_DEVICE: ${{ inputs.device }}
+          CI_TEST_GROUP: ${{ matrix.test_group.name }}
+          CI_TEST_PATH: ${{ matrix.test_group.path }}
+          CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+          CI_IGNORED_TESTS: ${{ inputs.ignored_tests }}
+          CI_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
+        run: tests/test_utils/runners/run_ci_unit_tests.sh
+        timeout-minutes: 60
+
+      - name: Upload Coverage Report
+        uses: actions/upload-artifact@v4
+        continue-on-error: true
+        with:
+          name: coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}
+          path: coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json
+
+      - name: Upload Coverage Report to FlagCICD
+        uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
+        continue-on-error: true
+        env:
+          NO_PROXY: "flagcicd-inner.flagos.net"
+        with:
+          backend_url: 'http://flagcicd-inner.flagos.net:8000/metrics/'
+          user_id: '000000000000000000'
+          report_path: 'coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json'
+          fail_on_error: 'false'

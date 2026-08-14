@@ -1,0 +1,184 @@
+name: Common Functional Tests - Training
+
+on:
+  workflow_call:
+    inputs:
+      platform:
+        required: true
+        type: string
+        description: Platform configuration name
+      device:
+        required: true
+        type: string
+        description: Device type (e.g., a100, a800, h100, generic)
+      image:
+        required: true
+        type: string
+      runs_on:
+        required: true
+        type: string
+      container_volumes:
+        required: true
+        type: string
+      container_options:
+        required: true
+        type: string
+      setup_script:
+        required: true
+        type: string
+        description: Repository-relative platform environment setup script
+      test_matrix:
+        required: true
+        type: string
+        description: JSON array of test configurations
+
+jobs:
+  functional_test_train:
+    name: functional-train-${{ inputs.device }}-${{ matrix.test_config.test_case }}
+    defaults:
+      run:
+        shell: bash
+    runs-on: ${{ fromJson(inputs.runs_on) }}
+    strategy:
+      fail-fast: false
+      matrix:
+        test_config: ${{ fromJson(inputs.test_matrix) }}
+    container:
+      image: ${{ inputs.image }}
+      ports:
+        - 80
+      volumes: ${{ fromJson(inputs.container_volumes) }}
+      options: ${{ inputs.container_options }}
+
+    steps:
+      - name: Checkout Source Code (attempt 1)
+        id: checkout1
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Checkout Source Code (attempt 2)
+        id: checkout2
+        if: steps.checkout1.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Checkout Source Code (attempt 3)
+        id: checkout3
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          set-safe-directory: true
+
+      - name: Setup platform environment
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_TEST_SUITE: functional
+          CI_NPROC_PER_NODE: ${{ matrix.test_config.gpus_per_node }}
+        run: |
+          set -euo pipefail
+
+          SETUP_SCRIPT='${{ inputs.setup_script }}'
+          if [[ "$SETUP_SCRIPT" = /* || "$SETUP_SCRIPT" == *".."* ]]; then
+            echo "::error::setup_script must be a repository-relative path"
+            exit 1
+          fi
+          if [ ! -f "$GITHUB_WORKSPACE/$SETUP_SCRIPT" ]; then
+            echo "::error::Platform setup script not found: $SETUP_SCRIPT"
+            exit 1
+          fi
+
+          bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+        timeout-minutes: 30
+
+      - name: Run functional tests
+        id: functional_test
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+
+          MODEL='${{ matrix.test_config.model }}'
+          TEST_CASE='${{ matrix.test_config.test_case }}'
+          TRAINING_SCRIPT='${{ matrix.test_config.training_script }}'
+          N_REPEAT='${{ matrix.test_config.n_repeat || 1 }}'
+          GOLDEN_ENV='${{ matrix.test_config.golden_environment }}'
+          GOLDEN_PLATFORM='${{ matrix.test_config.golden_platform }}'
+          ENABLE_LIGHTWEIGHT_MODE='${{ matrix.test_config.enable_lightweight_mode }}'
+          DATA_PATH='${{ matrix.test_config.data_path }}'
+          DATA_CACHE_PATH='${{ matrix.test_config.data_cache_path }}'
+          CHECKPOINT_LOAD_PATH='${{ matrix.test_config.checkpoint_load_path }}'
+          TENSORBOARD_SUBPATH='${{ matrix.test_config.tensorboard_subpath }}'
+          GPUS_PER_NODE='${{ matrix.test_config.gpus_per_node }}'
+
+          [[ -z "${N_REPEAT}" || "${N_REPEAT}" == "null" ]] && N_REPEAT='1'
+          [[ -z "${GOLDEN_ENV}" || "${GOLDEN_ENV}" == "null" ]] && GOLDEN_ENV='dev'
+          [[ -z "${GOLDEN_PLATFORM}" || "${GOLDEN_PLATFORM}" == "null" ]] && GOLDEN_PLATFORM='dgx_a100'
+          [[ -z "${ENABLE_LIGHTWEIGHT_MODE}" || "${ENABLE_LIGHTWEIGHT_MODE}" == "null" ]] && ENABLE_LIGHTWEIGHT_MODE='false'
+          [[ -z "${DATA_PATH}" || "${DATA_PATH}" == "null" ]] && DATA_PATH='/opt/data/datasets'
+          [[ -z "${DATA_CACHE_PATH}" || "${DATA_CACHE_PATH}" == "null" ]] && DATA_CACHE_PATH='/tmp/data_cache'
+          [[ -z "${CHECKPOINT_LOAD_PATH}" || "${CHECKPOINT_LOAD_PATH}" == "null" ]] && CHECKPOINT_LOAD_PATH='/tmp/checkpoints'
+          [[ -z "${TENSORBOARD_SUBPATH}" || "${TENSORBOARD_SUBPATH}" == "null" ]] && TENSORBOARD_SUBPATH='tensorboard'
+          if ! [[ "${GPUS_PER_NODE}" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::gpus_per_node must be a positive integer for ${TEST_CASE}"
+            exit 1
+          fi
+
+          echo "Running functional test: ${MODEL}/${TEST_CASE}"
+          echo "Training script: ${TRAINING_SCRIPT}"
+          echo "Golden target: ${GOLDEN_ENV}/${GOLDEN_PLATFORM}"
+          echo "Lightweight mode: ${ENABLE_LIGHTWEIGHT_MODE}"
+          echo "Data path: ${DATA_PATH}"
+          echo "Checkpoint load path: ${CHECKPOINT_LOAD_PATH}"
+          echo "GPUs per node: ${GPUS_PER_NODE}"
+
+          export PYTHONPATH=${{ github.workspace }}:${PYTHONPATH:-}
+
+          OUTPUT_DIR="./test_output/${TEST_CASE}"
+          TENSORBOARD_PATH="${OUTPUT_DIR}/${TENSORBOARD_SUBPATH}"
+          mkdir -p "${OUTPUT_DIR}"
+          echo "output_dir=${OUTPUT_DIR}" >> "$GITHUB_OUTPUT"
+          echo "logs_dir=${OUTPUT_DIR}/logs" >> "$GITHUB_OUTPUT"
+
+          ARGUMENTS=(
+            "DATA_PATH=${DATA_PATH}"
+            "DATA_CACHE_PATH=${DATA_CACHE_PATH}"
+            "OUTPUT_PATH=${OUTPUT_DIR}"
+            "TENSORBOARD_PATH=${TENSORBOARD_PATH}"
+            "CHECKPOINT_SAVE_PATH=${OUTPUT_DIR}/checkpoints"
+            "CHECKPOINT_LOAD_PATH=${CHECKPOINT_LOAD_PATH}"
+            "TRAINING_SCRIPT_PATH=${TRAINING_SCRIPT}"
+            "TRAINING_PARAMS_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/model_config.yaml"
+            "GOLDEN_VALUES_PATH=./tests/functional_tests/test_cases/${MODEL}/${TEST_CASE}/golden_values_${GOLDEN_ENV}_${GOLDEN_PLATFORM}.json"
+            "N_REPEAT=${N_REPEAT}"
+            "ENABLE_LIGHTWEIGHT_MODE=${ENABLE_LIGHTWEIGHT_MODE}"
+          )
+
+          ARGUMENTS+=("GPUS_PER_NODE=${GPUS_PER_NODE}")
+
+          bash ./tests/functional_tests/shell_test_utils/run_ci_test.sh "${ARGUMENTS[@]}"
+          exit_code=$?
+
+          if [ $exit_code -eq 0 ]; then
+            echo "✅ Functional test passed: ${MODEL}/${TEST_CASE}"
+          else
+            echo "❌ Functional test failed: ${MODEL}/${TEST_CASE} (exit code: $exit_code)"
+          fi
+
+          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
+          exit $exit_code
+        timeout-minutes: 60
+
+      - name: Upload Functional Test Logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional_tests-logs-${{ github.run_id }}-${{ inputs.device }}-${{ matrix.test_config.test_case }}
+          path: ${{ github.workspace }}/test_output/${{ matrix.test_config.test_case }}/logs/
+          retention-days: 7
+          if-no-files-found: warn

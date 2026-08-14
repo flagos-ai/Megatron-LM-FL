@@ -1,0 +1,61 @@
+name: Lint
+
+on:
+  workflow_call: 
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  pylint:
+    name: pylint_check
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout (attempt 1)
+        id: checkout1
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Checkout (attempt 2)
+        id: checkout2
+        if: steps.checkout1.outcome == 'failure'
+        uses: actions/checkout@v4
+        continue-on-error: true
+        with:
+          fetch-depth: 0
+
+      - name: Checkout (attempt 3)
+        if: steps.checkout2.outcome == 'failure'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v1
+        with:
+          version: 0.7.2
+
+      - name: Install linting tools
+        run: |
+          python -m pip install --upgrade setuptools wheel
+          uv sync --locked --only-group linting
+
+      - name: Get PR info
+        id: get-pr-info
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        uses: nv-gha-runners/get-pr-info@main
+
+      - name: Run linting
+        if: startsWith(github.ref, 'refs/heads/pull-request/')
+        run: |
+          export PATH=".venv/bin:$PATH"
+          export GITLAB_ENDPOINT=github.com
+          export CI_PROJECT_NAMESPACE=NVIDIA
+          export BASE_REF="${{ fromJSON(steps.get-pr-info.outputs.pr-info).base.ref }}"
+          export CHECK_ONLY=true
+          export SKIP_DOCS=false
+          bash tools/autoformat.sh
