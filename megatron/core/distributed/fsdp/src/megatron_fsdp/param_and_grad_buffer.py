@@ -224,14 +224,13 @@ class MultiGroupUBRAllocator:
     def __exit__(self, *args):
         self.mem_allocator.__exit__(*args)
         for group in self.groups[1:]:
-            backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
+            backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))  # FlagScale Add
             log_single_rank(
                 logger,
                 logging.INFO,
                 f"[MultiGroupUBRAllocator] Registering mem pool to group {group}, "
                 f"group.group_desc:{group.group_desc}",
             )
-            backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))  # FlagScale Add
             backend.register_mem_pool(self.pool)
 
 
@@ -803,12 +802,11 @@ class FixedPoolAllocator(TemporaryBucketAllocator):
             ):
                 # Requires synchronization for new buffer allocation
                 self.allocation_tracker[(buffer_name, dtype)] = size
-                torch.cuda.synchronize()
+                cur_platform.synchronize()  # FlagScale Add
         return Bucket(
             data=get_global_memory_buffer().get_tensor(
                 [size], dtype=dtype, name=buffer_name, mem_alloc_context=mem_alloc_context
             )
-                cur_platform.synchronize()  # FlagScale Add
         )
 
     def _get_gbuf_name(self, buf_group_id: int, bucket_index: int):
@@ -1731,13 +1729,6 @@ class ParamAndGradBuffer:
                 logging.INFO,
                 f"[ParamAndGradBuffer] FSDP UBRegistration Groups ({len(self.ubr_groups)}):",
             )
-            if (
-                self.dist_index.get_fsdp_group(
-                    is_expert_parallel=False, independent_all_gather=True
-                is not None
-            ):
-                # All-gather group used when overlapping all-gather and gradient reduction.
-                self.ubr_groups.append(
             # All ranks in each group must participate in the collective to avoid deadlock.
             for i, group in enumerate(self.ubr_groups):
                 log_single_rank(
@@ -1857,44 +1848,6 @@ class ParamAndGradBuffer:
         else:
             return nullcontext
 
-<<<<<<< TARGET
-    def manual_buffer_registration(self):
-        """
-        Manually register the FSDP communication buffers to NCCL user buffer.
-        """
-        assert self.ddp_config.nccl_ub, "NCCL UBR is not enabled"
-        assert self.ddp_config.fsdp_double_buffer, "FSDP double buffer is not enabled"
-        assert self.ddp_config.fsdp_manual_registration, "FSDP manual registration is not enabled"
-        assert not self.already_registered, "Mem pool is already registered"
-
-        self.already_registered = True
-
-        global NCCL_MEMORY_POOL
-        torch.cuda.synchronize()
-        torch.distributed.barrier(async_op=False)
-        torch.cuda.synchronize()
-
-        for group in self.ubr_groups:
-            log_single_rank(
-                logger,
-                logging.INFO,
-                f"[MCORE][FSDP][Manual REG] Registering mem pool to group {group},"
-                f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
-            )
-            nccl_allocator.register_mem_pool(
-                NCCL_MEMORY_POOL,
-                group,
-                symmetric=not self.ddp_config.disable_symmetric_registration,
-            )
-            log_single_rank(
-                logger,
-                logging.INFO,
-                f"[MCORE][FSDP][Manual REG] Registered mem pool to group {group},"
-                f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
-            )
-
-||||||| BASE
-=======
     def manual_buffer_registration(self):
         """
         Manually register the FSDP communication buffers to NCCL user buffer.
@@ -1930,7 +1883,6 @@ class ParamAndGradBuffer:
                 f"group.group_desc:{group.group_desc}, group.size(): {group.size()}",
             )
 
->>>>>>> FORK
     def _log_parameter_groups(self):
         """Compact log of FSDP parameter groups and their parameters."""
 
@@ -2259,12 +2211,6 @@ class ParamAndGradBuffer:
                 if ag_group is not None:
                     model_wbuf_dp_group = ag_group
 
-            # When --create-all-gather-group is enabled, use a separate process group for
-            # all-gather operations (model_weight_buffer) to enable overlap with gradient reduction
-            # operations (main_grad_buffer). This avoids head-of-line blocking between forward
-            # all-gather and backward reduce-scatter on the same communicator.
-            if not group.is_expert_param and not should_create_hfsdp_helper_buffers:
-                    is_expert_parallel=False, independent_all_gather=True
             gradient_scaling_factor = (
                 self.gradient_scaling_factor
                 if not group.is_expert_param
@@ -2791,7 +2737,6 @@ class ParamAndGradBuffer:
             new_param.requires_grad_(old_param.requires_grad)
 
             for tp_attr in ["_tensor_parallel_mode"]:
-            for tp_attr in ["_mcore_tp", "_tp_partition_dim", "_tp_duplicated"]:
                 if getattr(old_param, tp_attr, None) is not None:
                     setattr(new_param, tp_attr, getattr(old_param, tp_attr))
 
@@ -2970,9 +2915,6 @@ class ParamAndGradBuffer:
                             "is_embedding_or_output_parameter",
                             "is_embedding_parameter",
                             "_tensor_parallel_mode",
-                            "_mcore_tp",
-                            "_tp_duplicated",
-                            "_tp_partition_dim",
                         ]:
                             if hasattr(orig_param, attr_name):
                                 setattr(param, attr_name, getattr(orig_param, attr_name))
@@ -3030,10 +2972,6 @@ class ParamAndGradBuffer:
                 # Not needed for decoupled gradients, because the precision-aware
                 # optimizer can apply gradients to parameters of different precision!
                 optimizer_grad = optimizer_grad.to(param.dtype)
-            if group.main_weight_buffer is not None:
-                if not self.use_decoupled_grad:
-                    # Convert the gradient to the main weight buffer dtype.
-                    # TODO(@cspades): Why this is necessary? Casted below.
 
             if name not in self.dist_main_grad:
                 # Register the gradient as a distributed tensor.
@@ -4030,7 +3968,6 @@ class AllGatherPipeline:
                     self.bucket_status[bucket_key] = BucketStatus.PRESERVED
                 else:
                     self.bucket_can_be_released[bucket_key] = True
-                self.bucket_can_be_released[self.get_bucket_key(bucket_id, bwd)] = True
         self.recycle_unused_buckets()
 
         expected_statuses = (BucketStatus.EMPTY,)
@@ -4165,7 +4102,6 @@ class AllGatherPipeline:
                 ag_buckets = list(sorted(set(ag_buckets)))
                 bucket_id = next_bucket_id(ag_buckets)
 
-<<<<<<< TARGET
         # Only all-gather on buckets that have not been allocated yet or whose
         # persistent storage was preserved but is not ready for use.
         ag_buckets = [
@@ -4174,17 +4110,6 @@ class AllGatherPipeline:
             if self.bucket_status[self.get_bucket_key(bucket_id, bwd)]
             in (BucketStatus.EMPTY, BucketStatus.PRESERVED)
         ]
-||||||| BASE
-        # Only all-gather on buckets that have not been allocated yet.
-        ag_buckets = [i for i in ag_buckets if self.bucket_status[i] == BucketStatus.EMPTY]
-=======
-        # Only all-gather on buckets that have not been allocated yet.
-        ag_buckets = [
-            bucket_id
-            for bucket_id in ag_buckets
-            if self.bucket_status[self.get_bucket_key(bucket_id, bwd)] == BucketStatus.EMPTY
-        ]
->>>>>>> FORK
         if len(ag_buckets) == 0:
             return
 
@@ -4203,16 +4128,14 @@ class AllGatherPipeline:
                 self.ag_stream if self.ag_stream is not None else cur_platform.current_stream()  # FlagScale Add
             )
             if outer_fsdp_group_param_gather:
-                self.outer_fsdp_group_param_gather_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self.outer_fsdp_group_param_gather_stream):
-                    is_expert_parallel = parameter_groups[buckets[0]].is_expert_param
-                    outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group(
-                        is_expert_parallel=is_expert_parallel
-                    )
                 # FlagScale Begin
                 self.outer_fsdp_group_param_gather_stream.wait_stream(cur_platform.current_stream())
                 with cur_platform.stream(self.outer_fsdp_group_param_gather_stream):
                 # FlagScale End
+                    is_expert_parallel = parameter_groups[buckets[0]].is_expert_param
+                    outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group(
+                        is_expert_parallel=is_expert_parallel
+                    )
                     with _coalescing_manager(outer_fsdp_group, async_ops=False):
                         for bucket_id in buckets:
                             inner_dp_wbuf = self.get_fsdp_buffer(bucket_id, bwd=bwd)
@@ -4262,7 +4185,6 @@ class AllGatherPipeline:
             # Already ready to use.
             return
         if self.bucket_status[bucket_key] in (BucketStatus.EMPTY, BucketStatus.PRESERVED):
-        if self.bucket_status[bucket_key] == BucketStatus.EMPTY:
             if empty_ok:
                 return
             # Bucket should not be empty or merely preserved here; this implies that
@@ -4276,7 +4198,6 @@ class AllGatherPipeline:
         mark_bucket_ready_to_use()
 
     @torch.no_grad()
-<<<<<<< TARGET
     def release_bucket(self, bucket_id, bwd, lazy: bool = False):
         """
         Release the specified parameter bucket, freeing its associated buffer storage.
@@ -4316,54 +4237,10 @@ class AllGatherPipeline:
         if lazy:
             # Mark the bucket can be released later.
             self.bucket_can_be_released[bucket_key] = True
-||||||| BASE
-    def release_bucket(self, bucket_id: int):
-        """Release the bucket."""
-        if self.bucket_status[bucket_id] == BucketStatus.EMPTY:
-=======
-    def release_bucket(self, bucket_id, bwd, lazy: bool = False):
-        """
-        Release the specified parameter bucket, freeing its associated buffer storage.
-
-        This function marks or frees the memory of a parameter bucket depending on
-        whether lazy release is enabled. It ensures that buckets are not released
-        while still being communicated or in use by the pipeline.
-
-        Args:
-            bucket_id (int): Identifier of the bucket to be released.
-            bwd (bool): Indicates if the release is triggered during the backward pass.
-            lazy (bool, optional): Determines when the parameter buffer (bucket) is released.
-                - If False, the buffer is released immediately.
-                - If True, the release is deferred until just before the all-gather pipeline
-                requests a new buffer. The delayed release is performed by invoking
-                `recycle_unused_buckets`.
-
-        Raises:
-            ValueError: If the specified bucket is currently in communication and
-                cannot be safely released.
-
-        Notes:
-            - Buckets marked as lazy will be released later when the pipeline determines
-            they are no longer needed.
-            - If the bucket has a transpose weight buffer (used in FP8 backward passes),
-            this buffer is freed; otherwise, the model weight buffer is released.
-            - This function should NOT be invoked on buckets associated with modules not
-            identified as FSDP unit modules, even when weights are sharded in the case of
-            `optim_grads_params`. Non-unit modules should remain persistently allocated
-            because they do not satisfy FSDP unit module state requirements, e.g. their
-            parameters are simultaneously modified or shared with other modules.
-        """
-        bucket_key = self.get_bucket_key(bucket_id, bwd)
-        if self.bucket_status[bucket_key] == BucketStatus.EMPTY:
->>>>>>> FORK
             return
 
         self.wait_bucket_ready(bucket_id, bwd, empty_ok=True)
         if self.bucket_status[bucket_key] == BucketStatus.COMMUNICATING:
-        if lazy:
-            # Mark the bucket can be released later.
-            self.bucket_can_be_released[bucket_key] = True
-            return
             raise ValueError(f"Bucket {bucket_id} is communicating.")
 
         if bwd and self.buffer.parameter_groups[bucket_id].transpose_weight_buffer is not None:
@@ -4408,7 +4285,6 @@ class AllGatherPipeline:
             BucketStatus.COMMUNICATING,
             BucketStatus.READY_TO_USE,
         ):
-        if self.bucket_status[bucket_key] != BucketStatus.EMPTY:
             return
 
         self.bucket_status[bucket_key] = BucketStatus.COMMUNICATING
@@ -4843,17 +4719,6 @@ def make_fsdp_dtensor(
             assert tp_dim is not None, (
                 "[Megatron-FSDP] Parameter is not tensor model parallel, "
                 "yet tensor_model_parallel is True."
-        if tp_mesh.mesh.numel() > 1:
-                placements = [Shard(tp_dim)]
-                global_shape[tp_dim] *= tp_mesh.mesh.numel()
-            # Construct TP-sharded DTensor using Megatron-style placement
-            param = DTensor.from_local(
-                local_tensor=local_tensor,
-                device_mesh=tp_mesh,
-                placements=placements,
-                run_check=run_check,
-                shape=tuple(global_shape),
-                stride=torch.empty(global_shape).stride(),
             )
             placements = [Shard(tp_dim)]
             global_shape[tp_dim] *= tp_mesh.mesh.numel()
