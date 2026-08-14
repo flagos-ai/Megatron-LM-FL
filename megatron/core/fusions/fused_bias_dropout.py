@@ -1,12 +1,14 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-from typing import TYPE_CHECKING, Optional, Tuple
+from typing import TYPE_CHECKING, Optional, Tuple  # FlagScale Modify
 
 import torch
 
 from megatron.core.jit import jit_fuser
 
+######## FlagScale Begin ########
 if TYPE_CHECKING:
     from megatron.core.tensor_parallel.random import CheckpointManager
+######## FlagScale End ########
 
 # pylint: disable=missing-function-docstring
 
@@ -83,6 +85,7 @@ def bias_dropout_add_fused_inference(
     return _bias_dropout_add_func(x_with_bias, residual, prob, False)
 
 
+######## FlagScale Begin ########
 def get_bias_dropout_add(
     training, fused, mhc_recompute_manager: Optional['CheckpointManager'] = None
 ):
@@ -179,3 +182,4 @@ def _get_checkpointed_bda(training, fused, mhc_recompute_manager: 'CheckpointMan
         return result
 
     return _checkpointed_bda
+######## FlagScale End ########

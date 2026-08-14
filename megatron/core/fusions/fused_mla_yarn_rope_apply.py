@@ -7,6 +7,7 @@ import torch
 from packaging import version
 
 from megatron.core.utils import null_decorator
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
@@ -60,6 +61,7 @@ def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
     return token_idx
 
 
+######## FlagScale Begin ########
 @triton.autotune(
     configs=[
         triton.Config({"BLOCK_H": 1}),
@@ -882,3 +884,4 @@ def fused_mla_rope_kv_split(
 # ---------------------------------------------------------------------------
 fused_apply_mla_rope_for_q = fused_mla_rope_inplace
 fused_apply_mla_rope_for_kv = fused_mla_rope_kv_split
+######## FlagScale End ########
