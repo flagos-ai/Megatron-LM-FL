@@ -22,7 +22,7 @@ from megatron.core.pipeline_parallel.utils import (
     is_vp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.enums import AttnBackend, CudaGraphScope
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.multi_token_prediction import tie_word_embeddings_state_dict
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -87,14 +87,10 @@ class LanguageModule(MegatronModule):
     def _is_in_embd_group(self):
         if self.embd_group is None:
             return False
-        if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
-            self.embd_group
-        ):
-            if getattr(self, 'mtp_process', False):
-                return True
-            if (
-                torch.distributed.get_rank()
-                == torch.distributed.get_process_group_ranks(self.embd_group)[0]
+
+        if not isinstance(self.embd_group, list):  # FlagScale Modify
+            if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
+                self.embd_group
             ):
                 if getattr(self, 'mtp_process', False):
                     return True
