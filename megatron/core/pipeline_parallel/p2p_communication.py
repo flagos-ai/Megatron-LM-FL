@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
+from megatron.core.utils import nvtx_decorator
 # FlagScale Begin
 from megatron.core.utils import get_pg_rank, get_pg_size, nvtx_decorator
 from megatron.plugin.hetero.p2p_communication import (
@@ -201,6 +202,26 @@ class P2PCommunicator:
     def current_stage(self) -> int:
         """Return current pipeline stage index (0-indexed)."""
         return get_pg_rank(self.pp_group)  # FlagScale Add
+
+    @property
+    def is_pp_first_stage(self) -> bool:
+        """Return True if pp first stage."""
+        return is_pp_first_stage(self.pp_group)
+
+    @property
+    def is_pp_last_stage(self) -> bool:
+        """Return True if pp last stage."""
+        return is_pp_last_stage(self.pp_group)
+
+    @property
+    def total_stages(self) -> int:
+        """Return total number of pipeline stages."""
+        return self.pp_group.size()
+
+    @property
+    def current_stage(self) -> int:
+        """Return current pipeline stage index (0-indexed)."""
+        return self.pp_group.rank()
 
     def _communicate_shapes(self, tensor_send_next, tensor_send_prev, recv_prev, recv_next):
         """Communicate tensor shapes between stages. Used to communicate

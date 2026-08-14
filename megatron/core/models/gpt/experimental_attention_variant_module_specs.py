@@ -6,25 +6,12 @@ from megatron.core.fusions.fused_bias_dropout import get_bias_dropout_add
 from megatron.core.models.backends import BackendSpecProvider
 from megatron.core.ssm.gated_delta_net import GatedDeltaNet, GatedDeltaNetSubmodules
 from megatron.core.transformer.enums import AttnMaskType, LayerType
-from megatron.core.transformer.experimental_attention_variant.csa import (
-    CompressedSparseAttention,
-    CompressedSparseAttentionSubmodules,
-    Compressor,
-    CompressorSubmodules,
-    CSAIndexer,
-    CSAIndexerSubmodules,
-)
-from megatron.core.transformer.experimental_attention_variant.deepseek_v4_hybrid_attention import (
-    DSv4HybridSelfAttention,
-    DSv4HybridSelfAttentionSubmodules,
-)
 from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAIndexer,
     DSAIndexerSubmodules,
     DSAttention,
     DSAttentionSubmodules,
 )
-from megatron.core.transformer.hyper_connection import HyperConnectionModule
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.multi_latent_attention import (
     MLASelfAttention,
@@ -37,11 +24,12 @@ from megatron.core.transformer.transformer_block import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
-    HyperConnectionTransformerLayer,
+    MlpBuilder,
     TransformerLayer,
     TransformerLayerSubmodules,
     get_transformer_layer_offset,
 )
+from megatron.core.typed_torch import not_none
 
 try:
     import transformer_engine as te  # type: ignore[import-untyped]  # pylint: disable=unused-import
@@ -137,66 +125,9 @@ def get_dsa_module_spec_for_backend(
             q_layernorm=IdentityOp,
             kv_layernorm=IdentityOp,
         ),
-        metainfo={"fuse_input_layernorm": False},  # FlagScale added
-    )
-
-    return attention
-
-
-def get_dsv4_hybrid_module_spec_for_backend(
-    config: TransformerConfig, backend: BackendSpecProvider = None
-) -> ModuleSpec:
-    """Helper function to get module spec for DSv4 Hybrid Sparse Attention."""
-    assert config.multi_latent_attention, "Currently only MLA supports sparse attention."
-    assert config.qk_l2_norm is False, "qk_l2_norm is not supported with MLA."
-
-    # Adjust for RMS norm.
-    rms_norm = config.normalization == "RMSNorm"
-    # DSA indexer requires normalized q as input, so here we cannot fuse qk layernorm
-    # with linear projection and have to use unfused qk layernorm.
-    qk_norm = (
-        backend.layer_norm(rms_norm=rms_norm, for_qk=True) if config.qk_layernorm else IdentityOp
-    )
-
-    compressor_spec = ModuleSpec(
-        module=Compressor,
-        submodules=CompressorSubmodules(
-            linear_wkv=backend.linear(),
-            linear_wgate=backend.linear(),
-            norm=backend.layer_norm(rms_norm=True, for_qk=False),
-        ),
-    )
-
-    indexer_spec = ModuleSpec(
-        module=CSAIndexer,
-        submodules=CSAIndexerSubmodules(
-            linear_wq_b=backend.linear(),
-            linear_weights_proj=backend.linear(),
-            compressor=compressor_spec,
-        ),
-    )
-
-    core_attention = ModuleSpec(
-        module=CompressedSparseAttention,
-        submodules=CompressedSparseAttentionSubmodules(
-            compressor=compressor_spec, indexer=indexer_spec
-        ),
-    )
-
-    attention = ModuleSpec(
-        module=DSv4HybridSelfAttention,
-        params={"attn_mask_type": AttnMaskType.causal},
-        submodules=DSv4HybridSelfAttentionSubmodules(
-            linear_q_down_proj=backend.linear(),
-            linear_q_up_proj=backend.column_parallel_linear(),
-            linear_kv_proj=backend.column_parallel_linear(),
-            core_attention=core_attention,
-            linear_proj=backend.row_parallel_linear(),
-            q_layernorm=qk_norm,
-            kv_layernorm=qk_norm,
-        ),
         metainfo={"fuse_input_layernorm": False},
     )
+
     return attention
 
 
@@ -212,8 +143,6 @@ def get_experimental_attention_variant_module_spec(
         return get_gated_delta_net_module_spec(config=config, backend=backend)
     elif config.experimental_attention_variant == "dsa":
         return get_dsa_module_spec_for_backend(config=config, backend=backend)
-    elif config.experimental_attention_variant == "dsv4_hybrid":
-        return get_dsv4_hybrid_module_spec_for_backend(config=config, backend=backend)
     else:
         raise ValueError(
             f"Invalid experimental attention variant: {config.experimental_attention_variant}"
@@ -289,21 +218,21 @@ def get_transformer_block_with_experimental_attention_variant_spec(
         moe_layer_pattern = [0] * config.num_layers
 
     if 1 in moe_layer_pattern:
-        moe_layer_spec = _get_moe_module_spec(config=config, backend=backend)
+        moe_layer_spec, fuse_layernorm_pre_moe = _get_moe_module_spec(
+            config=config, backend=backend
+        )
     else:
-        moe_layer_spec = None
+        moe_layer_spec, fuse_layernorm_pre_moe = None, False
 
     if 0 in moe_layer_pattern:
-        dense_mlp_layer_spec = _get_dense_mlp_module_spec(config=config, backend=backend)
+        dense_mlp_layer_spec, fuse_layernorm_pre_dense = _get_dense_mlp_module_spec(
+            config=config, backend=backend
+        )
     else:
-        dense_mlp_layer_spec = None
+        dense_mlp_layer_spec, fuse_layernorm_pre_dense = None, False
 
     # Get GPT decoder block layer specs
     rms_norm = config.normalization == "RMSNorm"
-    enable_hc = config.enable_hyper_connections
-    hc_module = HyperConnectionModule if enable_hc else IdentityOp
-    layer_module = HyperConnectionTransformerLayer if enable_hc else TransformerLayer
-
     layer_specs = []
     for layer_number in range(config.num_layers):
         attention = (
@@ -312,6 +241,11 @@ def get_transformer_block_with_experimental_attention_variant_spec(
             else standard_attention_spec
         )
         mlp = moe_layer_spec if moe_layer_pattern[layer_number] == 1 else dense_mlp_layer_spec
+        fuse_pre_mlp_layernorm = (
+            fuse_layernorm_pre_moe
+            if moe_layer_pattern[layer_number] == 1
+            else fuse_layernorm_pre_dense
+        )
         input_layernorm = (
             IdentityOp
             if attention.metainfo["fuse_input_layernorm"]
@@ -319,22 +253,20 @@ def get_transformer_block_with_experimental_attention_variant_spec(
         )
         pre_mlp_layernorm = (
             IdentityOp
-            if mlp.metainfo["fuse_pre_mlp_layernorm"]
+            if fuse_pre_mlp_layernorm
             else backend.layer_norm(rms_norm=rms_norm, for_qk=False)
         )
 
         layer_specs.append(
             ModuleSpec(
-                module=layer_module,
+                module=TransformerLayer,
                 submodules=TransformerLayerSubmodules(
                     input_layernorm=input_layernorm,
                     self_attention=attention,
                     self_attn_bda=get_bias_dropout_add,
-                    self_attention_hyper_connection=hc_module,
                     pre_mlp_layernorm=pre_mlp_layernorm,
-                    mlp=mlp,
+                    mlp=not_none(mlp),
                     mlp_bda=get_bias_dropout_add,
-                    mlp_hyper_connection=hc_module,
                 ),
             )
         )
@@ -492,41 +424,50 @@ def _get_self_attention_module_spec(
 
 def _get_dense_mlp_module_spec(
     config: TransformerConfig, backend: BackendSpecProvider = None
-) -> ModuleSpec:
+) -> tuple[MlpBuilder, bool]:
     """Get dense MLP module spec.
     For hybrid models that mix dense MLP and experimental attention architectures.
 
-    Warning: This function may be deprecated in the future."""
+    Warning: This function may be deprecated in the future.
+
+    Returns:
+        A tuple of (MLP module spec, whether to fuse pre-MLP layernorm)
+    """
 
     if backend is None:
         backend = _get_backend_spec_provider(config=config)
 
     from megatron.core.models.gpt.gpt_layer_specs import get_mlp_module_spec_for_backend
 
-    mlp_spec = get_mlp_module_spec_for_backend(backend=backend, num_experts=None)
-    mlp_spec.metainfo["fuse_pre_mlp_layernorm"] = backend.fuse_layernorm_and_linear()
-
-    return mlp_spec
+    return (
+        get_mlp_module_spec_for_backend(backend=backend, num_experts=None),
+        backend.fuse_layernorm_and_linear(),
+    )
 
 
 def _get_moe_module_spec(
     config: TransformerConfig, backend: BackendSpecProvider = None
-) -> ModuleSpec:
+) -> tuple[MlpBuilder, bool]:
     """Get MoE module spec.
     For hybrid models that mix MoE and experimental attention architectures.
 
-    Warning: This function may be deprecated in the future."""
+    Warning: This function may be deprecated in the future.
+
+    Returns:
+        A tuple of (MoE module spec, whether to fuse pre-MoE layernorm)
+    """
 
     if backend is None:
         backend = _get_backend_spec_provider(config=config)
 
     from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
 
-    moe_spec = get_moe_module_spec_for_backend(
-        backend=backend,
-        num_experts=config.num_moe_experts,
-        moe_grouped_gemm=config.moe_grouped_gemm,
-        use_te_activation_func=config.use_te_activation_func,
+    return (
+        get_moe_module_spec_for_backend(
+            backend=backend,
+            num_experts=config.num_moe_experts,
+            moe_grouped_gemm=config.moe_grouped_gemm,
+            use_te_activation_func=config.use_te_activation_func,
+        ),
+        False,
     )
-    moe_spec.metainfo["fuse_pre_mlp_layernorm"] = False
-    return moe_spec

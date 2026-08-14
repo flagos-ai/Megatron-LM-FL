@@ -255,6 +255,7 @@ def count_zeros_fp32(
     #   - grad should not be none
     #   - parameter should not be shared
     #   - should not be a replica due to tensor model parallelism
+    total_num_zeros = torch.zeros(1, dtype=torch.int64, device='cuda')
     total_num_zeros = torch.zeros(
         1, dtype=torch.int64, device=cur_platform.device_name()
     )  # FlagScale Add

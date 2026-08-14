@@ -1,7 +1,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 from contextlib import nullcontext
-from typing import Optional
+from typing import Any, Callable, Optional
 
 import torch
 from torch import Tensor
@@ -14,6 +14,7 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
+from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
@@ -188,6 +189,46 @@ class TransformerLayerSchedulePlan:
         else:
             self.mtp_post_process = NoopScheduleNode()
 
+    def set_fsdp_reshard_hooks(self, post_forward_hook, post_backward_hook):
+        """Wire FSDP parameter release callbacks for the fine-grained overlap schedule.
+
+        The EP overlap schedule bypasses the normal FSDP forward/backward hooks
+        (registered on the FSDP unit module) because it calls sub-modules directly
+        instead of going through TransformerLayer.forward(). This method attaches
+        explicit release hooks to individual schedule nodes so that all-gathered
+        parameters are freed at the right time.
+
+        Args:
+            post_forward_hook: Callable(module) that releases forward-pass params
+                (bwd=False). Typically ``fsdp_wrapper.post_forward_release_module``.
+            post_backward_hook: Callable(module) that releases backward-pass params
+                (bwd=True). Typically ``fsdp_wrapper.post_backward_release_module``.
+        """
+        from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
+        from megatron.core.transformer.transformer_layer import TransformerLayer
+
+        assert isinstance(self.layer, (TransformerLayer, MultiTokenPredictionLayer)), (
+            f"Megatron FSDP with EP Overlap only supports TransformerLayer, "
+            f"but got {type(self.layer).__name__}."
+        )
+
+        if isinstance(self.layer, TransformerLayer):
+            hook_module = self.layer
+        else:
+            hook_module = self.layer.mtp_model_layer
+
+        # After the last backward op (attn), release backward-pass params.
+        self.attn.set_post_backward_hook(lambda: post_backward_hook(hook_module))
+
+        # Determine the last node in forward order.
+        if isinstance(self.moe_combine, NoopScheduleNode):
+            last_fwd_node = self.mlp
+        else:
+            last_fwd_node = self.moe_combine
+
+        # After the last forward op, release forward-pass params.
+        last_fwd_node.set_post_forward_hook(lambda: post_forward_hook(hook_module))
+
     def get_fp8_context(self):
         """
         Get the fp8 context for the transformer layer.
@@ -256,10 +297,13 @@ class TransformerLayerSchedulePlan:
         if f_layer is not None:
             with f_layer.get_fp8_context():
                 f_input = f_layer.moe_combine.forward(f_input)
-                f_input = f_layer.mtp_post_process.forward(f_input)
 
         if b_layer is not None and not b_layer.config.ep_overlap_early_attn_memory_release:
             b_grad = b_layer.attn.backward(b_grad)
+
+        if f_layer is not None:
+            with f_layer.get_fp8_context():
+                f_input = f_layer.mtp_post_process.forward(f_input)
 
         # Delay the last attn_dw in backward pass (attn_dw of the first layer)
         # for overlapping with the p2p comm
@@ -297,6 +341,9 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         runtime_gather_output: Optional[bool] = None,
         loss_mask: Optional[Tensor] = None,
         padding_mask=None,
+        *,
+        output_processor: Optional[Callable[..., Tensor]] = None,
+        output_processor_context: Optional[Any] = None,
     ):
         """Initialize the schedule plan of all Transformer layers' sub-modules.
 
@@ -314,6 +361,10 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             extra_block_kwargs: Additional keyword arguments for blocks.
             runtime_gather_output: Whether to gather output at runtime.
             loss_mask (torch.Tensor): Used to mask out some portions of the loss
+            output_processor (Callable): Custom postprocess hook to run instead of the
+                default logits/loss path.
+            output_processor_context (Any): User-defined context object forwarded to
+                `output_processor`.
 
         Returns:
             The model chunk schedule plan.
@@ -339,6 +390,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         self._model_chunk_state.padding_mask = padding_mask
         self._model_chunk_state.extra_block_kwargs = extra_block_kwargs
         self._model_chunk_state.runtime_gather_output = runtime_gather_output
+        self._model_chunk_state.output_processor = output_processor
+        self._model_chunk_state.output_processor_context = output_processor_context
         self._model_chunk_state.model = model
         self._model_chunk_state.context = None
         self._model_chunk_state.context_mask = None
@@ -351,7 +404,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         ##### FlagScale Begin #####
         self.enable_hyper_connections = getattr(model.config, "enable_hyper_connections", False)
         self.num_residual_streams = getattr(model.config, "num_residual_streams", 1)
-        # Build mhc recompute manager like TransformerBlock. 
+        # Build mhc recompute manager like TransformerBlock.
         decoder = model.decoder
         use_mhc_recompute = (
             decoder.training
@@ -417,7 +470,7 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
                     extra_args["mhc_recompute_manager"] = None
                     extra_args["enable_hyper_connections"] = False
                 extra_args["mhc_is_last_layer_in_recompute_block"] = self.mhc_is_last_in_recompute_block[layer_idx]
-                
+
             ########## FlagScale End ##########
             layer_plan = TransformerLayerSchedulePlan(
                 layer,  # FlagScale Add
@@ -549,7 +602,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         for i in range(overlapped_layers):
             f_layer = f_schedule_plan.get_layer(i)
             b_layer = b_schedule_plan.pop_layer()
-            cur_platform.range_push(f"layer_{i}f-layer_{b_schedule_plan.num_layers()}b")  # FlagScale Add
+            nvtx_msg = f"layer_{i}f-layer_{b_schedule_plan.num_layers()}b"
+            nvtx_range_push(nvtx_msg)
             f_input, b_grad = TransformerLayerSchedulePlan.run(
                 f_layer,
                 b_layer,
@@ -566,25 +620,27 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             ##### FlagScale End #####
             if i < b_num_layers - 1:
                 b_layer.release_state()
-            cur_platform.range_pop()  # FlagScale Add
+            nvtx_range_pop(nvtx_msg)
 
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
             b_layer = b_schedule_plan.pop_layer()
-            cur_platform.range_push(f"layer_{b_schedule_plan.num_layers()}b")  # FlagScale Add
+            nvtx_msg = f"layer_{b_schedule_plan.num_layers()}b"
+            nvtx_range_push(nvtx_msg)
             _, b_grad = TransformerLayerSchedulePlan.run(
                 None, b_layer, b_grad=b_grad, is_last_layer_in_bwd=(i == b_num_layers - 1)
             )
             if i < b_num_layers - 1:
                 b_layer.release_state()
-            cur_platform.range_pop()  # FlagScale Add
+            nvtx_range_pop(nvtx_msg)
 
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            cur_platform.range_push(f"layer_{i}f")  # FlagScale Add
+            nvtx_msg = f"layer_{i}f"
+            nvtx_range_push(nvtx_msg)
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
-            cur_platform.range_pop()  # FlagScale Add
+            nvtx_range_pop(nvtx_msg)
             ##### FlagScale #####
             TransformerBlock._finalize_mhc_recompute_layer(
                 mhc_manager=f_layer.layer_state.mhc_recompute_manager,

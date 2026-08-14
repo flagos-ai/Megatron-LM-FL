@@ -57,16 +57,10 @@ def create_hypercomm_grid(offset=0, tp=1, pp=1, dp=1):
 
 def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
-    if dist.is_initialized():
-        # Keep all ranks on the same test before tearing down shared NCCL groups.
-        dist.barrier()
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
-    if dist.is_initialized():
-        # Do not let fast ranks create the next test's groups during teardown.
-        dist.barrier()
 
 
 def get_pg_collection(grid):
@@ -367,10 +361,6 @@ def run_multimodule_schedule_test(
         micro_batch_size: Micro batch size
         num_microbatches: Number of microbatches
     """
-    # TE attention reads global parallel state during __init__, so we need to
-    # bootstrap it even though the actual communication uses per-grid PGs.
-    Utils.initialize_model_parallel()
-
     # Create model
     model = MultiModuleModel(encoder_configs, llm_config, hidden_size)
     model.model_type = 'unit-test'
@@ -459,7 +449,6 @@ def run_multimodule_schedule_test(
         if is_pp_last_stage(model.llm_grid.get_pg("pp")):
             assert len(losses) > 0, "Expected losses on last LLM stage"
 
-    Utils.destroy_model_parallel()
     return losses
 
 

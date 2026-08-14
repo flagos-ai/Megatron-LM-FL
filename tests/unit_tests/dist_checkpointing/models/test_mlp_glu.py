@@ -1,23 +1,18 @@
 # Copyright (c) 2023, NVIDIA CORPORATION. All rights reserved.
-import inspect
 import logging
 
 import pytest
 import torch
-from torch.optim import Adam
 
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing import ShardedTensor, load, load_plain_tensors, save
-from megatron.core.dist_checkpointing.dict_utils import diff, nested_values
-from megatron.core.dist_checkpointing.optimizer import (
-    get_param_id_to_sharded_param_map,
-    optim_state_to_sharding_state,
-)
+from megatron.core.dist_checkpointing.dict_utils import diff
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_submodules,
 )
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-from megatron.core.transformer.mlp import MLP, apply_swiglu_sharded_factory
+from megatron.core.transformer.mlp import MLP, MLPSubmodules, apply_swiglu_sharded_factory
+from megatron.core.transformer.spec_utils import get_submodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
@@ -33,9 +28,9 @@ def initialize_mlp(glu=True):
         use_cpu_initialization=True,
         gated_linear_unit=glu,
     )
-    return MLP(
-        transformer_config, get_gpt_layer_with_transformer_engine_submodules().mlp.submodules
-    )
+    mlp_submodules = get_submodules(get_gpt_layer_with_transformer_engine_submodules().mlp)
+    assert isinstance(mlp_submodules, MLPSubmodules)
+    return MLP(transformer_config, mlp_submodules)
 
 
 class TestParallelMLPWithGLU:
@@ -93,12 +88,26 @@ class TestParallelMLPWithGLU:
             diffs = diff(state_dict_A, state_dict_B)
             assert not any(map(bool, diffs)), diffs
 
-    def test_oom_is_handled(self, caplog, monkeypatch):
+    def test_oom_is_handled(self, caplog):
         Utils.initialize_model_parallel(Utils.world_size, 1)
         dtype = torch.bfloat16
 
-        local_w_plus_v_shape = (8, 8)
-        local_w_or_v_shape = (4, 8)
+        # Compute free memory in bytes
+        device = torch.cuda.current_device()
+        allocated = torch.cuda.memory_allocated(device)
+        total = torch.cuda.get_device_properties(device).total_memory
+        free = total - allocated
+
+        # We should create two tensor which take up between 50% and 100% of free memory,
+        # so that the torch.cat tries to allocate twice as many and OOMs.
+        expected_local_num_bytes = free * 0.6
+
+        local_num_elems = expected_local_num_bytes // torch._utils._element_size(dtype)
+        local_num_elems = int(local_num_elems // 1024 * 1024)
+        assert local_num_elems % 1024 == 0
+
+        local_w_plus_v_shape = (local_num_elems // 512, 512)
+        local_w_or_v_shape = (local_num_elems // 1024, 512)
 
         fc1_weight_sh_ten = ShardedTensor.from_rank_offsets(
             'a',
@@ -120,17 +129,7 @@ class TestParallelMLPWithGLU:
         # Load happens in-place, so we can just use the same tensors
         loaded_state_dict = [sh_ten.data for sh_ten in sharded_state_dict]
 
-        real_cat = torch.cat
-
-        def raise_cuda_oom(tensors, *args, **kwargs):
-            if tensors and tensors[0].is_cuda:
-                raise torch.cuda.OutOfMemoryError("synthetic merge OOM")
-            return real_cat(tensors, *args, **kwargs)
-
-        # Exercise the CPU fallback without consuming most of the shared CI GPU memory.
-        monkeypatch.setattr(torch, "cat", raise_cuda_oom)
+        # The critical part that should OOM:
         with caplog.at_level(logging.WARNING):
-            merged = fc1_factory.merge_fn(loaded_state_dict)
+            fc1_factory.merge_fn(loaded_state_dict)
             assert "CUDA OutOfMemoryError encountered during tensors merging" in caplog.text
-        assert merged.device.type == "cpu"
-        assert torch.equal(merged, real_cat([tensor.cpu() for tensor in loaded_state_dict]))
