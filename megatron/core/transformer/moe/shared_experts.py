@@ -1,10 +1,9 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import warnings
-from copy import deepcopy
+from copy import copy, deepcopy
 from enum import Enum
 from functools import wraps
-from copy import copy
 from typing import Optional
 
 import torch
@@ -121,24 +120,17 @@ class SharedExpertMLP(MLP):
         pg_collection: Optional[ProcessGroupCollection] = None,
         name: str | None = None,
     ):
-<<<<<<< TARGET
         """
         Args:
             name (str | None): module instance name passed top-down from its paranet module
         """
-        config = deepcopy(config)
-||||||| BASE
-        config = deepcopy(config)
-=======
         config = copy(config)
->>>>>>> FORK
         assert config.add_bias_linear == False, "bias is not supported in the shared experts, "
         "please set '--disable-bias-linear' instead."
 
         config.ffn_hidden_size = config.moe_shared_expert_intermediate_size
         # TODO(Hepteract): pass pg_collection to MLP after refactoring MLP
         super().__init__(config=config, submodules=submodules, tp_group=pg_collection.tp, name=name)
-        super().__init__(config=config, submodules=submodules, tp_group=pg_collection.tp)
 
         self.use_shared_expert_gate = gate
         if self.use_shared_expert_gate:
@@ -201,10 +193,8 @@ class SharedExpertMLP(MLP):
             self._overlap_state = SharedExpertState.IDLE
 
             if self.__class__.stream is None:
-                self.__class__.stream = torch.cuda.Stream()
+                self.__class__.stream = cur_platform.Stream()  # FlagScale Add
             self.stream = self.__class__.stream
-            if self.stream is None:
-                self.stream = cur_platform.Stream()  # FlagScale Add
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward function"""
@@ -248,13 +238,7 @@ class SharedExpertMLP(MLP):
         """
         if wait_current_stream:
             self.wait_current_stream()
-        with torch.cuda.stream(self.stream):
-        assert self.config.moe_shared_expert_overlap
-        assert self.cached_output is None
-        # FlagScale Begin
-        self.stream.wait_stream(cur_platform.current_stream())
-        with cur_platform.stream(self.stream):
-        # FlagScale End
+        with cur_platform.stream(self.stream):  # FlagScale Add
             if self.use_shared_expert_gate:
                 logits = torch.nn.functional.linear(input, self.gate_weight)
                 self.gate_score = torch.nn.functional.sigmoid(logits)
@@ -277,11 +261,6 @@ class SharedExpertMLP(MLP):
         This function is used to overlap shared experts with the dispatcher.
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
-        with torch.cuda.stream(self.stream):
-        assert self.config.moe_shared_expert_overlap
-        assert self.cached_fc1_input is not None
-        if overlapped_comm_output is not None:
-            set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with cur_platform.stream(self.stream):  # FlagScale Add
             # [s, b, 4 * h/p]
             intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
@@ -362,9 +341,6 @@ class SharedExpertMLP(MLP):
         This function is used to overlap shared experts with the dispatcher.
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
-        with torch.cuda.stream(self.stream):
-        assert self.config.moe_shared_expert_overlap
-        assert self.cached_fc2_output is not None
         with cur_platform.stream(self.stream):  # FlagScale Add
             if self.config.sequence_parallel:
                 self.cached_output = reduce_scatter_to_sequence_parallel_region(
@@ -384,9 +360,6 @@ class SharedExpertMLP(MLP):
         This function is used to overlap shared experts with the dispatcher.
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
-        with torch.cuda.stream(self.stream):
-        assert self.config.moe_shared_expert_overlap
-        assert self.cached_output is not None
         with cur_platform.stream(self.stream):  # FlagScale Add
             if self.use_shared_expert_gate:
                 assert self.gate_score is not None

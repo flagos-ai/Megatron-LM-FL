@@ -67,29 +67,8 @@ try:
     # Alias the PyTorch wrapper so we can call tex.* APIs
     import transformer_engine_torch as tex
 except ImportError:
-<<<<<<< TARGET
     # TE isn’t installed or the torch wrapper is missing
     tex = None
-||||||| BASE
-    HAVE_NVTX = False
-
-logger = logging.getLogger(__name__)
-
-=======
-    HAVE_NVTX = False
-
-logger = logging.getLogger(__name__)
-
-try:
-    # Register the TE CUDA kernels
-    import transformer_engine  # pylint: disable=unused-import
-
-    # Alias the PyTorch wrapper so we can call tex.* APIs
-    import transformer_engine_torch as tex
-except ImportError:
-    # TE isn’t installed or the torch wrapper is missing
-    tex = None
->>>>>>> FORK
 
 try:
     _torch_version = PkgVersion(torch.__version__)
@@ -355,22 +334,11 @@ def get_te_version():
     ########## FlagScale End ##########
 
     global _te_version
-<<<<<<< TARGET
-    if _te_version is None:
-        if HAVE_TE:
-            _te_version = PkgVersion(get_te_version_str())
-        else:
-            _te_version = PkgVersion("0.0.0")
-||||||| BASE
-    if _te_version is None and HAVE_TE:
-        _te_version = PkgVersion(get_te_version_str())
-=======
     if _te_version is None:
         if HAVE_TE:
             _te_version = PkgVersion(parse_te_version_str(get_te_version_str()))  # FlagScale Add
         else:
             _te_version = PkgVersion("0.0.0")
->>>>>>> FORK
     return _te_version
 
 
@@ -500,7 +468,6 @@ def is_causal_conv1d_min_version(version, check_equality=True):
     return get_causal_conv1d_version() > PkgVersion(version)
 
 
-<<<<<<< TARGET
 def get_flashinfer_version():
     """Get flashinfer version from __version__; if not available use pip's. Use caching."""
     if not HAVE_PACKAGING:
@@ -543,52 +510,6 @@ def accepts_parameter(func: Callable, name: str) -> bool:
     """Check if a callable accepts a parameter with the given name or **kwargs."""
     params = inspect.signature(func).parameters.values()
     return any(p.name == name or p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
-||||||| BASE
-def check_mamba_sequence_packing_support() -> Tuple[bool, Optional[str]]:
-    """Checks whether `causal_conv1d` and `mamba_ssm` support sequence packing."""
-    if not is_causal_conv1d_min_version("1.5.3.post1"):
-        return False, "causal_conv1d >= 1.5.3.post1 is required"
-    elif not is_mamba_min_version("2.2.6.post3"):
-        return False, "mamba_ssm >= 2.2.6.post3 is required"
-    return True, None
-=======
-def get_flashinfer_version():
-    """Get flashinfer version from __version__; if not available use pip's. Use caching."""
-    if not HAVE_PACKAGING:
-        raise ImportError(
-            "packaging is not installed. Please install it with `pip install packaging`."
-        )
-
-    def get_flashinfer_version_str():
-        try:
-            import flashinfer
-        except ImportError:
-            return None
-
-        if hasattr(flashinfer, "__version__"):
-            return str(flashinfer.__version__)
-        else:
-            return version("flashinfer")
-
-    global _flashinfer_version
-    if _flashinfer_version is None:
-        if (flashinfer_version_str := get_flashinfer_version_str()) is not None:
-            _flashinfer_version = PkgVersion(flashinfer_version_str)
-    return _flashinfer_version
-
-
-def is_flashinfer_min_version(version, check_equality=True):
-    """Check if minimum version of `flashinfer` is installed."""
-    if not HAVE_PACKAGING:
-        raise ImportError(
-            "packaging is not installed. Please install it with `pip install packaging`."
-        )
-    if (flashinfer_version := get_flashinfer_version()) is None:
-        return False
-    if check_equality:
-        return flashinfer_version >= PkgVersion(version)
-    return flashinver_version > PkgVersion(version)
->>>>>>> FORK
 
 
 def ensure_divisibility(numerator, denominator):
@@ -606,6 +527,7 @@ def divide(numerator, denominator):
 def round_up_to_nearest_multiple(value: int, multiple: int) -> int:
     """Round *value* up to the nearest multiple of *multiple*."""
     return math.ceil(value / multiple) * multiple
+
 
 
 def get_tensor_model_parallel_group_if_none(tp_group, is_expert=False, check_initialized=True):
@@ -2365,7 +2287,6 @@ def get_batch_on_this_tp_rank(
 ########################
 
 
-<<<<<<< TARGET
 def get_sft_batch_on_this_cp_rank(
     batch: dict[str, torch.Tensor], cp_group: torch.distributed.ProcessGroup
 ):
@@ -2443,26 +2364,8 @@ def get_pretrain_batch_on_this_cp_rank(
     Returns:
         dict[str, torch.Tensor]: The batch with sequence-dimension tensors
         sliced to this CP rank's zigzag partition.
-||||||| BASE
-def get_batch_on_this_cp_rank(batch: Dict[str, Any]):
-    """Slice batch input along sequence dimension into multiple chunks,
-    which are parallelized across GPUs in a context parallel group.
-=======
-def get_batch_on_this_cp_rank(
-    batch: Dict[str, Any], cp_group: Optional[torch.distributed.ProcessGroup] = None
-):
-    """Slice batch input along sequence dimension into multiple chunks,
-    which are parallelized across GPUs in a context parallel group.
-
-    Args:
-        batch (Dict[str, Any]): Input batch tensors.
-        cp_group (Optional[torch.distributed.ProcessGroup]): Context-parallel process group.
-            If provided, uses this group's size and rank. Otherwise, falls back to
-            the current context-parallel settings from parallel_state.
->>>>>>> FORK
     """
 
-<<<<<<< TARGET
     cp_size = torch.distributed.get_world_size(cp_group)
     cp_rank = torch.distributed.get_rank(cp_group)
 
@@ -2477,35 +2380,7 @@ def get_batch_on_this_cp_rank(
     )
 
     if cp_size > 1:
-||||||| BASE
-    # With causal masking, each token only attends to its prior tokens. Simply split
-    # sequence into CP chunks can result in severe load imbalance. That's to say, chunks
-    # at the end of sequence have bigger workload than others. To address this issue,
-    # we split sequence into 2*CP ranks. Assuming CP=2, we then get 4 chunks, chunk_0
-    # and chunk_3 are assigned to GPU0, chunk_1 and chunk_2 are assigned to GPU1, so
-    # that we can get balanced workload among GPUs in a context parallel group.
-    cp_size = parallel_state.get_context_parallel_world_size()
-    if cp_size > 1:
-        cp_rank = parallel_state.get_context_parallel_rank()
-=======
-    # With causal masking, each token only attends to its prior tokens. Simply split
-    # sequence into CP chunks can result in severe load imbalance. That's to say, chunks
-    # at the end of sequence have bigger workload than others. To address this issue,
-    # we split sequence into 2*CP ranks. Assuming CP=2, we then get 4 chunks, chunk_0
-    # and chunk_3 are assigned to GPU0, chunk_1 and chunk_2 are assigned to GPU1, so
-    # that we can get balanced workload among GPUs in a context parallel group.
-    # Determine CP topology either from provided group or from current context parallel state
-    if cp_group is not None:
-        cp_size = get_pg_size(cp_group)
-        cp_rank = get_pg_rank(cp_group)
-    else:
-        cp_size = parallel_state.get_context_parallel_world_size()
-        cp_rank = parallel_state.get_context_parallel_rank()
-
-    if cp_size > 1:
->>>>>>> FORK
         for key, val in batch.items():
-<<<<<<< TARGET
             if key in METADATA_KEYS or val is None:
                 continue
             seq_dim = 2 if key == 'attention_mask' else 1
@@ -2559,37 +2434,6 @@ def get_batch_on_this_cp_rank(
         Dict[str, Any]: The batch with sequence-dimension tensors partitioned
         to this CP rank.
     """
-||||||| BASE
-            if val is not None:
-                seq_dim = 1 if key != "attention_mask" else 2
-                val = val.view(
-                    *val.shape[0:seq_dim],
-                    2 * cp_size,
-                    val.shape[seq_dim] // (2 * cp_size),
-                    *val.shape[(seq_dim + 1) :],
-                )
-                index = torch.zeros(2, dtype=torch.int64, device=val.device)
-                index[0].fill_(cp_rank)
-                index[1].fill_(2 * cp_size - cp_rank - 1)
-                val = val.index_select(seq_dim, index)
-                val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
-                batch[key] = val
-=======
-            if val is not None:
-                seq_dim = 1 if key != 'attention_mask' else 2
-                val = val.view(
-                    *val.shape[0:seq_dim],
-                    2 * cp_size,
-                    val.shape[seq_dim] // (2 * cp_size),
-                    *val.shape[(seq_dim + 1) :],
-                )
-                index = torch.zeros(2, dtype=torch.int64, device=val.device)
-                index[0].fill_(cp_rank)
-                index[1].fill_(2 * cp_size - cp_rank - 1)
-                val = val.index_select(seq_dim, index)
-                val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
-                batch[key] = val
->>>>>>> FORK
 
     if batch.get("cu_seqlens") is not None:  # NOTE(asolergi-nv): SFT & HybridCP case
         if is_hybrid_cp:
@@ -2696,7 +2540,9 @@ def get_batch_on_this_hybrid_cp_rank(
     if cp_group is not None and cp_group.size() > 1:
         # When using hybrid_context_parallel, each sub-sample of a packed sample is
         # required to be divisible by CP*DP*2 or CP*DP*TP*2 (if using sequence parallel)
-        batch = get_batch_on_this_cp_rank(batch, cp_group=cp_group)
+        # NOTE(FlagScale): hybrid cp group already resolved above; use pretrain zigzag
+        # partition directly to match the refactored get_batch_on_this_cp_rank dispatcher.
+        batch = get_pretrain_batch_on_this_cp_rank(batch, cp_group=cp_group)
 
     return batch, packed_seq_params
 
@@ -3106,7 +2952,6 @@ def experimental_api(func: _Wrapped) -> _Wrapped:
     """
     func._experimental_api = True
     return func
-<<<<<<< TARGET
 
 
 def deprecate_args(
@@ -3147,46 +2992,3 @@ def deprecate_inference_params(inference_context, inference_params):
         )
         return inference_params
     return inference_context
-||||||| BASE
-=======
-
-
-def deprecate_args(
-    *deprecated_keys, message="Argument '{name}' has been deprecated and should not be used."
-):
-    """
-    Intercepts specific keyword arguments to raise a custom TypeError.
-
-    Args:
-        *deprecated_keys: Strings representing the argument names to block.
-        message: Custom error message string. Use {name} as a placeholder.
-    """
-
-    def decorator(func):
-        @functools.wraps(func)
-        def wrapper(*args, **kwargs):
-            # Check if any deprecated key is present in kwargs
-            found_deprecated = set(deprecated_keys) & set(kwargs.keys())
-
-            if found_deprecated:
-                bad_key = list(found_deprecated)[0]
-                raise TypeError(message.format(name=bad_key))
-
-            # Send args to the real function
-            return func(*args, **kwargs)
-
-        return wrapper
-
-    return decorator
-
-
-def deprecate_inference_params(inference_context, inference_params):
-    """Print warning for deprecated `inference_params`."""
-    if inference_context is None and inference_params is not None:
-        warnings.warn(
-            "`inference_params` renamed to `inference_context`, and will be "
-            "removed in `megatron-core` 0.13."
-        )
-        return inference_params
-    return inference_context
->>>>>>> FORK
