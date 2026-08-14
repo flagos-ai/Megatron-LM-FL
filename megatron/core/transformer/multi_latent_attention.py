@@ -36,7 +36,6 @@ from megatron.core.tensor_parallel.mappings import (
     scatter_to_sequence_parallel_region,
 )
 from megatron.core.transformer.attention import Attention, LinearProjBuilder
-from megatron.core.transformer.attention import Attention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
@@ -48,7 +47,6 @@ from megatron.core.utils import (
     is_te_min_version,
     make_tp_sharded_tensor_for_checkpoint,
 )
-from megatron.core.typed_torch import apply_module
 
 try:
     from megatron.core.fusions.fused_mla_yarn_rope_apply import (
@@ -69,7 +67,6 @@ if HAVE_TE:
         split_te_layernorm_column_parallel_linear,
     )
     from megatron.core.post_training.modelopt.layers import Linear
-<<<<<<< TARGET
 else:
     (
         TEColumnParallelLinear,
@@ -109,23 +106,6 @@ def _trim_mla_core_attention_output(core_attn_out, need_v_pad, orig_v_dim, padde
             core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, padded_v_dim)
         core_attn_out = core_attn_out[..., :orig_v_dim]
     return core_attn_out
-||||||| BASE
-
-    HAVE_TE = True
-except ImportError:
-    TEColumnParallelLinear, TELinear, Linear, set_save_original_input = None, None, None, None
-    HAVE_TE = False
-=======
-else:
-    (
-        TEColumnParallelLinear,
-        TELayerNormColumnParallelLinear,
-        TELinear,
-        Linear,
-        set_save_original_input,
-        split_te_layernorm_column_parallel_linear,
-    ) = (None, None, None, None, None, None)
->>>>>>> FORK
 
 
 @dataclass
@@ -145,7 +125,6 @@ class MLASelfAttentionSubmodules:
     linear_kv_up_proj: Union[ModuleSpec, type] = None
     linear_qkv_down_proj: Union[ModuleSpec, type] = None
     core_attention: Union[ModuleSpec, type] = None
-    linear_proj: Union[ModuleSpec, type] = None
 
 
 class MultiLatentAttention(Attention):
@@ -166,7 +145,6 @@ class MultiLatentAttention(Attention):
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
         name: str | None = None,
-        is_mtp_layer: bool = False,
     ) -> None:
         # TODO(nschank): Restructure so that the Attention initializer knows which specific
         # submodules it will construct, so that MLASelfAttentionSubmodules honors that interface.
@@ -179,7 +157,6 @@ class MultiLatentAttention(Attention):
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
             name=name,
-            is_mtp_layer=is_mtp_layer,
         )
         self.config: MLATransformerConfig
 
@@ -417,6 +394,9 @@ class MultiLatentAttention(Attention):
                     # query representation.
                     extra_kwargs["x"] = hidden_states
                     extra_kwargs["qr"] = q_compressed
+                    extra_kwargs["prev_topk_indices"] = getattr(
+                        self.core_attention, "current_topk_indices", None
+                    )  # FlagScale Add
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:
@@ -429,10 +409,6 @@ class MultiLatentAttention(Attention):
                         attn_mask_type=attn_mask_type,
                         **extra_kwargs,
                     )
-                    extra_kwargs["prev_topk_indices"] = getattr(
-                        self.core_attention, "current_topk_indices", None
-                    )  # FlagScale Add
-                    core_attn_out = self.core_attention(
             elif self.cache_mla_latents:
                 value, need_v_pad, orig_v_dim, padded_v_dim = _prepare_mla_core_attention_value(
                     self, query, value, packed_seq_params
@@ -497,7 +473,6 @@ class MultiLatentAttention(Attention):
             output = off_interface.group_commit(
                 output, name="attn_proj", forced_released_tensors=[core_attn_out]
             )
-            output, bias = self.linear_proj(core_attn_out)
 
         return output, bias
 
@@ -519,7 +494,6 @@ class MLASelfAttention(MultiLatentAttention):
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
         name: str | None = None,
-        is_mtp_layer: bool = False,
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -534,7 +508,6 @@ class MLASelfAttention(MultiLatentAttention):
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
             name=name,
-            is_mtp_layer=is_mtp_layer,
         )
 
         if self.config.q_lora_rank is None:
@@ -1132,7 +1105,6 @@ class MLASelfAttention(MultiLatentAttention):
         if self.config.q_lora_rank is not None:
             set_save_original_input(self.linear_q_down_proj)
         set_save_original_input(self.linear_kv_down_proj)
-<<<<<<< TARGET
 
     def clip_qk(self):
         """
@@ -1474,342 +1446,3 @@ class FusedMLASelfAttention(MLASelfAttention):
             state_dict.pop(f"{prefix}linear_kv_down_proj.bias", None)
 
         return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
-||||||| BASE
-=======
-
-    def clip_qk(self):
-        """
-        QK Clipping is a technique to clip the query and key attention logits to prevent the
-        attention logits from exploding. Per MuonClip usage, we update the weight by calling this
-        function after Muon optimizer step.
-        """
-
-        if not self.config.qk_clip:
-            raise ValueError("qk_clip option needs to be enabled")
-
-        if self.core_attention.current_max_attn_logits is None:
-            raise ValueError("current_max_attn_logits is None")
-
-        # Check if we're in absorption mode
-        if self.cache_mla_latents and not hasattr(self, 'linear_kv_up_proj'):
-            raise ValueError(
-                "qk_clip is not supported when cache_mla_latents is enabled and absorption is "
-                "active. The linear_kv_up_proj layer has been deleted during absorption "
-                "preparation."
-            )
-
-        assert self.core_attention.current_max_attn_logits.shape == (
-            self.num_attention_heads_per_partition,
-        ), f"current_max_attn_logits shape is not ({self.num_attention_heads_per_partition}, ) \
-                    but {self.core_attention.current_max_attn_logits.shape}"
-
-        # only update the weight if any head has
-        # current_max_attn_logits > qk_clip_threshold
-        if torch.any(self.core_attention.current_max_attn_logits > self.config.qk_clip_threshold):
-            # Use num_attention_heads_per_partition for tensor parallel scenarios
-
-            # qk_clip_balancing_eta (n, 1, 1)
-            assert self.core_attention.current_max_attn_logits.shape == (
-                self.num_attention_heads_per_partition,
-            ), f"current_max_attn_logits shape is not ({self.num_attention_heads_per_partition},) \
-                but {self.core_attention.current_max_attn_logits.shape}"
-            self.qk_clip_balancing_eta = torch.clamp(
-                self.config.qk_clip_threshold / self.core_attention.current_max_attn_logits, max=1.0
-            ).view(self.num_attention_heads_per_partition, 1, 1)
-            assert torch.all(self.qk_clip_balancing_eta <= 1.0)
-
-            # Update q side weight, keep qk_pos_emb_head_dim side weight unchanged
-            if self.config.q_lora_rank is None:
-                q_proj_weight = self.linear_q_proj.weight
-            else:
-                q_proj_weight = self.linear_q_up_proj.weight
-
-            # Handle different weight access patterns (main_param vs direct access)
-            if hasattr(q_proj_weight, 'main_param'):
-                q_proj_weight.main_param.data.copy_(
-                    self._clip_q_proj_weight(q_proj_weight.main_param.data)
-                )
-            q_proj_weight.data.copy_(self._clip_q_proj_weight(q_proj_weight.data))
-
-            # Update k side weight, keep v side weight unchanged
-            kv_proj_weight = self.linear_kv_up_proj.weight
-
-            # Handle different weight access patterns
-            if hasattr(kv_proj_weight, 'main_param'):
-                kv_proj_weight.main_param.data.copy_(
-                    self._clip_kv_proj_weight(kv_proj_weight.main_param.data)
-                )
-            kv_proj_weight.data.copy_(self._clip_kv_proj_weight(kv_proj_weight.data))
-
-        # reset current_max_attn_logits
-        self.core_attention.current_max_attn_logits = None
-
-    def _clip_q_proj_weight(self, weight):
-        """Clip q_proj_weight"""
-        # Reshape to (n, a + b, -1)
-        weight_reshaped = weight.view(
-            self.num_attention_heads_per_partition,
-            self.config.qk_head_dim + self.config.qk_pos_emb_head_dim,
-            -1,
-        )
-
-        # Split into qk_head_dim and qk_pos_emb_head_dim parts: (n, a, -1) and (n, b, -1)
-        weight_q_nope = weight_reshaped[:, : self.config.qk_head_dim, :]
-        weight_q_pe = weight_reshaped[:, self.config.qk_head_dim :, :]
-
-        # Clipping
-        weight_q_nope.mul_(torch.pow(self.qk_clip_balancing_eta, self.config.qk_clip_alpha))
-        weight_q_pe.mul_(self.qk_clip_balancing_eta)
-
-        # Concatenate back and reshape to original shape
-        weight_q_updated = torch.cat([weight_q_nope, weight_q_pe], dim=1)
-        weight_q_updated = weight_q_updated.view(
-            self.num_attention_heads_per_partition
-            * (self.config.qk_head_dim + self.config.qk_pos_emb_head_dim),
-            -1,
-        )
-
-        return weight_q_updated
-
-    def _clip_kv_proj_weight(self, weight):
-        """Clip kv_proj_weight"""
-        # shape: (n, qk_head_dim + v_head_dim, kv_lora_rank)
-        weight_reshaped = weight.view(
-            self.num_attention_heads_per_partition,
-            self.config.qk_head_dim + self.config.v_head_dim,
-            -1,
-        )
-
-        # Split into qk_head_dim and v_head_dim parts: (n, a, -1) and (n, b, -1)
-        weight_k = weight_reshaped[:, : self.config.qk_head_dim, :]
-        weight_v = weight_reshaped[:, self.config.qk_head_dim :, :]
-
-        # Clipping
-        weight_k.mul_(torch.pow(self.qk_clip_balancing_eta, 1 - self.config.qk_clip_alpha))
-
-        # Concatenate back and reshape to original shape
-        weight_kv_updated = torch.cat([weight_k, weight_v], dim=1)
-        weight_kv_updated = weight_kv_updated.view(
-            self.num_attention_heads_per_partition
-            * (self.config.qk_head_dim + self.config.v_head_dim),
-            -1,
-        )
-
-        return weight_kv_updated
-
-
-class FusedMLASelfAttention(MLASelfAttention):
-    """MLA self-attention with fused q/kv down projection."""
-
-    def __init__(
-        self,
-        config: MLATransformerConfig,
-        submodules: MLASelfAttentionSubmodules,
-        layer_number: int,
-        attn_mask_type=AttnMaskType.padding,
-        cp_comm_type: Optional[str] = None,
-        pg_collection: Optional[ProcessGroupCollection] = None,
-        is_mtp_layer: bool = False,
-    ):
-        if pg_collection is None:
-            pg_collection = ProcessGroupCollection.use_mpu_process_groups()
-
-        MultiLatentAttention.__init__(
-            self,
-            config=config,
-            submodules=submodules,
-            layer_number=layer_number,
-            attn_mask_type=attn_mask_type,
-            attention_type="self",
-            cp_comm_type=cp_comm_type,
-            pg_collection=pg_collection,
-            is_mtp_layer=is_mtp_layer,
-        )
-
-        assert self.config.q_lora_rank is not None, (
-            "FusedMLASelfAttention requires q_lora_rank to be set; "
-            "fallback to MLASelfAttention for q_lora_rank=None."
-        )
-
-        qkv_down_proj_kwargs = {}
-        if submodules.linear_qkv_down_proj in [TELinear]:
-            qkv_down_proj_kwargs['parallel_mode'] = 'duplicated'
-        elif submodules.linear_qkv_down_proj in [
-            Linear,
-            TEColumnParallelLinear,
-            ColumnParallelLinear,
-            TELayerNormColumnParallelLinear,
-        ]:
-            qkv_down_proj_kwargs['gather_output'] = False
-        else:
-            raise ValueError(f"Unsupported linear_qkv_down_proj: {submodules.linear_qkv_down_proj}")
-
-        self.linear_qkv_down_proj = build_module(
-            submodules.linear_qkv_down_proj,
-            self.config.hidden_size,
-            self.config.q_lora_rank + self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim,
-            config=self.config,
-            init_method=self.config.init_method,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_comm_buffer_name='qkv_down_proj',
-            skip_weight_param_allocation=False,
-            tp_group=(
-                pg_collection.tp
-                if qkv_down_proj_kwargs.get('parallel_mode') != 'duplicated'
-                else None
-            ),
-            **qkv_down_proj_kwargs,
-        )
-
-        self.linear_q_up_proj = build_module(
-            submodules.linear_q_up_proj,
-            self.config.q_lora_rank,
-            self.config.num_attention_heads * self.q_head_dim,
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_comm_buffer_name='q_up_proj',
-            tp_group=pg_collection.tp,
-        )
-
-        self.linear_kv_up_proj = build_module(
-            submodules.linear_kv_up_proj,
-            self.config.kv_lora_rank,
-            self.config.num_attention_heads * (self.config.qk_head_dim + self.config.v_head_dim),
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_comm_buffer_name='kv_up_proj',
-            tp_group=pg_collection.tp,
-        )
-
-        self.q_layernorm = submodules.q_layernorm(
-            hidden_size=self.config.q_lora_rank,
-            config=self.config,
-            eps=self.config.layernorm_epsilon,
-        )
-        self.kv_layernorm = submodules.kv_layernorm(
-            hidden_size=self.config.kv_lora_rank,
-            config=self.config,
-            eps=self.config.layernorm_epsilon,
-        )
-
-    def _qkv_down_projection(self, hidden_states):
-        """Fused q/kv down projection path."""
-        qkv, _ = self.linear_qkv_down_proj(hidden_states)
-        q_compressed, kv_combined = torch.split(
-            qkv,
-            [self.config.q_lora_rank, self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim],
-            dim=-1,
-        )
-        return q_compressed, kv_combined
-
-    def sharded_state_dict(self, prefix: str = "", sharded_offsets: tuple = (), metadata=None):
-        """Return a sharded state dict compatible with pre-fusion checkpoints."""
-        sharded_state_dict = super().sharded_state_dict(prefix, sharded_offsets, metadata)
-
-        def _clone_sharded_object_with_key(obj: ShardedObject, new_key: str) -> ShardedObject:
-            return ShardedObject(
-                key=new_key,
-                data=obj.data,
-                global_shape=obj.global_shape,
-                global_offset=obj.global_offset,
-                replica_id=obj.replica_id,
-            )
-
-        fused_prefix = f"{prefix}linear_qkv_down_proj."
-
-        fused_extra_keys = [
-            k
-            for k in sharded_state_dict.keys()
-            if k.startswith(fused_prefix) and "_extra_state" in k
-        ]
-        for fused_extra_key in fused_extra_keys:
-            suffix = fused_extra_key[len(fused_prefix) :]
-            q_extra_key = f"{prefix}linear_q_down_proj.{suffix}"
-            kv_extra_key = f"{prefix}linear_kv_down_proj.{suffix}"
-            fused_obj = sharded_state_dict.get(fused_extra_key)
-            if isinstance(fused_obj, ShardedObject):
-                sharded_state_dict[q_extra_key] = _clone_sharded_object_with_key(
-                    fused_obj, q_extra_key
-                )
-                sharded_state_dict[kv_extra_key] = _clone_sharded_object_with_key(
-                    fused_obj, kv_extra_key
-                )
-            elif fused_obj is not None:
-                sharded_state_dict[q_extra_key] = fused_obj
-                sharded_state_dict[kv_extra_key] = fused_obj
-
-        for key in list(sharded_state_dict.keys()):
-            if key.startswith(fused_prefix):
-                del sharded_state_dict[key]
-
-        fused_weight = self.linear_qkv_down_proj.weight
-        total_out = (
-            self.config.q_lora_rank + self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
-        )
-        tp_size = get_pg_size(self.tp_group)
-
-        if fused_weight.size(0) == total_out:
-            q_split = self.config.q_lora_rank
-            kv_split = self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
-        else:
-            assert (
-                self.config.q_lora_rank % tp_size == 0
-            ), "q_lora_rank must be divisible by tensor-parallel size"
-            assert (
-                self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim
-            ) % tp_size == 0, (
-                "kv_lora_rank + qk_pos_emb_head_dim must be divisible by tensor-parallel size"
-            )
-            q_split = self.config.q_lora_rank // tp_size
-            kv_split = (self.config.kv_lora_rank + self.config.qk_pos_emb_head_dim) // tp_size
-
-        if q_split + kv_split != fused_weight.size(0):
-            raise ValueError(
-                "Unexpected fused qkv-down weight shape: "
-                f"got {tuple(fused_weight.size())}, expected dim0 {q_split + kv_split}"
-            )
-
-        q_weight, kv_weight = torch.split(fused_weight, [q_split, kv_split], dim=0)
-
-        q_key = f"{prefix}linear_q_down_proj.weight"
-        kv_key = f"{prefix}linear_kv_down_proj.weight"
-
-        sharded_state_dict[q_key] = make_tp_sharded_tensor_for_checkpoint(
-            tensor=q_weight, key=q_key, tp_axis=0, prepend_offsets=sharded_offsets
-        )
-        sharded_state_dict[kv_key] = make_tp_sharded_tensor_for_checkpoint(
-            tensor=kv_weight, key=kv_key, tp_axis=0, prepend_offsets=sharded_offsets
-        )
-
-        return sharded_state_dict
-
-    def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
-        """Load state dict with automatic unfused->fused conversion."""
-        q_key = f"{prefix}linear_q_down_proj.weight"
-        kv_key = f"{prefix}linear_kv_down_proj.weight"
-        fused_key = f"{prefix}linear_qkv_down_proj.weight"
-
-        def _as_tensor(x):
-            return x.data if hasattr(x, 'data') else x
-
-        if fused_key not in state_dict and q_key in state_dict and kv_key in state_dict:
-            q_weight = _as_tensor(state_dict[q_key])
-            kv_weight = _as_tensor(state_dict[kv_key])
-            state_dict[fused_key] = torch.cat([q_weight, kv_weight], dim=0)
-            del state_dict[q_key]
-            del state_dict[kv_key]
-            state_dict.pop(f"{prefix}linear_q_down_proj.bias", None)
-            state_dict.pop(f"{prefix}linear_kv_down_proj.bias", None)
-
-        return super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
->>>>>>> FORK

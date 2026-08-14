@@ -3,7 +3,6 @@ import logging
 from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import List, Optional, Set, Union, cast
-from typing import List, Optional, Set, Tuple, Union, cast
 
 import torch
 import torch.nn as nn
@@ -24,12 +23,6 @@ from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.recompute import checkpointed_forward
 from megatron.core.transformer.enums import InferenceCudaGraphScope, LayerType
-from megatron.core.tensor_parallel.random import CheckpointManager
-from megatron.core.transformer.enums import CudaGraphScope, LayerType
-from megatron.core.transformer.hyper_connection import (
-    HyperConnectionModule,
-    learned_output_contract,
-)
 from megatron.core.transformer.module import GraphableMegatronModule, MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
@@ -40,11 +33,6 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.transformer.utils import sharded_state_dict_default
 from megatron.core.typed_torch import apply_module, not_none
-from megatron.core.transformer.utils import (
-    ensure_metadata_has_dp_cp_group,
-    make_sharded_tensors_for_checkpoint,
-    sharded_state_dict_default,
-)
 from megatron.core.utils import (
     WrappedTensor,
     deprecate_inference_params,
@@ -453,13 +441,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         else:
             self.final_layernorm = None  # Either this or nn.Identity
 
-<<<<<<< TARGET
-        if self.config.inference_fuse_tp_communication:
-            self._setup_fused_tp_communication()
-||||||| BASE
-    def _get_layer(self, layer_number: int):
-        return self.layers[layer_number]
-=======
         if self.config.inference_fuse_tp_communication:
             self._setup_fused_tp_communication()
 
@@ -518,218 +499,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
     def _get_layer(self, layer_number: int):
         return self.layers[layer_number]
->>>>>>> FORK
-
-<<<<<<< TARGET
-    def has_final_layernorm_in_this_stage(self):
-        """
-        Check if this vpp stage contains the final layernorm.
-
-        Note:
-            Final layernorm now has been moved from the post-process stage to the last decoder
-            layer by using this function.
-            There will be a small numeric difference because of grad norm reduction when final
-            layernorm is placed in different pipeline stages in deterministic mode. It can still
-            be bitwise aligned by disabling grad norm clipping.
-        """
-        if self.config.mtp_num_layers is None:
-            # for model without MTPLayer, the final layernorm is set in the stage which does
-            # post_process
-            return self.submodules.layer_norm and self.post_process and self.post_layer_norm
-        else:
-            # for model with MTPLayer, the final layernorm is set in the stage which has the
-            # last layer of the decoder
-            has_final_layernorm_in_this_stage = False
-            for layer in self.layers:
-                if layer.layer_number == self.config.num_layers:
-                    has_final_layernorm_in_this_stage = True
-                    break
-            return (
-                self.submodules.layer_norm
-                and has_final_layernorm_in_this_stage
-                and self.post_layer_norm
-            )
-||||||| BASE
-    def _checkpointed_forward(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor,
-        context_mask: Tensor,
-        rotary_pos_emb: Tensor,
-        attention_bias: Tensor,
-        packed_seq_params: PackedSeqParams,
-        use_inner_quantization_context: bool,
-    ):
-        """Forward method with activation checkpointing."""
-=======
-    def _checkpointed_forward(
-        self,
-        hidden_states: Tensor,
-        attention_mask: Tensor,
-        context: Tensor,
-        context_mask: Tensor,
-        rotary_pos_emb: Tensor,
-        attention_bias: Tensor,
-        packed_seq_params: PackedSeqParams,
-        use_inner_quantization_context: bool,
-        padding_mask: Optional[Tensor] = None,
-        extract_layer_indices: Optional[Set[int]] = None,
-        layer_offset: int = 0,
-        input_ids: Optional[Tensor] = None,
-    ):
-        """Forward method with activation checkpointing.
-
-        Args:
-            extract_layer_indices (Set[int], optional): Global layer
-                indices (across all pipeline stages) from which to
-                extract features.
-            layer_offset (int): The global layer offset for the current
-                pipeline stage. Used to convert local layer indices to
-                global indices when checking extract_layer_indices.
-
-        Returns:
-            If extract_layer_indices is empty: hidden_states tensor
-            If extract_layer_indices is non-empty: (hidden_states, intermediate_hidden_states) tuple
-        """
-        if extract_layer_indices is None:
-            extract_layer_indices = set()
-        intermediate_hidden_states: List[Tensor] = []
->>>>>>> FORK
-
-<<<<<<< TARGET
-    def _setup_fused_tp_communication(self):
-        """Setup fused TP communication for all layers.
-        We have a fused reduce-scatter + add + layer-norm + all-gather operation.
-        We call this kernel from within row parallel linear layers.
-        But layer-norm needs the layer norm weights from the
-        successive column parallel linear layer.
-        This function is used to pass those weights to the respective layers.
-        """
-||||||| BASE
-        def custom(start: int, end: int):
-            def custom_forward(
-                hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-            ):
-                for index in range(start, end):
-                    layer = self._get_layer(index)
-=======
-        def custom(start: int, end: int):
-            def custom_forward(
-                hidden_states,
-                attention_mask,
-                context,
-                context_mask,
-                rotary_pos_emb,
-                padding_mask=None,
-            ):
-                for index in range(start, end):
-                    layer = self._get_layer(index)
->>>>>>> FORK
-
-        for i in range(len(self.layers)):
-            current_layer = self.layers[i]
-
-            # Get next layer's QKV norm weights (None for last layer)
-            if i < len(self.layers) - 1:
-                next_qkv_norm_weights = self.layers[i + 1].get_qkv_layer_norm_weights()
-                    with inner_quantization_context:
-                        hidden_states, context = layer(
-                            hidden_states=hidden_states,
-                            attention_mask=attention_mask,
-                            context=context,
-                            context_mask=context_mask,
-                            rotary_pos_emb=rotary_pos_emb,
-                            attention_bias=attention_bias,
-                            inference_context=None,
-                            packed_seq_params=packed_seq_params,
-                            padding_mask=padding_mask,
-                            input_ids=input_ids,
-                        )
-                return hidden_states, context
-            return custom_forward
-        def checkpoint_handler(forward_func):
-            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
-            # TODO: check if fp4 is supported in this case
-            if self.config.fp8 or self.config.fp4:
-                return te_checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    tensor_parallel.random.get_cuda_rng_tracker,
-                    self.pg_collection.tp,
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                    padding_mask,
-            else:
-                next_qkv_norm_weights = None
-                return tensor_parallel.checkpoint(
-                    forward_func,
-                    self.config.distribute_saved_activations,
-                    hidden_states,
-                    attention_mask,
-                    context,
-                    context_mask,
-                    rotary_pos_emb,
-                    padding_mask,
-                )
-        if self.config.recompute_method == 'uniform':
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
-            layer_idx = 0
-            while layer_idx < self.num_layers_per_pipeline_rank:
-                chunk_end = min(
-                    layer_idx + self.config.recompute_num_layers, self.num_layers_per_pipeline_rank
-                hidden_states, context = checkpoint_handler(custom(layer_idx, chunk_end))
-                # Feature extraction for uniform recompute: collect at end of each chunk
-                # Note: Only the last layer of each chunk can have features collected
-                for idx in range(layer_idx, chunk_end):
-                    if (idx + layer_offset) in extract_layer_indices:
-                        # For uniform recompute, we can only get features at chunk boundaries
-                        # Limitation: for fine-grained extraction, use 'block'
-                        if idx == chunk_end - 1:
-                            intermediate_hidden_states.append(hidden_states)
-
-            # Configure all fused TP communication settings in one call
-            current_layer.configure_fused_tp_inference(
-                skip_qkv_norm_and_all_gather=(i > 0),
-                fc2_next_layer_norm_weights=next_qkv_norm_weights,
-            )
-                layer_idx += self.config.recompute_num_layers
-        elif self.config.recompute_method == 'block':
-            # Checkpoint the input activation of only a set number of individual
-            # Transformer layers and skip the rest.
-            # A method fully use the device memory removing redundant re-computation.
-            recompute_skip_num_layers = 0
-            for layer_idx in range(self.num_layers_per_pipeline_rank):
-                # Skip recomputation when input grad computation is not needed.
-                # Need to have at least one input tensor with gradient computation
-                # for re-enterant autograd engine.
-                # TODO: check if fp4 is supported in this case
-                if (self.config.fp8 or self.config.fp4) and not hidden_states.requires_grad:
-                    recompute_skip_num_layers += 1
-                if (
-                    layer_idx >= recompute_skip_num_layers
-                    and layer_idx < self.config.recompute_num_layers + recompute_skip_num_layers
-                ):
-                    hidden_states, context = checkpoint_handler(custom(layer_idx, layer_idx + 1))
-                else:
-                    hidden_states, context = custom(layer_idx, layer_idx + 1)(
-                        hidden_states, attention_mask, context, context_mask, rotary_pos_emb
-                # Feature extraction: collect hidden states at specified global layer indices
-                if (layer_idx + layer_offset) in extract_layer_indices:
-                    intermediate_hidden_states.append(hidden_states)
-            raise ValueError("Invalid activation recompute method.")
-
-    def _get_layer(self, layer_number: int):
-        return self.layers[layer_number]
-        # Return intermediate hidden states if feature extraction was requested
-        if len(extract_layer_indices) > 0:
-            return hidden_states, intermediate_hidden_states
-        return hidden_states
 
     def set_input_tensor(self, input_tensor: Tensor):
         """Set input tensor to be used instead of forward()'s input.
@@ -745,25 +514,15 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         """
         Check if we should call the local cudagraph path.
         """
-<<<<<<< TARGET
         if (
             InferenceMode.is_active()
             and hasattr(self, 'cudagraph_manager')
-||||||| BASE
-        if not self.training and (
-            hasattr(self, 'cudagraph_manager')
-=======
-        if (
-            not self.training
-            and hasattr(self, 'cudagraph_manager')
->>>>>>> FORK
             and kwargs['attention_mask'] is None
             and (
                 kwargs.get('inference_context') is not None
                 or kwargs.get('inference_params') is not None
             )
             and self.config.inference_cuda_graph_scope == InferenceCudaGraphScope.block
-            and CudaGraphScope.full_iteration_inference in self.config.cuda_graph_scope
         ):
             if kwargs['inference_context'].is_static_batching():
                 using_cuda_graph = kwargs['inference_context'].is_decode_only()
@@ -840,7 +599,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         sequence_len_offset: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
         extract_layer_indices: Optional[Set[int]] = None,
-        input_ids: Optional[Tensor] = None,
         *,
         inference_params: Optional[BaseInferenceContext] = None,
         dynamic_inference_decode_only: Optional[bool] = None,
@@ -916,10 +674,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # This is needed to convert local layer indices to global indices for feature extraction
         pp_group = self.pg_collection.pp if hasattr(self.pg_collection, 'pp') else None
         layer_offset = get_transformer_layer_offset(
-            self.config, self.vp_stage, get_pg_rank(pp_group)
+            self.config, self.vp_stage, get_pg_rank(pp_group), self.dualpipev_stage
         )
 
-            self.config, self.vp_stage, get_pg_rank(pp_group), self.dualpipev_stage
         # Delete the obsolete reference to the initial input tensor if necessary
         if isinstance(hidden_states, WrappedTensor):
             hidden_states = hidden_states.unwrap()
@@ -996,7 +753,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             if self.config.recompute_granularity == 'full' and self.training:
                 checkpointed_result = checkpointed_forward(
                     self,
-                checkpointed_result = self._checkpointed_forward(
                     hidden_states=hidden_states,
                     attention_mask=attention_mask,
                     context=context,
@@ -1008,7 +764,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     padding_mask=padding_mask,
                     extract_layer_indices=extract_layer_indices,
                     layer_offset=layer_offset,
-                    input_ids=input_ids,
                 )
                 # Handle return value from _checkpointed_forward
                 if len(extract_layer_indices) > 0:
@@ -1081,8 +836,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             packed_seq_params=packed_seq_params,
                             sequence_len_offset=sequence_len_offset,
                             padding_mask=padding_mask,
-                            mhc_recompute_manager=mhc_manager,
-                            input_ids=input_ids,
                         )
 
                         #### FlagScale Begin ####
@@ -1111,25 +864,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     if (l_no + layer_offset) in extract_layer_indices:
                         intermediate_hidden_states.append(hidden_states)
 
-        # Only contract if the final layer norm is in this stage
-        mhc_multistream = None
-        if self.config.enable_hyper_connections and self.has_final_layernorm_in_this_stage():
-            # When MTP is enabled, save pre-contraction multi-stream for MTP input.
-            if self.config.mtp_num_layers is not None:
-                assert (
-                    len(extract_layer_indices) == 0
-                ), "Feature extraction is not supported with mHC + MTP."
-                mhc_multistream = hidden_states
-            # DSv4 introduced the new output contraction for mHC.
-            # [s, b, n*C] -> [s, b, C]
-            hidden_states = learned_output_contract(
-                hidden_states,
-                self.hc_head_fn,
-                self.hc_head_base,
-                self.hc_head_scale,
-                self.config.num_residual_streams,
-                self.config.layernorm_epsilon,
-            )
         # Final layer norm.
         if self.final_layernorm is not None:
             hidden_states = apply_module(self.final_layernorm)(cast(Tensor, hidden_states))

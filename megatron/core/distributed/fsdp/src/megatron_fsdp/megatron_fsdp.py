@@ -671,7 +671,6 @@ class MegatronFSDP(torch.nn.Module):
             for sub_module in module.modules():
                 sub_module._training_state = TrainingState.IDLE
 
-<<<<<<< TARGET
         @torch.compiler.disable
         def _process_post_backward_gradients(param_list):
             """
@@ -709,20 +708,7 @@ class MegatronFSDP(torch.nn.Module):
             """
             # Filter out shared parameters whose gradients are handled by the root hook.
             param_list = [p for p in param_list if not getattr(p, "_is_shared", False)]
-||||||| BASE
-            # If the parameter is shared, we do not accumulate gradients
-            # here, as the gradients will be accumulated in the
-            # root post-backward hook.
-            param_list = [p for p in param_list if not getattr(p, "_is_shared", False)]
-=======
-            # Release parameters for this module after backward.
-            release_module_parameters(module, bwd=True)
 
-            # Transition this module back to the IDLE training state.
-            module._training_state = TrainingState.IDLE
->>>>>>> FORK
-
-<<<<<<< TARGET
             # Make sure for delayed wgrad params, the grad_acc_hooks are registered.
             for p in param_list:
                 if getattr(p, 'skip_backward_post_hook', False):
@@ -733,47 +719,6 @@ class MegatronFSDP(torch.nn.Module):
             if not param_list:
                 return
 
-||||||| BASE
-            # Write computed gradients into the allocated main gradient bucket for reduce-scatter.
-=======
-        @torch.compiler.disable
-        def _process_post_backward_gradients(param_list):
-            """
-            Process gradients for a list of parameters after the backward pass.
-
-            This helper accumulates gradients into the main_grad buffer and, when
-            appropriate, launches asynchronous reduce-scatter operations according
-            to the data-parallel sharding strategy and training phase.
-
-            Args:
-                param_list (List[torch.nn.Parameter]): Parameters whose gradients
-                    should be processed.
-
-            Behavior:
-                - Skips processing for shared parameters (those with ``_is_shared=True``),
-                since their gradients are handled by the root post-backward hook.
-                - Determines whether to reduce gradients based on:
-                    * Data-parallel sharding strategy (``"optim_grads"`` or
-                        ``"optim_grads_params"``).
-                    * Whether this is the last microbatch of the iteration.
-                    * Whether ``model_auto_sync`` is enabled.
-                - When reduction conditions are met, performs an asynchronous
-                reduce-scatter of gradients prior to the optimizer step, which
-                requires a subsequent call to ``finish_grad_sync()`` to complete.
-                - Marks parameters as processed by adding them to
-                    ``_params_require_handle_grad``.
-
-            Notes:
-                - With gradient-sharding strategies, gradient reduction occurs on
-                every backward propagation.
-                - Without gradient sharding, gradient reduction is deferred until
-                the last microbatch or when auto-sync is enabled.
-                - In hybrid FSDP configurations, an outer FSDP group gradient reduction
-                may be triggered.
-            """
-            # Filter out shared parameters whose gradients are handled by the root hook.
-            param_list = [p for p in param_list if not getattr(p, "_is_shared", False)]
->>>>>>> FORK
             for param in param_list:
                 _grad_acc(param)
 
@@ -797,36 +742,12 @@ class MegatronFSDP(torch.nn.Module):
                     ),
                 )
 
-<<<<<<< TARGET
             # Mark parameters as processed.
             for param in param_list:
                 self._params_require_handle_grad.discard(param)
 
         @torch.compiler.disable
         def _pre_forward_param_unshard(module: nn.Module, *unused):
-||||||| BASE
-        def _pre_forward_param_unshard(
-            module: nn.Module, args: Tuple[Any, ...], kwargs: Dict[str, Any]
-        ):
-=======
-            # Mark parameters as processed.
-            for param in param_list:
-                self._params_require_handle_grad.discard(param)
-
-        @torch.compiler.disable
-        def _pre_forward_param_unshard(
-            module: nn.Module,
-            args: Optional[Tuple[Any, ...]] = None,
-            kwargs: Optional[Dict[str, Any]] = None,
-        ):
-            # If args or kwargs are not passed, default to () and {}.
-            # This matches PyTorch Module hook conventions:
-            # torch.nn.Module._call_impl.inner()
-            if args is None:
-                args = ()
-            if kwargs is None:
-                kwargs = {}
->>>>>>> FORK
             # Unshard the parameters before the forward pass.
             input_training_state = module._training_state
             fsdp_forward_prefetch = True
@@ -869,13 +790,6 @@ class MegatronFSDP(torch.nn.Module):
             since such operations can trigger an autograd error that
             "the output is a view and is being modified in-place".
             """
-            # If args or kwargs are not passed, default to () and {}.
-            # This matches PyTorch Module hook conventions:
-            # torch.nn.Module._call_impl.inner()
-            if args is None:
-                args = ()
-            if kwargs is None:
-                kwargs = {}
             if not torch.is_grad_enabled():
                 # No gradients / backward pass, don't attach the post-backward hook.
                 return args, kwargs
@@ -968,7 +882,6 @@ class MegatronFSDP(torch.nn.Module):
             for sub_module in module.modules():
                 sub_module._training_state = TrainingState.PRE_BACKWARD
 
-            module._training_state = TrainingState.PRE_BACKWARD
             if isinstance(module, tuple(fsdp_unit_modules)):
                 param_list = list(module.parameters())
             else:
@@ -978,13 +891,11 @@ class MegatronFSDP(torch.nn.Module):
             self.all_gather_and_wait_parameters_ready(
                 param_list, prefetch_order=PrefetchOrder.BACKWARD_PASS_ORDER, bwd=True
             )
-            if self.enable_fine_grained_param_gather_hook:
 
         self._root_pre_backward_hook_issued = False
 
         def _root_pre_backward(module: nn.Module, *unused, skip_backward_hook: bool = False):
             """Marks the module's training state as PRE_BACKWARD before the
-        def _root_pre_backward(module: nn.Module, *unused):
             backprop, this function is registered on the root module.
 
             This root pre-backward hook informs all modules to skip forward
@@ -1001,9 +912,6 @@ class MegatronFSDP(torch.nn.Module):
                     # Set PRE_BACKWARD state to skip resharding and forward pre-fetching
                     # when performing activation recomputation / gradient checkpointing.
                     sub_module._training_state = TrainingState.PRE_BACKWARD
-                for module in root_module.modules():
-                    if isinstance(module, tuple(fsdp_unit_modules)):
-                        module._training_state = TrainingState.PRE_BACKWARD
                 # set all param buckets can be released
                 ag_pipeline = self.all_gather_pipeline
                 for bucket_id in range(ag_pipeline.num_buckets):
@@ -1088,7 +996,6 @@ class MegatronFSDP(torch.nn.Module):
             # on the output tensor(s).
             return module.register_forward_hook(forward_hook)
 
-<<<<<<< TARGET
         def _register_pre_forward_param_unshard_hook(module):
             """
             Register the forward pre-hook to unshard parameters before the forward pass.
@@ -1122,35 +1029,8 @@ class MegatronFSDP(torch.nn.Module):
         self.pre_backward = partial(_root_pre_backward, module=None, skip_backward_hook=True)
         self.post_backward = _root_post_backward
 
-||||||| BASE
-=======
-        def _register_pre_forward_param_unshard_hook(module):
-            """
-            Register the forward pre-hook to unshard parameters before the forward pass.
-            If we are not sharding anything, we do not have a model weight buffer and thus
-            have nothing to all-gather / un-shard.
-            """
-            if self.data_parallel_sharding_strategy != "no_shard":
-                self.forward_pre_hooks[f"{module._get_name()} parameter unshard"] = (
-                    module.register_forward_pre_hook(
-                        _pre_forward_param_unshard, prepend=True, with_kwargs=True
-                    )
-                )
-
-        def _register_pre_backward_param_unshard_hook(module):
-            """
-            Register the backward pre-hook to unshard FSDP unit module parameters
-            immediately before the backward pass via attaching a gradient-triggered
-            hook to the output tensor(s) of a module during a post-forward hook.
-            """
-            self.backward_pre_hooks[f"all-gather {module._get_name()} parameters"] = (
-                create_custom_backward_hook(module, _pre_backward_param_unshard)
-            )
-
->>>>>>> FORK
         fsdp_modules = []
         for name, module in root_module.named_modules():
-<<<<<<< TARGET
             # Set post backward hook for TE grouped gemm if enabled comm overlap
             setup_delayed_wgrad_acc_hook(module, _process_post_backward_gradients)
             if self.enable_fine_grained_param_gather_hook:
@@ -1158,13 +1038,6 @@ class MegatronFSDP(torch.nn.Module):
             if self.enable_fine_grained_param_gather_backward_hook:
                 _register_pre_backward_param_unshard_hook(module)
 
-||||||| BASE
-=======
-            if self.enable_fine_grained_param_gather_hook:
-                _register_pre_forward_param_unshard_hook(module)
-                _register_pre_backward_param_unshard_hook(module)
-
->>>>>>> FORK
             # Skip if the module is already registered in fsdp_modules.
             if any(is_submodule(module, fsdp_module) for fsdp_module in fsdp_modules):
                 continue
@@ -1181,19 +1054,7 @@ class MegatronFSDP(torch.nn.Module):
                     module.register_forward_hook(_post_forward, prepend=False)
                 )
 
-<<<<<<< TARGET
                 _register_pre_backward_param_unshard_hook(module)
-||||||| BASE
-                # Register the backward pre-hook to unshard FSDP unit module parameters
-                # immediately before the backward pass via attaching a gradient-triggered
-                # hook to the output tensor(s) of a module during a post-forward hook.
-                self.backward_pre_hooks[f"all-gather module {name} parameters"] = (
-                    create_custom_backward_hook(module, _pre_backward)
-                )
-=======
-                if not self.enable_fine_grained_param_gather_hook:
-                    _register_pre_backward_param_unshard_hook(module)
->>>>>>> FORK
             elif (
                 not self.ddp_config.keep_fp8_transpose_cache
                 and self.data_parallel_sharding_strategy == "optim_grads_params"
@@ -1206,7 +1067,6 @@ class MegatronFSDP(torch.nn.Module):
                     module.register_forward_hook(_release_module_fp8_transpose_cache, prepend=False)
                 )
 
-<<<<<<< TARGET
             # Register the post-backward hook to deallocate model parameters
             # and reduce-scatter gradients after the backward pass.
             if isinstance(module, tuple(fsdp_unit_modules)):
@@ -1237,39 +1097,6 @@ class MegatronFSDP(torch.nn.Module):
                             else _process_post_backward_gradients([p])
                         )
                     )
-||||||| BASE
-            # Register the post-backward hook to deallocate model parameters and
-            # reduce-scatter gradients immediately after the module backward pass
-            # has completed to conserve memory for the subsequent backward pass.
-            self.forward_pre_hooks[f"module {name} register post-backward hook"] = (
-                module.register_forward_pre_hook(
-                    functools.partial(_register_post_backward_hook, _post_backward),
-                    with_kwargs=True,
-=======
-            # Register the post-backward hook to deallocate model parameters
-            # and reduce-scatter gradients after the backward pass.
-            if isinstance(module, tuple(fsdp_unit_modules)):
-                if self.ddp_config.data_parallel_sharding_strategy == "optim_grads_params":
-                    self.forward_pre_hooks[f"module {name} register post-backward hook"] = (
-                        module.register_forward_pre_hook(
-                            functools.partial(
-                                _register_post_backward_hook, _post_backward_release_module
-                            ),
-                            with_kwargs=True,
-                        )
-                    )
-                grad_acc_param_list = [p for p in module.parameters() if p.requires_grad]
-            else:
-                grad_acc_param_list = [
-                    p for p in module.parameters(recurse=False) if p.requires_grad
-                ]
-
-            for param in grad_acc_param_list:
-                self.grad_acc_hooks[f"grad_acc and reduce for {self.param_to_name[param]}"] = (
-                    param.register_post_accumulate_grad_hook(
-                        lambda p: _process_post_backward_gradients([p])
-                    )
->>>>>>> FORK
                 )
 
         # Register root module pre- and post-backward hooks in cases where the
