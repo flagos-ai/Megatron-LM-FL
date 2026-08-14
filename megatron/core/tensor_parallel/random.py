@@ -903,21 +903,6 @@ class CheckpointWithoutOutput(object):
         self.ctx = None
         self.outputs = None
 
-<<<<<<< TARGET
-    def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
-        """Checkpoint function."""
-
-        # If in cuda graph warmup, disable checkpointing, as 'discard_output_and_register_recompute'
-        # may be called in a separate graph warmup.
-        from megatron.core.transformer.cuda_graphs import is_graph_warmup
-
-        if is_graph_warmup():
-            return run_function(*args)
-
-||||||| BASE
-    def checkpoint(self, run_function, *args):
-        """Checkpoint function."""
-=======
     def checkpoint(self, run_function: Callable[[Unpack[_Ts]], _R], *args: Unpack[_Ts]) -> _R:
         """
         Checkpoint function.
@@ -933,7 +918,6 @@ class CheckpointWithoutOutput(object):
         if is_graph_warmup():
             return run_function(*args)
 
->>>>>>> FORK
         self.run_function = run_function
 
         self.rng_states = _get_all_rng_states()
