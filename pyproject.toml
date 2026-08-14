@@ -6,9 +6,29 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
 include-package-data = true
+# Top-level entry modules (repo-root files). Megatron-LM-FL keeps the
+# pretrain_* / train_rl entry scripts and their *_builders / model_provider
+# helpers at the repo root — outside the megatron/ package. Packaging them as
+# top-level py-modules makes the installed wheel self-contained: `python -m
+# pretrain_gpt` and bare `from gpt_builders import gpt_builder` resolve against
+# site-packages, so no repo checkout is needed at runtime.
+py-modules = [
+    "gpt_builders",
+    "mamba_builders",
+    "model_provider",
+    "pretrain_gpt",
+    "pretrain_bert",
+    "pretrain_mamba",
+    "pretrain_t5",
+    "pretrain_vlm",
+    "train_rl",
+]
 
 [tool.setuptools.packages.find]
-include = ["megatron.core", "megatron.core.*", "megatron.plugin", "megatron.plugin.*"]
+include = ["megatron.core", "megatron.core.*", "megatron.plugin", "megatron.plugin.*",
+           "megatron.training", "megatron.training.*", "megatron.legacy", "megatron.legacy.*",
+           "megatron.rl", "megatron.rl.*", "megatron.post_training", "megatron.post_training.*",
+           "megatron.inference", "megatron.inference.*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "megatron.core.package_info.__version__" }
