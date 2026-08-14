@@ -34,7 +34,6 @@ except ImportError:
 
         USING_PYTORCH_OPTIMIZER = True
 
-<<<<<<< TARGET
 try:
     from importlib.metadata import PackageNotFoundError
     from importlib.metadata import version as _pkg_version
@@ -48,23 +47,6 @@ HAVE_EMERGING_OPTIMIZERS = _eo_ver >= (0, 2)
 if HAVE_EMERGING_OPTIMIZERS:
     from emerging_optimizers.scalar_optimizers import Lion
 
-||||||| BASE
-=======
-try:
-    from importlib.metadata import PackageNotFoundError
-    from importlib.metadata import version as _pkg_version
-
-    _eo_ver = tuple(int(x) for x in _pkg_version('emerging-optimizers').split('.')[:2])
-except (ImportError, PackageNotFoundError):
-    _eo_ver = (0, 0)
-
-HAVE_EMERGING_OPTIMIZERS = _eo_ver >= (0, 1)
-HAVE_EO_V02 = _eo_ver >= (0, 2)
-
-if HAVE_EO_V02:
-    from emerging_optimizers.scalar_optimizers import Lion
-
->>>>>>> FORK
 from megatron.core import parallel_state
 from megatron.core.optimizer.cpu_offloading.hybrid_optimizer import HybridDeviceOptimizer
 from megatron.core.optimizer_param_scheduler import (
@@ -278,7 +260,6 @@ def get_mup_config_overrides(
             )
 
         return mup_overrides
-        return param.dim() == 2 and not getattr(param, 'is_embedding_or_output_parameter', False)
 
     lr_override: ParamGroupOverride = {}
     if base_lr is not None:
@@ -341,16 +322,8 @@ def _get_param_groups(
         List of parameter groups.
     """
 
-    # Map (pg_overrides, is_expert_parallel) to params.
     # Map (pg_overrides, is_expert_parallel, is_engram_parallel) to params.  # FlagScale Add
     params_map = {}
-    if config_overrides is None:
-        # TODO remove this default behavior eventually.
-        #  This is only needed for backwards compatibility with the old config overrides API where
-        #  the config_overrides argument by default lead to bias parameters and length 1 parameters.
-        #  We assume that users of decoupled LR already provide config overrides so will adapt
-        #  to the new API.
-        config_overrides = get_standard_config_overrides(config=config)
 
     for model_chunk in model_chunks:
         for name, param in model_chunk.named_parameters():
@@ -374,16 +347,16 @@ def _get_param_groups(
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
 
-            # Create config_tuple that is hash-able, and has a consistent ordering of the keys.
-            param_override_tuple: tuple[tuple[str, Any], ...] | None = (
-                param_group_override_to_tuple(param_override)
-            )
-            key = (param_override_tuple, is_expert_parallel)
             # FlagScale Begin
             is_engram_parallel = getattr(
                 param, 'is_engram_embedding', False
             )  # FlagScale add is_engram_parallel
             # FlagScale End
+
+            # Create config_tuple that is hash-able, and has a consistent ordering of the keys.
+            param_override_tuple: tuple[tuple[str, Any], ...] | None = (
+                param_group_override_to_tuple(param_override)
+            )
             key = (param_override_tuple, is_expert_parallel, is_engram_parallel)  # FlagScale Add
             if key not in params_map:
                 params_map[key] = []
@@ -403,7 +376,6 @@ def _get_param_groups(
     param_groups = []
     # Sort keys, None first.
     for key in sorted(params_key, key=lambda x: (x[0] is not None, x[0])):
-        param_override_tuple, is_expert_parallel = key
         param_override_tuple, is_expert_parallel, is_engram_parallel = key  # FlagScale Add
         params = params_map[key] if key in params_map else []
         if param_override_tuple is None:
@@ -437,13 +409,13 @@ def _get_param_groups(
         param_group = {
             'params': params,
             'is_expert_parallel': is_expert_parallel,
-            'default_config': uses_default_lr_schedule,
-            **default_config,
-            **param_override,  # keep **param_override last so that users can override other fields.
             # FlagScale Begin
             'is_engram_parallel': is_engram_parallel,  # FlagScale add is_engram_parallel
             'is_vision_model_param': False,  # FlagScale add is_vision_model_param
             # FlagScale End
+            'default_config': uses_default_lr_schedule,
+            **default_config,
+            **param_override,  # keep **param_override last so that users can override other fields.
         }
         param_groups.append(param_group)
 
@@ -499,7 +471,6 @@ def _get_megatron_optimizer_based_on_param_groups(
     pg_collection: Optional[ProcessGroupCollection] = None,
     skip_megatron_wrapping: bool = False,
 ) -> Union[MegatronOptimizer, Tuple[Optional[torch.optim.Optimizer], Optional[Callable]]]:
-) -> MegatronOptimizer:
     """Get Megatron optimizer based on parameter groups.
 
     Args:
@@ -653,7 +624,6 @@ def _get_megatron_optimizer_based_on_param_groups(
                         if len(opt.state[p]) == 0:
                             opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
 
-            if not HAVE_EO_V02:
         elif config.optimizer == 'sgd':
             optimizer = SGD(
                 param_groups,
@@ -734,7 +704,6 @@ def _get_megatron_optimizer_based_on_param_groups(
     return optimizer
 
 
-<<<<<<< TARGET
 def check_config_overrides_consistency(
     config: OptimizerConfig, config_overrides: Optional[Dict[ParamKey, ParamGroupOverride]]
 ):
@@ -1000,36 +969,6 @@ def _get_megatron_emerging_optimizer(
     return ChainedOptimizer(results)
 
 
-||||||| BASE
-=======
-def check_config_overrides_consistency(
-    config: OptimizerConfig, config_overrides: Optional[Dict[ParamKey, ParamGroupOverride]]
-):
-    """Check if the config overrides are consistent with the config."""
-
-    # TODO: Remove `optimizer` from this eventually (e.g., if we use Muon for some layers and
-    # Adam for other layers). This would need some more refactoring to work though (param_groups
-    # filtered by optimizer passed into _get_megatron_optimizer_based_on_param_groups).
-    if config_overrides is not None:
-        fields_to_check_for_consistency = [
-            'overlap_param_gather_with_optimizer_step',
-            'optimizer',
-            'optimizer_cpu_offload',
-        ]
-        for field_name in fields_to_check_for_consistency:
-            base_field = getattr(config, field_name, None)
-            all_config_overrides = list(config_overrides.values())
-            for config_override in all_config_overrides:
-                if field_name in config_override:
-                    field = config_override[field_name]
-                    if field != base_field:
-                        raise ValueError(
-                            f"Field {field_name} should not be overriden in a config override."
-                        )
-    return True
-
-
->>>>>>> FORK
 def get_megatron_optimizer(
     config: OptimizerConfig,
     model_chunks: List[MegatronModule],
@@ -1065,7 +1004,6 @@ def get_megatron_optimizer(
     if config_overrides is None:
         config_overrides = get_standard_config_overrides(config)
 
-<<<<<<< TARGET
     check_config_overrides_consistency(config, config_overrides)
 
     # TODO: the standard and emerging optimizer paths handle pg_collection differently;
@@ -1079,23 +1017,6 @@ def get_megatron_optimizer(
         )
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
-||||||| BASE
-    # TODO: Remove `optimizer` from this eventually (e.g., if we use Muon for some layers and
-    # Adam for other layers). This would need some more refactoring to work though (param_groups
-    # filtered by optimizer passed into _get_megatron_optimizer_based_on_param_groups).
-    fields_to_check_for_consistency = [
-        'overlap_param_gather_with_optimizer_step',
-        'optimizer',
-        'optimizer_cpu_offload',
-    ]
-    for field_name in fields_to_check_for_consistency:
-        field = getattr(config, field_name, None)
-        if config_overrides is not None:
-            all_configs = list(config_overrides.values())
-            assert all([getattr(x, field_name, None) == field for x in all_configs])
-=======
-    check_config_overrides_consistency(config, config_overrides)
->>>>>>> FORK
 
     # Separate out first model chunk if overlapping param AG with optimizer step.
     if config.overlap_param_gather_with_optimizer_step:
@@ -1269,10 +1190,6 @@ def get_megatron_optimizer(
                 data_parallel_group_idx=expt_model_parallel_rank,
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
-<<<<<<< TARGET
-                pg_collection=pg_collection,
-||||||| BASE
-=======
                 pg_collection=pg_collection,
             )
         )
@@ -1317,7 +1234,6 @@ def get_megatron_optimizer(
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
                 pg_collection=pg_collection,
->>>>>>> FORK
             )
         )
     # FlagScale End
