@@ -13,8 +13,8 @@ import numpy as np
 import torch
 
 from megatron.core.inference.symmetric_memory import SymmetricMemoryManager
-
 from megatron.plugin.hetero.parallel_context import get_parallel_context  # FlagScale Add
+
 from .utils import GlobalMemoryBuffer, is_torch_min_version
 
 ########## FlagScale Begin ##########
@@ -595,9 +595,9 @@ def initialize_model_parallel(
     create_gloo_process_groups: bool = True,
     high_priority_stream_groups: Optional[List[str]] = None,
     sharp_enabled_group: Optional[str] = None,
+    create_all_gather_group: Optional[bool] = False,
     rank_offset: int = 0,
     local_world_size: Optional[int] = None,
-    create_all_gather_group: Optional[bool] = False,
     create_dualpipev_parallel_size: bool = False,  # FlagScale Add
 ) -> None:
     """Initialize model data parallel groups.
@@ -845,6 +845,7 @@ def initialize_model_parallel(
         order=order,
         rank_offset=rank_offset,
     )
+
     ######### FlagScale Begin ########
     engram_dp_size = (
         world_size // (engram_embedding_parallel_size * pipeline_model_parallel_size)
@@ -1483,26 +1484,9 @@ def initialize_model_parallel(
     _set_global_memory_buffer()
 
 
-<<<<<<< TARGET
 def create_all_gather_groups(for_expert_parallelism=False, timeout=None, nccl_comm_cfgs=None):
     """
     Helper function to create all-gather process groups for AG/RS overlap.
-||||||| BASE
-def is_initialized():
-    """Useful for code segments that may be accessed with or without mpu initialization"""
-    return _DATA_PARALLEL_GROUP is not None
-
-=======
-def is_initialized():
-    """Useful for code segments that may be accessed with or without mpu initialization"""
-    # FlagScale Begin
-    para_ctx = get_parallel_context()
-    if para_ctx is not None:
-        return True
-    # FlagScale End
->>>>>>> FORK
-
-<<<<<<< TARGET
     Creates separate communicators with the same ranks as data parallel groups
     to enable overlapping all-gather operations with reduce-scatter operations.
 
@@ -1586,19 +1570,12 @@ def is_initialized():
 
 def is_initialized():
     """Useful for code segments that may be accessed with or without mpu initialization"""
+    # FlagScale Begin
+    para_ctx = get_parallel_context()
+    if para_ctx is not None:
+        return True
+    # FlagScale End
     return _DATA_PARALLEL_GROUP is not None
-||||||| BASE
-def is_unitialized() -> bool:
-    """Check if parallel state has been initialized
-
-    Deprecated. Use is_initialized instead.
-
-    """
-    warnings.warn("is_unitialized is deprecated, use is_initialized instead", DeprecationWarning)
-    return not is_initialized()
-=======
-    return _DATA_PARALLEL_GROUP is not None
->>>>>>> FORK
 
 
 def model_parallel_is_initialized():
@@ -1770,6 +1747,13 @@ def get_hybrid_data_context_parallel_groups(check_initialized=True, group_size=N
     """Get the hybrid context parallel groups the caller rank belongs to."""
     # If the group size is the same as the entire DPxCP group, return the original group
     if get_data_parallel_world_size(with_context_parallel=True) == group_size:
+        # FlagScale Begin
+        para_ctx = get_parallel_context()
+        if para_ctx is not None:
+            return para_ctx.get_data_parallel_group(
+                with_context_parallel=True, partial_data_parallel=False
+            )
+        # FlagScale End
         if check_initialized:
             assert _DATA_PARALLEL_GROUP_WITH_CP is not None
         return _DATA_PARALLEL_GROUP_WITH_CP
@@ -1778,13 +1762,7 @@ def get_hybrid_data_context_parallel_groups(check_initialized=True, group_size=N
     return _HYBRID_DP_CP_GROUPS[group_size]
 
 
-        # FlagScale Begin
-        para_ctx = get_parallel_context()
-        if para_ctx is not None:
-            return para_ctx.get_data_parallel_group(
-                with_context_parallel=True, partial_data_parallel=False
-            )
-        # FlagScale End
+
 def get_embedding_group(check_initialized=True):
     """Get the embedding group the caller rank belongs to."""
     # FlagScale Begin

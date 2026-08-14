@@ -53,7 +53,6 @@ from ..distributed.param_and_grad_buffer import (
     partition_buckets,
 )
 from ..fp4_utils import is_nvfp4tensor, quantize_nvfp4_param_shard
-from ..distributed.param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
 from ..fp8_utils import dequantize_fp8_tensor, is_float8tensor, quantize_param_shard
 from ..transformer.fsdp_dtensor_checkpoint import handle_experts_in_state_dict
 from ..transformer.module import MegatronModule
@@ -107,25 +106,8 @@ class Range:
 
 
 class DistributedOptimizer(MixedPrecisionOptimizer):
-<<<<<<< TARGET
     """Optimizer that shards state across data-parallel ranks.
 
-    This class reduces memory usage by distributing optimizer states (like
-    momentum and variance buffers) across GPUs in the data-parallel group.
-||||||| BASE
-    """Distributed optimizer, for all data types (fp16, bf16, and fp32).
-=======
-    """Optimizer that shards state across data-parallel ranks.
->>>>>>> FORK
-
-<<<<<<< TARGET
-    Attributes:
-        model_chunks (List[MegatronModule]): Model segments being optimized.
-        per_model_buffers (Dict): Buffers managing contiguous params/grads.
-        data_parallel_group (ProcessGroup): Group for sharding and all-gathers.
-||||||| BASE
-    See __init__() below for argument details.
-=======
     This class reduces memory usage by distributing optimizer states (like
     momentum and variance buffers) across GPUs in the data-parallel group.
 
@@ -133,7 +115,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         model_chunks (List[MegatronModule]): Model segments being optimized.
         per_model_buffers (Dict): Buffers managing contiguous params/grads.
         data_parallel_group (ProcessGroup): Group for sharding and all-gathers.
->>>>>>> FORK
     """
 
     # enumerates fully reshardable optimizer formats (as opposed to formats
@@ -416,8 +397,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     ) or is_nvfp4tensor(model_param):
                         # MXFP8Tensor, BlockwiseQTensor, grouped quantized tensors, and NVFP4Tensor
                         # don't support view(-1).
-                        is_float8tensor(model_param) and config.fp8_recipe != "delayed"
-                        # MXFP8Tensor, BlockwiseQTensor, and NVFP4Tensor don't support view(-1)
                         shard_model_param = None
                     else:
                         shard_model_param = model_param.detach().view(-1)[
@@ -439,7 +418,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         if is_nvfp4tensor(model_param) or cls._is_distopt_quantized_param(
                             model_param
                         ):
-                        if is_nvfp4tensor(model_param) or is_float8tensor(model_param):
                             if hasattr(model_param, 'get_high_precision_init_val'):
                                 shard_main_param = (
                                     model_param.get_high_precision_init_val()
@@ -2805,7 +2783,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             )
         else:
             pass
-                *self._get_fp8_params_and_shard_fp32_from_fp8(), self.data_parallel_group
 
         # Utility method for copying group params.
         def copy_group_params(shard_main_groups, model_groups):

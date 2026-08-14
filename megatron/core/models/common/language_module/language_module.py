@@ -1,5 +1,4 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 import logging
 import os
 from typing import Optional, Tuple
@@ -33,8 +32,10 @@ from megatron.core.utils import (
     is_te_min_version,
     make_tp_sharded_tensor_for_checkpoint,
 )
+
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
+
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
@@ -86,29 +87,11 @@ class LanguageModule(MegatronModule):
     def _is_in_embd_group(self):
         if self.embd_group is None:
             return False
-<<<<<<< TARGET
-        if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
-            self.embd_group
-        ):
-            if getattr(self, 'mtp_process', False):
-                return True
-            if (
-                torch.distributed.get_rank()
-                == torch.distributed.get_process_group_ranks(self.embd_group)[0]
-||||||| BASE
-        if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
-            self.embd_group
-        ):
-            if (
-                torch.distributed.get_rank()
-                == torch.distributed.get_process_group_ranks(self.embd_group)[0]
-=======
 
         # Original logic: handle single process group
         if not isinstance(self.embd_group, list):
             if torch.distributed.get_rank() in torch.distributed.get_process_group_ranks(
                 self.embd_group
->>>>>>> FORK
             ):
                 if getattr(self, 'mtp_process', False):
                     return True
@@ -213,8 +196,6 @@ class LanguageModule(MegatronModule):
                     is_cg_capturable = (
                         hasattr(self.config, 'cuda_graph_impl')
                         and self.config.cuda_graph_impl == "full_iteration"
-                        hasattr(self.config, 'cuda_graph_scope')
-                        and CudaGraphScope.full_iteration in self.config.cuda_graph_scope
                     )
                     if is_cg_capturable and not is_te_min_version("2.7.0"):
                         from megatron.core.utils import get_te_version
@@ -246,22 +227,12 @@ class LanguageModule(MegatronModule):
         This function initalizes word embeddings in the final stage when we are
         using pipeline parallelism and sharing word embeddings, and sets up param
         attributes on the embedding and output layers.
-<<<<<<< TARGET
 
         Parameter attributes set:
         - `is_embedding_or_output_parameter`: True for embedding + output layer weights.
           Used by decoupled_lr, Muon optimizer, and other Megatron features.
         - `is_embedding_parameter`: True for MuP "embedding-class" parameters.
           Used by MuP for table-8 style optimizer grouping (base LR/eps for vector-like params).
-||||||| BASE
-=======
-
-        Parameter attributes set:
-        - `is_embedding_or_output_parameter`: True for embedding + output layer weights.
-        Used by decoupled_lr, Muon optimizer, and other Megatron features.
-        - `is_embedding_parameter`: True for MuP "embedding-class" parameters.
-        Used by MuP for table-8 style optimizer grouping (base LR/eps for vector-like params).
->>>>>>> FORK
         """
 
         # Mark embedding and output layer for decoupled_lr and other features.
@@ -272,7 +243,6 @@ class LanguageModule(MegatronModule):
         # `_emit_bucket(shared_embedding=True)` replicates the (vocab x hidden) tensor
         # across all dp_size shards, blowing up the chunk's buffer by ~8x.
         if (self.pre_process or getattr(self, 'mtp_process', False)) and hasattr(self, 'embedding'):
-        if self.pre_process and hasattr(self, 'embedding'):
             self.embedding.word_embeddings.weight.is_embedding_or_output_parameter = True
         if (
             self.post_process
