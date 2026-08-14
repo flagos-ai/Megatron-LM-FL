@@ -32,61 +32,6 @@ cur_platform = get_platform()
 ######## FlagScale End ########
 
 
-def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
-    """
-    Set QoS (Quality of Service) for the current checkpoint writer process.
-    This ensures checkpoint writing doesn't interfere with training.
-
-    Args:
-        cpu_priority: Nice value for CPU scheduling (0-19, higher = lower priority).
-                     Default 10 is moderately deprioritized.
-        io_priority: I/O scheduling class and priority. If None, uses best-effort class.
-                    Format: class_id (0-3) where 3 = idle (lowest priority).
-
-    Note: Requires appropriate permissions. Failures are logged but not fatal.
-    """
-    pid = os.getpid()
-
-    # Set CPU priority (nice value). os.nice(increment) adds to current;
-    # get current with os.nice(0). Only increase nice (deprioritize);
-    # decreasing requires superuser.
-    if cpu_priority is not None and cpu_priority >= 0 and cpu_priority <= 19:
-        try:
-            current_nice = os.nice(0)  # 0 = no change, returns current nice value
-            increment = cpu_priority - current_nice
-            if increment <= 0:
-                logger.warning(
-                    "PID %s: Skipping CPU nice (current %s already <= target %s; "
-                    "lowering requires superuser",
-                    pid,
-                    current_nice,
-                    cpu_priority,
-                )
-            else:
-                new_nice = os.nice(increment)
-                logger.debug(
-                    "PID %s: Set CPU nice from %s to %s (target %s)",
-                    pid,
-                    current_nice,
-                    new_nice,
-                    cpu_priority,
-                )
-        except (OSError, PermissionError) as e:
-            logger.warning(f"PID {pid}: Failed to set CPU priority: {e}")
-
-    # Set I/O priority (ionice) - Linux only
-    if io_priority is not None:
-        try:
-            # ionice -c <class> -p <pid>
-            # class 3 = idle (only when no other process needs I/O)
-            # class 2 = best-effort (default, can set priority 0-7)
-            subprocess.run(
-                ["ionice", "-c", str(io_priority), "-p", str(pid)], check=True, capture_output=True
-            )
-            logger.debug(f"PID {pid}: Set I/O priority class to {io_priority}")
-        except (subprocess.CalledProcessError, FileNotFoundError, PermissionError) as e:
-            logger.warning(f"PID {pid}: Failed to set I/O priority: {e}")
-
 
 def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
     """
