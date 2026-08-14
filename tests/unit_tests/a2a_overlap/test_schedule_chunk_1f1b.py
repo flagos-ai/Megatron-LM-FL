@@ -82,13 +82,6 @@ class TestA2AOverlap:
     def teardown_method(self, method):
         Utils.destroy_model_parallel()
 
-    @pytest.mark.skipif(
-        not torch.cuda.is_available()
-        or torch.cuda.get_device_capability() < (9, 0)
-        or torch.version.cuda is None
-        or tuple(int(x) for x in torch.version.cuda.split(".")) < (12, 9),
-        reason="FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9",
-    )
     @pytest.mark.skipif(not is_te_min_version("1.9.0.dev0"), reason="Requires TE >= 1.9.0.dev0")
     @pytest.mark.parametrize("mtp_layers", [0, 1])
     @pytest.mark.parametrize("dispatcher_type", get_valid_token_dispatcher_types())
@@ -110,7 +103,6 @@ class TestA2AOverlap:
         extra_kwargs = {"moe_token_dispatcher_type": dispatcher_type}
         if dispatcher_type == "flex":
             extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
-            extra_kwargs["moe_router_dtype"] = "fp32"
         if fp8_flag is not None:
             extra_kwargs["fp8"] = fp8_flag[0]
             extra_kwargs["fp8_recipe"] = fp8_flag[1]
@@ -222,7 +214,6 @@ class TestA2AOverlap:
         }
         if dispatcher_type == "flex":
             extra_kwargs["moe_flex_dispatcher_backend"] = "deepep"
-            extra_kwargs["moe_router_dtype"] = "fp32"
         with deterministic_mode():
             for layer_num in layers:
                 output_tensors = []

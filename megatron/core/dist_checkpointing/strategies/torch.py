@@ -1,6 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 """ Strategies using PyTorch distributed.checkpoint as an underlying format. """
+import inspect
 import io
 import os
 import pickle
@@ -11,7 +12,7 @@ from contextlib import contextmanager
 from itertools import product
 from logging import getLogger
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Tuple, Union, cast
+from typing import TYPE_CHECKING, Any, Dict, Iterable, List, Optional, Tuple, Union, cast
 
 import torch
 from packaging.version import Version as PkgVersion
@@ -50,6 +51,7 @@ from ..mapping import (
 )
 from .async_utils import AsyncRequest
 from .checkpointable import CheckpointableShardedTensor, LocalShardsContainer
+from .nvrx import has_nvrx_async_support, make_nvrx_async_request
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
@@ -57,18 +59,16 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ########## FlagScale End ##########
 
-try:
+if TYPE_CHECKING:
     from nvidia_resiliency_ext.checkpointing.async_ckpt.core import AsyncRequest as NVRxAsyncRequest
     from nvidia_resiliency_ext.checkpointing.async_ckpt.state_dict_saver import (
         CheckpointMetadataCache,
     )
+else:
+    CheckpointMetadataCache = Any
+    NVRxAsyncRequest = Any
 
-    HAVE_NVRX = True
-except (ImportError, ModuleNotFoundError):
-    CheckpointMetadataCache = ABC
-    NVRxAsyncRequest = ABC
-
-    HAVE_NVRX = False
+HAVE_NVRX = has_nvrx_async_support()
 
 try:
     if not cur_platform.is_available():  # FlagScale Add
@@ -108,6 +108,7 @@ class MCoreSavePlan:
 
 
 logger = getLogger(__name__)
+_logged_mcore_async_deprecation = False
 
 
 def flatten_state_dict(
@@ -606,6 +607,7 @@ class TorchDistSaveShardedStrategy:
         thread_count: int = 1,
         cached_metadata: bool = False,
         separation_hint: Optional[str] = None,
+        cpu_shm_mode: bool = False,
     ):
         """Adds parameters specific to PyT Distributed format
         Args:
@@ -620,6 +622,10 @@ class TorchDistSaveShardedStrategy:
                 gathering local metadata every checkpointing invocation
             separation_hint(str, optional): If provided, all tensors whose keys have this
                 prefix will be saved to a separate file.
+            cpu_shm_mode (bool, optional): Copy GPU tensors to CPU shared-memory in the
+                training process before handing off to the async worker. Avoids CUDA IPC /
+                NVLink fabric handles in the worker subprocess. Only applies with nvrx async
+                strategy.
         """
         self.backend = backend
         self.version = version
@@ -646,6 +652,7 @@ class TorchDistSaveShardedStrategy:
         self.cached_global_metadata: Optional[Metadata] = None
 
         self.separation_hint = separation_hint
+        self.cpu_shm_mode = cpu_shm_mode
 
         self.validated_loaded_metadata_reuse = False
 
@@ -670,11 +677,14 @@ class TorchDistSaveShardedStrategy:
 
         Returns: None
         """
+        global _logged_mcore_async_deprecation
         if async_strategy == "mcore":
-            logger.warning(
-                "MCore's async save is deprecated and will be removed in the future releases. "
-                "Please, use NVRx async solution by setting `async_strategy` to `nvrx`."
-            )
+            if not _logged_mcore_async_deprecation:
+                logger.warning(
+                    "MCore's async save is deprecated and will be removed in the future releases. "
+                    "Please, use NVRx async solution by setting `async_strategy` to `nvrx`."
+                )
+                _logged_mcore_async_deprecation = True
 
         # Translate the state dict
         (sharded_state_dict, flat_mapping, rename_mapping) = (
@@ -683,7 +693,6 @@ class TorchDistSaveShardedStrategy:
             )
         )
         pyt_state_dict = mcore_to_pyt_state_dict(sharded_state_dict, False)
-
         if self.separation_hint is not None and self.thread_count <= 1:
             self.thread_count = 2
 
@@ -700,10 +709,24 @@ class TorchDistSaveShardedStrategy:
         if async_strategy == "nvrx":
             if self._metadata_cache is None:
                 self._metadata_cache = checkpointable_metadata_cache()
-                if self.cached_global_metadata is not None:
+                if self.cached_global_metadata is not None and hasattr(
+                    self._metadata_cache, "set_cached_global_metadata"
+                ):
                     self._metadata_cache.set_cached_global_metadata(self.cached_global_metadata)
             # Define additional arguments
             async_writer_kwargs["use_cached_data_structure"] = self.use_cached_ckpt_structure
+            if self.cpu_shm_mode:
+                if (
+                    "use_cpu_shm_for_gpu_tensors"
+                    in inspect.signature(async_writer.__init__).parameters
+                ):
+                    async_writer_kwargs["use_cpu_shm_for_gpu_tensors"] = True
+                else:
+                    raise AssertionError(
+                        "Installed nvidia-resiliency-ext does not support "
+                        "use_cpu_shm_for_gpu_tensors. Update nvidia-resiliency-ext "
+                        "to enable cpu_shm_mode."
+                    )
             state_dict_saver_kwargs["enable_cache"] = self.use_cached_ckpt_structure
             state_dict_saver_kwargs["metadata_cache"] = self._metadata_cache
         else:
@@ -805,7 +828,9 @@ class TorchDistSaveShardedStrategy:
         def finalize_fn():
             save_state_dict_async_finalize(*save_state_dict_ret)
 
-        return async_request(save_fn, save_args, [finalize_fn], preload_fn=preload_fn)
+        return make_nvrx_async_request(
+            async_request, save_fn, save_args, [finalize_fn], preload_fn=preload_fn
+        )
 
 
 def _get_filesystem_reader(
@@ -813,6 +838,14 @@ def _get_filesystem_reader(
 ) -> FileSystemReader:
     if MultiStorageClientFeature.is_enabled():
         msc = MultiStorageClientFeature.import_package()
+        if cache_metadata:
+            warnings.warn(
+                "MSC is enabled: returning msc.torch.MultiStorageFileSystemReader instead of "
+                "CachedMetadataFileSystemReader. The cache_metadata=True request "
+                "(e.g. ckpt_assume_constant_structure=True) will be ignored and metadata "
+                "will be re-read on every load. Pass --enable-msc only when this is intended.",
+                stacklevel=2,
+            )
         return msc.torch.MultiStorageFileSystemReader(checkpoint_dir, thread_count=2)
 
     if cache_metadata:
@@ -865,7 +898,7 @@ class TorchDistLoadShardedStrategy:
         fsr = _get_filesystem_reader(
             checkpoint_dir, cache_metadata=self.cache_metadata, async_strategy=async_strategy
         )
-        checkpoint.load_state_dict(
+        checkpoint.load(
             pyt_state_dict,
             fsr,
             planner=MCoreLoadPlanner(
@@ -874,6 +907,7 @@ class TorchDistLoadShardedStrategy:
                 flatten_state_dict=False,
                 flatten_sharded_tensors=False,
             ),
+            no_dist=True,
         )
 
         if self.cache_metadata:
@@ -1048,9 +1082,8 @@ def get_async_strategy(async_strategy: str = "nvrx", module: str = None) -> tupl
             async_strategy = "nvrx"
         except (ImportError, ModuleNotFoundError):
             raise ModuleNotFoundError(
-                "nvidia-resiliency-ext package is not installed. "
-                "Please, install nvidia-resiliency-ext package or set `async_strategy` to `mcore` "
-                "to enable async save strategy."
+                "A compatible `nvidia-resiliency-ext` installation is required for "
+                '`async_strategy="nvrx"`. Please install it or set `async_strategy` to `mcore`.'
             )
     elif async_strategy == "mcore":
         # do mcore async imports

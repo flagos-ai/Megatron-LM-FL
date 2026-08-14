@@ -78,6 +78,57 @@ def _get_share_storage():
     return _share_storage_ext.share_storage
 
 
+# ---------------------------------------------------------------------------
+# C++ extension: zero-copy storage sharing for CheckpointWithoutOutput
+# ---------------------------------------------------------------------------
+# Makes dst's UntypedStorage point to src's data WITHOUT copying bytes.
+# Holds a refcounted reference to src's StorageImpl so the memory stays alive.
+# Operates below the Tensor / autograd layer → no version-counter bump,
+# and ALL TensorImpls that reference dst's StorageImpl (including views
+# created by reshape / split / etc. inside TE GroupedLinear) see the data.
+# ---------------------------------------------------------------------------
+
+_SHARE_STORAGE_SRC = r"""
+#include <torch/extension.h>
+
+void share_storage(at::Tensor dst, at::Tensor src) {
+    auto* dst_impl = dst.storage().unsafeGetStorageImpl();
+
+    // Copy src's c10::Storage (increments StorageImpl refcount).
+    auto* src_storage_ref = new c10::Storage(src.storage());
+
+    void*       data   = src_storage_ref->data_ptr().get();
+    size_t      nbytes = src_storage_ref->nbytes();
+    c10::Device device = src_storage_ref->device();
+
+    // Build a DataPtr whose deleter releases our StorageImpl reference.
+    c10::DataPtr shared(
+        data,
+        static_cast<void*>(src_storage_ref),
+        [](void* ctx) { delete static_cast<c10::Storage*>(ctx); },
+        device);
+
+    dst_impl->set_data_ptr(std::move(shared));
+    dst_impl->set_nbytes(nbytes);
+}
+"""
+
+_share_storage_ext = None
+
+
+def _get_share_storage():
+    """Lazily compile & cache the share_storage extension."""
+    global _share_storage_ext
+    if _share_storage_ext is None:
+        _share_storage_ext = load_inline(
+            name="share_storage_ext",
+            cpp_sources=_SHARE_STORAGE_SRC,
+            functions=["share_storage"],
+            verbose=False,
+        )
+    return _share_storage_ext.share_storage
+
+
 from .utils import gather_split_1d_tensor, split_tensor_into_1d_equal_chunks
 
 try:
@@ -654,6 +705,13 @@ def checkpoint(
 ) -> _R:
     """Checkpoint a model or part of the model.
     This has been directly copied from torch.utils.checkpoint."""
+    from megatron.core.transformer.cuda_graphs import is_graph_capturing, is_graph_warmup
+
+    # Skip checkpointing during CUDA graph warmup and capture, matching the behavior of
+    # CheckpointWithoutOutput. The graph captures all ops directly; recomputation cannot
+    # run inside a captured graph.
+    if is_graph_warmup() or is_graph_capturing():
+        return function(*args)
     return CheckpointFunction.apply(function, distribute_saved_activations, *args)
 
 
@@ -760,6 +818,7 @@ class CheckpointWithoutOutputFunction(torch.autograd.Function):
         torch.autograd.backward(outputs, args)
         ctx.outputs = None
         ctx.inputs = None
+        grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else inp for inp in inputs)
         grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else None for inp in inputs)
         return (None, None) + grads
 
@@ -880,11 +939,12 @@ class CheckpointWithoutOutput(object):
         from megatron.core.transformer.cuda_graphs import is_graph_capturing, is_graph_warmup
 
         # The recomputation has been triggered already. Just return.
-        # Handle cudagraphs: do nothing if currently in graph warmup
+        # Handle cudagraphs, do nothing if currently in graph warmup
         if self.ctx is None or is_graph_warmup():
             return
 
         if not torch.autograd._is_checkpoint_valid() and not is_graph_capturing():
+        # Handle cudagraphs: do nothing if currently in graph warmup
             raise RuntimeError(
                 "Checkpointing is not compatible with .grad(), "
                 "please use .backward() if possible"
@@ -902,6 +962,17 @@ class CheckpointWithoutOutput(object):
                 recompute_ctx = contextlib.nullcontext()
                 fp8_ctx = contextlib.nullcontext()
 
+            # Store the inputs for backward pass
+            inputs = self.ctx.saved_tensors
+
+            def detach(t):
+                if isinstance(t, torch.Tensor):
+                    requires_grad = t.requires_grad
+                    t = t.detach()
+                    t.requires_grad_(requires_grad)
+                return t
+
+            inputs = tuple(detach(t) for t in inputs)
             # Reconstruct full args list from saved ctx
             inputs = _load_args_from_ctx(self.ctx)
             with torch.enable_grad(), fp8_ctx, recompute_ctx:
@@ -936,10 +1007,14 @@ class CheckpointWithoutOutput(object):
         in the forward pass and the gradient of the hook_tensor is computed before the recomputed
         tensors are used.
         """
-        # When ckpt_manager is set, this is a no-op.
-        # Manager handles all discarding and hook registration uniformly.
+
         from megatron.core.transformer.cuda_graphs import is_graph_warmup
 
+        if is_graph_warmup():
+            return
+
+        # When ckpt_manager is set, this is a no-op.
+        # Manager handles all discarding and hook registration uniformly.
         if self.ckpt_manager is not None or is_graph_warmup():
             return
 

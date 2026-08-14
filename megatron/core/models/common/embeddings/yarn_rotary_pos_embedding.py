@@ -16,7 +16,6 @@ from megatron.core.transformer import TransformerConfig
 from megatron.core.utils import internal_api
 # FlagScale Begin
 from megatron.plugin.platform import get_platform
-
 cur_platform = get_platform()
 # FlagScale End
 

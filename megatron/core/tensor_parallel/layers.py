@@ -246,6 +246,11 @@ class VocabParallelEmbedding(torch.nn.Module):
         )
         self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
         self.deterministic_mode = config.deterministic_mode
+        self.config = config
+
+        self.use_inference_optimized_reduce_scatter = (
+            getattr(config, 'transformer_impl', None) == 'inference_optimized'
+        )
 
         # Allocate weights and initialize.
         if config.use_cpu_initialization:
@@ -266,6 +271,10 @@ class VocabParallelEmbedding(torch.nn.Module):
                     rank=get_pg_rank(self.tp_group),
                     world_size=get_pg_size(self.tp_group),
                 )
+            else:
+                set_tensor_model_parallel_attributes(
+                    tensor=self.weight, is_parallel=True, dim=0, stride=1
+                )
         else:
             self.weight = Parameter(
                 torch.empty(
@@ -277,6 +286,10 @@ class VocabParallelEmbedding(torch.nn.Module):
             )
             if config.perform_initialization:
                 _initialize_affine_weight_gpu(self.weight, init_method, partition_dim=0, stride=1)
+            else:
+                set_tensor_model_parallel_attributes(
+                    tensor=self.weight, is_parallel=True, dim=0, stride=1
+                )
 
     def forward(self, input_):
         """Forward.
@@ -305,12 +318,22 @@ class VocabParallelEmbedding(torch.nn.Module):
         if self.reduce_scatter_embeddings:
             # Data format change to avoid explicit tranposes : [b s h] --> [s b h].
             output_parallel = output_parallel.transpose(0, 1).contiguous()
-            output = reduce_scatter_to_sequence_parallel_region(
-                output_parallel, group=self.tp_group
-            )
-        else:
+            if self.use_inference_optimized_reduce_scatter and not self.training:
+                # Deferred to avoid circular import: inference_layers → TE → layers.
+                from .inference_layers import inference_reduce_scatter_to_sequence_parallel_region
+
+                output = inference_reduce_scatter_to_sequence_parallel_region(
+                    output_parallel, self.tp_group, self.config
+                )
+            else:
+                output = reduce_scatter_to_sequence_parallel_region(
+                    output_parallel, group=self.tp_group
+                )
+        elif self.tp_group.size() > 1:
             # Reduce across all the model parallel GPUs.
             output = reduce_from_tensor_model_parallel_region(output_parallel, group=self.tp_group)
+        else:
+            output = output_parallel
         return output
 
     def sharded_state_dict(
@@ -572,7 +595,23 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 # In case of Megatron-FSDP, need to create main grad buffers in-place
                 if hasattr(weight, "__fsdp_param__"):
                     weight.main_grad = weight.get_main_grad()
-                    torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
+                    # Import here to avoid circular import
+                    from megatron.core.extensions.transformer_engine import te_general_gemm
+
+                    if te_general_gemm is not None:
+                        # Use TE general_gemm to support mixed-precision output
+                        # (e.g. bf16 input -> fp32 main_grad) which torch.matmul
+                        # does not support via the out= parameter.
+                        te_general_gemm(
+                            total_input,
+                            grad_output,
+                            out_dtype=weight.main_grad.dtype,
+                            layout="NT",
+                            out=weight.main_grad,
+                            grad=True,
+                        )
+                    else:
+                        torch.matmul(grad_output.t(), total_input, out=weight.main_grad)
                 else:
                     # FlagScale Begin
                     if not (ctx.te_fl_prefer == 'flagos' or ctx.te_fl_prefer == 'reference'):
@@ -843,6 +882,7 @@ class ColumnParallelLinear(torch.nn.Module):
         tp_comm_buffer_name: Optional[str] = None,  # Not used
         disable_grad_reduce: bool = False,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: str | None = None,
     ):
         super(ColumnParallelLinear, self).__init__()
 
@@ -892,6 +932,10 @@ class ColumnParallelLinear(torch.nn.Module):
                         rank=rank,
                         world_size=world_size,
                     )
+                else:
+                    set_tensor_model_parallel_attributes(
+                        tensor=self.weight, is_parallel=True, dim=0, stride=stride
+                    )
             else:
                 self.weight = Parameter(
                     torch.empty(
@@ -908,6 +952,10 @@ class ColumnParallelLinear(torch.nn.Module):
                         partition_dim=0,
                         stride=stride,
                         is_expert=self.is_expert,
+                    )
+                else:
+                    set_tensor_model_parallel_attributes(
+                        tensor=self.weight, is_parallel=True, dim=0, stride=stride
                     )
 
             setattr(self.weight, "allreduce", not (self.is_expert and self.expert_parallel))
@@ -935,6 +983,10 @@ class ColumnParallelLinear(torch.nn.Module):
             setattr(self.bias, "allreduce", not (self.is_expert and self.expert_parallel))
         else:
             self.register_parameter("bias", None)
+
+        self.use_inference_optimized_all_gather = (
+            getattr(config, 'transformer_impl', None) == 'inference_optimized'
+        )
 
         self.sequence_parallel = config.sequence_parallel
         if self.sequence_parallel and world_size <= 1:
@@ -1073,7 +1125,17 @@ class ColumnParallelLinear(torch.nn.Module):
 
         if gather_output:
             # All-gather across the partitions.
-            output = gather_from_tensor_model_parallel_region(output_parallel, group=self.tp_group)
+            if self.use_inference_optimized_all_gather and not self.training:
+                # Deferred to avoid circular import: inference_layers → TE → layers.
+                from .inference_layers import inference_all_gather_from_tensor_model_parallel_region
+
+                output = inference_all_gather_from_tensor_model_parallel_region(
+                    output_parallel, self.tp_group, self.config
+                )
+            else:
+                output = gather_from_tensor_model_parallel_region(
+                    output_parallel, group=self.tp_group
+                )
         else:
             output = output_parallel
         output_bias = self.bias if self.skip_bias_add else None
@@ -1109,7 +1171,7 @@ class ColumnParallelLinear(torch.nn.Module):
     def extra_repr(self) -> str:
         """Extra context to add to the module's string representation."""
         tp = self.output_size // self.output_size_per_partition
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"in_features={self.input_size}, "
             f"out_features={self.output_size}, "
@@ -1169,6 +1231,7 @@ class RowParallelLinear(torch.nn.Module):
         is_expert: bool = False,
         tp_comm_buffer_name: str | None = None,  # Not used
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
+        name: str | None = None,
     ):
         super(RowParallelLinear, self).__init__()
 
@@ -1222,6 +1285,10 @@ class RowParallelLinear(torch.nn.Module):
                     rank=rank,
                     world_size=world_size,
                 )
+            else:
+                set_tensor_model_parallel_attributes(
+                    tensor=self.weight, is_parallel=True, dim=1, stride=stride
+                )
         else:
             self.weight = Parameter(
                 torch.empty(
@@ -1238,6 +1305,10 @@ class RowParallelLinear(torch.nn.Module):
                     partition_dim=1,
                     stride=stride,
                     is_expert=self.is_expert,
+                )
+            else:
+                set_tensor_model_parallel_attributes(
+                    tensor=self.weight, is_parallel=True, dim=1, stride=stride
                 )
         setattr(self.weight, "allreduce", not (self.is_expert and self.expert_parallel))
 
@@ -1363,7 +1434,7 @@ class RowParallelLinear(torch.nn.Module):
     def extra_repr(self) -> str:
         """Extra context to add to the module's string representation."""
         tp = self.input_size // self.input_size_per_partition
-        use_bias = self.bias is not None and self.bias is True
+        use_bias = self.bias is not None
         return (
             f"in_features={self.input_size}, "
             f"out_features={self.output_size}, "

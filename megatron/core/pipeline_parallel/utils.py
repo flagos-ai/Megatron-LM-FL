@@ -8,7 +8,14 @@ from typing import Callable, Optional
 import torch
 from torch.autograd import Variable
 
-from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_viewless_tensor
+from megatron.core.utils import (
+    get_pg_rank,
+    get_pg_size,
+    log_single_rank,
+    make_viewless_tensor,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
@@ -363,14 +370,22 @@ _COMP_STREAM = None
 _COMM_STREAM = None
 
 
-def set_streams(comm_stream=None):
+def set_streams(comm_stream=None, high_priority=False):
     """Set the stream for communication operations."""
     global _COMM_STREAM
 
     # Set communication stream
     if _COMM_STREAM is None:
         if comm_stream is None:
-            comm_stream = cur_platform.Stream(device=cur_platform.device_name())  # FlagScale Add
+            # FlagScale Begin
+            if high_priority:
+                _, high = cur_platform.Stream.priority_range()
+                comm_stream = cur_platform.Stream(
+                    device=cur_platform.device_name(), priority=high
+                )
+            else:
+                comm_stream = cur_platform.Stream(device=cur_platform.device_name())
+            # FlagScale End
         _COMM_STREAM = comm_stream
 
 
