@@ -273,7 +273,6 @@ class FileSystemWriterAsync(FileSystemWriter):
         without spawning child processes. Uses two queues:
         - local_results_queue - to collect write results from worker threads
         - count_queue - to signal worker completion (task_done/join).
->>>>>>> FORK
 
         Triggering GC during execution can lead to CUDA errors when tensors are shared.
         To prevent this, we disable the GC explicitly for this function with _disable_gc.
