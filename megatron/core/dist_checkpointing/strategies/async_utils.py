@@ -624,14 +624,13 @@ class PersistentAsyncCaller(AsyncCaller):
         # in this new process are on the right device, and device 0 on the node does not
         # take on undue memory burden from other devices on node (default behavior without
         # this line).
-        torch.cuda.set_device(rank % torch.cuda.device_count())
+        cur_platform.set_device(rank % cur_platform.device_count())  # FlagScale Add
 
         # Set QoS to deprioritize checkpoint writing vs training
         # This prevents checkpoint I/O from interfering with data loader
         _set_process_qos(cpu_priority=cpu_priority, io_priority=io_priority)
 
         # Start busy loop waiting for and executing checkpoint saves.
-        cur_platform.set_device(rank % cur_platform.device_count())  # FlagScale Add
         while True:
             item = queue.get()
             if isinstance(item, str) and item == 'DONE':

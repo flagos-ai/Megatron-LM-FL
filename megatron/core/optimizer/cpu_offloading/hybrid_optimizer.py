@@ -130,7 +130,6 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                     for param in _param_generator(optimizer):
                         gpu_param = self.cpu_copys_map_gpu_param[param]
                         gpu_param.data.copy_(param.data, non_blocking=True)
-                self._h2d_stream.record_event().wait(torch.cuda.current_stream())
                 self._h2d_stream.record_event().wait(cur_platform.current_stream())  # FlagScale Add
 
             return param_copy_back_gpu_hook

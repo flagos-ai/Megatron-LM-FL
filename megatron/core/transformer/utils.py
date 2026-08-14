@@ -93,7 +93,7 @@ def cat_with_oom_fallback(sub_state_dict):
         )
         merged_sub_state_dict = torch.cat([t.cpu() for t in sub_state_dict])
         gc.collect()
-        torch.cuda.empty_cache()
+        cur_platform.empty_cache()  # FlagScale Add
         return merged_sub_state_dict
 
 
