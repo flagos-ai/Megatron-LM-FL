@@ -10,7 +10,6 @@ from torch.nn.parameter import Parameter
 
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
-from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import (
     ensure_metadata_has_dp_cp_group,
@@ -179,10 +178,6 @@ class GraphableMegatronModule(MegatronModule):
                 self.create_mcore_cudagraph_manager(config)
             else:
                 from megatron.core.transformer.cuda_graphs import CudaGraphManager
-        if (
-            config.cuda_graph_impl == "local"
-            and CudaGraphScope.full_iteration not in config.cuda_graph_scope
-        ):
 
                 self.cudagraph_manager = CudaGraphManager(config)
         elif config.cuda_graph_impl == "transformer_engine":

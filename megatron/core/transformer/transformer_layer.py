@@ -1565,16 +1565,16 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         """
         submodules = super()._get_submodules_under_cudagraphs()
 
-        if not self.config.cuda_graph_scope:
+        if not self.config.cuda_graph_modules:
             return submodules
 
-        if CudaGraphScope.attn in self.config.cuda_graph_scope:
+        if CudaGraphModule.attn in self.config.cuda_graph_modules:
             submodules.append(self.self_attention_hyper_connection)
-        if (not self.is_moe_layer and CudaGraphScope.mlp in self.config.cuda_graph_scope) or (
+        if (not self.is_moe_layer and CudaGraphModule.mlp in self.config.cuda_graph_modules) or (
             self.is_moe_layer
             and (
-                CudaGraphScope.moe in self.config.cuda_graph_scope
-                or CudaGraphScope.moe_router in self.config.cuda_graph_scope
+                CudaGraphModule.moe in self.config.cuda_graph_modules
+                or CudaGraphModule.moe_router in self.config.cuda_graph_modules
             )
         ):
             submodules.append(self.mlp_hyper_connection)
@@ -1800,7 +1800,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             and self.config.cuda_graph_impl == "transformer_engine"
             and self.training
             and is_graph_capturing()
-            and CudaGraphScope.moe_router in self.config.cuda_graph_scope
+            and CudaGraphModule.moe_router in self.config.cuda_graph_modules
         ):
             if self.recompute_pre_mlp_layernorm or (
                 mhc_recompute_manager is not None and self.mhc_checkpoint_pre_mlp_layernorm
@@ -1892,9 +1892,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             context = cuda_graph_output.pop()
 
         if (
-            not self.config.cuda_graph_scope
-            or (not self.is_moe_layer and CudaGraphScope.mlp in self.config.cuda_graph_scope)
-            or (self.is_moe_layer and CudaGraphScope.moe in self.config.cuda_graph_scope)
+            not self.config.cuda_graph_modules
+            or (not self.is_moe_layer and CudaGraphModule.mlp in self.config.cuda_graph_modules)
+            or (self.is_moe_layer and CudaGraphModule.moe in self.config.cuda_graph_modules)
         ):
             assert len(cuda_graph_output) == 1, "CUDA Graph output should be the layer output."
             output = cuda_graph_output.pop()
@@ -1902,7 +1902,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
                 not self.config.overlap_moe_expert_parallel_comm
             ), "EP overlap must be \
                 disabled when CUDA graph captures the whole MLP/MoE part."
-        elif self.is_moe_layer and CudaGraphScope.moe_router in self.config.cuda_graph_scope:
+        elif self.is_moe_layer and CudaGraphModule.moe_router in self.config.cuda_graph_modules:
             # Pop HC state (appended during capture in _forward_mlp).
             residual = cuda_graph_output.pop()
             mlp_h_res = cuda_graph_output.pop()
@@ -1915,7 +1915,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             ):
                 shared_expert_output = cuda_graph_output.pop()
 
-            if CudaGraphScope.moe_preprocess in self.config.cuda_graph_scope:
+            if CudaGraphModule.moe_preprocess in self.config.cuda_graph_modules:
                 (hidden_states, probs), attr_outputs = (
                     cuda_graph_output[:2],
                     cuda_graph_output[2:],

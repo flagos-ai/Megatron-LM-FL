@@ -22,7 +22,7 @@ from megatron.core.pipeline_parallel.utils import (
     is_vp_last_stage,
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
-from megatron.core.transformer.enums import AttnBackend, CudaGraphScope
+from megatron.core.transformer.enums import AttnBackend
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.multi_token_prediction import tie_word_embeddings_state_dict
 from megatron.core.transformer.transformer_config import TransformerConfig
