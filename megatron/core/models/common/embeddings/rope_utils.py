@@ -97,7 +97,8 @@ def _rotate_half(x: Tensor, rotary_interleaved: bool) -> Tensor:
         return x_new.view(x_new.shape[0], x_new.shape[1], x_new.shape[2], -1)
 
 
-@overridable  # FlagScale Modify
+######## FlagScale Begin ########
+@overridable
 def _apply_rotary_pos_emb_bshd(
     t: Tensor,
     freqs: Tensor,
@@ -164,6 +165,8 @@ def _apply_rotary_pos_emb_bshd(
 
     return torch.cat((t, t_pass), dim=-1)
 
+######## FlagScale End ########
+
 
 def _get_thd_freqs_on_this_cp_rank(
     cp_rank: int, cp_size: int, x: Tensor, freqs: Tensor, offset: int = 0
@@ -214,6 +217,7 @@ def _get_thd_freqs_on_this_cp_rank(
         return freqs[offset : offset + x.size(0)]
 
 
+######## FlagScale Begin ########
 def _apply_rotary_pos_emb_thd(
     t: Tensor,
     cu_seqlens: Tensor,
@@ -298,7 +302,10 @@ def _apply_rotary_pos_emb_thd(
             mla_output_remove_interleaving=mla_output_remove_interleaving,
         ).squeeze(1)
 
+######## FlagScale End ########
 
+
+######## FlagScale Begin ########
 def apply_rotary_pos_emb(
     t: Tensor,
     freqs: Tensor,
@@ -386,6 +393,8 @@ def apply_rotary_pos_emb(
             mla_output_remove_interleaving=mla_output_remove_interleaving,
         )
 
+######## FlagScale End ########
+
 
 def apply_rotary_pos_emb_with_cos_sin(
     t: Tensor, cos: Tensor, sin: Tensor, rotary_interleaved: bool = False
@@ -410,7 +419,7 @@ def apply_rotary_pos_emb_with_cos_sin(
             t,
             freqs,
             rotary_interleaved=rotary_interleaved,
-            mla_rotary_interleaved=False,
+            mla_rotary_interleaved=False,  # FlagScale Modify
             mscale=1.0,
         )
     else:

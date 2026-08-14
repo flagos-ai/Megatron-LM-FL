@@ -210,6 +210,7 @@ class RotaryEmbedding(nn.Module):
 
         return emb
 
+    ######## FlagScale Begin ########
     def _set_cos_sin_cache(self, seq_len, offset, dtype, packed_seq=False, cp_group=None):
         """Materialize cached cos/sin tensors for ``[seq_len, ..., dim]``."""
         self.max_seq_len_cached = seq_len
@@ -250,6 +251,7 @@ class RotaryEmbedding(nn.Module):
         ):
             self._set_cos_sin_cache(seq_len, offset, dtype, packed_seq, cp_group)
         return (self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...])
+    ######## FlagScale End ########
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
         state_dict.pop(f'{prefix}inv_freq', None)
@@ -339,7 +341,7 @@ class MultimodalRotaryEmbedding(nn.Module):
         seq_len_interpolation_factor: Optional[float] = None,
         rotary_base: int = 10000,
         cp_group: Optional[torch.distributed.ProcessGroup] = None,
-        interleaved_mrope: bool = False,
+        interleaved_mrope: bool = False,  # FlagScale Modify
     ) -> None:
         super().__init__()
 
@@ -347,13 +349,19 @@ class MultimodalRotaryEmbedding(nn.Module):
         if rotary_percent < 1.0:
             dim = int(dim * rotary_percent)
         self.rotary_interleaved = rotary_interleaved
-        self.interleaved_mrope = interleaved_mrope
+        self.interleaved_mrope = interleaved_mrope  # FlagScale Modify
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
         self.inv_freq = 1.0 / (
             rotary_base
             ** (
-                torch.arange(0, dim, 2, dtype=torch.float32, device=torch.cuda.current_device())
+                torch.arange(
+                    0,
+                    dim,
+                    2,
+                    dtype=torch.float32,
+                    device=cur_platform.current_device(),  # FlagScale Modify
+                )
                 / dim
             )
         )
@@ -363,6 +371,7 @@ class MultimodalRotaryEmbedding(nn.Module):
             else parallel_state.get_context_parallel_group(check_initialized=False)
         )
 
+    ######## FlagScale Begin ########
     @staticmethod
     def _apply_interleaved_mrope(freqs: Tensor, mrope_section: List[int]) -> Tensor:
         """Merge T/H/W frequency channels into a single interleaved vector.
@@ -381,6 +390,7 @@ class MultimodalRotaryEmbedding(nn.Module):
             idx = slice(offset, length, 3)
             freqs_out[..., idx] = freqs[dim_idx, ..., idx]
         return freqs_out
+    ######## FlagScale End ########
 
     def forward(
         self,
@@ -414,6 +424,7 @@ class MultimodalRotaryEmbedding(nn.Module):
 
         # first part even vector components, second part odd vector components,
         #  2 * dim in dimension size
+        ######## FlagScale Begin ########
         if self.interleaved_mrope:
             # Qwen3.5-VL: merge T/H/W with interleaved layout [T₀,H₀,W₀,T₁,H₁,W₁,...].
             # freqs becomes shape (bs, seq_length, dim).
@@ -439,6 +450,7 @@ class MultimodalRotaryEmbedding(nn.Module):
             emb = torch.cat(
                 [m[i % 3] for i, m in enumerate(emb.split(mrope_section_doubled, dim=-1))], dim=-1
             )  # shape (bs, seq_length, 2 * dim)
+        ######## FlagScale End ########
 
         # shape (seq_length, bs, 1, 2 * dim)
         emb = emb[..., None, :].transpose(0, 1).contiguous()
