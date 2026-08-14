@@ -2,6 +2,7 @@
 
 import logging
 from abc import ABC, abstractmethod
+from re import M  # FlagScale Add
 from typing import List, Optional, Tuple
 
 import torch
@@ -16,7 +17,11 @@ from megatron.core.tensor_parallel import (
     gather_from_sequence_parallel_region,
     reduce_scatter_to_sequence_parallel_region,
 )
+<<<<<<< ours
 from megatron.core.transformer.enums import CudaGraphModule
+=======
+from megatron.core.transformer.enums import CudaGraphScope
+>>>>>>> theirs
 from megatron.core.transformer.moe.fused_a2a import (
     fused_combine,
     fused_dispatch,
@@ -48,6 +53,12 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 """
 
 logger = logging.getLogger(__name__)
+
+# FlagScale Begin
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+# FlagScale End
 
 
 class MoETokenDispatcher:
@@ -82,6 +93,11 @@ class MoETokenDispatcher:
 
         # Attributes that need to be captured in cudagraph. These attributes are returned
         # as cudagraph outputs when the cuda_graph_modules contains moe_preprocess.
+        self.cudagraph_attrs = []
+        self.valid_cudagraph_attrs = None
+
+        # Attributes that need to be captured in cudagraph. These attributes are returned
+        # as cudagraph outputs when the cuda_graph_scope contains moe_preprocess.
         self.cudagraph_attrs = []
         self.valid_cudagraph_attrs = None
 
@@ -244,7 +260,11 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         self.global_local_map = None
 
         # Attributes that need to be captured in cudagraph. These attributes are returned
+<<<<<<< ours
         # as cudagraph outputs when the cuda_graph_modules contains moe_preprocess.
+=======
+        # as cudagraph outputs when the cuda_graph_scope contains moe_preprocess.
+>>>>>>> theirs
         self.cudagraph_attrs = ['routing_map']
 
     def dispatch_preprocess(
@@ -407,7 +427,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         # [tp_size]. Represents the number of tokens received by the current rank from
         # other TP ranks.
         self.output_splits_tp = None
-        self.permute_idx_device = torch.device("cuda") if self.config.moe_permute_fusion else "cpu"
+        # FlagScale Begin
+        self.permute_idx_device = (
+            torch.device(cur_platform.device_name()) if self.config.moe_permute_fusion else "cpu"
+        )
+        # FlagScale End
         input_chunk_idxs = torch.arange(
             self.num_experts * self.tp_size, device=self.permute_idx_device
         )
@@ -443,12 +467,30 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         }
         self.cuda_dtoh_point = "before_permutation_1"
         if config.cuda_graph_impl != "none" and (
+<<<<<<< ours
             CudaGraphModule.moe_preprocess in config.cuda_graph_modules
             or not self.config.cuda_graph_modules
+=======
+            CudaGraphScope.moe_preprocess in config.cuda_graph_scope
+            or not self.config.cuda_graph_scope
+>>>>>>> theirs
         ):
             self.cuda_dtoh_point = "before_ep_alltoall"
         if MoEAlltoAllTokenDispatcher.cuda_dtoh_stream is None:
-            MoEAlltoAllTokenDispatcher.cuda_dtoh_stream = torch.cuda.Stream()
+            MoEAlltoAllTokenDispatcher.cuda_dtoh_stream = cur_platform.Stream()  # FlagScale Add
+
+        # Attributes that need to be captured in cudagraph. These attributes are returned
+        # as cudagraph outputs when the cuda_graph_scope contains moe_preprocess.
+        self.cudagraph_attrs = [
+            'tokens_per_expert',
+            'input_splits',
+            'output_splits',
+            'output_splits_tp',
+            'num_out_tokens',
+            'num_global_tokens_per_local_expert',
+            'reversed_local_input_permutation_mapping',
+            'routing_map',
+        ]
 
         # Attributes that need to be captured in cudagraph. These attributes are returned
         # as cudagraph outputs when the cuda_graph_modules contains moe_preprocess.
@@ -667,10 +709,14 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         Returns:
             A tuple of tokens and probabilities after All-to-All.
         """
+<<<<<<< ours
         # Make sure the shared experts fc1 is overlapped with dispatch A2A
         # when CUDA_DEVICE_MAX_CONNECTIONS>1.
         if self.shared_experts is not None:
             self.shared_experts.wait_current_stream()
+=======
+
+>>>>>>> theirs
         # Perform expert parallel AlltoAll communication
         self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
             "before_ep_alltoall", self.tokens_per_expert
@@ -899,10 +945,12 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if not self.drop_and_pad:
             if point == self.cuda_dtoh_point:
                 # Move all possible GPU tensors to CPU at self.cuda_dtoh_point.
-                on_side_stream = torch.cuda.current_stream() != self.cuda_dtoh_stream
+                on_side_stream = cur_platform.current_stream() != self.cuda_dtoh_stream  # FlagScale Add
                 if on_side_stream:
-                    self.cuda_dtoh_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self.cuda_dtoh_stream):
+                    # FlagScale Begin
+                    self.cuda_dtoh_stream.wait_stream(cur_platform.current_stream())
+                with cur_platform.stream(self.cuda_dtoh_stream):
+                    # FlagScale End
                     # TODO: use MemcpyBatchAsync instead.
                     tokens_per_expert = maybe_move_tensor_to_cpu(
                         tokens_per_expert, record_stream=on_side_stream
@@ -1093,8 +1141,11 @@ class _HybridEPManager(_DispatchManager):
                 num_local_experts=self.num_local_experts,
                 num_sms_dispatch_api=self.config.moe_hybridep_num_sms,
                 num_sms_combine_api=self.config.moe_hybridep_num_sms,
+<<<<<<< ours
                 num_blocks_permute=self.config.moe_hybridep_num_blocks_permute,
                 num_blocks_unpermute=self.config.moe_hybridep_num_blocks_unpermute,
+=======
+>>>>>>> theirs
                 num_permuted_tokens=self.num_permuted_tokens,
                 pad_multiple=self.pad_multiple,
                 fused=self.config.moe_permute_fusion_into_hybridep,

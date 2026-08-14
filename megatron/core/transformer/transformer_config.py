@@ -26,6 +26,7 @@ from megatron.core.transformer.enums import (
     InferenceCudaGraphScope,
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+from megatron.plugin.decorators import overridable
 
 from .._rank_utils import log_single_rank
 from ..fusions.fused_bias_geglu import quick_gelu
@@ -49,6 +50,7 @@ except ImportError:
     HAVE_PACKAGING = False
 
 
+@overridable
 @dataclass
 class TransformerConfig(ModelParallelConfig):
     """Configuration object for megatron-core transformers.
@@ -128,6 +130,17 @@ class TransformerConfig(ModelParallelConfig):
     account_for_loss_in_pipeline_split: bool = False
     """If set, the loss layer will be treated as a standard transformer
     layer in the context of partition and placement for pipeline parallelism."""
+
+    # FlagScale Begin
+    use_dualpipev: bool = False
+    """Enable DualPipeV pipeline scheduling for MoE models."""
+
+    moe_fb_overlap: bool = False
+    """Enable MoE forward-backward overlap in DualPipeV scheduling."""
+
+    te_fl_prefer: Optional[str] = "vendor"
+    """TE-FL backend preference: 'flagos', 'vendor', or 'reference'."""
+    # FlagScale End
 
     hidden_size: int = field(default=0, metadata={"argparse_meta": {"default": None}})
     """Transformer hidden size."""
@@ -235,6 +248,10 @@ class TransformerConfig(ModelParallelConfig):
 
     qk_layernorm: bool = False
     """Whether to apply `normalization` type of normalization to the query and key embeddings."""
+    # FlagScale Begin
+    qk_layernorm_hidden_dim: bool = False
+    """Whether to layer normalize q and k on hidden dimension rather than head dimension."""
+    # FlagScale End
 
     qk_l2_norm: bool = False
     """Whether to apply llama 4-style qk L2 norm."""
@@ -272,6 +289,54 @@ class TransformerConfig(ModelParallelConfig):
     A list of integers: Defines a custom pattern where 1 means skip RoPE and 0 means apply RoPE.
     For example, [0,1,1,0] means: apply RoPE, skip RoPE, skip RoPE, apply RoPE."""
 
+    ##### FlagScale Begin #####
+    ###################
+    # Engram
+    ###################
+    use_engram: bool = False
+    """Use Engram module."""
+
+    engram_tokenizer_name_or_path: Optional[str] = None
+    """Tokenizer name or path used by Engram"""
+
+    engram_vocab_size: Optional[List[int]] = None
+    """Engram vocab size per layer (list of ints)"""
+
+    max_ngram_size: int = 1
+    """Maximum n-gram size for Engram"""
+
+    n_embed_per_ngram: Optional[int] = None
+    """Embedding dimension per n-gram"""
+
+    n_head_per_ngram: int = 1
+    """Number of heads per n-gram"""
+
+    engram_layer_ids: Optional[List[int]] = None
+    """Layer ids where Engram is applied"""
+
+    engram_pad_id: int = 0
+    """Pad token id for Engram hashing"""
+
+    engram_seed: int = 0
+    """Random seed for Engram hashing"""
+
+    engram_kernel_size: int = 1
+    """Kernel size for Engram short convolution"""
+
+    engram_embedding_parallel_size: Optional[int] = None
+    """Parallel size for Engram embedding"""
+
+    engram_embedding_parallel_method: Literal["alltoall", "allreduce"] = "alltoall"
+    """Parallel method for Engram embedding across 
+    embedding parallel(alltoall) / tensor parallel(allreduce) groups"""
+
+    engram_offload_embedding_optimizer_states: bool = False
+    """Whether to offload Engram embedding optimizer states to CPU 
+    when using alltoall for Engram embedding parallelism.
+    This is typically used to save GPU memory 
+    when Engram embedding is large while accelerators are limited."""
+    ##### FlagScale End #####
+
     ####################
     # attention variant
     ####################
@@ -296,6 +361,22 @@ class TransformerConfig(ModelParallelConfig):
     dsa_indexer_use_sparse_loss: bool = False
     """Whether to use sparse DSA indexer loss. If True, the indexer loss will be computed using the
     top-k indices."""
+    ##### FlagScale Begin #####
+    indexer_types: Optional[List[str]] = None
+    """List of indexer types for each layer. If None, all layers will use the 'full' indexer type.
+    Can also be set via indexer_type_rule string, which will be expanded in __post_init__."""
+
+    indexer_type_rule: Optional[str] = None
+    """Compact rule string to generate indexer_types. Format examples:
+      - "2*full + repeat(full, shared, shared, shared)"            — prefix + cyclic pattern
+      - "2*full + repeat(full, shared, shared, shared) + 1*full"   — prefix + cyclic + suffix
+      - "repeat(full, shared)"                                   — alternating for all layers
+    Supported syntax:
+      - N*type  — N consecutive layers of the given type
+      - repeat(type, ...)  — repeating pattern to fill remaining layers
+      - Segments after repeat() become suffix (appended at the end)
+    """
+    ##### FlagScale End #####
 
     ####################
     # linear attention
@@ -493,6 +574,16 @@ class TransformerConfig(ModelParallelConfig):
     each uniformly divided recompute unit.  When recompute_method is block, recompute_num_layers is
     the number of transformer layers to recompute within each pipeline stage.  Must be None for
     'selective' activation checkpointing."""
+    # FlagScale Begin
+    recompute_granularity_per_stage_micro_batch: Optional[List] = None
+    """Fine-grained recompute granularity control per pipeline stage and micro-batch."""
+
+    recompute_method_per_stage_micro_batch: Optional[List] = None
+    """Fine-grained recompute method control per pipeline stage and micro-batch."""
+
+    recompute_num_layers_per_stage_micro_batch: Optional[List] = None
+    """Fine-grained recompute num_layers control per pipeline stage and micro-batch."""
+    # FlagScale End
 
     distribute_saved_activations: Optional[bool] = False
     """If True, distribute recomputed activations across the model parallel group."""
@@ -1136,6 +1227,32 @@ class TransformerConfig(ModelParallelConfig):
     """
     min_offloaded_tensor_size: int = 1024 * 1024
     """The minimum size of the tensor to be offloaded."""
+    # FlagScale Begin
+    # FlagScale PEFT/LoRA configuration
+    peft_type: Optional[str] = None
+    """PEFT type (e.g., 'lora'). None means no PEFT."""
+
+    lora_target_modules: Optional[List[str]] = None
+    """LoRA target modules list."""
+
+    lora_dim: int = 8
+    """LoRA rank dimension."""
+
+    lora_alpha: int = 16
+    """LoRA alpha scaling factor."""
+
+    lora_dropout: float = 0.0
+    """Dropout probability for LoRA layers."""
+
+    lora_dropout_position: str = "pre"
+    """Dropout position: 'pre' or 'post'."""
+
+    lora_in_init_method: str = "xavier"
+    """Initialization method for LoRA A matrix."""
+
+    lora_out_init_method: str = "zero"
+    """Initialization method for LoRA B matrix."""
+    # FlagScale End
 
     moe_paged_stash: bool = False
     """If True, enable paged stash for all routed-expert activations needed for backward"""
@@ -2564,6 +2681,87 @@ class TransformerConfig(ModelParallelConfig):
             assert (
                 self.attention_backend == AttnBackend.flash
             ), "Batch invariant mode only supports FlashAttention"
+    ##### FlagScale Begin #####
+    @staticmethod
+    def _parse_indexer_type_rule(rule: str, num_layers: int) -> List[str]:
+        """Parse a compact indexer_type_rule string into a list of indexer types.
+
+        Syntax:
+          - "N*type" — N consecutive layers of the given type
+          - "repeat(type, ...)" — repeating pattern to fill remaining layers
+          - Terms are joined with "+"
+          - Segments before repeat() are prefix, segments after are suffix.
+
+        Examples:
+          "2*full + repeat(full, share, share, share)"
+            → 2 full prefix, then cyclic pattern fills all remaining layers
+          "2*full + repeat(full, share, share, share) + 1*full"
+            → 2 full prefix, cyclic pattern in the middle, 1 full suffix
+        """
+        import re
+
+        rule = rule.strip()
+        parts = [p.strip() for p in rule.split("+")]
+
+        prefix: List[str] = []
+        suffix: List[str] = []
+        repeat_pattern: Optional[List[str]] = None
+        # Split parts into prefix, repeat, suffix
+        collecting_suffix = False
+
+        for part in parts:
+            # Match repeat(...)
+            repeat_match = re.match(r"repeat\((.+)\)", part)
+            if repeat_match:
+                if repeat_pattern is not None:
+                    raise ValueError("indexer_type_rule: only one repeat() is allowed")
+                repeat_pattern = [t.strip() for t in repeat_match.group(1).split(",")]
+                collecting_suffix = True
+                continue
+
+            # Match N*type
+            mult_match = re.match(r"(\d+)\*(\w+)", part)
+            if mult_match:
+                count = int(mult_match.group(1))
+                typ = mult_match.group(2)
+                if collecting_suffix:
+                    suffix.extend([typ] * count)
+                else:
+                    prefix.extend([typ] * count)
+                continue
+
+            # Single type name
+            if re.match(r"\w+$", part):
+                if collecting_suffix:
+                    suffix.append(part)
+                else:
+                    prefix.append(part)
+                continue
+
+            raise ValueError(f"indexer_type_rule: cannot parse segment '{part}'")
+
+        if repeat_pattern is not None:
+            fixed_len = len(prefix) + len(suffix)
+            remaining = num_layers - fixed_len
+            if remaining < 0:
+                raise ValueError(
+                    f"indexer_type_rule: prefix ({len(prefix)}) + suffix ({len(suffix)}) "
+                    f"= {fixed_len} exceeds num_layers ({num_layers})"
+                )
+            middle = [repeat_pattern[i % len(repeat_pattern)] for i in range(remaining)]
+            result = prefix + middle + suffix
+        else:
+            # No repeat — the explicit list must match num_layers exactly
+            result = prefix
+            if len(result) != num_layers:
+                raise ValueError(
+                    f"indexer_type_rule: expanded length ({len(result)}) != "
+                    f"num_layers ({num_layers}). Use repeat() to fill remaining layers."
+                )
+
+        return result
+
+    ##### FlagScale End #####
 
 
 @dataclass

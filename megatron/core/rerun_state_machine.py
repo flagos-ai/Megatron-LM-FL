@@ -17,6 +17,15 @@ import torch
 from megatron.core._rank_utils import log_single_rank, safe_get_rank
 from megatron.core.dist_checkpointing.mapping import ShardedObject
 from megatron.core.typed_torch import copy_signature
+<<<<<<< ours
+=======
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+>>>>>>> theirs
 
 """DISCLAIMER: THIS IS AN EXPERIMENTAL FEATURE.
 
@@ -431,9 +440,16 @@ class RerunStateMachine:
             log_single_rank(
                 logger,
                 logging.WARNING,
+<<<<<<< ours
                 "Exiting now. The job can be resumed from a previous checkpoint",
             )
             return False, True, EXIT_CODE_FAILED_ON_RESULT_VALIDATION
+=======
+                "Exiting now. A checkpoint at the last iteration is being saved "
+                "if further examination is needed",
+            )
+            return True, True, EXIT_CODE_FAILED_ON_RESULT_VALIDATION
+>>>>>>> theirs
         elif self.state == RerunState.WILL_RERUN_FROM_CHECKPOINT:
             log_single_rank(
                 logger,
@@ -524,7 +540,7 @@ class RerunStateMachine:
                 )
                 rank: int = safe_get_rank()
                 node: str = os.uname()[1]
-                device: int = torch.cuda.current_device()
+                device: int = cur_platform.current_device()  # FlagScale Add
                 full_message: str = (
                     f"Rank {rank}, node {node}, device {device}, "
                     f"iteration {self.current_iteration + 1}: "
@@ -566,7 +582,11 @@ class RerunStateMachine:
         def log_failure(message: str, fatal: bool = True) -> None:
             rank: int = safe_get_rank()
             node: str = os.uname()[1]
+<<<<<<< ours
             device: int = torch.cuda.current_device()
+=======
+            device: int = cur_platform.current_device()  # FlagScale Add
+>>>>>>> theirs
             if fatal:
                 logger.error(
                     f"Rank {rank}, node {node}, device {device}, "
@@ -643,7 +663,7 @@ class RerunStateMachine:
                     # Remember the node and device we're running on so that we can check we're not
                     # rerunning on the same GPU when we resume from the checkpoint.
                     self.suspicious_node = os.uname()[1]
-                    self.suspicious_device = torch.cuda.current_device()
+                    self.suspicious_device = cur_platform.current_device()  # FlagScale Add
                     self._log_validation_error_to_file(
                         status=RerunValidationStatus.FIRST_RERUN_REPRODUCIBLE,
                         result=result,
@@ -659,7 +679,11 @@ class RerunStateMachine:
             elif self.state == RerunState.RERUNNING_FROM_CHECKPOINT:
                 # Ensure we're not on the same GPU as the first rerun.
                 node = os.uname()[1]
+<<<<<<< ours
                 device = torch.cuda.current_device()
+=======
+                device = cur_platform.current_device()  # FlagScale Add
+>>>>>>> theirs
                 if node == self.suspicious_node and device == self.suspicious_device:
                     logger.error(
                         f"Got rescheduled on the same GPU. Need to resume again from the same "
@@ -983,7 +1007,7 @@ class RerunStateMachine:
                 "random_rng_state": random.getstate(),
                 "np_rng_state": np.random.get_state(),
                 "torch_rng_state": torch.get_rng_state(),
-                "cuda_rng_state": torch.cuda.get_rng_state(),
+                "cuda_rng_state": cur_platform.get_rng_state(),  # FlagScale Add
             },
             "other_state": self.state_save_func() if self.state_save_func else None,
             # any other state to save to guarantee deterministic execution?
@@ -996,7 +1020,7 @@ class RerunStateMachine:
         random.setstate(rng_state["random_rng_state"])
         np.random.set_state(rng_state["np_rng_state"])
         torch.set_rng_state(rng_state["torch_rng_state"])
-        torch.cuda.set_rng_state(rng_state["cuda_rng_state"])
+        cur_platform.set_rng_state(rng_state["cuda_rng_state"])  # FlagScale Add
         if self.saved_state["other_state"] and self.state_restore_func:
             self.state_restore_func(self.saved_state["other_state"])
 
@@ -1035,7 +1059,7 @@ class RerunStateMachine:
             try:
                 rank: int = safe_get_rank()
                 node: str = os.uname()[1]
-                device: int = torch.cuda.current_device()
+                device: int = cur_platform.current_device()  # FlagScale Add
                 with open(self.result_rejected_tracker_filename, "a") as f:
                     f.write(
                         f"ts={datetime.datetime.now()} node={node} device={device} "

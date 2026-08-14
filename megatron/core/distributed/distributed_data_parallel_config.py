@@ -4,8 +4,11 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 import torch
+<<<<<<< ours
 
 from ..utils import is_torch_min_version
+=======
+>>>>>>> theirs
 
 
 @dataclass
@@ -83,6 +86,14 @@ class DistributedDataParallelConfig:
     """If true, keep the compute param in fp4 (do not use any other intermediate dtype) and
        perform the param all-gather in fp4."""
 
+<<<<<<< ours
+=======
+    # FlagScale Begin
+    use_partial_reduce_for_shared_embedding: bool = False
+    """If true, use partial reduce for shared embedding gradient allreduce in hetero training."""
+    # FlagScale End
+
+>>>>>>> theirs
     reuse_grad_buf_for_mxfp8_param_ag: bool = False
     """If true, reuse the grad buffer for param AG when using mxfp8 recipe. Should be 
        set to True only when fp8_recipe is mxfp8 and fp8_param_gather is True."""
@@ -154,9 +165,13 @@ class DistributedDataParallelConfig:
     If True, use all-gather during the initial Megatron-FSDP parameter
     synchronization step. This can increase overlap between the first
     parameter all-gather and computation, helping to better hide the
+<<<<<<< ours
     initial communication cost. Should be deactivated when using
     full-iteration CG, or partial CG if AG/RS is launched beyond the
     CG capture scope but is waited on during the capture scope.
+=======
+    initial communication cost.
+>>>>>>> theirs
     """
 
     outer_dp_sharding_strategy: str = 'no_shard'
@@ -215,6 +230,7 @@ class DistributedDataParallelConfig:
       main gradients to parameter dtype for `.grad`.
     """
 
+<<<<<<< ours
     megatron_fsdp_cuda_graph_mode: bool = False
     """If set to True, Megatron-FSDP will practice CUDA graph-safe operations, such as
     not dereferencing `param.grad` after the optimizer step to preserve references for
@@ -237,6 +253,8 @@ class DistributedDataParallelConfig:
       will be unsharded.
     """
 
+=======
+>>>>>>> theirs
     def __post_init__(self):
         import os
 
@@ -244,7 +262,11 @@ class DistributedDataParallelConfig:
         if self.reuse_grad_buf_for_mxfp8_param_ag:
             assert self.fp8_param_gather, "Reuse grad buffer only when keeping params in MXFP8."
 
+<<<<<<< ours
         if self.nccl_ub and not is_torch_min_version("2.11.0a0"):
+=======
+        if self.nccl_ub:
+>>>>>>> theirs
             if 'expandable_segments:True' in os.getenv('PYTORCH_CUDA_ALLOC_CONF', '').split(','):
                 raise ValueError(
                     "PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True is currently not supported "
@@ -256,7 +278,10 @@ class DistributedDataParallelConfig:
                 "Only need to explicitly specify param_name patterns for FP32 local accumulation "
                 "if .main_grads aren't already in FP32"
             )
+<<<<<<< ours
 
         if self.num_buckets is not None:
             assert self.bucket_size is None, "Cannot specify both num_buckets and bucket_size"
             assert self.num_buckets > 0, "num_buckets must be greater than 0"
+=======
+>>>>>>> theirs

@@ -1,5 +1,9 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+<<<<<<< ours
 from __future__ import annotations
+=======
+
+>>>>>>> theirs
 
 import math
 from dataclasses import dataclass
@@ -35,12 +39,20 @@ from megatron.core.tensor_parallel.mappings import (
     gather_from_tensor_model_parallel_region,
     scatter_to_sequence_parallel_region,
 )
+<<<<<<< ours
 from megatron.core.transformer.attention import Attention, LinearProjBuilder
+=======
+from megatron.core.transformer.attention import Attention
+>>>>>>> theirs
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
 from megatron.core.transformer.transformer_config import MLATransformerConfig
+<<<<<<< ours
 from megatron.core.typed_torch import apply_module, not_none
+=======
+from megatron.core.typed_torch import apply_module
+>>>>>>> theirs
 from megatron.core.utils import (
     deprecate_inference_params,
     get_pg_size,
@@ -76,6 +88,7 @@ else:
         set_save_original_input,
         split_te_layernorm_column_parallel_linear,
     ) = (None, None, None, None, None, None)
+<<<<<<< ours
 
 if TYPE_CHECKING:
     from megatron.core.inference.contexts import BaseInferenceContext
@@ -106,14 +119,19 @@ def _trim_mla_core_attention_output(core_attn_out, need_v_pad, orig_v_dim, padde
             core_attn_out = core_attn_out.reshape(*core_attn_out.shape[:-1], -1, padded_v_dim)
         core_attn_out = core_attn_out[..., :orig_v_dim]
     return core_attn_out
+=======
+>>>>>>> theirs
 
 
 @dataclass
 class MLASelfAttentionSubmodules:
     """Submodules for the MLA self-attention layer."""
 
+<<<<<<< ours
     linear_proj: LinearProjBuilder
 
+=======
+>>>>>>> theirs
     # TODO(nschank): Move layernorms back to the bottom once all other layers have defaults removed.
     q_layernorm: LayerNormBuilder
     kv_layernorm: LayerNormBuilder
@@ -125,6 +143,10 @@ class MLASelfAttentionSubmodules:
     linear_kv_up_proj: Union[ModuleSpec, type] = None
     linear_qkv_down_proj: Union[ModuleSpec, type] = None
     core_attention: Union[ModuleSpec, type] = None
+<<<<<<< ours
+=======
+    linear_proj: Union[ModuleSpec, type] = None
+>>>>>>> theirs
 
 
 class MultiLatentAttention(Attention):
@@ -144,7 +166,11 @@ class MultiLatentAttention(Attention):
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
+<<<<<<< ours
         name: str | None = None,
+=======
+        is_mtp_layer: bool = False,
+>>>>>>> theirs
     ) -> None:
         # TODO(nschank): Restructure so that the Attention initializer knows which specific
         # submodules it will construct, so that MLASelfAttentionSubmodules honors that interface.
@@ -156,7 +182,11 @@ class MultiLatentAttention(Attention):
             attn_mask_type=attn_mask_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+<<<<<<< ours
             name=name,
+=======
+            is_mtp_layer=is_mtp_layer,
+>>>>>>> theirs
         )
         self.config: MLATransformerConfig
 
@@ -204,6 +234,11 @@ class MultiLatentAttention(Attention):
                 "'rope' and 'yarn'"
             )
 
+        if self.config.experimental_attention_variant == "dsa":
+            core_attn_extra_kwargs = {"is_mtp_layer": is_mtp_layer}
+        else:
+            core_attn_extra_kwargs = {}
+
         self.core_attention = build_module(
             submodules.core_attention,
             config=self.config,
@@ -215,6 +250,7 @@ class MultiLatentAttention(Attention):
             v_channels=self.config.v_head_dim,
             cp_comm_type=cp_comm_type,
             pg_collection=self.pg_collection,
+            **core_attn_extra_kwargs
         )
 
         # Output.
@@ -229,7 +265,10 @@ class MultiLatentAttention(Attention):
             is_expert=False,
             tp_comm_buffer_name='proj',
             tp_group=self.pg_collection.tp,
+<<<<<<< ours
             name=(name + ".linear_proj") if name is not None else None,
+=======
+>>>>>>> theirs
         )
 
         if (
@@ -388,10 +427,20 @@ class MultiLatentAttention(Attention):
                     # query representation.
                     extra_kwargs["x"] = hidden_states
                     extra_kwargs["qr"] = q_compressed
+<<<<<<< ours
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:
                     core_attn_out = self._run_core_attention(
+=======
+                    extra_kwargs["prev_topk_indices"] = getattr(
+                        self.core_attention, "current_topk_indices", None
+                    )  # FlagScale Add
+                with off_interface(
+                    self.offload_core_attention and self.training, query, "core_attn"
+                ) as query:
+                    core_attn_out = self.core_attention(
+>>>>>>> theirs
                         query,
                         key,
                         value,
@@ -423,7 +472,10 @@ class MultiLatentAttention(Attention):
                 # Only rearrange if not in absorption mode (Flash MLA handles format correctly)
                 if not inference_context.is_decode_only():
                     core_attn_out = rearrange(core_attn_out, 's b h d -> s b (h d)')
+<<<<<<< ours
                 needs_output_trim = need_v_pad
+=======
+>>>>>>> theirs
             if self.offload_core_attention and self.training:
                 core_attn_out = off_interface.group_commit(
                     core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
@@ -459,7 +511,11 @@ class MultiLatentAttention(Attention):
         # Output. [sq, b, h]
         # =================
         with off_interface(self.offload_attn_proj, core_attn_out, "attn_proj") as core_attn_out:
+<<<<<<< ours
             output, bias = apply_module(self.linear_proj)(core_attn_out)
+=======
+            output, bias = self.linear_proj(core_attn_out)
+>>>>>>> theirs
         if self.offload_attn_proj:
             output = off_interface.group_commit(
                 output, name="attn_proj", forced_released_tensors=[core_attn_out]
@@ -484,7 +540,11 @@ class MLASelfAttention(MultiLatentAttention):
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
         pp_layer_offset: Optional[int] = None,
+<<<<<<< ours
         name: str | None = None,
+=======
+        is_mtp_layer: bool = False,
+>>>>>>> theirs
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -498,7 +558,11 @@ class MLASelfAttention(MultiLatentAttention):
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
             pp_layer_offset=pp_layer_offset,
+<<<<<<< ours
             name=name,
+=======
+            is_mtp_layer=is_mtp_layer,
+>>>>>>> theirs
         )
 
         if self.config.q_lora_rank is None:
@@ -546,7 +610,10 @@ class MLASelfAttention(MultiLatentAttention):
                     if q_down_proj_kwargs.get('parallel_mode') != 'duplicated'
                     else None
                 ),
+<<<<<<< ours
                 name=(name + ".linear_q_down_proj") if name is not None else None,
+=======
+>>>>>>> theirs
                 **q_down_proj_kwargs,
             )
 
@@ -562,7 +629,10 @@ class MLASelfAttention(MultiLatentAttention):
                 is_expert=False,
                 tp_comm_buffer_name='q_up_proj',
                 tp_group=pg_collection.tp,
+<<<<<<< ours
                 name=(name + ".linear_q_up_proj") if name is not None else None,
+=======
+>>>>>>> theirs
             )
 
         kv_down_proj_kwargs = {}
@@ -593,7 +663,10 @@ class MLASelfAttention(MultiLatentAttention):
                 if kv_down_proj_kwargs.get('parallel_mode') != 'duplicated'
                 else None
             ),
+<<<<<<< ours
             name=(name + ".linear_kv_down_proj") if name is not None else None,
+=======
+>>>>>>> theirs
             **kv_down_proj_kwargs,
         )
 
@@ -609,7 +682,10 @@ class MLASelfAttention(MultiLatentAttention):
             is_expert=False,
             tp_comm_buffer_name='kv_up_proj',
             tp_group=pg_collection.tp,
+<<<<<<< ours
             name=(name + ".linear_kv_up_proj") if name is not None else None,
+=======
+>>>>>>> theirs
         )
 
         if self.config.q_lora_rank is not None:
@@ -930,6 +1006,7 @@ class MLASelfAttention(MultiLatentAttention):
                     cu_seqlens=cu_seqlens_q,
                     mscale=mscale,
                     cp_group=self.pg_collection.cp,
+                    mla_rotary_interleaved=True,
                 )
                 # k_pos_emb:[num_tokens, 1, qk_pos_emb_head_dim]
                 k_pos_emb = apply_rotary_pos_emb(
@@ -939,6 +1016,7 @@ class MLASelfAttention(MultiLatentAttention):
                     cu_seqlens=cu_seqlens_kv,
                     mscale=mscale,
                     cp_group=self.pg_collection.cp,
+                    mla_rotary_interleaved=True,
                 )
 
                 # query: [num_tokens, n, (qk_head_dim + v_head_dim)]
@@ -1227,8 +1305,12 @@ class FusedMLASelfAttention(MLASelfAttention):
         attn_mask_type=AttnMaskType.padding,
         cp_comm_type: Optional[str] = None,
         pg_collection: Optional[ProcessGroupCollection] = None,
+<<<<<<< ours
         pp_layer_offset: Optional[int] = None,
         name: str | None = None,
+=======
+        is_mtp_layer: bool = False,
+>>>>>>> theirs
     ):
         if pg_collection is None:
             pg_collection = ProcessGroupCollection.use_mpu_process_groups()
@@ -1242,8 +1324,12 @@ class FusedMLASelfAttention(MLASelfAttention):
             attention_type="self",
             cp_comm_type=cp_comm_type,
             pg_collection=pg_collection,
+<<<<<<< ours
             pp_layer_offset=pp_layer_offset,
             name=name,
+=======
+            is_mtp_layer=is_mtp_layer,
+>>>>>>> theirs
         )
 
         assert self.config.q_lora_rank is not None, (
@@ -1280,7 +1366,10 @@ class FusedMLASelfAttention(MLASelfAttention):
                 if qkv_down_proj_kwargs.get('parallel_mode') != 'duplicated'
                 else None
             ),
+<<<<<<< ours
             name=(name + ".linear_qkv_down_proj") if name is not None else None,
+=======
+>>>>>>> theirs
             **qkv_down_proj_kwargs,
         )
 
@@ -1296,7 +1385,10 @@ class FusedMLASelfAttention(MLASelfAttention):
             is_expert=False,
             tp_comm_buffer_name='q_up_proj',
             tp_group=pg_collection.tp,
+<<<<<<< ours
             name=(name + ".linear_q_up_proj") if name is not None else None,
+=======
+>>>>>>> theirs
         )
 
         self.linear_kv_up_proj = build_module(
@@ -1311,7 +1403,10 @@ class FusedMLASelfAttention(MLASelfAttention):
             is_expert=False,
             tp_comm_buffer_name='kv_up_proj',
             tp_group=pg_collection.tp,
+<<<<<<< ours
             name=(name + ".linear_kv_up_proj") if name is not None else None,
+=======
+>>>>>>> theirs
         )
 
         self.q_layernorm = submodules.q_layernorm(

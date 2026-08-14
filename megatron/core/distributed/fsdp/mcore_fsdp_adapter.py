@@ -43,6 +43,10 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import is_te_min_version, log_single_rank
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 try:
     from megatron.core.distributed.fsdp.src.megatron_fsdp import (
@@ -145,7 +149,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
         self.bucket_size = self.ddp_config.bucket_size
         if disable_bucketing:
             self.bucket_size = None
-        self.device = device if device else torch.device(f'cuda:{torch.cuda.current_device()}')
+        self.device = device if device else torch.device(cur_platform.current_device_name())  # FlagScale Add
 
         if fsdp_unit_modules is not None:
             self.fsdp_unit_modules = fsdp_unit_modules
@@ -205,6 +209,7 @@ class FullyShardedDataParallel(_BaseDataParallel):
                     config.overlap_moe_expert_parallel_comm
                     and ddp_config.data_parallel_sharding_strategy == "optim_grads_params"
                 ),
+                    config.fp8_recipe == "mxfp8" and ddp_config.fp8_param_gather
             ),
         )
         self.param_and_grad_buffer = self.module.param_and_grad_buffer
@@ -597,7 +602,7 @@ def _get_rng_state_dict():
         'random_rng_state': random.getstate(),
         'np_rng_state': np.random.get_state(),
         'torch_rng_state': torch.get_rng_state(),
-        'cuda_rng_state': torch.cuda.get_rng_state(),
+        'cuda_rng_state': cur_platform.get_rng_state(),  # FlagScale Add
         'rng_tracker_states': tensor_parallel.get_cuda_rng_tracker().get_states(),
     }
     return rng_state_dict
@@ -607,5 +612,5 @@ def _load_rng_state_dict(rng_state_dict):
     random.setstate(rng_state_dict['random_rng_state'])
     np.random.set_state(rng_state_dict['np_rng_state'])
     torch.set_rng_state(rng_state_dict['torch_rng_state'])
-    torch.cuda.set_rng_state(rng_state_dict['cuda_rng_state'])
+    cur_platform.set_rng_state(rng_state_dict['cuda_rng_state'])  # FlagScale Add
     tensor_parallel.get_cuda_rng_tracker().set_states(rng_state_dict['rng_tracker_states'])

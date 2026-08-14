@@ -20,6 +20,16 @@ from contextlib import nullcontext
 from functools import reduce
 from importlib.metadata import version
 from typing import Callable, Optional, Sequence, Union
+<<<<<<< ours
+=======
+
+try:
+    import megatron.core.parallel_state as parallel_state
+
+    HAVE_MEGATRON_CORE = True
+except (ImportError, ModuleNotFoundError):
+    HAVE_MEGATRON_CORE = False
+>>>>>>> theirs
 
 try:
     import einops
@@ -36,6 +46,12 @@ from torch.cuda import device as device_ctx_manager
 from torch.distributed import DeviceMesh, ProcessGroup
 
 logger = logging.getLogger(__name__)
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 try:
     import transformer_engine  # pylint: disable=W0611
@@ -85,6 +101,7 @@ def is_te_min_version(vers, check_equality=True):
     return te_version > PkgVersion(vers)
 
 
+<<<<<<< ours
 def is_torch_min_version(version, check_equality=True):
     """Check if minimum version of `torch` is installed."""
     if check_equality:
@@ -92,6 +109,8 @@ def is_torch_min_version(version, check_equality=True):
     return _torch_version > PkgVersion(version)
 
 
+=======
+>>>>>>> theirs
 def is_submodule(module, parent_module, strict=True):
     """
     Check if a module is a submodule of another module.
@@ -105,6 +124,7 @@ def is_submodule(module, parent_module, strict=True):
     return False
 
 
+<<<<<<< ours
 def find_megatron_fsdp(model):
     """Walk the model wrapper chain to find a MegatronFSDP instance, if any."""
     # Lazy import to avoid a circular import: megatron_fsdp.py transitively imports
@@ -122,6 +142,8 @@ def find_megatron_fsdp(model):
     return None
 
 
+=======
+>>>>>>> theirs
 def get_mesh_names(
     device_mesh: Optional[DeviceMesh] = None, only_submesh_dims: bool = False
 ) -> list[str]:
@@ -184,7 +206,7 @@ def contains_submesh(
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = "cuda", clone: bool = False, graph_safe: bool = False
+    device: Union[int, str, torch.device] = cur_platform.device_name(), clone: bool = False, graph_safe: bool = False  # FlagScale Add
 ) -> torch.Tensor:
     """Return the random number generator state of the specified GPU.
 
@@ -197,18 +219,18 @@ def _get_cuda_rng_state(
 
     # if not using cuda graphs, just use the builtin pytorch function
     if not graph_safe:
-        return torch.cuda.random.get_rng_state(device=device)
+        return cur_platform.random().get_rng_state(device=device)  # FlagScale Add
 
     _lazy_init()
     if isinstance(device, str):
         device = torch.device(device)
     elif isinstance(device, int):
-        device = torch.device("cuda", device)
+        device = torch.device(cur_platform.current_device_name())  # FlagScale Add
     idx = device.index
     if idx is None:
-        idx = torch.cuda.current_device()
+        idx = cur_platform.current_device()  # FlagScale Add
 
-    default_generator = torch.cuda.default_generators[idx]
+    default_generator = cur_platform.default_generator(idx)  # FlagScale Add
     if clone:
         return default_generator.clone_state()
     return default_generator.graphsafe_get_state()
@@ -235,17 +257,19 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
     else:
         # newer PyTorch
         if device == -1:
-            device = torch.device("cuda")
+            device = torch.device(cur_platform.device_name())  # FlagScale Add
         elif isinstance(device, str):
             device = torch.device(device)
         elif isinstance(device, int):
-            device = torch.device("cuda", device)
+            device = torch.device(cur_platform.device(int))  # FlagScale Add
 
         def cb():
             idx = device.index
             if idx is None:
-                idx = torch.cuda.current_device()
-            default_generator = torch.cuda.default_generators[idx]
+                # FlagScale Begin
+                idx = cur_platform.current_device()
+            default_generator = cur_platform.default_generator(idx)
+                # FlagScale End
 
             # if graph capturing, set the rng state in a cudagraphable way
             if graph_safe:
@@ -383,10 +407,12 @@ def initialize_rng_tracker(
                     self.states_[name] = new_state
                 else:
                     # Get the current rng state.
-                    orig_rng_state = torch.cuda.get_rng_state()
+                    orig_rng_state = cur_platform.get_rng_state()  # FlagScale Add
                     # Set the new state and store it.
-                    torch.cuda.manual_seed(seed)
-                    self.states_[name] = torch.cuda.get_rng_state()
+                    # FlagScale Begin
+                    cur_platform.manual_seed(seed)
+                    self.states_[name] = cur_platform.get_rng_state()
+                    # FlagScale End
                     # Reset rng state to what it was.
                     _set_cuda_rng_state(orig_rng_state)
 
@@ -554,9 +580,19 @@ class FSDPDistributedIndex:
             if contains_submesh(self.device_mesh, self.dp_shard_dim)
             else None
         )
+<<<<<<< ours
         # AG groups: supplied via ProcessGroupCollection (Megatron-FSDP entrypoint).
         self.fsdp_group_ag = fsdp_group_ag
         self.expt_fsdp_group_ag = expt_fsdp_group_ag
+=======
+        # AG group comes from parallel_state, not the mesh
+        # the purpose of this independent group is to overlap all-gather and gradient reduction.
+        self.fsdp_group_ag = None
+        if HAVE_MEGATRON_CORE and parallel_state.has_separate_all_gather_group():
+            self.fsdp_group_ag = parallel_state.get_data_parallel_group(
+                with_context_parallel=True, independent_all_gather=True
+            )
+>>>>>>> theirs
         # Retrieve the outer-FSDP process group from the DeviceMesh.
         self.outer_fsdp_group = (
             self.device_mesh[self.dp_outer_dim].get_group()
@@ -791,7 +827,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                     requires_grad=False,
                 )
 

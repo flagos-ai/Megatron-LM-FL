@@ -1,6 +1,11 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
 from __future__ import annotations
 
+<<<<<<< ours
+=======
+import gc
+import logging
+>>>>>>> theirs
 import warnings
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -26,7 +31,10 @@ from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_b
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
+<<<<<<< ours
 from megatron.core.transformer.utils import cat_with_oom_fallback, sharded_state_dict_default
+=======
+>>>>>>> theirs
 from megatron.core.typed_torch import apply_module, not_none
 from megatron.core.utils import (
     get_tensor_model_parallel_group_if_none,
@@ -128,6 +136,97 @@ class LinearFc2Builder(Protocol):
         """Builds a linear_fc2 layer for MLP."""
         ...
 
+# FlagScale Begin
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+# FlagScale End
+
+
+class LinearFc1Interface(Protocol):
+    """Interface for linear_fc1 module in MLP."""
+
+    def forward(self, hidden_states: torch.Tensor, /) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Forward method for linear_fc1 module."""
+        ...
+
+    def backward_dw(self) -> None:
+        """Backward method for linear_fc1 module."""
+        ...
+
+
+class LinearFc1Builder(Protocol):
+    """Protocol describing how to build a linear_fc1 layer in MLP."""
+
+    def __call__(
+        self,
+        input_size: int,
+        output_size: int,
+        /,
+        *,
+        config: TransformerConfig,
+        init_method: Callable[[torch.Tensor], None],
+        gather_output: bool,
+        bias: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: str | None,
+        tp_group: torch.distributed.ProcessGroup | None,
+        stride: int = 1,
+    ) -> LinearFc1Interface:
+        """Builds a linear_fc1 layer for MLP."""
+        ...
+
+
+class TEActivationFunctionInterface(Protocol):
+    """Interface for activation_function module in MLP."""
+
+    def forward(self, input_: torch.Tensor, /) -> torch.Tensor:
+        """Forward method for activation_function module."""
+        ...
+
+
+class TEActivationFunctionBuilder(Protocol):
+    """Protocol for activation_function module in MLP."""
+
+    def __call__(self, *, config: TransformerConfig) -> TEActivationFunctionInterface:
+        """Builds an activation function module for MLP."""
+        ...
+
+
+class LinearFc2Interface(Protocol):
+    """Interface for linear_fc2 module in MLP."""
+
+    def forward(self, hidden_states: torch.Tensor, /) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Forward method for linear_fc2 module."""
+        ...
+
+    def backward_dw(self) -> None:
+        """Backward method for linear_fc2 module."""
+        ...
+
+
+class LinearFc2Builder(Protocol):
+    """Protocol describing how to build a linear_fc2 layer in MLP."""
+
+    def __call__(
+        self,
+        input_size: int,
+        output_size: int,
+        /,
+        *,
+        config: TransformerConfig,
+        init_method: Callable[[torch.Tensor], None],
+        bias: bool,
+        input_is_parallel: bool,
+        skip_bias_add: bool,
+        is_expert: bool,
+        tp_comm_buffer_name: str | None,
+        tp_group: torch.distributed.ProcessGroup | None,
+    ) -> LinearFc2Interface:
+        """Builds a linear_fc2 layer for MLP."""
+        ...
+
 
 @dataclass
 class MLPSubmodules:
@@ -225,7 +324,10 @@ class MLP(MegatronModule):
             tp_comm_buffer_name="fc1",
             tp_group=tp_group,
             stride=fc1_stride,
+<<<<<<< ours
             name=(name + ".linear_fc1") if name is not None else None,
+=======
+>>>>>>> theirs
         )
 
         if self.config.use_te_activation_func and not (submodules.activation_func is None):
@@ -307,6 +409,7 @@ class MLP(MegatronModule):
                         self.config.cpu_offloading
                         and self.config.cpu_offloading_activations
                         and HAVE_TE,
+                        self.config.activation_func_clamp_value,
                     )
                 else:
                     raise ValueError("Only support fusion of gelu and swiglu")
@@ -461,6 +564,23 @@ def apply_swiglu_sharded_factory(
                 prepend_axis_num=prepend_axis_num,
             ),
         ]
+<<<<<<< ours
+=======
+
+    def sh_ten_merge_fn(sub_state_dict):
+        with torch.no_grad():
+            try:
+                return torch.cat(sub_state_dict)
+            except (RuntimeError, torch.cuda.OutOfMemoryError) as e:
+                logger.warning(
+                    f"CUDA OutOfMemoryError encountered during tensors merging."
+                    f" Switching to CPU merge. (Error: {e})"
+                )
+                merged_sub_state_dict = torch.cat([t.cpu() for t in sub_state_dict])
+                gc.collect()
+                cur_platform.empty_cache()  # FlagScale Add
+                return merged_sub_state_dict
+>>>>>>> theirs
 
     return ShardedTensorFactory(
         original_sh_ten.key,

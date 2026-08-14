@@ -36,6 +36,8 @@ class ModelParallelConfig:
        arxiv.org/pdf/2104.04473.pdf for more details.
     """
 
+    dualpipev_pipeline_model_parallel_size: Optional[int] = None
+
     sequence_parallel: bool = False
     """Makes tensor parallelism more memory efficient for LLMs (20B+) by parallelizing layer norms
        and dropout sequentially.  See Reducing Activation Recomputation in Large Transformer Models
@@ -406,6 +408,17 @@ class ModelParallelConfig:
        calling barrier with their timers will not result in hangs. This can happen if for example
        the user adds a level 1 timer that is not called by all ranks.
     """
+
+    # FlagScale Begin
+    ###################
+    # Heterogeneous Training
+    ###################
+    enable_hetero: str = None
+    """Enable the heterogeneous training."""
+
+    hetero_pipeline_layer_split: list = None
+    """A list of lists, each sublist contains numbers of layers to be processed in the corresponding pipeline stages for one device type."""
+    # FlagScale End
 
     def __post_init__(self):
         """Python dataclass method that is used to modify attributes after initialization.

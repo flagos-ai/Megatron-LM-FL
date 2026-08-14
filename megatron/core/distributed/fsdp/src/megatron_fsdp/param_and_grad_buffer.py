@@ -53,10 +53,19 @@ from .utils import (
     get_mcore_tensor_parallel_partition_dim,
     is_mcore_tensor_parallel_duplicated,
     log_single_rank,
+<<<<<<< ours
     using_tensor_parallel,
+=======
+>>>>>>> theirs
 )
 
 logger = logging.getLogger(__name__)
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 
 try:
@@ -205,7 +214,7 @@ class MultiGroupUBRAllocator:
 
     def __enter__(self):
         for group in self.groups[1:]:
-            backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
+            backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))  # FlagScale Add
             try:
                 # Since the registration is done in mempool granularity, we need to deregister
                 # the tensors in the mempool and re-register the mempool including the newly created
@@ -218,7 +227,11 @@ class MultiGroupUBRAllocator:
     def __exit__(self, *args):
         self.mem_allocator.__exit__(*args)
         for group in self.groups[1:]:
+<<<<<<< ours
             backend = group._get_backend(torch.device("cuda", torch.cuda.current_device()))
+=======
+            backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))  # FlagScale Add
+>>>>>>> theirs
             log_single_rank(
                 logger,
                 logging.INFO,
@@ -796,7 +809,11 @@ class FixedPoolAllocator(TemporaryBucketAllocator):
             ):
                 # Requires synchronization for new buffer allocation
                 self.allocation_tracker[(buffer_name, dtype)] = size
+<<<<<<< ours
                 torch.cuda.synchronize()
+=======
+                cur_platform.synchronize()  # FlagScale Add
+>>>>>>> theirs
         return Bucket(
             data=get_global_memory_buffer().get_tensor(
                 [size], dtype=dtype, name=buffer_name, mem_alloc_context=mem_alloc_context
@@ -1717,6 +1734,21 @@ class ParamAndGradBuffer:
             if self.dist_index.get_outer_fsdp_group() is not None:
                 # Outer/Inter-FSDP group when using hybrid FSDP (IB domain, registered last).
                 self.ubr_groups.append(self.dist_index.get_outer_fsdp_group())
+<<<<<<< ours
+=======
+            if (
+                self.dist_index.get_fsdp_group(
+                    is_expert_parallel=False, independent_all_gather=True
+                )
+                is not None
+            ):
+                # All-gather group used when overlapping all-gather and gradient reduction.
+                self.ubr_groups.append(
+                    self.dist_index.get_fsdp_group(
+                        is_expert_parallel=False, independent_all_gather=True
+                    )
+                )
+>>>>>>> theirs
 
             log_single_rank(
                 logger,
@@ -1854,9 +1886,15 @@ class ParamAndGradBuffer:
         self.already_registered = True
 
         global NCCL_MEMORY_POOL
+<<<<<<< ours
         torch.cuda.synchronize()
         torch.distributed.barrier(async_op=False)
         torch.cuda.synchronize()
+=======
+        cur_platform.synchronize()  # FlagScale Add
+        torch.distributed.barrier(async_op=False)
+        cur_platform.synchronize()  # FlagScale Add
+>>>>>>> theirs
 
         for group in self.ubr_groups:
             log_single_rank(
@@ -2134,7 +2172,10 @@ class ParamAndGradBuffer:
                 name="fsdp_fp8_transpose_params",
                 fsdp_param_groups=self.parameter_groups,
                 size=UB_BUFFER_NUM,
+<<<<<<< ours
                 fallback_to_persistent_buffer=self.ddp_config.fsdp_db_use_persist_buf_on_alloc_fail,
+=======
+>>>>>>> theirs
             )
             self.main_grad_alloc = FixedPoolAllocator(
                 name="fsdp_grads",
@@ -2193,6 +2234,7 @@ class ParamAndGradBuffer:
                     is_expert_parallel=group.is_expert_param
                 )
 
+<<<<<<< ours
             # Use separate process group for all-gather operations (model_weight_buffer)
             # to enable overlap with gradient reduction operations (main_grad_buffer).
             # This avoids head-of-line blocking between forward all-gather and backward
@@ -2201,6 +2243,16 @@ class ParamAndGradBuffer:
             if not should_create_hfsdp_helper_buffers:
                 ag_group = self.dist_index.get_fsdp_group(
                     is_expert_parallel=group.is_expert_param, independent_all_gather=True
+=======
+            # When --create-all-gather-group is enabled, use a separate process group for
+            # all-gather operations (model_weight_buffer) to enable overlap with gradient reduction
+            # operations (main_grad_buffer). This avoids head-of-line blocking between forward
+            # all-gather and backward reduce-scatter on the same communicator.
+            model_wbuf_dp_group = main_buf_dp_group
+            if not group.is_expert_param and not should_create_hfsdp_helper_buffers:
+                ag_group = self.dist_index.get_fsdp_group(
+                    is_expert_parallel=False, independent_all_gather=True
+>>>>>>> theirs
                 )
                 if ag_group is not None:
                     model_wbuf_dp_group = ag_group
@@ -2498,7 +2550,7 @@ class ParamAndGradBuffer:
                             # CUDA device.
                             if check_gpu_memory(threshold=0.5):
                                 gc.collect()
-                                torch.cuda.empty_cache()
+                                cur_platform.empty_cache()  # FlagScale Add
 
                             m.to_empty(device=self.device, recurse=False)
                             if (
@@ -2712,7 +2764,7 @@ class ParamAndGradBuffer:
 
         # Clean up deallocated memory.
         gc.collect()
-        torch.cuda.empty_cache()
+        cur_platform.empty_cache()  # FlagScale Add
 
     def _reset_parameters(self, old_params, new_params):
         assert len(old_params) == len(new_params)
@@ -2730,7 +2782,11 @@ class ParamAndGradBuffer:
 
             new_param.requires_grad_(old_param.requires_grad)
 
+<<<<<<< ours
             for tp_attr in ["_tensor_parallel_mode"]:
+=======
+            for tp_attr in ["_mcore_tp", "_tp_partition_dim", "_tp_duplicated"]:
+>>>>>>> theirs
                 if getattr(old_param, tp_attr, None) is not None:
                     setattr(new_param, tp_attr, getattr(old_param, tp_attr))
 
@@ -2908,7 +2964,13 @@ class ParamAndGradBuffer:
                             "partition_stride",
                             "is_embedding_or_output_parameter",
                             "is_embedding_parameter",
+<<<<<<< ours
                             "_tensor_parallel_mode",
+=======
+                            "_mcore_tp",
+                            "_tp_duplicated",
+                            "_tp_partition_dim",
+>>>>>>> theirs
                         ]:
                             if hasattr(orig_param, attr_name):
                                 setattr(param, attr_name, getattr(orig_param, attr_name))
@@ -2961,11 +3023,19 @@ class ParamAndGradBuffer:
             optimizer_grad = group.main_grad_buffer.get_item(
                 item_id, only_shard=sharded_optimizer_state
             )
+<<<<<<< ours
             if group.main_weight_buffer is not None and not self.use_decoupled_grad:
                 # Convert the gradient to the main weight data-type for optimization.
                 # Not needed for decoupled gradients, because the precision-aware
                 # optimizer can apply gradients to parameters of different precision!
                 optimizer_grad = optimizer_grad.to(param.dtype)
+=======
+            if group.main_weight_buffer is not None:
+                if not self.use_decoupled_grad:
+                    # Convert the gradient to the main weight buffer dtype.
+                    # TODO(@cspades): Why this is necessary? Casted below.
+                    optimizer_grad = optimizer_grad.to(param.dtype)
+>>>>>>> theirs
 
             if name not in self.dist_main_grad:
                 # Register the gradient as a distributed tensor.
@@ -3412,7 +3482,7 @@ class GradReducePipeline:
     def __init__(
         self,
         param_and_grad_buffer: ParamAndGradBuffer,
-        rs_stream: Optional[torch.cuda.Stream] = None,
+        rs_stream: Optional[cur_platform.Stream] = None,  # FlagScale Add
         check_nans: bool = False,
     ) -> None:
         self.buffer = param_and_grad_buffer
@@ -3435,7 +3505,7 @@ class GradReducePipeline:
         if dist_index.use_hybrid_fsdp:
             # If there are multiple FSDP groups, we need to reduce gradients across groups.
             self.outer_fsdp_group_grad_reduce = True
-            self.outer_fsdp_group_grad_reduce_stream = torch.cuda.Stream()
+            self.outer_fsdp_group_grad_reduce_stream = cur_platform.Stream()  # FlagScale Add
         else:
             self.outer_fsdp_group_grad_reduce = False
 
@@ -3621,15 +3691,15 @@ class GradReducePipeline:
         if ddp_config.fsdp_double_buffer:
             self._enforce_double_buffer_limit(bucket_group)
 
-        current_stream = torch.cuda.current_stream()
+        current_stream = cur_platform.current_stream()  # FlagScale Add
         reduce_scatter_stream = (
-            self.rs_stream if self.rs_stream is not None else torch.cuda.current_stream()
+            self.rs_stream if self.rs_stream is not None else cur_platform.current_stream()  # FlagScale Add
         )
         reduce_scatter_stream.wait_stream(current_stream)
 
         # DP-Shard Gradient Reduction
         dp_group = self.get_fsdp_buffer(bucket_group[0]).data_parallel_group
-        with torch.cuda.stream(reduce_scatter_stream):
+        with cur_platform.stream(reduce_scatter_stream):  # FlagScale Add
             with _coalescing_manager(dp_group):
                 # List of gradient accumulation closure tasks.
                 # (grad_buffer, reduced_grad)
@@ -3723,7 +3793,7 @@ class GradReducePipeline:
             # Wait on the DP-Shard reduction before further reduction.
             self.outer_fsdp_group_grad_reduce_stream.wait_stream(reduce_scatter_stream)
             outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group()
-            with torch.cuda.stream(self.outer_fsdp_group_grad_reduce_stream):
+            with cur_platform.stream(self.outer_fsdp_group_grad_reduce_stream):  # FlagScale Add
                 with _coalescing_manager(outer_fsdp_group):
                     # List of gradient accumulation closure tasks.
                     # (grad_buffer, reduced_grad)
@@ -3870,7 +3940,7 @@ class AllGatherPipeline:
     def __init__(
         self,
         param_and_grad_buffer: ParamAndGradBuffer,
-        ag_stream: Optional[torch.cuda.Stream] = None,
+        ag_stream: Optional[cur_platform.Stream] = None,  # FlagScale Add
     ) -> None:
         self.buffer = param_and_grad_buffer
         self.ag_stream = ag_stream
@@ -3909,7 +3979,14 @@ class AllGatherPipeline:
         ):
             # If there are multiple FSDP groups and full sharding, we need to
             # all-gather parameters across groups.
-            self.outer_fsdp_group_param_gather_stream = torch.cuda.Stream()
+            self.outer_fsdp_group_param_gather_stream = cur_platform.Stream()  # FlagScale Add
+
+    def get_bucket_key(self, bucket_id, bwd):
+        """Get the key for the bucket."""
+        has_transpose_buffer = (
+            self.buffer.parameter_groups[bucket_id].transpose_weight_buffer is not None
+        )
+        return (bucket_id, has_transpose_buffer and bwd)
 
     def get_bucket_key(self, bucket_id, bwd):
         """Get the key for the bucket."""
@@ -3942,6 +4019,7 @@ class AllGatherPipeline:
             while len(self.param_gather_event_map) > 0:
                 (bucket_id, bwd) = next(iter(self.param_gather_event_map))
                 self.wait_bucket_ready(bucket_id, bwd)
+<<<<<<< ours
 
         for bucket_id in range(self.num_buckets):
             is_unit_bucket = self.buffer.parameter_groups[bucket_id].fsdp_unit_id is not None
@@ -3955,6 +4033,11 @@ class AllGatherPipeline:
                     self.bucket_status[bucket_key] = BucketStatus.PRESERVED
                 else:
                     self.bucket_can_be_released[bucket_key] = True
+=======
+        for bucket_id in range(self.num_buckets):
+            for bwd in [False, True]:
+                self.bucket_can_be_released[self.get_bucket_key(bucket_id, bwd)] = True
+>>>>>>> theirs
         self.recycle_unused_buckets()
 
         expected_statuses = (BucketStatus.EMPTY,)
@@ -4089,6 +4172,7 @@ class AllGatherPipeline:
                 ag_buckets = list(sorted(set(ag_buckets)))
                 bucket_id = next_bucket_id(ag_buckets)
 
+<<<<<<< ours
         # Only all-gather on buckets that have not been allocated yet or whose
         # persistent storage was preserved but is not ready for use.
         ag_buckets = [
@@ -4096,6 +4180,13 @@ class AllGatherPipeline:
             for bucket_id in ag_buckets
             if self.bucket_status[self.get_bucket_key(bucket_id, bwd)]
             in (BucketStatus.EMPTY, BucketStatus.PRESERVED)
+=======
+        # Only all-gather on buckets that have not been allocated yet.
+        ag_buckets = [
+            bucket_id
+            for bucket_id in ag_buckets
+            if self.bucket_status[self.get_bucket_key(bucket_id, bwd)] == BucketStatus.EMPTY
+>>>>>>> theirs
         ]
         if len(ag_buckets) == 0:
             return
@@ -4112,11 +4203,18 @@ class AllGatherPipeline:
         # Coalesce all-gather operations for all buckets in the same data-parallel-group
         for _, buckets in bucket_group_to_buckets.items():
             all_gather_stream = (
-                self.ag_stream if self.ag_stream is not None else torch.cuda.current_stream()
+                self.ag_stream if self.ag_stream is not None else cur_platform.current_stream()  # FlagScale Add
             )
             if outer_fsdp_group_param_gather:
+<<<<<<< ours
                 self.outer_fsdp_group_param_gather_stream.wait_stream(torch.cuda.current_stream())
                 with torch.cuda.stream(self.outer_fsdp_group_param_gather_stream):
+=======
+                # FlagScale Begin
+                self.outer_fsdp_group_param_gather_stream.wait_stream(cur_platform.current_stream())
+                with cur_platform.stream(self.outer_fsdp_group_param_gather_stream):
+                # FlagScale End
+>>>>>>> theirs
                     is_expert_parallel = parameter_groups[buckets[0]].is_expert_param
                     outer_fsdp_group = self.buffer.dist_index.get_outer_fsdp_group(
                         is_expert_parallel=is_expert_parallel
@@ -4137,9 +4235,9 @@ class AllGatherPipeline:
                 all_gather_stream.wait_stream(self.outer_fsdp_group_param_gather_stream)
 
             # Coalesce the asynchronous NCCL operations in this context.
-            all_gather_stream.wait_stream(torch.cuda.current_stream())
+            all_gather_stream.wait_stream(cur_platform.current_stream())  # FlagScale Add
             dp_group = self.get_fsdp_buffer(buckets[0]).data_parallel_group
-            with torch.cuda.stream(all_gather_stream):
+            with cur_platform.stream(all_gather_stream):  # FlagScale Add
                 with _coalescing_manager(
                     dp_group, async_ops=async_param_gather
                 ) as coalescing_event:
@@ -4169,7 +4267,11 @@ class AllGatherPipeline:
         if self.bucket_status[bucket_key] == BucketStatus.READY_TO_USE:
             # Already ready to use.
             return
+<<<<<<< ours
         if self.bucket_status[bucket_key] in (BucketStatus.EMPTY, BucketStatus.PRESERVED):
+=======
+        if self.bucket_status[bucket_key] == BucketStatus.EMPTY:
+>>>>>>> theirs
             if empty_ok:
                 return
             # Bucket should not be empty or merely preserved here; this implies that
@@ -4217,6 +4319,7 @@ class AllGatherPipeline:
         """
         bucket_key = self.get_bucket_key(bucket_id, bwd)
         if self.bucket_status[bucket_key] == BucketStatus.EMPTY:
+<<<<<<< ours
             return
 
         if lazy:
@@ -4224,6 +4327,15 @@ class AllGatherPipeline:
             self.bucket_can_be_released[bucket_key] = True
             return
 
+=======
+            return
+
+        if lazy:
+            # Mark the bucket can be released later.
+            self.bucket_can_be_released[bucket_key] = True
+            return
+
+>>>>>>> theirs
         self.wait_bucket_ready(bucket_id, bwd, empty_ok=True)
         if self.bucket_status[bucket_key] == BucketStatus.COMMUNICATING:
             raise ValueError(f"Bucket {bucket_id} is communicating.")
@@ -4266,10 +4378,14 @@ class AllGatherPipeline:
         bucket_key = self.get_bucket_key(bucket_id, bwd)
 
         self.bucket_can_be_released[bucket_key] = False
+<<<<<<< ours
         if self.bucket_status[bucket_key] in (
             BucketStatus.COMMUNICATING,
             BucketStatus.READY_TO_USE,
         ):
+=======
+        if self.bucket_status[bucket_key] != BucketStatus.EMPTY:
+>>>>>>> theirs
             return
 
         self.bucket_status[bucket_key] = BucketStatus.COMMUNICATING
@@ -4357,12 +4473,14 @@ def check_gpu_memory(threshold=0.9):
     Returns:
         bool: True if the GPU memory is over the threshold.
     """
-    if not torch.cuda.is_available():
+    if not cur_platform.is_available():  # FlagScale Add
         return False
-    device = torch.cuda.current_device()
-    allocated = torch.cuda.memory_allocated(device)
-    reserved = torch.cuda.memory_reserved(device)
-    total = torch.cuda.get_device_properties(device).total_memory
+    # FlagScale Begin
+    device = cur_platform.current_device()
+    allocated = cur_platform.memory_allocated(device)
+    reserved = cur_platform.memory_reserved(device)
+    total = cur_platform.get_device_properties(device).total_memory
+    # FlagScale End
 
     allocated_ratio = allocated / total
     reserved_ratio = reserved / total
@@ -4687,6 +4805,7 @@ def make_fsdp_dtensor(
         )
         tp_mesh = dist_index.get_submesh(dist_index.tp_dim, is_expert_parallel=is_expert_param)
         global_shape = list(param.shape)
+<<<<<<< ours
         if is_mcore_tensor_parallel_duplicated(param):
             placements = [Replicate()]
             if force_sync_tp_duplicated_param:
@@ -4702,6 +4821,36 @@ def make_fsdp_dtensor(
             assert tp_dim is not None, (
                 "[Megatron-FSDP] Parameter is not tensor model parallel, "
                 "yet tensor_model_parallel is True."
+=======
+        if tp_mesh.mesh.numel() > 1:
+            if is_mcore_tensor_parallel_duplicated(param):
+                placements = [Replicate()]
+                if force_sync_tp_duplicated_param:
+                    if local_tensor.numel() > 0:
+                        torch.distributed.broadcast(
+                            local_tensor, group=tp_mesh.get_group(), group_src=0
+                        )
+                elif run_check:
+                    # TODO: Implement consistency check for duplicated TP parameters
+                    pass
+            else:
+                tp_dim = get_mcore_tensor_parallel_partition_dim(param)
+                assert tp_dim is not None, (
+                    "[Megatron-FSDP] Parameter is not tensor model parallel, "
+                    "yet tensor_model_parallel is True."
+                )
+                placements = [Shard(tp_dim)]
+                global_shape[tp_dim] *= tp_mesh.mesh.numel()
+
+            # Construct TP-sharded DTensor using Megatron-style placement
+            param = DTensor.from_local(
+                local_tensor=local_tensor,
+                device_mesh=tp_mesh,
+                placements=placements,
+                run_check=run_check,
+                shape=tuple(global_shape),
+                stride=torch.empty(global_shape).stride(),
+>>>>>>> theirs
             )
             placements = [Shard(tp_dim)]
             global_shape[tp_dim] *= tp_mesh.mesh.numel()

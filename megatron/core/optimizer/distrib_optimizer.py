@@ -47,11 +47,15 @@ from ..dist_checkpointing.mapping import (
     ShardedTensorFactory,
 )
 from ..dist_checkpointing.utils import extract_sharded_tensors_and_factories
+<<<<<<< ours
 from ..distributed.param_and_grad_buffer import (
     _ParamAndGradBuffer,
     group_params_for_buffers,
     partition_buckets,
 )
+=======
+from ..distributed.param_and_grad_buffer import _ParamAndGradBuffer, partition_buckets
+>>>>>>> theirs
 from ..fp4_utils import is_nvfp4tensor, quantize_nvfp4_param_shard
 from ..fp8_utils import dequantize_fp8_tensor, is_float8tensor, quantize_param_shard
 from ..transformer.fsdp_dtensor_checkpoint import handle_experts_in_state_dict
@@ -60,6 +64,12 @@ from .grad_scaler import MegatronGradScaler
 from .optimizer import MixedPrecisionOptimizer, _zero_grad_group_helper, param_group_identifier_keys
 from .optimizer_config import OptimizerConfig
 from .param_layout import FullParamLayout, PerBufferParamLayout, pad_bucket_end, pad_param_start
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform  # isort: skip
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 logger = getLogger(__name__)
 
@@ -101,10 +111,17 @@ class Range:
 
 class DistributedOptimizer(MixedPrecisionOptimizer):
     """Optimizer that shards state across data-parallel ranks.
+<<<<<<< ours
 
     This class reduces memory usage by distributing optimizer states (like
     momentum and variance buffers) across GPUs in the data-parallel group.
 
+=======
+
+    This class reduces memory usage by distributing optimizer states (like
+    momentum and variance buffers) across GPUs in the data-parallel group.
+
+>>>>>>> theirs
     Attributes:
         model_chunks (List[MegatronModule]): Model segments being optimized.
         per_model_buffers (Dict): Buffers managing contiguous params/grads.
@@ -223,8 +240,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         gbuf_world_range = gbuf_world_all_ranges[data_parallel_rank]
 
         # Get each param's ranges.
+        # Use get_unpacked_index_map() which returns full-numel indices for NVFP4 params
+        # (from nvfp4_unpacked_param_index_map) and normal indices for other params.
         param_range_map = cls._build_model_gbuf_param_range_map(
-            param_and_grad_buffer.param_index_map, gbuf_world_range, bucket.offset
+            param_and_grad_buffer.get_unpacked_index_map(), gbuf_world_range, bucket.offset
         )
 
         # Group into dict.
@@ -375,15 +394,26 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 param_range = gbuf_range["param_map"][model_param]["param"]
 
                 # fp16, bf16 params.
-                if model_param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                # FlagScale Begin
+                if model_param.device.type == cur_platform.device_name() and model_param.dtype in (
+                    torch.float16,
+                    torch.bfloat16,
+                ):
+                # FlagScale End
 
                     # Generate sharded model param.
                     if (
+<<<<<<< ours
                         cls._is_distopt_quantized_param(model_param)
                         and config.fp8_recipe != "delayed"
                     ) or is_nvfp4tensor(model_param):
                         # MXFP8Tensor, BlockwiseQTensor, grouped quantized tensors, and NVFP4Tensor
                         # don't support view(-1).
+=======
+                        is_float8tensor(model_param) and config.fp8_recipe != "delayed"
+                    ) or is_nvfp4tensor(model_param):
+                        # MXFP8Tensor, BlockwiseQTensor, and NVFP4Tensor don't support view(-1)
+>>>>>>> theirs
                         shard_model_param = None
                     else:
                         shard_model_param = model_param.detach().view(-1)[
@@ -402,9 +432,13 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         # precision at the beginning of training (this problem will not occur if the
                         # training is long enough or if the main params are loaded from a
                         # checkpoint).
+<<<<<<< ours
                         if is_nvfp4tensor(model_param) or cls._is_distopt_quantized_param(
                             model_param
                         ):
+=======
+                        if is_nvfp4tensor(model_param) or is_float8tensor(model_param):
+>>>>>>> theirs
                             if hasattr(model_param, 'get_high_precision_init_val'):
                                 shard_main_param = (
                                     model_param.get_high_precision_init_val()
@@ -440,7 +474,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     shard_fp32_from_float16_params_this_group.append(shard_main_param)
 
                 # fp32 params.
-                elif model_param.type() == 'torch.cuda.FloatTensor':
+                # FlagScale Begin
+                elif (
+                    model_param.device.type == cur_platform.device_name()
+                    and model_param.dtype == torch.float32
+                ):
+                # FlagScale End
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
@@ -453,9 +492,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'torch.cuda.FloatTensor,  '
-                        'torch.cuda.HalfTensor, or '
-                        'torch.cuda.BFloat16Tensor. '
+                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '  # FlagScale Add
                         'Received {}'.format(model_param.type())
                     )
 
@@ -730,7 +767,12 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             for param in param_group['params']:
                 if param.requires_grad:
                     # fp32 copy only needed for 16-bit parameters.
-                    if param.type() in ['torch.cuda.HalfTensor', 'torch.cuda.BFloat16Tensor']:
+                    # FlagScale Begin
+                    if param.device.type == cur_platform.device_name() and param.dtype in (
+                        torch.float16,
+                        torch.bfloat16,
+                    ):
+                    # FlagScale End
                         param.main_param = None
                         param.main_param_sharded = True
 
@@ -941,7 +983,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=torch.cuda.current_device()
+                                (numel,), dtype=dtype, device=cur_platform.current_device()  # FlagScale Add
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
@@ -1303,7 +1345,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else torch.cuda.current_device()
+                                device = "cpu" if use_gloo_comm else cur_platform.current_device()  # FlagScale Add
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device
@@ -2728,6 +2770,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             return
 
         if self.ddp_config.fp8_param_gather:
+<<<<<<< ours
             # Grouped quantized tensors expose one logical parameter backed by multiple TE
             # quantized members. Expand them so quantize_param_shard receives member-aligned
             # master shards instead of a shard over the grouped wrapper.
@@ -2754,6 +2797,10 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 expanded_shard_fp32_from_fp8,
                 expanded_shard_offsets_in_fp8,
                 self.data_parallel_group,
+=======
+            quantize_param_shard(
+                *self._get_fp8_params_and_shard_fp32_from_fp8(), self.data_parallel_group
+>>>>>>> theirs
             )
         elif self.ddp_config.fp4_param_gather:
             # Quantize FP32 master shards back to NVFP4 model params (rowwise only)

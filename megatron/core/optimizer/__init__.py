@@ -42,9 +42,16 @@ try:
 except (ImportError, PackageNotFoundError):
     _eo_ver = (0, 0)
 
+<<<<<<< ours
 HAVE_EMERGING_OPTIMIZERS = _eo_ver >= (0, 2)
 
 if HAVE_EMERGING_OPTIMIZERS:
+=======
+HAVE_EMERGING_OPTIMIZERS = _eo_ver >= (0, 1)
+HAVE_EO_V02 = _eo_ver >= (0, 2)
+
+if HAVE_EO_V02:
+>>>>>>> theirs
     from emerging_optimizers.scalar_optimizers import Lion
 
 from megatron.core import parallel_state
@@ -75,8 +82,11 @@ from .optimizer import (
     MegatronOptimizer,
     param_group_identifier_keys,
 )
+<<<<<<< ours
 
 # Subclass aliases kept for backward compatibility; all are OptimizerConfig.
+=======
+>>>>>>> theirs
 from .optimizer_config import (
     AdamOptimizerConfig,
     OptimizerConfig,
@@ -217,7 +227,11 @@ def get_mup_config_overrides(
     def is_muon_managed_matrix_parameter(param: torch.nn.Parameter, _: str) -> bool:
         if not is_muon_optimizer:
             return False
+<<<<<<< ours
         return is_managed_by_layer_wise_optimizer(param)
+=======
+        return param.dim() == 2 and not getattr(param, 'is_embedding_or_output_parameter', False)
+>>>>>>> theirs
 
     def should_scale_lr_with_mup(param: torch.nn.Parameter, param_name: str) -> bool:
         if decoupled_lr_enabled and getattr(param, 'is_embedding_or_output_parameter', False):
@@ -258,9 +272,15 @@ def get_mup_config_overrides(
             mup_overrides[ParamKey(with_name_predicate=vector_like_predicate)] = (
                 vector_like_lr_override
             )
+<<<<<<< ours
 
         return mup_overrides
 
+=======
+
+        return mup_overrides
+
+>>>>>>> theirs
     lr_override: ParamGroupOverride = {}
     if base_lr is not None:
         lr_override["max_lr"] = base_lr * hidden_lr_mult
@@ -322,8 +342,21 @@ def _get_param_groups(
         List of parameter groups.
     """
 
+<<<<<<< ours
     # Map (pg_overrides, is_expert_parallel) to params.
     params_map = {}
+=======
+    # Map (pg_overrides, is_expert_parallel, is_engram_parallel) to params.  # FlagScale Add
+    params_map = {}
+
+    if config_overrides is None:
+        # TODO remove this default behavior eventually.
+        #  This is only needed for backwards compatibility with the old config overrides API where
+        #  the config_overrides argument by default lead to bias parameters and length 1 parameters.
+        #  We assume that users of decoupled LR already provide config overrides so will adapt
+        #  to the new API.
+        config_overrides = get_standard_config_overrides(config=config)
+>>>>>>> theirs
 
     for model_chunk in model_chunks:
         for name, param in model_chunk.named_parameters():
@@ -346,12 +379,24 @@ def _get_param_groups(
                 param_override = None
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
+<<<<<<< ours
+=======
+            # FlagScale Begin
+            is_engram_parallel = getattr(
+                param, 'is_engram_embedding', False
+            )  # FlagScale add is_engram_parallel
+            # FlagScale End
+>>>>>>> theirs
 
             # Create config_tuple that is hash-able, and has a consistent ordering of the keys.
             param_override_tuple: tuple[tuple[str, Any], ...] | None = (
                 param_group_override_to_tuple(param_override)
             )
+<<<<<<< ours
             key = (param_override_tuple, is_expert_parallel)
+=======
+            key = (param_override_tuple, is_expert_parallel, is_engram_parallel)  # FlagScale Add
+>>>>>>> theirs
             if key not in params_map:
                 params_map[key] = []
             params_map[key].append(param)
@@ -370,7 +415,11 @@ def _get_param_groups(
     param_groups = []
     # Sort keys, None first.
     for key in sorted(params_key, key=lambda x: (x[0] is not None, x[0])):
+<<<<<<< ours
         param_override_tuple, is_expert_parallel = key
+=======
+        param_override_tuple, is_expert_parallel, is_engram_parallel = key  # FlagScale Add
+>>>>>>> theirs
         params = params_map[key] if key in params_map else []
         if param_override_tuple is None:
             param_override: ParamGroupOverride = {}
@@ -403,6 +452,13 @@ def _get_param_groups(
         param_group = {
             'params': params,
             'is_expert_parallel': is_expert_parallel,
+<<<<<<< ours
+=======
+            # FlagScale Begin
+            'is_engram_parallel': is_engram_parallel,  # FlagScale add is_engram_parallel
+            'is_vision_model_param': False,  # FlagScale add is_vision_model_param
+            # FlagScale End
+>>>>>>> theirs
             'default_config': uses_default_lr_schedule,
             **default_config,
             **param_override,  # keep **param_override last so that users can override other fields.
@@ -459,8 +515,12 @@ def _get_megatron_optimizer_based_on_param_groups(
     intra_dist_opt_group: Optional[torch.distributed.ProcessGroup] = None,
     distributed_optimizer_instance_id: Optional[int] = 0,
     pg_collection: Optional[ProcessGroupCollection] = None,
+<<<<<<< ours
     skip_megatron_wrapping: bool = False,
 ) -> Union[MegatronOptimizer, Tuple[Optional[torch.optim.Optimizer], Optional[Callable]]]:
+=======
+) -> MegatronOptimizer:
+>>>>>>> theirs
     """Get Megatron optimizer based on parameter groups.
 
     Args:
@@ -596,7 +656,11 @@ def _get_megatron_optimizer_based_on_param_groups(
                                 opt.initialize_state(p)
 
         elif config.optimizer == 'lion':
+<<<<<<< ours
             if not HAVE_EMERGING_OPTIMIZERS:
+=======
+            if not HAVE_EO_V02:
+>>>>>>> theirs
                 raise ImportError(
                     "Lion optimizer requires emerging_optimizers >= 0.2. "
                     "Please install or upgrade it to use --optimizer lion."
@@ -721,6 +785,7 @@ def check_config_overrides_consistency(
     return True
 
 
+<<<<<<< ours
 def _get_megatron_emerging_optimizer(
     config: OptimizerConfig,
     model_chunks: List[MegatronModule],
@@ -959,6 +1024,8 @@ def _get_megatron_emerging_optimizer(
     return ChainedOptimizer(results)
 
 
+=======
+>>>>>>> theirs
 def get_megatron_optimizer(
     config: OptimizerConfig,
     model_chunks: List[MegatronModule],
@@ -995,6 +1062,7 @@ def get_megatron_optimizer(
         config_overrides = get_standard_config_overrides(config)
 
     check_config_overrides_consistency(config, config_overrides)
+<<<<<<< ours
 
     # TODO: the standard and emerging optimizer paths handle pg_collection differently;
     # unify them so both use a single pg_collection-based flow.
@@ -1007,6 +1075,8 @@ def get_megatron_optimizer(
         )
 
     log_single_rank(logger, logging.INFO, f'Setting up optimizer with config {config}')
+=======
+>>>>>>> theirs
 
     # Separate out first model chunk if overlapping param AG with optimizer step.
     if config.overlap_param_gather_with_optimizer_step:
@@ -1025,10 +1095,24 @@ def get_megatron_optimizer(
     intra_dp_cp_group = process_groups_dict['intra_dp_cp_group']
     intra_expt_dp_group = process_groups_dict['intra_expt_dp_group']
     mp_group = process_groups_dict['mp_group']
+<<<<<<< ours
+=======
+    ########## FlagScale Begin ##########
+    mp_group = [mp_group] if not isinstance(mp_group, list) else mp_group
+    ########## FlagScale End ##########
+>>>>>>> theirs
     expt_tp_pp_group = process_groups_dict['expt_tp_pp_group']
     intra_dp_cp_group_gloo = process_groups_dict['intra_dp_cp_group_gloo']
     intra_expt_dp_group_gloo = process_groups_dict['intra_expt_dp_group_gloo']
     intra_dist_opt_group = process_groups_dict['intra_dist_opt_group']
+<<<<<<< ours
+=======
+    # FlagScale Begin
+    engram_dp_group = process_groups_dict['engram_dp_group']
+    engram_mp_group = process_groups_dict['engram_mp_group']
+    engram_dp_group_gloo = process_groups_dict['engram_dp_group_gloo']
+    # FlagScale End
+>>>>>>> theirs
 
     model_parallel_rank = get_pg_rank(mp_group)
 
@@ -1085,8 +1169,11 @@ def get_megatron_optimizer(
                 # applied to the Megatron-FSDP main weight and extended to FusedAdam
                 # main weights. Override this here.
                 setattr(optimizer_part.optimizer, "master_weights", False)
+<<<<<<< ours
                 # Megatron-FSDP always uses a decoupled gradient when using FusedAdam.
                 setattr(optimizer_part.optimizer, "use_decoupled_grad", True)
+=======
+>>>>>>> theirs
 
             optimizers.append(optimizer_part)
             model_chunk_offset += 1
@@ -1107,7 +1194,7 @@ def get_megatron_optimizer(
             model_chunk_offset=model_chunk_offset,
             config=config,
             config_overrides=config_overrides,
-            filter_fn=lambda g: not g['is_expert_parallel'],
+            filter_fn=lambda g: not g['is_expert_parallel'] and not g['is_engram_parallel'],  # FlagScale Add
             buffer_name='buffers',
         )
         for model_chunk in dense_model_chunks:
@@ -1144,7 +1231,7 @@ def get_megatron_optimizer(
         model_chunk_offset=0,
         config=config,
         config_overrides=config_overrides,
-        filter_fn=lambda g: g['is_expert_parallel'],
+        filter_fn=lambda g: g['is_expert_parallel'] and not g['is_engram_parallel'],  # FlagScale Add
         buffer_name='expert_parallel_buffers',
     )
     if dump_param_to_param_group_map is not None:
@@ -1173,8 +1260,55 @@ def get_megatron_optimizer(
                 intra_dist_opt_group=intra_dist_opt_group,
                 distributed_optimizer_instance_id=distributed_optimizer_instance_id,
                 pg_collection=pg_collection,
+<<<<<<< ours
+=======
             )
         )
+
+    # FlagScale Begin
+    # Engram parallel param groups and buffers
+    engram_param_groups, engram_buffers = _get_param_groups_and_buffers(
+        model_chunks,
+        model_chunk_offset=0,
+        config=config,
+        config_overrides=config_overrides,
+        filter_fn=lambda g: g['is_engram_parallel'],
+        buffer_name='engram_embedding_buffers',
+    )
+    if dump_param_to_param_group_map is not None:
+        for param_group in engram_param_groups:
+            for param in param_group["params"]:
+                param_name = get_global_unique_param_name(model_chunks, param)
+                param_to_param_group[param_name] = param_group_id
+            param_group_id += 1
+    if len(engram_param_groups) > 0:
+        engram_model_parallel_rank = get_pg_rank(engram_mp_group)
+
+        # Pass Gloo process groups into optimizer only if needed.
+        if use_gloo_process_groups:
+            engram_data_parallel_group_gloo = engram_dp_group_gloo
+        else:
+            engram_data_parallel_group_gloo = None
+        assert (
+            distributed_optimizer_instance_id == 0
+        ), "Engram parallel optimizer only supports a single instance."
+        optimizers.append(
+            _get_megatron_optimizer_based_on_param_groups(
+                config=config,
+                model_chunks=model_chunks,
+                param_groups=engram_param_groups,
+                per_model_buffers=engram_buffers,
+                model_parallel_group=engram_mp_group,
+                data_parallel_group=engram_dp_group,
+                data_parallel_group_gloo=engram_data_parallel_group_gloo,
+                data_parallel_group_idx=engram_model_parallel_rank,
+                intra_dist_opt_group=intra_dist_opt_group,
+                distributed_optimizer_instance_id=distributed_optimizer_instance_id,
+                pg_collection=pg_collection,
+>>>>>>> theirs
+            )
+        )
+    # FlagScale End
 
     if dump_param_to_param_group_map is not None:
         torch.distributed.checkpoint.save(

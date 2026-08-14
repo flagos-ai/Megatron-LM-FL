@@ -26,6 +26,12 @@ from megatron.core.transformer.moe.moe_utils import (
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
 
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+
 
 class Router(ABC, MegatronModule):
     """Base Router class"""
@@ -35,6 +41,10 @@ class Router(ABC, MegatronModule):
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
         is_mtp_layer: bool = False,
+<<<<<<< ours
+=======
+        layer_number: Optional[int] = None,
+>>>>>>> theirs
     ) -> None:
         """
         Initialize the Router module.
@@ -48,7 +58,11 @@ class Router(ABC, MegatronModule):
         self.config = config
         self.num_experts = self.config.num_moe_experts
         self.moe_aux_loss_func = None
+<<<<<<< ours
         self.layer_number = None
+=======
+        self.layer_number = layer_number
+>>>>>>> theirs
         self.is_mtp_layer = is_mtp_layer
         self.tp_group = pg_collection.tp
         self.cp_group = pg_collection.cp
@@ -94,9 +108,9 @@ class Router(ABC, MegatronModule):
         """
         if self.weight.device.type == 'cpu':
             # move weights to GPU
-            self.weight.data = self.weight.data.to(device=torch.cuda.current_device())
+            self.weight.data = self.weight.data.to(device=cur_platform.current_device())  # FlagScale Add
         if self.bias is not None and self.bias.device.type == 'cpu':
-            self.bias.data = self.bias.data.to(device=torch.cuda.current_device())
+            self.bias.data = self.bias.data.to(device=cur_platform.current_device())  # FlagScale Add
 
         # Convert to specified datatype for routing computation if enabled
         router_dtype = input.dtype
@@ -156,6 +170,10 @@ class TopKRouter(Router):
         config: TransformerConfig,
         pg_collection: Optional[ProcessGroupCollection] = None,
         is_mtp_layer: bool = False,
+<<<<<<< ours
+=======
+        layer_number: Optional[int] = None,
+>>>>>>> theirs
     ) -> None:
         """Initialize the zero token dropping router.
 
@@ -164,20 +182,52 @@ class TopKRouter(Router):
             pg_collection (ProcessGroupCollection, optional): Process groups for MoE operations.
             is_mtp_layer (bool): Flag indicating if this router is part of an MTP layer.
         """
+<<<<<<< ours
         super().__init__(config=config, pg_collection=pg_collection, is_mtp_layer=is_mtp_layer)
+=======
+        super().__init__(
+            config=config,
+            pg_collection=pg_collection,
+            is_mtp_layer=is_mtp_layer,
+            layer_number=layer_number,
+        )
+>>>>>>> theirs
         self.topk = self.config.moe_router_topk
         self.routing_type = self.config.moe_router_load_balancing_type
         self.score_function = self.config.moe_router_score_function
         self.input_jitter = None
 
-        self.enable_expert_bias = self.config.moe_router_enable_expert_bias
+        if self.config.moe_n_hash_layers > 0:
+            assert layer_number is not None, "layer_number is required for the hash-based router."
+        self.is_hash_layer = (
+            not self.is_mtp_layer
+            and self.config.moe_n_hash_layers > 0
+            and layer_number <= self.config.moe_n_hash_layers
+        )
+        if self.is_hash_layer:
+            # DSv4-Pro ships a pre-trained tid2eid table in its inference checkpoint;
+            # no public initialization recipe is documented. Round-robin is used here
+            # only as a placeholder so the layer is runnable from scratch.
+            vocab_size = self.config.actual_vocab_size
+            num_experts = self.config.num_moe_experts
+            ids = torch.arange(vocab_size, device=torch.cuda.current_device())
+            tid2eid = torch.stack([(ids + k) % num_experts for k in range(self.topk)], dim=1).to(
+                torch.int32
+            )
+            self.register_buffer('tid2eid', tid2eid)
+        else:
+            self.tid2eid = None
+
+        self.enable_expert_bias = (
+            self.config.moe_router_enable_expert_bias and not self.is_hash_layer
+        )
         if self.enable_expert_bias:
             self.register_buffer(
                 'local_tokens_per_expert',
                 torch.zeros(
                     self.config.num_moe_experts,
                     dtype=torch.float32,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                 ),
                 persistent=False,
             )
@@ -186,7 +236,7 @@ class TopKRouter(Router):
                 torch.zeros(
                     self.config.num_moe_experts,
                     dtype=torch.float32,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                 ),
             )
         else:
@@ -200,13 +250,13 @@ class TopKRouter(Router):
                 torch.zeros(
                     self.config.num_moe_experts,
                     dtype=torch.float32,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                 ),
                 persistent=False,
             )
             self.register_buffer(
                 'ga_steps',
-                torch.tensor(0, dtype=torch.float32, device=torch.cuda.current_device()),
+                torch.tensor(0, dtype=torch.float32, device=cur_platform.current_device()),  # FlagScale Add
                 persistent=False,
             )
         else:
@@ -419,7 +469,11 @@ class TopKRouter(Router):
             global_aux_loss,
             "global_load_balancing_loss",
             self.tp_dp_cp_group,
+<<<<<<< ours
             needs_dp_avg=False,
+=======
+            reduce_group_has_dp=True,
+>>>>>>> theirs
             valid_token_count=local_num_tokens,
         )
         return probs
@@ -431,7 +485,11 @@ class TopKRouter(Router):
         aux_loss: torch.Tensor,
         aux_loss_name: str,
         reduce_group: torch.distributed.ProcessGroup,
+<<<<<<< ours
         needs_dp_avg: bool = True,
+=======
+        reduce_group_has_dp: bool = False,
+>>>>>>> theirs
         valid_token_count: Optional[Union[int, torch.Tensor]] = None,
     ):
         """Attach aux loss function to activation and add to logging.
@@ -442,7 +500,13 @@ class TopKRouter(Router):
             aux_loss (torch.Tensor): Computed aux loss.
             aux_loss_name (str): Name of the aux loss for logging.
             reduce_group (torch.distributed.ProcessGroup): Process group for reduction.
+<<<<<<< ours
             needs_dp_avg (bool): Whether to average this metric across DP ranks after reduce_group.
+=======
+            reduce_group_has_dp (bool): Whether the reduce group has data parallel ranks.
+                Set this to True if the reduce group has data parallel ranks. This flag is used to
+                ensure the correct reduction in aux loss tracking.
+>>>>>>> theirs
             valid_token_count (int or torch.Tensor, optional): Number of valid tokens excluding
                 padding tokens. Can be a Python int or a torch.Tensor (typically 0-d tensor).
                 If None, uses activation.shape[0]. Defaults to None.
@@ -470,7 +534,11 @@ class TopKRouter(Router):
         else:
             layer_number = self.layer_number
 
+<<<<<<< ours
         get_moe_metrics_tracker().record(
+=======
+        save_to_aux_losses_tracker(
+>>>>>>> theirs
             aux_loss_name,
             aux_loss / aux_loss_coeff,
             layer_number,
@@ -543,7 +611,11 @@ class TopKRouter(Router):
             else:
                 layer_number = self.layer_number
 
+<<<<<<< ours
             get_moe_metrics_tracker().record(
+=======
+            save_to_aux_losses_tracker(
+>>>>>>> theirs
                 "z_loss", z_loss / moe_z_loss_coeff, layer_number, num_layers
             )
         return logits
@@ -583,7 +655,57 @@ class TopKRouter(Router):
                     routing_map = routing_map & (~padding_mask)
                 self.local_tokens_per_expert += routing_map.sum(dim=0)
 
+<<<<<<< ours
     def routing(self, logits: torch.Tensor, padding_mask: Optional[torch.Tensor] = None):
+=======
+    def _hash_routing(self, logits: torch.Tensor, input_ids: torch.Tensor):
+        """Hash-based routing: expert indices come from the tid2eid lookup table.
+
+        Scores are still computed from the gating logits for weight computation,
+        but expert selection is determined by the pre-computed hash table.
+
+        Args:
+            logits (torch.Tensor): Gating logits, shape [num_tokens, num_experts].
+            input_ids (torch.Tensor): Token IDs, shape [seq_length, bsz].
+
+        Returns:
+            Tuple[torch.Tensor, torch.Tensor]: routing_probs and routing_map.
+        """
+        num_tokens, num_experts = logits.shape
+
+        if self.score_function == "softmax":
+            scores = torch.softmax(logits, dim=-1, dtype=torch.float32).type_as(logits)
+        elif self.score_function == "sigmoid":
+            scores = torch.sigmoid(logits.float()).type_as(logits)
+        elif self.score_function == "sqrtsoftplus":
+            scores = torch.nn.functional.softplus(logits.float()).sqrt().type_as(logits)
+        else:
+            raise ValueError(f"Invalid score_function: {self.score_function}")
+
+        # input_ids is [b, s] from the model, but hidden_states are [s, b, h]
+        # and get flattened to [s*b, h]. Transpose to match.
+        flat_ids = input_ids.T.reshape(-1)
+        top_indices = self.tid2eid[flat_ids].long()  # [num_tokens, topk]
+
+        probs = scores.gather(1, top_indices)
+        if self.score_function != "softmax":
+            probs = probs / (probs.sum(dim=-1, keepdim=True) + 1e-20)
+
+        if self.config.moe_router_topk_scaling_factor:
+            probs = probs * self.config.moe_router_topk_scaling_factor
+
+        routing_probs = torch.zeros_like(logits).scatter(1, top_indices, probs)
+        routing_map = torch.zeros_like(logits).int().scatter(1, top_indices, 1).bool()
+
+        return routing_probs, routing_map
+
+    def routing(
+        self,
+        logits: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+    ):
+>>>>>>> theirs
         """Top-k routing function
 
         Args:
@@ -591,6 +713,11 @@ class TopKRouter(Router):
             padding_mask (torch.Tensor, optional): Boolean mask indicating non-padding tokens.
                                                    Shape [seq_length, bsz]. True for valid tokens,
                                                    False for padding tokens. Defaults to None.
+<<<<<<< ours
+=======
+            input_ids (torch.Tensor, optional): The input IDs tensor. Shape [seq_length, bsz].
+                                                Defaults to None.
+>>>>>>> theirs
 
         Returns:
             probs (torch.Tensor): The probabilities of token to experts assignment.
@@ -608,7 +735,13 @@ class TopKRouter(Router):
         logits = self.apply_z_loss(logits, padding_mask=padding_mask)
 
         # Calculate probs and routing_map for token dispatching
-        if self.routing_type == "sinkhorn":
+        if self.is_hash_layer:
+            assert input_ids is not None, (
+                "input_ids is required for hash-based routing but was None. "
+                "Ensure --moe-n-hash-layers is set correctly and input_ids are passed."
+            )
+            probs, routing_map = self._hash_routing(logits, input_ids)
+        elif self.routing_type == "sinkhorn":
             probs, routing_map = self.sinkhorn_load_balancing(logits)
         else:
             probs, routing_map = topk_routing_with_score_function(
@@ -677,7 +810,16 @@ class TopKRouter(Router):
             self.global_tokens_per_expert.zero_()
             self.ga_steps.zero_()
 
+<<<<<<< ours
     def forward(self, input: torch.Tensor, padding_mask: Optional[torch.Tensor] = None):
+=======
+    def forward(
+        self,
+        input: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+    ):
+>>>>>>> theirs
         """
         Forward pass of the router.
 
@@ -686,6 +828,11 @@ class TopKRouter(Router):
             padding_mask (torch.Tensor, optional): Boolean mask indicating non-padding tokens.
                                                    Shape [seq_length, bsz]. True for valid tokens,
                                                    False for padding tokens. Defaults to None.
+<<<<<<< ours
+=======
+            input_ids (torch.Tensor, optional): The input IDs tensor. Shape [seq_length, bsz].
+                                                Defaults to None.
+>>>>>>> theirs
         """
         self._maintain_float32_expert_bias()
 
@@ -703,7 +850,11 @@ class TopKRouter(Router):
                 logits, self.config.moe_router_force_biased, self.layer_number
             )
 
+<<<<<<< ours
         probs, routing_map = self.routing(logits, padding_mask=padding_mask)
+=======
+        probs, routing_map = self.routing(logits, padding_mask=padding_mask, input_ids=input_ids)
+>>>>>>> theirs
 
         return probs, routing_map
 
@@ -754,6 +905,19 @@ class InferenceTopKRouter(TopKRouter):
 
         super().__init__(config=config, pg_collection=pg_collection)
 
+<<<<<<< ours
+=======
+        self.is_inference_cuda_graphed_iteration = False
+
+    def set_inference_cuda_graphed_iteration(self):
+        """Enable CUDA graph-compatible operations for the router."""
+        self.is_inference_cuda_graphed_iteration = True
+
+    def unset_inference_cuda_graphed_iteration(self):
+        """Disable CUDA graph-compatible operations for the router."""
+        self.is_inference_cuda_graphed_iteration = False
+
+>>>>>>> theirs
     @staticmethod
     @torch.compile
     def _compiled_topk_routing(
@@ -814,7 +978,11 @@ class InferenceTopKRouter(TopKRouter):
                 - top_indices: Selected expert indices [num_tokens, topk]
         """
 
+<<<<<<< ours
         if not InferenceMode.is_active():
+=======
+        if self.training or not self.is_inference_cuda_graphed_iteration:
+>>>>>>> theirs
             return super().forward(input, padding_mask)
 
         return self._forward(input, padding_mask)

@@ -392,6 +392,11 @@ class OptimizerConfig:
     optimizer_cuda_graph: bool = False
     """If true, enables CUDA graph for optimizer step."""
 
+    ########## FlagScale Begin ##########
+    ################
+    # Grouped learning rate for multi-model training.
+    vision_ration: float = 1.0
+    ########## FlagScale End ##########
     def __post_init__(self):
         """Check the validity of the config."""
 

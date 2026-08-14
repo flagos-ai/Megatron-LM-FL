@@ -32,6 +32,7 @@ import torch
 from megatron.core import config
 from megatron.core._rank_utils import log_single_rank
 from megatron.core.package_info import __version__ as mcore_version
+from megatron.core.packed_seq_params import PackedSeqParams
 
 try:
     from torch.distributed._tensor import DTensor
@@ -43,6 +44,12 @@ except ImportError:
 
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
 
 try:
     from packaging.version import Version as PkgVersion
@@ -60,6 +67,20 @@ try:
     # Alias the PyTorch wrapper so we can call tex.* APIs
     import transformer_engine_torch as tex
 except ImportError:
+<<<<<<< ours
+=======
+    HAVE_NVTX = False
+
+logger = logging.getLogger(__name__)
+
+try:
+    # Register the TE CUDA kernels
+    import transformer_engine  # pylint: disable=unused-import
+
+    # Alias the PyTorch wrapper so we can call tex.* APIs
+    import transformer_engine_torch as tex
+except ImportError:
+>>>>>>> theirs
     # TE isn’t installed or the torch wrapper is missing
     tex = None
 
@@ -314,10 +335,26 @@ def get_te_version():
         else:
             return version("transformer-engine")
 
+    ########## FlagScale Begin ##########
+    def parse_te_version_str(ver_str):
+        import re
+
+        # Handle versions like "0.1.0+te2.9.0" — extract the part after "+te"
+        match = re.search(r'\+te(\d+\.\d+.*)', ver_str)
+        if match:
+            return match.group(1)
+        return ver_str
+
+    ########## FlagScale End ##########
+
     global _te_version
     if _te_version is None:
         if HAVE_TE:
+<<<<<<< ours
             _te_version = PkgVersion(get_te_version_str())
+=======
+            _te_version = PkgVersion(parse_te_version_str(get_te_version_str()))  # FlagScale Add
+>>>>>>> theirs
         else:
             _te_version = PkgVersion("0.0.0")
     return _te_version
@@ -485,12 +522,15 @@ def is_flashinfer_min_version(version, check_equality=True):
     if check_equality:
         return flashinfer_version >= PkgVersion(version)
     return flashinver_version > PkgVersion(version)
+<<<<<<< ours
 
 
 def accepts_parameter(func: Callable, name: str) -> bool:
     """Check if a callable accepts a parameter with the given name or **kwargs."""
     params = inspect.signature(func).parameters.values()
     return any(p.name == name or p.kind == inspect.Parameter.VAR_KEYWORD for p in params)
+=======
+>>>>>>> theirs
 
 
 def ensure_divisibility(numerator, denominator):
@@ -505,11 +545,14 @@ def divide(numerator, denominator):
     return numerator // denominator
 
 
+<<<<<<< ours
 def round_up_to_nearest_multiple(value: int, multiple: int) -> int:
     """Round *value* up to the nearest multiple of *multiple*."""
     return math.ceil(value / multiple) * multiple
 
 
+=======
+>>>>>>> theirs
 def get_tensor_model_parallel_group_if_none(tp_group, is_expert=False, check_initialized=True):
     """Issue a deprecation warning if tp_group is None and return the default tp group."""
     # TODO(zijiey): remove this function later.
@@ -550,6 +593,10 @@ def get_pg_size(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 1
+    ######### FlagScale Begin #########
+    if isinstance(group, list):
+        return group[0].size()
+    ######### FlagScale End #########
     return group.size()
 
 
@@ -564,6 +611,10 @@ def get_pg_rank(group=None):
     """
     if not torch.distributed.is_initialized() or group is None:
         return 0
+    ######### FlagScale Begin #########
+    if isinstance(group, list):
+        return group[0].rank()
+    ######### FlagScale End #########
     return group.rank()
 
 
@@ -652,7 +703,7 @@ class GlobalMemoryBuffer:
                 self.buffer[(name, dtype)] = torch.empty(
                     required_len,
                     dtype=dtype,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),  # FlagScale Add
                     requires_grad=False,
                 )
 
@@ -1379,10 +1430,12 @@ class StragglerDetector:
         self.bdata: bool = False
         self.dev: Union[torch.device, int, None] = None
         self.evt_q: Union[queue.LifoQueue, None] = None
-        self.start_gemm_ev: List[torch.cuda.Event] = []
-        self.stop_gemm_ev: List[torch.cuda.Event] = []
-        self.start_data_ev: List[torch.cuda.Event] = []
-        self.stop_data_ev: List[torch.cuda.Event] = []
+        # FlagScale Begin
+        self.start_gemm_ev: List[cur_platform.Event] = []
+        self.stop_gemm_ev: List[cur_platform.Event] = []
+        self.start_data_ev: List[cur_platform.Event] = []
+        self.stop_data_ev: List[cur_platform.Event] = []
+        # FlagScale End
         self.start_gemm_tm: List[int] = []
         self.stop_gemm_tm: List[int] = []
         self.start_data_tm: List[int] = []
@@ -1432,7 +1485,7 @@ class StragglerDetector:
         self.stop = self.null_method
         self._off = True
         # No CUDA, No Support
-        if torch.cuda.is_available():
+        if cur_platform.is_available():  # FlagScale Add
             self._off = not enabled
             self.world = world
             self.rank = rank
@@ -1452,12 +1505,12 @@ class StragglerDetector:
             self.stop_data_tm = []
             backend = torch.distributed.get_backend()
             if backend == "nccl":
-                self.dev = torch.cuda.current_device()
+                self.dev = cur_platform.current_device()  # FlagScale Add
             else:
                 self.dev = torch.device("cpu")
             # cache some events
             for _ in range(prefill):
-                self.evt_q.put(torch.cuda.Event(enable_timing=True))
+                self.evt_q.put(cur_platform.Event(enable_timing=True))  # FlagScale Add
             if self.rank == 0:
                 # Start the controller
                 self._controller()
@@ -1502,8 +1555,10 @@ class StragglerDetector:
             sev = self.evt_q.get()  # no try-catch
             eev = self.evt_q.get()  # no try-catch
         else:
-            sev = torch.cuda.Event(enable_timing=True)
-            eev = torch.cuda.Event(enable_timing=True)
+            # FlagScale Begin
+            sev = cur_platform.Event(enable_timing=True)
+            eev = cur_platform.Event(enable_timing=True)
+            # FlagScale End
         # First check if this start is for data
         if self.bdata:
             self.start_data_ev.append(sev)
@@ -1574,11 +1629,13 @@ class StragglerDetector:
         elif ls_bs != ls_be:
             logger.warning(f"get_batch Start/Stop out of sync {ls_bs}/{ls_be}")
         else:
-            temp = torch.cuda.temperature()
-            power = torch.cuda.power_draw()
-            util = torch.cuda.utilization()
-            clock = torch.cuda.clock_rate()
-            torch.cuda.synchronize()
+            # FlagScale Begin
+            temp = cur_platform.temperature()
+            power = cur_platform.power_draw()
+            util = cur_platform.utilization()
+            clock = cur_platform.clock_rate()
+            cur_platform.synchronize()
+            # FlagScale End
             # Process Events
             for i in range(ls_ev):
                 e_ev = self.start_gemm_ev[i].elapsed_time(self.stop_gemm_ev[i])
@@ -2253,6 +2310,7 @@ def get_batch_on_this_tp_rank(
 ########################
 
 
+<<<<<<< ours
 def get_sft_batch_on_this_cp_rank(
     batch: dict[str, torch.Tensor], cp_group: torch.distributed.ProcessGroup
 ):
@@ -2400,6 +2458,51 @@ def get_batch_on_this_cp_rank(
         Dict[str, Any]: The batch with sequence-dimension tensors partitioned
         to this CP rank.
     """
+=======
+def get_batch_on_this_cp_rank(
+    batch: Dict[str, Any], cp_group: Optional[torch.distributed.ProcessGroup] = None
+):
+    """Slice batch input along sequence dimension into multiple chunks,
+    which are parallelized across GPUs in a context parallel group.
+
+    Args:
+        batch (Dict[str, Any]): Input batch tensors.
+        cp_group (Optional[torch.distributed.ProcessGroup]): Context-parallel process group.
+            If provided, uses this group's size and rank. Otherwise, falls back to
+            the current context-parallel settings from parallel_state.
+    """
+
+    # With causal masking, each token only attends to its prior tokens. Simply split
+    # sequence into CP chunks can result in severe load imbalance. That's to say, chunks
+    # at the end of sequence have bigger workload than others. To address this issue,
+    # we split sequence into 2*CP ranks. Assuming CP=2, we then get 4 chunks, chunk_0
+    # and chunk_3 are assigned to GPU0, chunk_1 and chunk_2 are assigned to GPU1, so
+    # that we can get balanced workload among GPUs in a context parallel group.
+    # Determine CP topology either from provided group or from current context parallel state
+    if cp_group is not None:
+        cp_size = get_pg_size(cp_group)
+        cp_rank = get_pg_rank(cp_group)
+    else:
+        cp_size = parallel_state.get_context_parallel_world_size()
+        cp_rank = parallel_state.get_context_parallel_rank()
+
+    if cp_size > 1:
+        for key, val in batch.items():
+            if val is not None:
+                seq_dim = 1 if key != 'attention_mask' else 2
+                val = val.view(
+                    *val.shape[0:seq_dim],
+                    2 * cp_size,
+                    val.shape[seq_dim] // (2 * cp_size),
+                    *val.shape[(seq_dim + 1) :],
+                )
+                index = torch.zeros(2, dtype=torch.int64, device=val.device)
+                index[0].fill_(cp_rank)
+                index[1].fill_(2 * cp_size - cp_rank - 1)
+                val = val.index_select(seq_dim, index)
+                val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
+                batch[key] = val
+>>>>>>> theirs
 
     if batch.get("cu_seqlens") is not None:  # NOTE(asolergi-nv): SFT & HybridCP case
         if is_hybrid_cp:
@@ -2415,6 +2518,100 @@ def get_batch_on_this_cp_rank(
     else:  # NOTE(asolergi-nv): Pretrain case
         batch = get_pretrain_batch_on_this_cp_rank(batch, cp_group=cp_group)
     return batch
+
+
+def get_thd_batch_on_this_cp_rank(
+    batch: Dict[str, Any],
+    cu_seqlens: torch.Tensor,
+    cu_seqlens_padded: torch.Tensor,
+    max_seqlen: torch.Tensor,
+    cp_size: Optional[int] = None,
+    cp_rank: Optional[int] = None,
+):
+    """Slice each sub-sample in a packed sample batch input along
+    sequence dimension into multiple chunks, which are parallelized
+    across GPUs in a context parallel group.
+    """
+    packed_seq_params = PackedSeqParams(
+        qkv_format="thd",
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_kv=cu_seqlens,
+        cu_seqlens_q_padded=cu_seqlens_padded,
+        cu_seqlens_kv_padded=cu_seqlens_padded,
+        max_seqlen_q=int(max_seqlen[0].item()),
+        max_seqlen_kv=int(max_seqlen[0].item()),
+    )
+
+    cp_size = parallel_state.get_context_parallel_world_size() if cp_size is None else cp_size
+    cp_rank = parallel_state.get_context_parallel_rank() if cp_rank is None else cp_rank
+    if cp_size > 1:  # slice batch along sequence dimension for context parallelism
+        assert tex is not None and is_te_min_version("1.10.0"), (
+            "Please update Transformer Engine to >= 1.10 to use "
+            "Context Parallel with THD format data"
+        )
+        index = tex.thd_get_partitioned_indices(
+            cu_seqlens_padded, batch['tokens'].size(1), cp_size, cp_rank
+        )
+        for key, data in batch.items():
+            if key in {'attention_mask', 'cu_seqlens', 'cu_seqlens_padded', 'max_seqlen'}:
+                continue
+            batch[key] = data.index_select(1, index)
+
+    return batch, packed_seq_params
+
+
+################################
+### hybrid context parallel ###
+################################
+
+
+def get_batch_on_this_hybrid_cp_rank(
+    batch: Dict[str, Any],
+    local_cp_size: int,
+    cp_group: Optional[torch.distributed.ProcessGroup] = None,
+):
+    """Slice batch input along sequence dimension into multiple chunks,
+    which are parallelized across GPUs in a context parallel group.
+    """
+    assert local_cp_size is not None
+    if cp_group is None:
+        # Get the local cp group required for as defined by the HybridCPDataLoaderWrapper
+        if local_cp_size > 1:
+            cp_group = parallel_state.get_hybrid_data_context_parallel_groups(
+                group_size=local_cp_size
+            )
+    else:
+        # If cp group is provided, it must match the local cp size
+        # as defined by the HybridCPDataLoaderWrapper
+        assert cp_group.size() == local_cp_size
+
+    # Convert [seqlen] to [1, seqlen] similar to default collate_fn
+    # as hybrid_context_parallel dataloader wrapper does not go through default collate_fn
+    for key, data in batch.items():
+        if key in ['attention_mask']:
+            continue
+        batch[key] = torch.stack([data], 0)
+    sample_length = batch['tokens'].shape[1]
+    # TODO(pmannan): Take care of padding tokens here if not divisible by cp_size*2
+    # Create packed_seq_params for SBHD format with cp group information.
+    packed_seq_params = PackedSeqParams(
+        qkv_format="sbhd",
+        cu_seqlens_q=torch.tensor([0, sample_length], device="cuda", pin_memory=True),
+        cu_seqlens_kv=torch.tensor([0, sample_length], device="cuda", pin_memory=True),
+        cu_seqlens_q_padded=torch.tensor([0, sample_length], device="cuda", pin_memory=True),
+        cu_seqlens_kv_padded=torch.tensor([0, sample_length], device="cuda", pin_memory=True),
+        max_seqlen_q=sample_length,
+        max_seqlen_kv=sample_length,
+        local_cp_size=local_cp_size,
+        cp_group=cp_group,
+    )
+
+    if cp_group is not None and cp_group.size() > 1:
+        # When using hybrid_context_parallel, each sub-sample of a packed sample is
+        # required to be divisible by CP*DP*2 or CP*DP*TP*2 (if using sequence parallel)
+        batch = get_batch_on_this_cp_rank(batch, cp_group=cp_group)
+
+    return batch, packed_seq_params
 
 
 ######################
@@ -2477,7 +2674,7 @@ def nvtx_range_push(msg=None, suffix=None) -> None:
     _nvtx_range_messages.append(msg)
 
     # Push NVTX range
-    torch.cuda.nvtx.range_push(msg)
+    cur_platform.range_push(msg)  # FlagScale Add
 
 
 def nvtx_range_pop(msg=None, suffix=None) -> None:
@@ -2506,7 +2703,7 @@ def nvtx_range_pop(msg=None, suffix=None) -> None:
         )
 
     # Pop NVTX range
-    torch.cuda.nvtx.range_pop()
+    cur_platform.range_pop()  # FlagScale Add
 
 
 @lru_cache(maxsize=None)
@@ -2825,8 +3022,13 @@ def experimental_api(func: _Wrapped) -> _Wrapped:
 
 
 def deprecate_args(
+<<<<<<< ours
     *deprecated_keys: str, message="Argument '{name}' has been deprecated and should not be used."
 ) -> Callable[[_Wrapped], _Wrapped]:
+=======
+    *deprecated_keys, message="Argument '{name}' has been deprecated and should not be used."
+):
+>>>>>>> theirs
     """
     Intercepts specific keyword arguments to raise a custom TypeError.
 
@@ -2835,7 +3037,11 @@ def deprecate_args(
         message: Custom error message string. Use {name} as a placeholder.
     """
 
+<<<<<<< ours
     def decorator(func: _Wrapped) -> _Wrapped:
+=======
+    def decorator(func):
+>>>>>>> theirs
         @functools.wraps(func)
         def wrapper(*args, **kwargs):
             # Check if any deprecated key is present in kwargs

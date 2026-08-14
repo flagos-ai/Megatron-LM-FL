@@ -8,6 +8,7 @@ from typing import Callable, Optional
 import torch
 from torch.autograd import Variable
 
+<<<<<<< ours
 from megatron.core.utils import (
     get_pg_rank,
     get_pg_size,
@@ -16,6 +17,15 @@ from megatron.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
+=======
+from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_viewless_tensor
+
+########## FlagScale Begin ##########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+########## FlagScale End ##########
+>>>>>>> theirs
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +60,26 @@ def is_vp_last_stage(vp_stage: int, vp_size: int | None):
         )
         return True
     return vp_stage == (vp_size - 1)
+
+
+def is_dualpipev_first_stage(dualpipev_stage: int, dualpipev_size: int | None):
+    if dualpipev_size is None or dualpipev_size <= 1:
+        assert dualpipev_stage is None or dualpipev_stage == 0, (
+            f"Expected dualpipev_stage to be 0 or None when dualpipev_size is <= 1 or None, "
+            f"but got dualpipev_stage={dualpipev_stage} and dualpipev_size={dualpipev_size}"
+        )
+        return True
+    return dualpipev_stage == 0
+
+def is_dualpipev_last_stage(dualpipev_stage: int, dualpipev_size: int | None):
+    """Return True if in the last virtual pipeline model-parallel stage, False otherwise."""
+    if dualpipev_size is None or dualpipev_size <= 1:
+        assert dualpipev_stage is None or dualpipev_stage == 0, (
+            f"Expected dualpipev_stage to be 0 or None when dualpipev_size is <= 1 or None, "
+            f"but got dualpipev_stage={dualpipev_stage} and dualpipev_size={dualpipev_size}"
+        )
+        return True
+    return dualpipev_stage == (dualpipev_size - 1)
 
 
 def get_pp_first_rank(pp_group: torch.distributed.ProcessGroup):
@@ -151,8 +181,10 @@ class ScheduleNode:
     def __init__(
         self,
         forward_func: Callable,
-        stream: torch.cuda.Stream,
-        event: torch.cuda.Event,
+        # FlagScale Begin
+        stream: cur_platform.Stream,
+        event: cur_platform.Event,
+        # FlagScale End
         backward_func: Optional[Callable] = None,
         free_input: bool = False,
         name: str = "schedule_node",
@@ -182,6 +214,8 @@ class ScheduleNode:
         self.free_input = free_input
         self.inputs = None
         self.outputs = None
+        self.delay_grads_release = False
+        self.manual_release_grads = False
 
     def default_backward_func(self, outputs, output_grad):
         """Default backward function"""
@@ -261,6 +295,12 @@ class ScheduleNode:
             for g in output_grad:
                 if g is not None:
                     g.record_stream(self.stream)
+                    # Manually trigger the memory release of dgrad tensor
+                    # to avoid delayed garbage collection. If
+                    # delay_grads_release is True, dgrad is last used in
+                    # wgrad compute and skip the release here.
+                    if self.manual_release_grads and not self.delay_grads_release:
+                        g.untyped_storage().resize_(0)
 
         grads = self.get_grad()
         self._release_state()
@@ -290,6 +330,7 @@ class ScheduleNode:
         """
         self.event.wait(self.stream)
         if name:
+<<<<<<< ours
             nvtx_range_push(name)
         try:
             with torch.cuda.stream(self.stream):
@@ -297,6 +338,15 @@ class ScheduleNode:
         finally:
             if name:
                 nvtx_range_pop(name)
+=======
+            cur_platform.range_push(name)  # FlagScale Add
+        try:
+            with cur_platform.stream(self.stream):  # FlagScale Add
+                yield
+        finally:
+            if name:
+                cur_platform.range_pop()  # FlagScale Add
+>>>>>>> theirs
             self.event.record(self.stream)
 
     def _release_state(self):
@@ -321,6 +371,7 @@ class AbstractSchedulePlan(ABC):
         pre_backward=None,
         post_forward=None,
         post_backward=None,
+        skip_wgrad=False,
     ):
         """run() is the protocol between our schedule logic and model, which is used to schedule
         the forward and backward schedule plans for the models.
@@ -333,24 +384,36 @@ _COMP_STREAM = None
 _COMM_STREAM = None
 
 
+<<<<<<< ours
 def set_streams(comm_stream=None, high_priority=False):
+=======
+def set_streams(comm_stream=None):
+>>>>>>> theirs
     """Set the stream for communication operations."""
     global _COMM_STREAM
 
     # Set communication stream
     if _COMM_STREAM is None:
         if comm_stream is None:
+<<<<<<< ours
             if high_priority:
                 _, high = torch.cuda.Stream.priority_range()
                 comm_stream = torch.cuda.Stream(device="cuda", priority=high)
             else:
                 comm_stream = torch.cuda.Stream(device="cuda")
+=======
+            comm_stream = cur_platform.Stream(device=cur_platform.device_name())  # FlagScale Add
+>>>>>>> theirs
         _COMM_STREAM = comm_stream
 
 
 def get_comp_stream():
     """Get the stream for computation"""
+<<<<<<< ours
     return torch.cuda.current_stream()
+=======
+    return cur_platform.current_stream()  # FlagScale Add
+>>>>>>> theirs
 
 
 def get_comm_stream():

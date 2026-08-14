@@ -1,5 +1,8 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+<<<<<<< ours
 from __future__ import annotations
+=======
+>>>>>>> theirs
 
 import copy
 import dataclasses
@@ -34,7 +37,10 @@ from megatron.core.parallel_state import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.quantization.quant_config import QuantizationConfig
+<<<<<<< ours
 from megatron.core.quantization.utils import get_quant_config_or_none
+=======
+>>>>>>> theirs
 from megatron.core.tensor_parallel.layers import (
     _initialize_affine_weight_cpu,
     set_tensor_model_parallel_attributes,
@@ -47,7 +53,11 @@ from megatron.core.tensor_parallel.random import (
 )
 from megatron.core.tensor_parallel.utils import divide
 from megatron.core.transformer.enums import AttnMaskType
+<<<<<<< ours
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
+=======
+from megatron.core.transformer.mlp import MLP
+>>>>>>> theirs
 from megatron.core.transformer.torch_norm import LayerNormInterface
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import (
@@ -56,6 +66,10 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.typed_torch import copy_signature
+<<<<<<< ours
+=======
+from megatron.plugin.decorators import overridable  # FlagScale Add
+>>>>>>> theirs
 from megatron.core.utils import (
     get_pg_rank,
     get_pg_size,
@@ -67,7 +81,11 @@ from megatron.core.utils import (
 
 try:
     import transformer_engine as te
+<<<<<<< ours
     from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast, fp8_model_init
+=======
+    from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+>>>>>>> theirs
 
     HAVE_TE = True
 except ImportError:
@@ -75,6 +93,7 @@ except ImportError:
         # For type checking, treat transformer_engine as always available.
         import transformer_engine as te
         from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, fp8_autocast
+<<<<<<< ours
 
         HAVE_TE = True
     else:
@@ -322,6 +341,193 @@ def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
 
         return fp8_autocast(enabled=True, fp8_recipe=quant_recipe, fp8_group=amax_group)
 
+=======
+
+        HAVE_TE = True
+    else:
+        from unittest.mock import MagicMock
+
+        te = MagicMock()
+        HAVE_TE = False
+
+_TE_CONFIG_TYPE_KEY = "transformer_engine_config_type"
+from megatron.plugin.hetero.parallel_context import get_parallel_context    ##### FlagScale add #####
+
+
+class TransformerEngineConfigType(enum.Enum):
+    """Configuration object types in config dictionary"""
+
+    TEQuantizationParams = "TEQuantizationParams"
+
+
+@dataclasses.dataclass
+class TEQuantizationRecipe:
+    """Class to capture options for opening an autocast context in forward"""
+
+    fp8_quantization_recipe: Optional[Fp8Recipe] = None
+    """
+    An FP8 quantization override if the module should use FP8.
+    If no FP8 or FP4 quantization is configured, the recipe is execution
+    in high-precision (BF16).
+    """
+    fp4_quantization_recipe: Optional[Fp4Recipe] = None
+    """
+    An FP4 quantization override if the module should use FP4.
+    If no FP8 or FP4 quantization is configured, the recipe is execution
+    in high-precision (BF16).
+    """
+    custom_recipe_factory: Optional[str] = None
+    """The path to a custom recipe factory if a custom Fp4 or Fp8 recipe is configured"""
+    fp8_format: str = "e4m3"
+    """A format to select from an FP8Recipe"""
+    override_quantized_autocast: bool = True
+    """
+    If the quantization autocast context for a targeted module is enabled,
+    whether to override it and change (or disable) the quantization recipe.
+    """
+    override_nonquantized_autocast: bool = False
+    """
+    If the quantization autocast context for a targeted module is not enabled,
+    whether to override it and enable a quantization recipe.
+    """
+    tp_only_amax_red: bool = False
+    """
+    If an amax reduction is applicable, such as in per-tensor quantization recipe,
+    whether to reduce only along TP groups.
+    """
+
+    @classmethod
+    def parse_from_config(cls, quant_config: Dict[Any, Any]) -> "TEQuantizationRecipe":
+        """
+        Parse config from quantization dictionary.
+        """
+        kwargs = {}
+        class_keys = cls.get_config_keys()
+        for field in class_keys:
+            if field in quant_config:
+                kwargs[field] = quant_config[field]
+        for field in quant_config:
+            if field not in class_keys:
+                raise ValueError(f"Field '{field}' not valid for this configuration.")
+        instance = TEQuantizationRecipe(**kwargs)
+        if instance.fp8_quantization_recipe == Fp8Recipe.delayed:
+            raise ValueError("Delayed scaling not in scope of te per-module quantization config.")
+        if (
+            instance.fp8_quantization_recipe is not None
+            and instance.fp4_quantization_recipe is not None
+        ):
+            raise ValueError("fp8 and fp4 quantization settings are mutually exclusive.")
+        if (
+            instance.fp8_quantization_recipe == Fp8Recipe.custom
+            or instance.fp4_quantization_recipe == Fp4Recipe.custom
+        ):
+            if instance.custom_recipe_factory is None:
+                raise ValueError("custom fp8 or fp4 recipe requires custom_recipe_factory")
+        return instance
+
+    @classmethod
+    def get_config_keys(cls) -> Set[str]:
+        """Get expected keys from the dataclass fields."""
+        return {field.name for field in dataclasses.fields(cls)}
+
+
+@dataclasses.dataclass
+class TEQuantizationParams:
+    """Class to capture precision options for training and evaluation."""
+
+    training_recipe: TEQuantizationRecipe
+    """Precision override for when self.training is True"""
+    evaluation_recipe: Optional[TEQuantizationRecipe]
+    """
+    Precision override for when self.training is False.
+    If None, training_recipe is used.
+    """
+
+    @staticmethod
+    def parse_from_config(quant_config: QuantizationConfig) -> "TEQuantizationParams":
+        """Parses quantization config for a layer or throw an error."""
+        config = quant_config.config
+        try:
+            config_type = TransformerEngineConfigType(config[_TE_CONFIG_TYPE_KEY])
+        except KeyError:
+            raise ValueError(
+                f"TransformerEngine config dictionary must have '{_TE_CONFIG_TYPE_KEY}' key."
+            )
+        except ValueError:
+            raise ValueError(f"Unsupported config type '{config[_TE_CONFIG_TYPE_KEY]}'.")
+
+        if config_type == TransformerEngineConfigType.TEQuantizationParams:
+            if 'training_recipe' not in config.keys():
+                raise ValueError(
+                    "TransformerEngine config dictionary must have 'training_recipe' key"
+                )
+            training_recipe = TEQuantizationRecipe.parse_from_config(config['training_recipe'])
+            if 'evaluation_recipe' not in config.keys():
+                evaluation_recipe = None
+                assert len(config.keys()) == 2
+            else:
+                evaluation_recipe = TEQuantizationRecipe.parse_from_config(
+                    config['evaluation_recipe']
+                )
+                assert len(config.keys()) == 3
+            return TEQuantizationParams(
+                training_recipe=training_recipe, evaluation_recipe=evaluation_recipe
+            )
+        else:
+            raise NotImplementedError(f"Unhandled configuration type {config_type}")
+
+
+def _get_fp8_autocast_for_quant_recipe(qrecipe: TEQuantizationRecipe):
+    if FP8GlobalStateManager.is_fp8_enabled():
+        if not qrecipe.override_quantized_autocast:
+            return nullcontext()
+    else:
+        if not qrecipe.override_nonquantized_autocast:
+            return nullcontext()
+
+    if qrecipe.fp8_quantization_recipe is None and qrecipe.fp4_quantization_recipe is None:
+        # Force BF16 for this layer and override autocast
+        return fp8_autocast(enabled=False)
+    else:
+        amax_group = None
+        if model_parallel_is_initialized():
+            amax_group = get_amax_reduction_group(
+                with_context_parallel=True, tp_only_amax_red=qrecipe.tp_only_amax_red
+            )
+        if (
+            qrecipe.fp8_quantization_recipe == Fp8Recipe.custom
+            or qrecipe.fp4_quantization_recipe == Fp4Recipe.custom
+        ):
+            from megatron.core.fp8_utils import _get_custom_recipe
+
+            assert qrecipe.custom_recipe_factory is not None
+            quant_recipe = _get_custom_recipe(qrecipe.custom_recipe_factory)
+        elif qrecipe.fp8_quantization_recipe is not None:
+            if qrecipe.fp8_format == "e4m3":
+                fp8_format = te.common.recipe.Format.E4M3
+            elif qrecipe.fp8_format == "hybrid":
+                fp8_format = te.common.recipe.Format.HYBRID
+            else:
+                raise ValueError(f"Unhandled fp8_format {qrecipe.fp8_format}")
+
+            if qrecipe.fp8_quantization_recipe == Fp8Recipe.tensorwise:
+                quant_recipe = te.common.recipe.Float8CurrentScaling(fp8_format=fp8_format)
+            elif qrecipe.fp8_quantization_recipe == Fp8Recipe.blockwise:
+                quant_recipe = te.common.recipe.Float8BlockScaling(fp8_format=fp8_format)
+            elif qrecipe.fp8_quantization_recipe == Fp8Recipe.mxfp8:
+                quant_recipe = te.common.recipe.MXFP8BlockScaling(fp8_format=fp8_format)
+            else:
+                raise ValueError(f"Unhandled fp8 recipe: {qrecipe.fp8_quantization_recipe}")
+        else:
+            # Fp4 configured.
+            if qrecipe.fp4_quantization_recipe == Fp4Recipe.nvfp4:
+                quant_recipe = te.common.recipe.NVFP4BlockScaling()
+            else:
+                raise ValueError(f"Unhandled fp4 recipe: {qrecipe.fp8_quantization_recipe}")
+
+        return fp8_autocast(enabled=True, fp8_recipe=quant_recipe, fp8_group=amax_group)
+
+>>>>>>> theirs
 
 def _get_fp8_autocast_for_quant_params(qparams: TEQuantizationParams | None, training: bool):
     if qparams is None:
@@ -361,6 +567,16 @@ def _get_should_context_be_quantized_params(
         return _get_should_context_be_quantized_recipe(
             qparams.training_recipe, is_context_quantized
         )
+<<<<<<< ours
+=======
+
+
+# FlagScale Begin
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+# FlagScale End
+>>>>>>> theirs
 
 
 def _get_extra_te_kwargs(config: TransformerConfig):
@@ -372,7 +588,7 @@ def _get_extra_te_kwargs(config: TransformerConfig):
         elif config.init_model_with_meta_device:
             extra_transformer_engine_kwargs["device"] = "meta"
         else:
-            extra_transformer_engine_kwargs["device"] = torch.cuda.current_device()
+            extra_transformer_engine_kwargs["device"] = cur_platform.current_device()  # FlagScale Add
     return extra_transformer_engine_kwargs
 
 
@@ -888,12 +1104,32 @@ class TELinear(te.pytorch.Linear):
                 tp_size = 1
                 tp_group_for_te = None
 
+<<<<<<< ours
         self.te_quant_params: Optional[TEQuantizationParams] = None
         quant_config = get_quant_config_or_none(name, config.quant_recipe)
         self.finish_init(quant_config)
         init_quant_context = _get_fp8_model_init_for_quant_params(
             self.te_quant_params, torch.is_grad_enabled()
+=======
+        super().__init__(
+            in_features=input_size,
+            out_features=output_size,
+            sequence_parallel=self.config.sequence_parallel,
+            fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
+            # Pass None if not initialized for backward compatibility with the ckpt converter.
+            tp_group=tp_group_for_te if torch.distributed.is_initialized() else None,
+            tp_size=tp_size,
+            get_rng_state_tracker=(
+                get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
+            ),
+            init_method=condition_init_method(config, init_method),
+            bias=bias,
+            return_bias=self.te_return_bias,
+            parallel_mode=te_parallel_mode,
+            **extra_kwargs,
+>>>>>>> theirs
         )
+        self.te_quant_params: Optional[TEQuantizationParams] = None
 
         with init_quant_context:
             super().__init__(
@@ -927,6 +1163,25 @@ class TELinear(te.pytorch.Linear):
                     setattr(param, "sequence_parallel", self.config.sequence_parallel)
                     # Mark as NOT tensor parallel since weight is duplicated
                     setattr(param, "tensor_model_parallel", False)
+<<<<<<< ours
+=======
+
+        tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
+        self._tp_group = tp_group
+
+    def finish_init(self, quantization_config: QuantizationConfig):
+        """Post-init of quantization override"""
+        if quantization_config is None:
+            self.te_quant_params = None
+        else:
+            self.te_quant_params = TEQuantizationParams.parse_from_config(quantization_config)
+
+    def will_execute_quantized(self, is_context_quantized: bool) -> bool:
+        """Returns whether the module is configured to execute quantized."""
+        return _get_should_context_be_quantized_params(
+            self.te_quant_params, self.training, is_context_quantized
+        )
+>>>>>>> theirs
 
         tp_group = get_tensor_model_parallel_group_if_none(tp_group, is_expert=is_expert)
         self._tp_group = tp_group
@@ -1005,7 +1260,10 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
+<<<<<<< ours
         name: str | None = None,
+=======
+>>>>>>> theirs
     ):
         """
         Args:
@@ -1103,12 +1361,43 @@ class TELayerNormColumnParallelLinear(te.pytorch.LayerNormLinear):
 
         self.stride = stride
 
+<<<<<<< ours
         self.te_quant_params: Optional[TEQuantizationParams] = None
         quant_config = get_quant_config_or_none(name, config.quant_recipe)
         self.finish_init(quant_config)
         init_quant_context = _get_fp8_model_init_for_quant_params(
             self.te_quant_params, torch.is_grad_enabled()
+=======
+        super().__init__(
+            in_features=input_size,
+            out_features=output_size,
+            eps=self.config.layernorm_epsilon,
+            sequence_parallel=self.config.sequence_parallel,
+            fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
+            tp_group=tp_group if torch.distributed.is_initialized() else None,
+            tp_size=self.config.tensor_model_parallel_size if get_parallel_context() is None else get_tensor_model_parallel_world_size(), ##### FlagScale Add #####
+            get_rng_state_tracker=(
+                get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
+            ),
+            init_method=(
+                condition_init_method(config, init_method)
+                if not config.use_cpu_initialization
+                else lambda w: None
+            ),
+            bias=bias,
+            return_bias=self.te_return_bias,
+            parallel_mode="column",
+            return_layernorm_output=False,
+            zero_centered_gamma=self.config.layernorm_zero_centered_gamma,
+            **extra_kwargs,
+>>>>>>> theirs
         )
+        self.te_quant_params: Optional[TEQuantizationParams] = None
+
+        # Set proper partition_stride
+        setattr(self.weight, 'partition_stride', stride)
+        if bias and hasattr(self, 'bias') and self.bias is not None:
+            setattr(self.bias, 'partition_stride', stride)
 
         with init_quant_context:
             super().__init__(
@@ -1244,7 +1533,10 @@ class TEColumnParallelLinear(TELinear):
         tp_comm_buffer_name: Optional[str] = None,
         tp_group: Optional[torch.distributed.ProcessGroup] = None,
         stride: int = 1,
+<<<<<<< ours
         name: str | None = None,
+=======
+>>>>>>> theirs
     ):
         """
         Args:
@@ -1589,7 +1881,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
     via set_tensor_parallel_group() and set_context_parallel_group().
     """
 
-    cp_stream: torch.cuda.Stream = None
+    cp_stream: cur_platform.Stream = None  # FlagScale Add
 
     def __init__(
         self,
@@ -1673,7 +1965,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 "1.0.0"
             ), "Only Transformer-Engine version >= 1.0.0 supports context parallelism!"
             if getattr(TEDotProductAttention, "cp_stream") is None:
-                TEDotProductAttention.cp_stream = torch.cuda.Stream()
+                TEDotProductAttention.cp_stream = cur_platform.Stream()  # FlagScale Add
             extra_kwargs["cp_group"] = pg_collection.cp
             extra_kwargs["cp_global_ranks"] = torch.distributed.get_process_group_ranks(
                 pg_collection.cp
@@ -1768,7 +2060,7 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             ),
             attn_mask_type=attn_mask_type.name,
             sequence_parallel=self.config.sequence_parallel,
-            tp_size=self.config.tensor_model_parallel_size,
+            tp_size=self.config.tensor_model_parallel_size if get_parallel_context() is None else get_tensor_model_parallel_world_size(), ##### FlagScale Add #####
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
@@ -1926,7 +2218,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             is_expert: bool = False,
             tp_comm_buffer_name: Optional[str] = None,
             pg_collection: Optional[ProcessGroupCollection] = None,
+<<<<<<< ours
             name: str | None = None,
+=======
+>>>>>>> theirs
         ):
             """
             Args:
@@ -1992,6 +2287,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 tp_size = 1
                 tp_group_for_te = None
 
+<<<<<<< ours
             if is_te_min_version("2.14.0"):
                 extra_kwargs["single_grouped_weight"] = getattr(
                     config, "moe_single_grouped_weight", False
@@ -2026,6 +2322,26 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                     **extra_kwargs,
                 )
 
+=======
+            super().__init__(
+                num_gemms=num_gemms,
+                in_features=input_size,
+                out_features=output_size,
+                sequence_parallel=self.config.sequence_parallel,
+                fuse_wgrad_accumulation=self.config.gradient_accumulation_fusion,
+                tp_group=tp_group_for_te if torch.distributed.is_initialized() else None,
+                tp_size=tp_size,
+                get_rng_state_tracker=(
+                    get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
+                ),
+                init_method=condition_init_method(config, init_method),
+                bias=bias,
+                return_bias=self.te_return_bias,
+                parallel_mode=parallel_mode,
+                **extra_kwargs,
+            )
+            self.te_quant_params: Optional[TEQuantizationParams] = None
+>>>>>>> theirs
             for param in self.parameters():
                 setattr(param, "allreduce", not (is_expert and self.expert_parallel))
 
@@ -2044,10 +2360,13 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                         setattr(weight, "partition_dim", part_dim)
                         setattr(weight, "partition_stride", 1)
 
+<<<<<<< ours
             self._register_load_state_dict_pre_hook(
                 type(self)._normalize_grouped_parameter_keys, with_module=True
             )
 
+=======
+>>>>>>> theirs
             def merge_extra_states(
                 self,
                 state_dict,
@@ -2138,6 +2457,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
 
             self._register_load_state_dict_pre_hook(merge_extra_states, with_module=True)
 
+<<<<<<< ours
         def _normalize_grouped_parameter_keys(
             self,
             state_dict,
@@ -2208,6 +2528,8 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 f"into {self.num_gemms} GEMM shards."
             )
 
+=======
+>>>>>>> theirs
         def finish_init(self, quantization_config: QuantizationConfig):
             """Post-init of quantization override"""
             if quantization_config is None:
@@ -2242,7 +2564,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
         def _encode_extra_state(self, state):
             # TE 2.0 changed the format of extra_state to be a byte tensor
             if is_te_min_version("2.0.0"):
-                torch.cuda.synchronize()
+                cur_platform.synchronize()  # FlagScale Add
                 state_serialized = bytearray(pickle.dumps(state))
                 state_serialized = torch.frombuffer(state_serialized, dtype=torch.uint8)
             else:
@@ -2260,7 +2582,11 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 return SafeUnpickler(io.BytesIO(state.detach().cpu().numpy().tobytes())).load()
             elif isinstance(state, io.BytesIO):
                 state.seek(0)
-                return torch.load(state, map_location="cuda")
+                # FlagScale Begin
+                return torch.load(
+                    state, map_location=cur_platform.device_name(), weights_only=False
+                )
+                # FlagScale End
             else:
                 raise RuntimeError("Unsupported checkpoint format.")
 
@@ -2305,6 +2631,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 extra_states.append(self._encode_extra_state(tmp_state))
             return extra_states
 
+        @overridable  # FlagScale Add
         def _sharded_state_dict_grouped(
             self, tp_axis_map, prefix="", sharded_offsets=(), metadata=None
         ):
@@ -2314,6 +2641,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             singleton_local_shards = (metadata or {}).get('singleton_local_shards', False)
             sharded_state_dict = {}
             full_state_dict = self.state_dict(prefix="", keep_vars=True)
+<<<<<<< ours
             grouped_split_cache = {}
 
             def get_gemm_tensor(param_name: str, gemm_idx: int) -> torch.Tensor:
@@ -2329,6 +2657,8 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 grouped_splits = grouped_split_cache[param_name]
                 return grouped_splits[gemm_idx]
 
+=======
+>>>>>>> theirs
             num_global_experts = get_pg_size(self._pg_collection.ep) * self.num_gemms
             local_expert_indices_offset = get_pg_rank(self._pg_collection.ep) * self.num_gemms
             ep_axis = len(sharded_offsets)
@@ -2410,7 +2740,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             is_expert: bool,
             tp_comm_buffer_name: Optional[str] = None,
             pg_collection: Optional[ProcessGroupCollection] = None,
+<<<<<<< ours
             name: str | None = None,
+=======
+>>>>>>> theirs
         ):
             """
             Args:
@@ -2428,7 +2761,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
                 pg_collection=pg_collection,
+<<<<<<< ours
                 name=name,
+=======
+>>>>>>> theirs
             )
 
         def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
@@ -2462,7 +2798,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             is_expert: bool,
             tp_comm_buffer_name: Optional[str] = None,
             pg_collection: Optional[ProcessGroupCollection] = None,
+<<<<<<< ours
             name: str | None = None,
+=======
+>>>>>>> theirs
         ):
             """
             Args:
@@ -2480,7 +2819,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 is_expert=is_expert,
                 tp_comm_buffer_name=tp_comm_buffer_name,
                 pg_collection=pg_collection,
+<<<<<<< ours
                 name=name,
+=======
+>>>>>>> theirs
             )
 
         def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None):
@@ -3120,6 +3462,7 @@ try:
         retain_pinned_cpu_buffers,
     ):
         """Get CPU offload context and sync function."""
+<<<<<<< ours
         if is_te_min_version("2.10.0"):
             # TE 2.10+ supports retain_pinned_cpu_buffers
             context, sync_func = _get_cpu_offload_context(
@@ -3141,6 +3484,36 @@ try:
                 weight_offloading,
                 double_buffering,
             )
+=======
+        if is_te_min_version("2.5.0"):
+            # FlagScale Begin
+            # Check whether the installed TE actually supports retain_pinned_cpu_buffers,
+            # since custom TE builds (e.g. v0.1.0+te2.9.0) may report >= 2.5.0 but
+            # lack this parameter.
+            import inspect
+
+            _sig = inspect.signature(_get_cpu_offload_context)
+            if "retain_pinned_cpu_buffers" in _sig.parameters:
+                context, sync_func = _get_cpu_offload_context(
+                    enabled,
+                    num_layers,
+                    model_layers,
+                    activation_offloading,
+                    weight_offloading,
+                    double_buffering,
+                    retain_pinned_cpu_buffers=retain_pinned_cpu_buffers,
+                )
+            else:
+                context, sync_func = _get_cpu_offload_context(
+                    enabled,
+                    num_layers,
+                    model_layers,
+                    activation_offloading,
+                    weight_offloading,
+                    double_buffering,
+                )
+            # FlagScale End
+>>>>>>> theirs
         elif is_te_min_version("1.10.0.dev0"):
             context, sync_func = _get_cpu_offload_context(
                 enabled, num_layers, model_layers, activation_offloading, weight_offloading

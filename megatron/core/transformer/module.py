@@ -10,16 +10,22 @@ from torch.nn.parameter import Parameter
 
 from megatron.core import parallel_state
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
+from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.utils import (
     ensure_metadata_has_dp_cp_group,
     make_sharded_tensors_for_checkpoint,
     sharded_state_dict_default,
 )
+from megatron.plugin.platform import get_platform  # FlagScale Add
 
-_FLOAT_TYPES = (torch.FloatTensor, torch.cuda.FloatTensor)
-_HALF_TYPES = (torch.HalfTensor, torch.cuda.HalfTensor)
-_BF16_TYPES = (torch.BFloat16Tensor, torch.cuda.BFloat16Tensor)
+# FlagScale Begin
+cur_platform = get_platform()
+
+_FLOAT_TYPES = (torch.FloatTensor, cur_platform.FloatTensor)
+_HALF_TYPES = (torch.HalfTensor, cur_platform.HalfTensor)
+_BF16_TYPES = (torch.BFloat16Tensor, cur_platform.BFloat16Tensor)
+# FlagScale End
 
 
 def param_is_not_shared(param):  # pylint: disable=missing-function-docstring
@@ -173,6 +179,10 @@ class GraphableMegatronModule(MegatronModule):
                 self.create_mcore_cudagraph_manager(config)
             else:
                 from megatron.core.transformer.cuda_graphs import CudaGraphManager
+        if (
+            config.cuda_graph_impl == "local"
+            and CudaGraphScope.full_iteration not in config.cuda_graph_scope
+        ):
 
                 self.cudagraph_manager = CudaGraphManager(config)
         elif config.cuda_graph_impl == "transformer_engine":
@@ -246,7 +256,7 @@ class GraphableMegatronModule(MegatronModule):
             (slen_per_cptp, micro_batch_size, self.config.hidden_size),
             dtype=torch.bfloat16,
             requires_grad=True,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),  # FlagScale Add
         )
         return static_inputs
 
@@ -429,6 +439,8 @@ class Float16Module(MegatronModule):
         self.vp_size = config.virtual_pipeline_model_parallel_size
         self.vp_stage = getattr(module, 'vp_stage', None)
         self.pg_collection = getattr(module, 'pg_collection', None)
+        self.dualpipev_size = config.dualpipev_pipeline_model_parallel_size
+        self.dualpipev_stage = getattr(module, 'dualpipev_stage',  None)
 
         if self.fp16:
             self.add_module('module', module.half())
@@ -485,6 +497,22 @@ class Float16Module(MegatronModule):
         else:
             pp_group = self.pg_collection.pp
         if is_vp_first_stage(self.vp_stage, self.vp_size) and is_pp_first_stage(pp_group):
+            is_dualpipev_first_stage,
+            is_dualpipev_last_stage,
+        ######### FlagScale Begin ########
+        # TODO: Fix the dualpipev import issue in the latest Megatron codebase
+        if self.config.use_dualpipev:
+            if is_dualpipev_first_stage(self.dualpipev_stage, self.dualpipev_size) and is_pp_first_stage(pp_group):
+                inputs = fp32_to_float16(inputs, self.float16_convertor)
+            outputs = self.module(*inputs, **kwargs)
+            if (
+                is_dualpipev_last_stage(self.dualpipev_stage, self.dualpipev_size)
+                and is_pp_first_stage(pp_group)
+                and fp32_output is True
+            ):
+                outputs = float16_to_fp32(outputs)
+            return outputs
+        ######### FlagScale End ########
             inputs = fp32_to_float16(inputs, self.float16_convertor)
         outputs = self.module(*inputs, **kwargs)
         if (
