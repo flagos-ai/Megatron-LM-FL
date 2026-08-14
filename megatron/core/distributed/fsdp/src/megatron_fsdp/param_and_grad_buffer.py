@@ -3924,13 +3924,6 @@ class AllGatherPipeline:
         )
         return (bucket_id, has_transpose_buffer and bwd)
 
-    def get_bucket_key(self, bucket_id, bwd):
-        """Get the key for the bucket."""
-        has_transpose_buffer = (
-            self.buffer.parameter_groups[bucket_id].transpose_weight_buffer is not None
-        )
-        return (bucket_id, has_transpose_buffer and bwd)
-
     @property
     def num_buckets(self):
         """Return the number of buckets."""
