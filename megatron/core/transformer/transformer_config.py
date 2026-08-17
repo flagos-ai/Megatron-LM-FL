@@ -458,6 +458,11 @@ class TransformerConfig(ModelParallelConfig):
     or 'chunkwise' (FLA ring CP). Headwise is bitwise-exact with CP-off; chunkwise is
     approximate at bf16 floor but has better memory efficiency."""
 
+    fsa_cp_mode: Optional[str] = "headwise"
+    """Context parallel mode for Flash Sparse Attention (FSA). Options: 'headwise'
+    (Ulysses-style all-to-all on Q heads, AllGather on KV when heads insufficient).
+    Currently only 'headwise' is supported."""
+
     gdn_conv_pad_alignment: Optional[int] = None
     """Alignment for causal conv1d input padding in GDN packed sequence mode.
     When set, pads the conv input to a multiple of this value. Incompatible with chunkwise CP."""
@@ -1366,14 +1371,15 @@ class TransformerConfig(ModelParallelConfig):
                 f"({self.tensor_model_parallel_size=} * {self.context_parallel_size=})."
             )
 
-        # FSA (Flash Sparse Attention) headwise CP validation
+        # FSA (Flash Sparse Attention) CP validation
         if self.attention_backend == AttnBackend.fsa and self.context_parallel_size > 1:
-            assert self.linear_cp_mode in ("headwise", "chunkwise"), (
-                f"linear_cp_mode must be 'headwise' or 'chunkwise', "
-                f"got {self.linear_cp_mode!r}."
+            assert self.fsa_cp_mode in ("headwise",), (
+                f"fsa_cp_mode must be 'headwise', "
+                f"got {self.fsa_cp_mode!r}. "
+                f"Currently only 'headwise' (Ulysses-style) is supported for FSA."
             )
 
-            if self.linear_cp_mode == "headwise":
+            if self.fsa_cp_mode == "headwise":
                 # Q heads validation: must be divisible by CP size after TP
                 num_q_heads_per_tp = self.num_attention_heads // self.tensor_model_parallel_size
                 assert num_q_heads_per_tp % self.context_parallel_size == 0, (
@@ -1401,18 +1407,6 @@ class TransformerConfig(ModelParallelConfig):
                         f"K/V will use AllGather for sequence dimension (higher communication cost). "
                         f"This is expected when tp_size > num_kv_heads_global."
                     )
-
-            elif self.linear_cp_mode == "chunkwise":
-                raise ValueError(
-                    f"FSA does not support chunkwise CP yet. "
-                    f"Use linear_cp_mode='headwise' or context_parallel_size=1 "
-                    f"when attention_backend=AttnBackend.fsa."
-                )
-            else:
-                raise ValueError(
-                    f"linear_cp_mode must be 'headwise' or 'chunkwise' when CP > 1, "
-                    f"got {self.linear_cp_mode!r}."
-                )
 
         elif self.experimental_attention_variant == "dsa":
             pass

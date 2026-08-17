@@ -1018,7 +1018,7 @@ class Attention(MegatronModule, ABC):
 
             # Context parallel routing
             cp_size = self.config.context_parallel_size
-            if cp_size > 1 and self.config.linear_cp_mode == "headwise":
+            if cp_size > 1 and self.config.fsa_cp_mode == "headwise":
                 # Use headwise CP wrapper
                 from megatron.core.extensions.flash_sparse_attention import (
                     _fsa_headwise_cp_forward,
