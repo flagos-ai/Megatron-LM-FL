@@ -67,9 +67,35 @@ training = [
     "flask-restful",
     "sentencepiece",
     "tiktoken",
-    "wandb",
-    "transformers",
+    "wandb==0.28.2",
+    "transformers==5.15.0",
     "accelerate",
+    "nvidia-modelopt[torch]==0.45.0; sys_platform != 'darwin'",
+    "tqdm==4.70.0",
+    "datasets==5.0.1",
+    "pyarrow==21.0.0",
+]
+
+# RL (megatron/rl) runtime deps. All pinned to the exact versions verified on
+# the hygon DTK 26.04 backend (2026-08-17 E2E). The (datasets 5.0.1, pyarrow
+# 21.0.0) pair is the tested combination — datasets 5.0.1 artifacts are
+# unreadable by pyarrow <=25 (ArrowInvalid, see verification report §5.2).
+rl = [
+    "pydantic==2.12.5",
+    "tensorboard==2.19.0",
+    "wandb==0.28.2",
+    "httpx==0.28.1",
+    "tqdm==4.70.0",
+    "openai[aiohttp]==3.1.0",
+    "uvicorn==0.52.3",
+    "fastapi==0.141.1",
+    "datasets==5.0.1",
+    "pyarrow==21.0.0",
+    "transformers==5.15.0",
+    "pyzmq==27.1.0",
+    "msgpack==1.2.1",
+    "quart==0.20.0",
+    "hypercorn==0.18.0",
 ]
 
 ### 'mlm' group is deprecated. please use 'training' instead ###
