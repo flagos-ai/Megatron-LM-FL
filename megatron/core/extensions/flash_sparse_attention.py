@@ -120,13 +120,20 @@ def _fsa_headwise_cp_forward(
 
         window_sizes_local = window_sizes[kv_head_idx:kv_head_idx+1, :]
 
-    # Step 3: FSA kernel (pack_gqa=False handles GQA natively)
-    output = flash_sparse_attn_func(
-        q_full_seq, k_full_seq, v_full_seq,
+    # Step 3: FSA kernel — transpose to BSHD for flash_sparse_attn_func
+    q_bshd = q_full_seq.transpose(0, 1).contiguous()   # [b, sq_global, num_q_heads_per_rank, hn]
+    k_bshd = k_full_seq.transpose(0, 1).contiguous()   # [b, sq_global, num_kv_heads_local, hn]
+    v_bshd = v_full_seq.transpose(0, 1).contiguous()   # [b, sq_global, num_kv_heads_local, hn]
+
+    output_bshd = flash_sparse_attn_func(
+        q_bshd, k_bshd, v_bshd,
         window_sizes=window_sizes_local,
         softmax_threshold=softmax_threshold,
         pack_gqa=False,
-    )  # [sq_global, b, num_q_heads_per_rank, hn]
+    )  # [b, sq_global, num_q_heads_per_rank, hn]
+
+    # Transpose back to SBHD
+    output = output_bshd.transpose(0, 1).contiguous()  # [sq_global, b, num_q_heads_per_rank, hn]
 
     # Step 4: All-to-all backward (head -> sequence dimension)
     # Reshape to 3-d: [sq_global, b, num_q_heads_per_rank * hn]

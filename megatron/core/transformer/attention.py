@@ -970,10 +970,7 @@ class Attention(MegatronModule, ABC):
             output = output.unsqueeze(0)
             output = output.reshape(output.size(0), output.size(1), -1)
         else:
-            # Megatron uses [sq, b, np, hn] (sbhd) but flash_sparse_attn expects [b, sq, np, hn] (bshd)
-            query = query.transpose(0, 1).contiguous()
-            key = key.transpose(0, 1).contiguous()
-            value = value.transpose(0, 1).contiguous()
+            # Input is SBHD: [sq, b, np, hn]
 
             # Get local and global head counts
             num_q_heads = query.shape[2]
@@ -1001,7 +998,10 @@ class Attention(MegatronModule, ABC):
 
             # Compute TP-aware window sizes (cached after first call)
             if self._fsa_cached_window_sizes is None:
-                seqlen_k = key.shape[1]
+                cp_size = self.config.context_parallel_size
+                # window_sizes should be based on the full global sequence length
+                # that the FSA kernel actually processes
+                seqlen_k = query.shape[0] * cp_size  # sq_local * cp_size = sq_global
                 self._fsa_cached_window_sizes = window_sizes_heuristic(
                     seqlen_k=seqlen_k,
                     num_heads_kv=num_kv_heads,
@@ -1019,7 +1019,7 @@ class Attention(MegatronModule, ABC):
             # Context parallel routing
             cp_size = self.config.context_parallel_size
             if cp_size > 1 and self.config.fsa_cp_mode == "headwise":
-                # Use headwise CP wrapper
+                # Use headwise CP wrapper (SBHD in, SBHD out)
                 from megatron.core.extensions.flash_sparse_attention import (
                     _fsa_headwise_cp_forward,
                 )
@@ -1035,9 +1035,14 @@ class Attention(MegatronModule, ABC):
                     num_kv_heads_per_tp=num_kv_heads,
                     softmax_threshold=softmax_threshold,
                 )
-                # Output is already [sq, b, np, hn], no transpose needed
+                # Output is [sq, b, np, hn] (SBHD)
             else:
                 # No CP or CP disabled, use standard FSA
+                # Transpose to BSHD for flash_sparse_attn_func
+                query = query.transpose(0, 1).contiguous()
+                key = key.transpose(0, 1).contiguous()
+                value = value.transpose(0, 1).contiguous()
+
                 output = flash_sparse_attn_func(
                     query,
                     key,
@@ -1057,7 +1062,7 @@ class Attention(MegatronModule, ABC):
                     is_autotune=is_autotune,
                     skip_checks=True,
                 )
-                # Convert output back from [b, sq, np, hn] to [sq, b, np, hn]
+                # Convert output back from BSHD [b, sq, np, hn] to SBHD [sq, b, np, hn]
                 output = output.transpose(0, 1).contiguous()
 
         output = output.reshape(output.size(0), output.size(1), -1)
