@@ -160,6 +160,11 @@ class LanguageModule(MegatronModule):
             check_and_set_env_variable("NVTE_FLASH_ATTN", 1, AttnBackend.auto)
             check_and_set_env_variable("NVTE_FUSED_ATTN", 1, AttnBackend.auto)
             check_and_set_env_variable("NVTE_UNFUSED_ATTN", 1, AttnBackend.auto)
+        elif self.config.attention_backend == AttnBackend.fsa:
+            check_and_set_env_variable("NVTE_FLASH_ATTN", 0, AttnBackend.fsa)
+            check_and_set_env_variable("NVTE_FUSED_ATTN", 0, AttnBackend.fsa)
+            check_and_set_env_variable("NVTE_UNFUSED_ATTN", 0, AttnBackend.fsa)
+            check_and_set_env_variable("NVTE_FSA_ATTN", 1, AttnBackend.fsa)
 
     def compute_language_model_loss(self, labels: Tensor, logits: Tensor) -> Tensor:
         """Computes the language model loss (Cross entropy across vocabulary)
@@ -199,6 +204,10 @@ class LanguageModule(MegatronModule):
                     raise RuntimeError("Trying to use a TE block when it's not present.")
             elif self.config.cross_entropy_fusion_impl == 'native':
                 loss = fused_vocab_parallel_cross_entropy(logits, labels, self.pg_collection.tp)
+        elif self.config.chunked_cross_entropy:
+            loss = tensor_parallel.vocab_parallel_cross_entropy_chunked(
+                logits, labels, chunk_size=self.config.cross_entropy_chunk_size
+            )
         else:
             loss = tensor_parallel.vocab_parallel_cross_entropy(logits, labels)
 
