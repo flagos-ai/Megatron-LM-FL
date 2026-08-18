@@ -1405,7 +1405,7 @@ class TransformerConfig(ModelParallelConfig):
                         f"FSA headwise CP: num_query_groups per TP rank ({num_kv_heads_per_tp}) "
                         f"< context_parallel_size ({self.context_parallel_size}). "
                         f"K/V will use AllGather for sequence dimension (higher communication cost). "
-                        f"This is expected when tp_size > num_kv_heads_global."
+                        f"This is expected when cp_size > num_kv_heads_per_tp."
                     )
 
         elif self.experimental_attention_variant == "dsa":
