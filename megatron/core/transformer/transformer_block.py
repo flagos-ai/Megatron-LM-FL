@@ -825,8 +825,10 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         )
 
         with rng_context, outer_quantization_context:
+            engram_hash_input_ids = decoder_extra_block_kwargs.get("engram_hash_input_ids")  # FlagScale Modify
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
+                assert engram_hash_input_ids is None  # FlagScale Modify
                 checkpointed_result = checkpointed_forward(
                     self,
                     hidden_states=hidden_states,
@@ -850,7 +852,18 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     # No intermediate_hidden_states requested: just hidden_states
                     hidden_states = checkpointed_result
             else:
-                _dsa_prev_topk_indices = None  # FlagSale Add
+                ######## FlagScale Begin ########
+                _dsa_prev_topk_indices = None
+                # The first local layer has no preceding layer on this PP/VPP stage
+                # to launch its Engram embedding prefetch.
+                if (
+                    engram_hash_input_ids is not None
+                    and len(self.layers) > 0
+                    and getattr(self.layers[0], "is_engram_layer", False)
+                ):
+                    self.layers[0].pre_compute_embedding(engram_hash_input_ids)
+                ######## FlagScale End ########
+
                 for l_no, layer in enumerate(self.layers):
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
@@ -877,12 +890,10 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         ######## FlagScale Begin ########
                         # Pre-compute embeddings for the next DeepSeekTransformerLayer
                         # if engram exists, to overlap with current layer's computation
-                        if l_no < len(self.layers) - 1:
+                        if engram_hash_input_ids is not None and l_no < len(self.layers) - 1:
                             next_layer = self.layers[l_no + 1]
                             if getattr(next_layer, "is_engram_layer", False):
-                                next_layer.pre_compute_embedding(
-                                    decoder_extra_block_kwargs["engram_hash_input_ids"]
-                                )
+                                next_layer.pre_compute_embedding(engram_hash_input_ids)
                         ######## FlagScale End ########
 
                         ######## FlagScale Begin ########
