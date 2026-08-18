@@ -80,7 +80,6 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_safe_globals.py
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
       - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py ## sporadic cuda malloc error on CI machines, tests passed locally

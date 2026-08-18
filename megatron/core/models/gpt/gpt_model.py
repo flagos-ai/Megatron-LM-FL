@@ -619,7 +619,6 @@ class GPTModel(LanguageModule):
             inference_context=inference_context,
             output_processor=output_processor,
             output_processor_context=output_processor_context,
-            is_spec_decode=is_spec_decode,  # FlagScale Modify
             mhc_multistream=mhc_multistream,  # FlagScale Modify
         )
 
@@ -645,7 +644,6 @@ class GPTModel(LanguageModule):
         inference_context=None,
         output_processor=None,
         output_processor_context=None,
-        is_spec_decode=None,  # FlagScale Modify
         mhc_multistream=None,  # FlagScale Modify
     ):
         """Postprocesses decoder hidden states to generate logits or compute loss.
