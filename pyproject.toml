@@ -208,7 +208,15 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 link-mode = "copy"
-conflicts = [[{ extra = "lts" }, { extra = "dev" }]]
+conflicts = [
+    [{ extra = "lts" }, { extra = "dev" }],
+    [{ extra = "lts" }, { extra = "training" }],
+    [{ extra = "lts" }, { extra = "rl" }],
+    [{ extra = "dev" }, { extra = "training" }],
+    [{ extra = "dev" }, { extra = "rl" }],
+    [{ group = "build" }, { extra = "training" }],
+    [{ group = "test" }, { extra = "rl" }],
+]
 # We don't define override-dependencies globally but rather locally where we need it.
 # For instance, when installing into a PyTorch base image, we don't want to install torch, 
 # torchvision, and triton.
