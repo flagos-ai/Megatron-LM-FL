@@ -670,6 +670,10 @@ def get_logprobs(model, tokens, position_ids, no_grad=False, sequence_packing=Fa
                 max_sequences_per_bin=args.rl_sequence_packing_max_sequences_per_bin,
                 device=tokens.device,
             )
+        elif args.transformer_impl == "local":
+            # local impl (DotProductAttention) rejects THD packed sequences —
+            # thd is only consumed by TE fused attention. Pass None through.
+            pass
         else:
             cu_seqlens = torch.tensor([0, tokens.shape[1]], dtype=torch.int32, device=tokens.device)
             packed_seq_params = PackedSeqParams(
@@ -1840,7 +1844,7 @@ def megatron_rl_inference_mode(
     model[0].config.cuda_graph_impl = "local"
 
     # If we get a lower precision wrapper, we go one object deeper.
-    lang_module = model[0].module.module if hasattr(model[0].module, "module") else model[0].module
+    lang_module = unwrap_model(model[0])
 
     # Switch MoE layers to full CUDA graph capture for inference
     if args.rl_training_cuda_graphs and args.num_experts is not None:
