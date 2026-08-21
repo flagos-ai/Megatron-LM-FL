@@ -484,8 +484,6 @@ class MoELayer(BaseMoELayer):
         dispatched_input, tokens_per_expert, permuted_probs = (
             self.token_dispatcher.dispatch_postprocess(hidden_states, probs)
         )
-        rank = torch.distributed.get_rank()
-        # print(f"[Rank {rank}][Layer {self.layer_number}] tokens_per_expert: {tokens_per_expert.tolist()}")
         if (
             hasattr(self, "_inference_token_dispatcher")
             and self.is_inference_cuda_graphed_iteration
