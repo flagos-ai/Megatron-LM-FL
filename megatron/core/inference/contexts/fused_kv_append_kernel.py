@@ -115,10 +115,10 @@ def triton_append_key_value_cache(
     """
     # --- Input Validation and Preparation ---
     assert (
-        key.device.type == 'cuda'
-        and value.device.type == 'cuda'
-        and memory_buffer.device.type == 'cuda'
-    ), "All tensors must be on CUDA devices."
+        key.device.type in ('cuda', 'npu')
+        and value.device.type in ('cuda', 'npu')
+        and memory_buffer.device.type in ('cuda', 'npu')
+    ), "All tensors must be on CUDA or Ascend NPU devices."
 
     assert (
         key.size(1) == 1 and value.size(1) == 1
