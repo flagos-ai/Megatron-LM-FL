@@ -37,6 +37,7 @@ from megatron.core import mpu
 from megatron.core.datasets.utils import get_blend_from_list
 from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
 from megatron.core.utils import (
+    cur_platform,
     get_batch_on_this_cp_rank,
     get_data_parallel_group_if_dtensor,
     to_local_if_dtensor,
@@ -767,18 +768,16 @@ def get_nvtx_range():
         log_level: Timer log level (0=always, 1=default, 2=verbose). Default: 1
     """
     try:
-        from torch.cuda import nvtx
-
         @contextmanager
         def nvtx_range(msg, time=False, log_level=1):
             if time:
                 timers = get_timers()
                 timers(msg, log_level=log_level).start()
             try:
-                nvtx.range_push(msg)
+                cur_platform.range_push(msg)
                 yield
             finally:
-                nvtx.range_pop()
+                cur_platform.range_pop()
                 if time:
                     timers(msg, log_level=log_level).stop()
 
