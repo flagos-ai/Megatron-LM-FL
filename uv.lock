@@ -3393,6 +3393,7 @@ dependencies = [
     { name = "numpy", version = "2.0.2", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-13-megatron-core-dev' or (extra == 'extra-13-megatron-core-lts' and extra == 'extra-13-megatron-core-rl') or (extra == 'extra-13-megatron-core-lts' and extra == 'extra-13-megatron-core-training') or (extra == 'extra-13-megatron-core-rl' and extra == 'group-13-megatron-core-test') or (extra == 'extra-13-megatron-core-training' and extra == 'group-13-megatron-core-build')" },
     { name = "numpy", version = "2.4.4", source = { registry = "https://pypi.org/simple" }, marker = "extra == 'extra-13-megatron-core-lts' or extra == 'extra-13-megatron-core-rl' or extra == 'extra-13-megatron-core-training' or extra != 'extra-13-megatron-core-dev'" },
     { name = "packaging" },
+    { name = "psutil" },
     { name = "torch", marker = "sys_platform == 'never' or (extra == 'extra-13-megatron-core-dev' and extra == 'extra-13-megatron-core-lts') or (extra == 'extra-13-megatron-core-dev' and extra == 'extra-13-megatron-core-rl') or (extra == 'extra-13-megatron-core-dev' and extra == 'extra-13-megatron-core-training') or (extra == 'extra-13-megatron-core-lts' and extra == 'extra-13-megatron-core-rl') or (extra == 'extra-13-megatron-core-lts' and extra == 'extra-13-megatron-core-training') or (extra == 'extra-13-megatron-core-rl' and extra == 'group-13-megatron-core-test') or (extra == 'extra-13-megatron-core-training' and extra == 'group-13-megatron-core-build')" },
 ]
 
@@ -3584,6 +3585,7 @@ requires-dist = [
     { name = "opentelemetry-api", marker = "extra == 'lts'", specifier = "~=1.33.1" },
     { name = "orjson", marker = "extra == 'dev'" },
     { name = "packaging", specifier = ">=24.2" },
+    { name = "psutil" },
     { name = "pyarrow", marker = "extra == 'rl'", specifier = "==21.0.0" },
     { name = "pyarrow", marker = "extra == 'training'", specifier = "==21.0.0" },
     { name = "pydantic", marker = "extra == 'rl'", specifier = "==2.12.5" },
