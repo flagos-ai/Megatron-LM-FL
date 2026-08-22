@@ -15,7 +15,12 @@ def get_platform():
     if cur_platform is not None:
         return cur_platform
 
-    if "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
+    if "mlu" in PLATFORMS.keys() and PLATFORMS["mlu"].is_available():
+        # Checked before CUDA: the gpu_migration bridge makes the CUDA surface
+        # (and thus PLATFORMS["cuda"].is_available()) report True on MLU hosts.
+        cur_platform = PLATFORMS["mlu"]
+        print(f"Megatron-LM-FL Platform: mlu Selected")
+    elif "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
         cur_platform = PLATFORMS["cuda"]
         print(f"Megatron-LM-FL Platform: cuda Selected")
     elif "musa" in PLATFORMS.keys() and PLATFORMS["musa"].is_available():
