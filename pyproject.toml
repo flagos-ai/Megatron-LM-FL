@@ -74,7 +74,7 @@ training = [
     # requires torch>=2.8). Vendor backends running torch 2.7.1 (e.g. cambricon
     # NEUWARE 4.4.3) cannot upgrade torch, so 0.43.0 is the ceiling for them.
     # post_training verified with 0.43.0 on NEUWARE 4.4.3 + 4.7.2 (2026-08-22).
-    "nvidia-modelopt[torch]==0.43.0; sys_platform != 'darwin'",
+    "nvidia-modelopt[torch]==0.43.0",
     "tqdm==4.70.0",
     "datasets==5.0.1",
     "pyarrow==21.0.0",
@@ -113,7 +113,7 @@ mlm = [
 ]
 
 dev = [
-    "nvidia-modelopt[torch]; sys_platform != 'darwin'",
+    "nvidia-modelopt[torch]",
     "transformer-engine[pytorch,core_cu13]",
     "nvidia-resiliency-ext",
     "tqdm",
