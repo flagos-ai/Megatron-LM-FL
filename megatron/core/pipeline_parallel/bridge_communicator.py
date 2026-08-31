@@ -674,11 +674,10 @@ class BridgeCommunicator:
                 # Broadcast tensor shape to all ranks in scatter_pg
                 tensor_shape_to_broadcast = aggregated_gradient.shape
                 shape_tensor = torch.tensor(
-                    ######## FlagScale Begin ########
-                    tensor_shape_to_broadcast,
-                    device=cur_platform.current_device(),
-                    dtype=torch.int64,
-                    ######## FlagScale End ########
+                    tensor_shape_to_broadcast, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                )
+                dist.broadcast(
+                    shape_tensor, src=self.current_rank, group=self.src_grid_broadcast_pg
                 )
 
                 # Broadcast the tensors to all ranks in the group
@@ -885,14 +884,13 @@ class BridgeCommunicator:
         if rank_info.role == CommRole.SENDER:
             # Prepare send operations for forward shapes
             if tensor_to_send_next is not None:
-                send_shape = tensor_to_send_next.shape
-                send_shape_tensor = torch.tensor(
-                    send_shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                tensors_to_send = self._as_per_peer_tensors(
+                    tensor_to_send_next, len(rank_info.send_to_ranks)
                 )
                 # Add send operations for each destination
                 for dest_rank, tensor in zip(rank_info.send_to_ranks, tensors_to_send):
                     send_shape_tensor = torch.tensor(
-                        tensor.shape, device=torch.cuda.current_device(), dtype=torch.int64
+                        tensor.shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
                     )
                     ops.append(
                         torch.distributed.P2POp(
@@ -930,14 +928,13 @@ class BridgeCommunicator:
             # If we need to send gradient shapes back, prepare send operations
             if tensor_to_send_prev is not None:
 
-                grad_shape = tensor_to_send_prev.shape
-                grad_shape_tensor = torch.tensor(
-                    grad_shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                tensors_to_send = self._as_per_peer_tensors(
+                    tensor_to_send_prev, len(rank_info.recv_from_ranks)
                 )
 
                 for src_rank, tensor in zip(rank_info.recv_from_ranks, tensors_to_send):
                     grad_shape_tensor = torch.tensor(
-                        tensor.shape, device=torch.cuda.current_device(), dtype=torch.int64
+                        tensor.shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
                     )
                     ops.append(
                         torch.distributed.P2POp(

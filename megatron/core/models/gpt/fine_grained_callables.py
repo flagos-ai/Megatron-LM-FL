@@ -366,13 +366,6 @@ class TransformerLayerNode(ScheduleNode):
             cur_platform.range_pop()
         ######## FlagScale End ########
 
-        # the output grad memory is last used in wgrad compute, should be safe to release.
-        assert self.delay_grads_release, "output grad memory should be valid before wgrad."
-        if self.manual_release_grads:
-            for tensor in self.output_grads:
-                tensor.untyped_storage().resize_(0)
-        self.output_grads = None
-
         # Collecting gradient acc hooks if there is `post_wgrad_grad_acc_hook`
         # attribute attached to param, o.w. the wgrad hook wouldn't be fired.
         if self.post_wgrad_grad_acc_hooks is None:
