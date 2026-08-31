@@ -369,7 +369,15 @@ def set_streams(comm_stream=None, high_priority=False):
     # Set communication stream
     if _COMM_STREAM is None:
         if comm_stream is None:
-            comm_stream = cur_platform.Stream(device=cur_platform.device_name())  # FlagScale Modify
+            ######## FlagScale Begin ########
+            if high_priority:
+                _, high = cur_platform.Stream.priority_range()
+                comm_stream = cur_platform.Stream(
+                    device=cur_platform.device_name(), priority=high
+                )
+            else:
+                comm_stream = cur_platform.Stream(device=cur_platform.device_name())
+            ######## FlagScale End ########
         _COMM_STREAM = comm_stream
 
 

@@ -283,7 +283,7 @@ def test_float16_module_cpu_forward_and_state_paths(monkeypatch):
     fp16_module = Float16Module(config, wrapped)
     assert fp16_module.set_input_tensor("input") == "set"
     assert wrapped.inputs == ["input"]
-    output = fp16_module(torch.ones(2), extra=torch.ones(2), fp32_output=True)
+    output = fp16_module(torch.ones(2), torch.ones(2), fp32_output=True)
     assert output.dtype == torch.float32
     half_output = fp16_module(torch.ones(2), fp32_output=False)
     assert half_output.dtype == torch.float16

@@ -25,8 +25,6 @@ from megatron.core.parallel_state import (
 from megatron.core.utils import is_te_min_version, safely_set_viewless_tensor_data
 from megatron.plugin.decorators import overridable  # FlagScale Modify
 
-from megatron.plugin.decorators import overridable
-
 # ---------------------------------------------------------------------------
 # C++ extension: zero-copy storage sharing for CheckpointWithoutOutput
 # ---------------------------------------------------------------------------
