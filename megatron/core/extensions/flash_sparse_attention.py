@@ -7,7 +7,12 @@ from torch import Tensor
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from megatron.core.ssm.mamba_context_parallel import _all_to_all_cp2hp, _all_to_all_hp2cp
+from megatron.core.ssm.mamba_context_parallel import (
+    _all_to_all_cp2hp,
+    _all_to_all_hp2cp,
+    _undo_attention_load_balancing,
+    _redo_attention_load_balancing,
+)
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 
 
@@ -69,6 +74,9 @@ def _fsa_headwise_cp_forward(
     q_full_seq_3d = _all_to_all_cp2hp(q_3d, cp_group)
     # [sq_global, b, np_local * hn / cp_size] = [sq_global, b, (np_local/cp_size) * hn]
     sq_global = sq_local * cp_size
+    # Undo zigzag load-balancing so that tokens are in sequential temporal order.
+    # The FSA sparse window pattern assumes sequential ordering for correct causality.
+    q_full_seq_3d = _undo_attention_load_balancing(q_full_seq_3d, cp_size)
     num_q_heads_per_rank = np_local // cp_size
     q_full_seq = q_full_seq_3d.reshape(sq_global, b, num_q_heads_per_rank, hn)
     # [sq_global, b, num_q_heads_per_rank, hn]
@@ -88,6 +96,9 @@ def _fsa_headwise_cp_forward(
         v_3d = value.reshape(sq_local, b, nkv_local * hn)
         k_full_seq_3d = _all_to_all_cp2hp(k_3d, cp_group)
         v_full_seq_3d = _all_to_all_cp2hp(v_3d, cp_group)
+        # Undo zigzag load-balancing for K/V as well
+        k_full_seq_3d = _undo_attention_load_balancing(k_full_seq_3d, cp_size)
+        v_full_seq_3d = _undo_attention_load_balancing(v_full_seq_3d, cp_size)
         num_kv_heads_per_rank = nkv_local // cp_size
         k_full_seq = k_full_seq_3d.reshape(sq_global, b, num_kv_heads_per_rank, hn)
         v_full_seq = v_full_seq_3d.reshape(sq_global, b, num_kv_heads_per_rank, hn)
@@ -106,6 +117,9 @@ def _fsa_headwise_cp_forward(
         v_3d = value.reshape(sq_local, b, nkv_local * hn)
         k_full_seq_3d = gather_from_sequence_parallel_region(k_3d, group=cp_group)
         v_full_seq_3d = gather_from_sequence_parallel_region(v_3d, group=cp_group)
+        # Undo zigzag load-balancing for K/V gathered via AllGather
+        k_full_seq_3d = _undo_attention_load_balancing(k_full_seq_3d, cp_size)
+        v_full_seq_3d = _undo_attention_load_balancing(v_full_seq_3d, cp_size)
         k_full_seq = k_full_seq_3d.reshape(sq_global, b, nkv_local, hn)
         v_full_seq = v_full_seq_3d.reshape(sq_global, b, nkv_local, hn)
         # [sq_global, b, nkv_local, hn] — all KV heads on full sequence
@@ -138,6 +152,9 @@ def _fsa_headwise_cp_forward(
     # Step 4: All-to-all backward (head -> sequence dimension)
     # Reshape to 3-d: [sq_global, b, num_q_heads_per_rank * hn]
     output_3d = output.reshape(sq_global, b, num_q_heads_per_rank * hn)
+    # Redo zigzag load-balancing before converting back to CP layout.
+    # The downstream layers expect the zigzag ordering that CP uses.
+    output_3d = _redo_attention_load_balancing(output_3d, cp_size)
     output_sp_3d = _all_to_all_hp2cp(output_3d, cp_group)
     # [sq_local, b, np_local * hn]
     output_sp = output_sp_3d.reshape(sq_local, b, np_local, hn)

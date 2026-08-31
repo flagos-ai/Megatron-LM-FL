@@ -7,6 +7,10 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.extensions.flash_sparse_attention import _fsa_headwise_cp_forward
+from megatron.core.ssm.mamba_context_parallel import (
+    _redo_attention_load_balancing,
+    _undo_attention_load_balancing,
+)
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -183,10 +187,17 @@ class TestFSAHeadwiseCP:
             device=device, dtype=dtype
         )
 
-        # Extract local sequence chunk
-        query_local = query_full_cp[seq_start:seq_end].contiguous()
-        key_local = key_full_cp[seq_start:seq_end].contiguous()
-        value_local = value_full_cp[seq_start:seq_end].contiguous()
+        # Apply zigzag reordering (sequential -> zigzag) to match production layout.
+        # In production, Megatron distributes tokens in zigzag order across CP ranks.
+        # _redo_attention_load_balancing converts sequential to zigzag ordering on dim=0.
+        query_zigzag = _redo_attention_load_balancing(query_full_cp, cp_size)
+        key_zigzag = _redo_attention_load_balancing(key_full_cp, cp_size)
+        value_zigzag = _redo_attention_load_balancing(value_full_cp, cp_size)
+
+        # Extract local sequence chunk (now in zigzag order)
+        query_local = query_zigzag[seq_start:seq_end].contiguous()
+        key_local = key_zigzag[seq_start:seq_end].contiguous()
+        value_local = value_zigzag[seq_start:seq_end].contiguous()
 
         # Run with CP
         output_cp_local = _fsa_headwise_cp_forward(
@@ -201,8 +212,11 @@ class TestFSAHeadwiseCP:
             softmax_threshold=0.5,
         )
 
-        # Gather output from all CP ranks
-        output_cp_full = _gather_tensor_across_cp_group(output_cp_local, cp_group)
+        # Gather output from all CP ranks (output is in zigzag order)
+        output_cp_full_zigzag = _gather_tensor_across_cp_group(output_cp_local, cp_group)
+
+        # Undo zigzag to get sequential order for comparison with no-CP baseline
+        output_cp_full = _undo_attention_load_balancing(output_cp_full_zigzag, cp_size)
 
         # ==================================================================
         # Numerical comparison (on CP rank 0 only)
@@ -517,12 +531,16 @@ class TestFSAHeadwiseCPIntegration:
         )
         ref_output = ref_output_bshd.transpose(0, 1).contiguous()  # Back to SBHD
 
-        # CP path: split sequence and run _fsa_headwise_cp_forward (SBHD in/out)
+        # CP path: apply zigzag reordering then split sequence
+        query_zigzag = _redo_attention_load_balancing(query_full, cp_size)
+        key_zigzag = _redo_attention_load_balancing(key_full, cp_size)
+        value_zigzag = _redo_attention_load_balancing(value_full, cp_size)
+
         seq_start = cp_rank * seq_len_local
         seq_end = seq_start + seq_len_local
-        query_local = query_full[seq_start:seq_end].contiguous()
-        key_local = key_full[seq_start:seq_end].contiguous()
-        value_local = value_full[seq_start:seq_end].contiguous()
+        query_local = query_zigzag[seq_start:seq_end].contiguous()
+        key_local = key_zigzag[seq_start:seq_end].contiguous()
+        value_local = value_zigzag[seq_start:seq_end].contiguous()
 
         # Verify input is SBHD
         assert query_local.shape == (seq_len_local, batch_size, num_q_heads_per_tp, head_dim), \
@@ -545,7 +563,8 @@ class TestFSAHeadwiseCPIntegration:
             f"Output should be SBHD [sq_local, b, np, hn], got {output_cp_local.shape}"
 
         # Gather and compare with reference
-        output_cp_full = _gather_tensor_across_cp_group(output_cp_local, cp_group)
+        output_cp_full_zigzag = _gather_tensor_across_cp_group(output_cp_local, cp_group)
+        output_cp_full = _undo_attention_load_balancing(output_cp_full_zigzag, cp_size)
 
         if cp_rank == 0:
             abs_diff = torch.abs(ref_output - output_cp_full)
