@@ -70,89 +70,90 @@ test_matrix:
       - name: fusions
         path: tests/unit_tests/fusions/
         description: Fusion tests
+      - name: transformer
+        path: tests/unit_tests/transformer/
+        description: Transformer tests
       - name: others
         path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: Export, post-training, tokenizer, and utility tests
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
+      # Data
       - tests/unit_tests/data/test_preprocess_data.py
-      # PyTorch 2.7/NCCL allocator teardown leaves the CUDA context invalid on the local CI stack.
-      - tests/unit_tests/test_nccl_allocator.py
-      # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.
-      - tests/unit_tests/test_fp8_param.py
-      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py
-      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
-      - tests/unit_tests/dist_checkpointing/test_safe_globals.py
+
+      # Distributed checkpointing
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
-      - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py
+      - tests/unit_tests/dist_checkpointing/test_safe_globals.py
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
+
+      # Distributed
       # Sporadic CUDA async allocation failure leaves NCCL ranks on different collective sequences.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
+
+      # Export
       - tests/unit_tests/export/trtllm/test_distributed_fp8.py
       - tests/unit_tests/export/trtllm/test_single_device_fp8.py
       - tests/unit_tests/export/trtllm/test_trtllm_helper.py
-      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromSequenceParallelRegion ## sporadic NCCL all-gather OOM on shared A100 CI runner
-      - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
-      - tests/unit_tests/transformer/moe/test_token_dispatcher.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/test_inference.py
-      - tests/unit_tests/models/test_gpt_model.py
-      - tests/unit_tests/models/test_mamba_model.py
-      - tests/unit_tests/models/test_mamba_moe_model.py ## sporadic cuda malloc error on CI machines, tests passed locally
+
+      # Fusions
+      # CUDA CI sees sporadic backward gradient mismatches from the fused kernel;
+      # the numeric error is within 1 ULP but outside allclose.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_inplace_forward_backward
+      # KV-split MLA RoPE fusion hits sporadic Triton autotune/compile failures on shared A100 CI.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-sbhd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-thd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-sbhd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-thd]
+
+      # Models
+      # Dynamic inference FP8 selects Flash Attention with an unsupported test head size.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTWithDynamicInference::test_dynamic_inference_padding_with_fp8
       # FL does not modify upstream Mamba logic, and mamba-ssm is not installed in the CUDA CI image.
       - tests/unit_tests/models/test_hybrid_model.py
       - tests/unit_tests/models/test_hybrid_moe_model.py
-      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      - tests/unit_tests/models/test_mamba_moe_model.py ## sporadic cuda malloc error on CI machines, tests passed locally
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py ## HyperCommGrid + TE attention: TE requires global _TENSOR_MODEL_PARALLEL_GROUP but HyperCommGrid only sets per-grid process groups
       - tests/unit_tests/models/test_mimo_checkpoint.py ## same HyperCommGrid + TE attention issue as test_mimo_1f1b_schedule
-      - tests/unit_tests/post_training/test_modelopt_module_spec.py
+
+      # Post-training
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder ## ModelOpt is excluded from the FL CUDA CI image
-      - tests/unit_tests/transformer/moe/test_upcycling.py ## tests passed locally but CI hits unhandled NCCL error
-      - tests/unit_tests/transformer/moe/test_aux_loss.py
-      - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
-      - tests/unit_tests/transformer/moe/test_routers.py
-      - tests/unit_tests/transformer/test_attention.py
-      - tests/unit_tests/transformer/test_attention_packed_seq.py
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py
+
+      # Tensor parallel
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromSequenceParallelRegion ## sporadic NCCL all-gather OOM on shared A100 CI runner
+
+      # Tokenizers
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+
+      # Transformer
       - tests/unit_tests/transformer/test_cuda_graphs.py
       - tests/unit_tests/transformer/test_full_cuda_graph.py
-      - tests/unit_tests/transformer/test_multi_latent_attention.py
       - tests/unit_tests/transformer/test_multi_token_prediction.py
       - tests/unit_tests/transformer/test_transformer_block.py
-      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
-      - tests/unit_tests/transformer/test_submodule_callables.py ## tests passed locally but CI hits NCCL error
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp4_sp] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp2_sp_longseq] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[short_seqs_parallel] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[extreme_mixed] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[long_short_mix] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
-      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
-      # KV-split MLA RoPE fusion hits sporadic Triton autotune/compile failures on shared A100 CI.
-      # CUDA CI sees sporadic backward gradient mismatches from the fused
-      # kernel; the numeric error is within 1 ULP but outside allclose.
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_inplace_forward_backward
-      # Keep the inplace MLA RoPE cases enabled for coverage.
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-sbhd]
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-sbhd]
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-thd]
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-thd]
-      - tests/unit_tests/dist_checkpointing/test_local.py
-      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
 
+      # Top-level unit tests
+      # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.
+      - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_inference.py
+      # PyTorch 2.7/NCCL allocator teardown leaves the CUDA context invalid on the local CI stack.
+      - tests/unit_tests/test_nccl_allocator.py
       # test_straggler_detector causes a SIGSEGV (Signal 11) crash during pytest session teardown on A100.
       # Root cause: UCX (HPC-X libucs.so) crashes in torch.distributed.barrier() called from the
       # session-scoped cleanup fixture in conftest.py, likely because the distributed process group
       # is in an inconsistent state after the test completes. This is a UCX/NCCL environment issue,
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
-      - tests/unit_tests/tokenizers/test_tokenizer.py
-      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
-      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
-      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
-      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
 
   functional:
     train:
