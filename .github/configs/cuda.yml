@@ -77,6 +77,10 @@ test_matrix:
     # These files will be skipped when running pytest
     ignored_tests:
       - tests/unit_tests/data/test_preprocess_data.py
+      # PyTorch 2.7/NCCL allocator teardown leaves the CUDA context invalid on the local CI stack.
+      - tests/unit_tests/test_nccl_allocator.py
+      # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.
+      - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
@@ -98,6 +102,10 @@ test_matrix:
       - tests/unit_tests/models/test_gpt_model.py
       - tests/unit_tests/models/test_mamba_model.py
       - tests/unit_tests/models/test_mamba_moe_model.py ## sporadic cuda malloc error on CI machines, tests passed locally
+      # FL does not modify upstream Mamba logic, and mamba-ssm is not installed in the CUDA CI image.
+      - tests/unit_tests/models/test_hybrid_model.py
+      - tests/unit_tests/models/test_hybrid_moe_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py ## HyperCommGrid + TE attention: TE requires global _TENSOR_MODEL_PARALLEL_GROUP but HyperCommGrid only sets per-grid process groups
       - tests/unit_tests/models/test_mimo_checkpoint.py ## same HyperCommGrid + TE attention issue as test_mimo_1f1b_schedule
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
