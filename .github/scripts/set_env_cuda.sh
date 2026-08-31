@@ -14,6 +14,8 @@ validate_cuda_capacity() {
 
 setup_unit_environment() {
   ci_activate_python_environment
+  ci_export_env NCCL_MAX_NCHANNELS 1
+  ci_export_env NCCL_NVLS_ENABLE 0
   ci_ensure_curl
 
   local test_dependencies=(

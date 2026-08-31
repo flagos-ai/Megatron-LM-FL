@@ -44,7 +44,11 @@ test_matrix:
       - a100
     pytest_extra_args:
       - -m
-      - not flaky_in_dev
+      - not experimental and not flaky_in_dev
+    experimental_pytest_extra_args:
+      - --experimental
+      - -m
+      - experimental and not flaky_in_dev
     groups:
       - name: core
         path: tests/unit_tests/test_*.py megatron/plugin/tests/
@@ -137,10 +141,6 @@ test_matrix:
       - tests/unit_tests/tokenizers/test_tokenizer.py
 
       # Transformer
-      - tests/unit_tests/transformer/test_cuda_graphs.py
-      - tests/unit_tests/transformer/test_full_cuda_graph.py
-      - tests/unit_tests/transformer/test_multi_token_prediction.py
-      - tests/unit_tests/transformer/test_transformer_block.py
 
       # Top-level unit tests
       # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.

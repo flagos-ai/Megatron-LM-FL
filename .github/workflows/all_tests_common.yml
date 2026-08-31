@@ -36,6 +36,7 @@ jobs:
       train_test_matrix: ${{ steps.config.outputs.train_test_matrix }}
       unit_test_groups: ${{ steps.config.outputs.unit_test_groups }}
       unit_pytest_extra_args: ${{ steps.config.outputs.unit_pytest_extra_args }}
+      unit_experimental_pytest_extra_args: ${{ steps.config.outputs.unit_experimental_pytest_extra_args }}
       ignored_tests: ${{ steps.config.outputs.ignored_tests }}
     steps:
       - name: Checkout source code
@@ -95,6 +96,7 @@ jobs:
           UNIT_NPROC_PER_NODE=$(yq '.test_matrix.unit.nproc_per_node // ""' "$CONFIG_FILE")
           UNIT_TEST_GROUPS=$(yq '.test_matrix.unit.groups // [] | tojson(0)' "$CONFIG_FILE")
           UNIT_PYTEST_EXTRA_ARGS=$(yq '.test_matrix.unit.pytest_extra_args // [] | tojson(0)' "$CONFIG_FILE")
+          UNIT_EXPERIMENTAL_PYTEST_EXTRA_ARGS=$(yq '.test_matrix.unit.experimental_pytest_extra_args // [] | tojson(0)' "$CONFIG_FILE")
           IGNORED_TESTS=$(yq '.test_matrix.unit.ignored_tests // [] | tojson(0)' "$CONFIG_FILE")
 
           if [ "${{ inputs.run_unit_tests }}" = "true" ] && [ "$UNIT_TEST_GROUPS" = "[]" ]; then
@@ -108,6 +110,7 @@ jobs:
           echo "unit_nproc_per_node=$UNIT_NPROC_PER_NODE" >> $GITHUB_OUTPUT
           echo "unit_test_groups=$UNIT_TEST_GROUPS" >> $GITHUB_OUTPUT
           echo "unit_pytest_extra_args=$UNIT_PYTEST_EXTRA_ARGS" >> $GITHUB_OUTPUT
+          echo "unit_experimental_pytest_extra_args=$UNIT_EXPERIMENTAL_PYTEST_EXTRA_ARGS" >> $GITHUB_OUTPUT
           echo "ignored_tests=$IGNORED_TESTS" >> $GITHUB_OUTPUT
       
   lint:
@@ -138,6 +141,7 @@ jobs:
       test_groups: ${{ needs.checkout_and_config.outputs.unit_test_groups }}
       nproc_per_node: ${{ needs.checkout_and_config.outputs.unit_nproc_per_node }}
       pytest_extra_args: ${{ needs.checkout_and_config.outputs.unit_pytest_extra_args }}
+      experimental_pytest_extra_args: ${{ needs.checkout_and_config.outputs.unit_experimental_pytest_extra_args }}
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
 
   unit_tests_complete:

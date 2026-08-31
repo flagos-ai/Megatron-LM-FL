@@ -40,6 +40,11 @@ on:
         type: string
         default: '[]'
         description: JSON array of additional pytest arguments
+      experimental_pytest_extra_args:
+        required: false
+        type: string
+        default: '[]'
+        description: JSON array of arguments for an optional experimental pytest pass
       ignored_tests:
         required: false
         type: string
@@ -122,6 +127,7 @@ jobs:
           CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
           CI_IGNORED_TESTS: ${{ inputs.ignored_tests }}
           CI_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
+          CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS: ${{ inputs.experimental_pytest_extra_args }}
         run: tests/test_utils/runners/run_ci_unit_tests.sh
         timeout-minutes: 60
 
