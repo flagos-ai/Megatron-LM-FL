@@ -22,6 +22,7 @@ from megatron.core.num_microbatches_calculator import destroy_num_microbatches_c
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import get_context_parallel_group
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.ssm.mamba_mixer import HAVE_MAMBA_SSM
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.hyper_connection import learned_output_contract
 from megatron.core.transformer.multi_token_prediction import (
@@ -836,6 +837,7 @@ class TestMTPLossLoggingHelper:
         assert MTPLossLoggingHelper.tracker["avg_group"] is None
 
 
+@pytest.mark.skipif(not HAVE_MAMBA_SSM, reason="mamba-ssm not available")
 class TestMultiTokenPredictionHybrid:
     """Test Multi-Token Prediction with Mamba hybrid models."""
 

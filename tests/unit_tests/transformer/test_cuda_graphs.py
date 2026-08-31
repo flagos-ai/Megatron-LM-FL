@@ -27,6 +27,7 @@ from megatron.core.num_microbatches_calculator import (
 )
 from megatron.core.pipeline_parallel.schedules import set_current_microbatch
 from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.ssm.mamba_mixer import HAVE_MAMBA_SSM
 from megatron.core.tensor_parallel.random import (
     HAVE_TE,
     initialize_rng_tracker,
@@ -35,8 +36,8 @@ from megatron.core.tensor_parallel.random import (
 from megatron.core.transformer.cuda_graphs import (
     ArgMetadata,
     CudaGraphManager,
-    TensorReusePool,
     TECudaGraphHelper,
+    TensorReusePool,
     _check_supported_type,
     _clone_nested_tensors,
     _CudagraphGlobalRecord,
@@ -904,6 +905,7 @@ class TestLLaVACudaGraph:
                 del layer.cudagraph_manager.cudagraph_runners[0].bwd_graph
 
 
+@pytest.mark.skipif(not HAVE_MAMBA_SSM, reason="mamba-ssm not available")
 class TestParallelHybridBlockCudagraphs:
     def setup_method(self, method):
         # initialize parallel state
