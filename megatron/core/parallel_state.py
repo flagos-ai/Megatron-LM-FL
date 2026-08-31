@@ -1420,6 +1420,10 @@ def initialize_model_parallel(
 
     ######## FlagScale Begin ########
     if engram_rank_generator is not None:
+        global _ENGRAM_DATA_PARALLEL_GROUP
+        global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+        global _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS
+        assert _ENGRAM_DATA_PARALLEL_GROUP is None
         for ranks in engram_rank_generator.get_ranks('dp'):
             group = create_group(
                 ranks,
@@ -1437,12 +1441,15 @@ def initialize_model_parallel(
             else:
                 group_gloo = None
             if rank in ranks:
-                global _ENGRAM_DATA_PARALLEL_GROUP
-                global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
-                global _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS
                 _ENGRAM_DATA_PARALLEL_GROUP = group
                 _ENGRAM_DATA_PARALLEL_GROUP_GLOO = group_gloo
                 _ENGRAM_DATA_PARALLEL_GLOBAL_RANKS = ranks
+
+        global _ENGRAM_EMBEDDING_PARALLEL_GROUP
+        assert _ENGRAM_EMBEDDING_PARALLEL_GROUP is None
+        global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
+        assert _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO is None
+        global _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS
         for ranks in engram_rank_generator.get_ranks('tp'):
             group = create_group(
                 ranks,
@@ -1460,12 +1467,13 @@ def initialize_model_parallel(
             else:
                 group_gloo = None
             if rank in ranks:
-                global _ENGRAM_EMBEDDING_PARALLEL_GROUP
-                global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
-                global _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS
                 _ENGRAM_EMBEDDING_PARALLEL_GROUP = group
                 _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = group_gloo
                 _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = ranks
+
+        global _ENGRAM_MODEL_PARALLEL_GROUP
+        assert _ENGRAM_MODEL_PARALLEL_GROUP is None
+        global _ENGRAM_MODEL_PARALLEL_GROUP_RANKS
         for ranks in engram_rank_generator.get_ranks('tp-pp'):
             group = create_group(
                 ranks,
@@ -1474,8 +1482,6 @@ def initialize_model_parallel(
                 group_desc="ENGRAM_MODEL_PARALLEL_GROUP",
             )
             if rank in ranks:
-                global _ENGRAM_MODEL_PARALLEL_GROUP
-                global _ENGRAM_MODEL_PARALLEL_GROUP_RANKS
                 _ENGRAM_MODEL_PARALLEL_GROUP = group
                 _ENGRAM_MODEL_PARALLEL_GROUP_RANKS = ranks
     ######## FlagScale End ########
@@ -2665,39 +2671,52 @@ def get_inter_distributed_optimizer_instance_group(check_initialized=True):
 ## Engram related parallel states functions
 def get_engram_embedding_parallel_group():
     """Get the engram embedding group the caller rank belongs to."""
-    global _ENGRAM_EMBEDDING_PARALLEL_GROUP
     return _ENGRAM_EMBEDDING_PARALLEL_GROUP
+
+
+def get_engram_embedding_parallel_rank():
+    """Return caller's rank for the engram-embedding-parallel rank."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        engram_embedding_group = get_engram_embedding_parallel_group()
+        return engram_embedding_group.rank() if engram_embedding_group else 0
+    else:
+        return 0
+
+
+def get_engram_embedding_parallel_world_size():
+    """Return world size for the engram-embedding-parallel group size."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        engram_embedding_group = get_engram_embedding_parallel_group()
+        return engram_embedding_group.size() if engram_embedding_group else 1
+    else:
+        return 1
 
 
 def get_engram_model_parallel_group():
     """Get the engram model group the caller rank belongs to."""
-    global _ENGRAM_MODEL_PARALLEL_GROUP
     return _ENGRAM_MODEL_PARALLEL_GROUP
 
 
 def get_engram_data_parallel_group():
     """Get the engram data parallel group the caller rank belongs to."""
-    global _ENGRAM_DATA_PARALLEL_GROUP
     return _ENGRAM_DATA_PARALLEL_GROUP
 
 
 def get_engram_data_parallel_world_size():
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         engram_group = get_engram_data_parallel_group()
-        return engram_group.size() if engram_group is not None else 0
+        return engram_group.size() if engram_group is not None else 1
     else:
-        return 0
+        return 1
 
 
 def get_engram_embedding_parallel_group_gloo():
     """Get the engram embedding group the caller rank belongs to."""
-    global _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
     return _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO
 
 
 def get_engram_data_parallel_group_gloo():
     """Get the engram data parallel group the caller rank belongs to."""
-    global _ENGRAM_DATA_PARALLEL_GROUP_GLOO
     return _ENGRAM_DATA_PARALLEL_GROUP_GLOO
 ######## FlagScale End ########
 

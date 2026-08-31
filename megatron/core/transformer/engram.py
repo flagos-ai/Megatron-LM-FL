@@ -2,34 +2,39 @@
 
 ## built-in
 import copy
-from typing import Optional, Callable, Tuple
 import math
+from typing import Callable, Optional, Tuple
 
 ## third-party
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.parameter import Parameter
 from sympy import isprime
+from tokenizers import Regex, normalizers
+from torch.nn.parameter import Parameter
 from transformers import AutoTokenizer
 
-from tokenizers import Regex, normalizers
-
 # megatron-core
-from megatron.core import tensor_parallel
-from megatron.core.utils import (
-    get_pg_size,
-    get_pg_rank,
-    get_tensor_model_parallel_group_if_none,
-)
-from megatron.core.tensor_parallel.utils import VocabUtility
-from megatron.core.tensor_parallel.layers import _initialize_affine_weight_cpu
-from megatron.core import parallel_state
-from megatron.core.model_parallel_config import ModelParallelConfig
+from megatron.core import parallel_state, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedTensor
-from megatron.core.utils import nvtx_range_push, nvtx_range_pop
-from megatron.core.transformer.utils import sharded_state_dict_default
+from megatron.core.model_parallel_config import ModelParallelConfig
+from megatron.core.tensor_parallel.random import _initialize_affine_weight_cpu
+from megatron.core.tensor_parallel.utils import VocabUtility
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.utils import sharded_state_dict_default
+from megatron.core.utils import (
+    get_pg_rank,
+    get_pg_size,
+    get_tensor_model_parallel_group_if_none,
+    nvtx_range_pop,
+    nvtx_range_push,
+)
+
+######## FlagScale Begin ########
+from megatron.plugin.platform import get_platform
+
+cur_platform = get_platform()
+######## FlagScale End ########
 
 
 def _vocab_size_with_padding(orig_vocab_size, tp_size):
@@ -53,7 +58,7 @@ def _initialize_engram_weight_gpu_with_seed(
         init_method(weight)
 
 
-class EngramMemory(nn.Module):
+class EngramEmbedding(nn.Module):
     """Embedding parallelized in the vocabulary dimension.
 
     This is mainly adapted from torch.nn.Embedding and all the default values are kept.
@@ -88,12 +93,12 @@ class EngramMemory(nn.Module):
         self.embedding_dim = embedding_dim
         self.reduce_scatter_embeddings = reduce_scatter_embeddings
         self.embedding_parallel_group = embedding_parallel_group
+
         if self.embedding_parallel_group is None:
-            self.embedding_parallel_size = 1
-            self.embedding_parallel_rank = 0
-        else:
-            self.embedding_parallel_size = get_pg_size(self.embedding_parallel_group)
-            self.embedding_parallel_rank = get_pg_rank(self.embedding_parallel_group)
+            self.embedding_parallel_group = parallel_state.get_engram_model_parallel_group()
+
+        self.embedding_parallel_size = get_pg_size(self.embedding_parallel_group)
+        self.embedding_parallel_rank = get_pg_rank(self.embedding_parallel_group)
 
         (self.vocab_start_index, self.vocab_end_index) = (
             VocabUtility.vocab_range_from_global_vocab_size(
@@ -102,18 +107,15 @@ class EngramMemory(nn.Module):
                 self.embedding_parallel_size,
             )
         )
-        self.num_embeddings_per_partition = (
-            self.vocab_end_index - self.vocab_start_index
-        )
+        self.num_embeddings_per_partition = self.vocab_end_index - self.vocab_start_index
         self.deterministic_mode = config.deterministic_mode
+        self.config = config
 
         # Allocate weights and initialize on GPU only.
         if config.use_cpu_initialization:
             self.weight = Parameter(
                 torch.empty(
-                    self.num_embeddings_per_partition,
-                    self.embedding_dim,
-                    dtype=config.params_dtype,
+                    self.num_embeddings_per_partition, self.embedding_dim, dtype=config.params_dtype,
                 )
             )
             if config.perform_initialization:
@@ -133,7 +135,7 @@ class EngramMemory(nn.Module):
                 torch.empty(
                     self.num_embeddings_per_partition,
                     self.embedding_dim,
-                    device=torch.cuda.current_device(),
+                    device=cur_platform.current_device(),
                     dtype=config.params_dtype,
                 )
             )
@@ -326,7 +328,7 @@ class MultiHeadEmbedding(nn.Module):
                 f"Engram multi-head embedding: pad total_n from {total_N} to {padded_total_N}"
             )
 
-            self.memory = tensor_parallel.VocabParallelEmbedding(
+            self.embedding = tensor_parallel.VocabParallelEmbedding(
                 num_embeddings=padded_total_N,
                 embedding_dim=D,
                 init_method=self.config.embedding_init_method,
@@ -344,7 +346,7 @@ class MultiHeadEmbedding(nn.Module):
             print(
                 f"Engram multi-head embedding: pad total_n from {total_N} to {padded_total_N}"
             )
-            self.memory = EngramMemory(
+            self.embedding = EngramEmbedding(
                 num_embeddings=padded_total_N,
                 embedding_dim=D,
                 init_method=self.config.embedding_init_method,
@@ -353,9 +355,9 @@ class MultiHeadEmbedding(nn.Module):
                 embedding_parallel_group=self.embedding_parallel_group,
             )
             if self.config.engram_embedding_parallel_method == "alltoall":
-                self.memory.enable_parallel()
+                self.embedding.enable_parallel()
                 if self.config.engram_offload_embedding_optimizer_states:
-                    self.memory.enable_offloading()
+                    self.embedding.enable_offloading()
             else:
                 raise ValueError(
                     f"Unsupported engram_embedding_parallel_method: {self.config.engram_embedding_parallel_method}"
@@ -363,7 +365,7 @@ class MultiHeadEmbedding(nn.Module):
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
         shifted_input_ids = input_ids + self.offsets
-        output = self.memory(shifted_input_ids)
+        output = self.embedding(shifted_input_ids)
 
         if not self.reduce_scatter_embeddings:
             output = output.transpose(0, 1).contiguous()
@@ -731,7 +733,7 @@ class EngramModule(nn.Module):
             pad_id=config.engram_pad_id,
             seed=config.engram_seed,
         )
-        self.memory = MultiHeadEmbedding(
+        self.multi_head_embedding = MultiHeadEmbedding(
             config,
             list_of_N=[
                 x
@@ -820,7 +822,7 @@ class EngramModule(nn.Module):
             assert hash_input_ids is not None, (
                 "If there is no embedding cache, hash input ids can not be None for Engram"
             )
-            embeddings = self.memory(hash_input_ids).flatten(start_dim=-2)
+            embeddings = self.multi_head_embedding(hash_input_ids).flatten(start_dim=-2)
         # [L/tp_size, B, N_GRAM * N_HEADS_PER_GRAM, N_EMBED_PER_GRAM // N_HEADS_PER_GRAM]
         # [L/tp_size, B, N_GRAM * N_EMBED_PER_NGRAM]
 
@@ -870,7 +872,7 @@ class EngramModule(nn.Module):
         assert input_ids is not None, "Input ids can not be None for EngramModel"
         self.embedding_stream.synchronize()  # Ensure previous computations on the stream are finished
         with torch.cuda.stream(self.embedding_stream):
-            embedding_result = self.memory(input_ids).flatten(start_dim=-2)
+            embedding_result = self.multi_head_embedding(input_ids).flatten(start_dim=-2)
         embedding_event = torch.cuda.Event()
         embedding_event.record(self.embedding_stream)
         self.embedding_cache = (embedding_result, embedding_event)
@@ -884,7 +886,7 @@ class EngramModule(nn.Module):
         sharded_dict = {}
         memory_prefix = f"{prefix}memory."
         sharded_dict.update(
-            self.memory.sharded_state_dict(memory_prefix, sharded_offsets, metadata)
+            self.multi_head_embedding.sharded_state_dict(memory_prefix, sharded_offsets, metadata)
         )
         conv_prefix = f"{prefix}short_conv."
         sharded_dict.update(
