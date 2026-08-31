@@ -1045,18 +1045,13 @@ class MultiTokenPredictionLayer(MegatronModule):
                 )
         else:
             hidden_states = apply_module(self.hnorm)(hidden_states)
-            hidden_states = make_viewless_tensor(
-                inp=hidden_states, requires_grad=True, keep_graph=True
-            )
+            hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
             # At the (k - 1)-th MTP module, concatenates the i-th token's hidden_states
             # and the (i + K)-th token's embedding, and combine them with linear projection.
             hidden_states = torch.cat((decoder_input, hidden_states), -1)
             hidden_states, _ = self.eh_proj(hidden_states)
             # For tensor parallel we need to gather the tensor across the model-parallel
-            # ranks after the linear projection. This used to call
-            # `all_gather_last_dim_from_tensor_parallel_region`, but that utility reduces
-            # the gradient in backward pass and was therefore incorrect in this context.
-            # It has been replaced with the correct `gather_from_tensor_model_parallel_region`.
+        # ranks after the linear projection.
             if InferenceMode.is_active():
                 hidden_states = inference_all_gather_from_tensor_model_parallel_region(
                     hidden_states, self.tp_group, self.config
@@ -1067,9 +1062,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                 )
             # For sequence parallel, scatter after linear_fc and before transformer layer.
             if self.sequence_parallel:
-                hidden_states = scatter_to_sequence_parallel_region(
-                    hidden_states, group=self.tp_group
-                )
+                hidden_states = scatter_to_sequence_parallel_region(hidden_states, group=self.tp_group)
         return hidden_states
 
     def _proj_and_transformer_layer(
@@ -1219,6 +1212,7 @@ class MultiTokenPredictionLayer(MegatronModule):
         hidden_states: Tensor,
         decoder_input: Tensor,
         attention_mask: Optional[Tensor] = None,
+        padding_mask: Optional[Tensor] = None,
         context: Optional[Tensor] = None,
         context_mask: Optional[Tensor] = None,
         rotary_pos_emb: Optional[Tensor] = None,
@@ -1254,6 +1248,7 @@ class MultiTokenPredictionLayer(MegatronModule):
             hidden_states,
             decoder_input,
             attention_mask,
+            padding_mask,
             context,
             context_mask,
             rotary_pos_emb,
@@ -1265,6 +1260,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                 hidden_states=hidden_states,
                 decoder_input=decoder_input,
                 attention_mask=attention_mask,
+                padding_mask=padding_mask,
                 context=context,
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb,
@@ -1311,6 +1307,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                     hidden_states,
                     decoder_input,
                     attention_mask,
+                    padding_mask,
                     context,
                     context_mask,
                     rotary_pos_emb,
@@ -1330,6 +1327,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                     hidden_states,
                     decoder_input,
                     attention_mask,
+                    padding_mask,
                     context,
                     context_mask,
                     rotary_pos_emb,
@@ -1356,6 +1354,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                 hidden_states=hidden_states,
                 decoder_input=decoder_input,
                 attention_mask=attention_mask,
+                padding_mask=padding_mask,
                 context=context,
                 context_mask=context_mask,
                 rotary_pos_emb=rotary_pos_emb,

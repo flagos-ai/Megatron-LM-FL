@@ -1507,6 +1507,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         pg_collection: Optional[ProcessGroupCollection] = None,
         vp_stage: Optional[int] = None,
         is_mtp_layer: bool = False,
+        name: str | None = None,
         dualpipev_stage: Optional[int] = None,
     ):
         super().__init__(
@@ -1517,6 +1518,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             pg_collection=pg_collection,
             vp_stage=vp_stage,
             is_mtp_layer=is_mtp_layer,
+            name=name,
             dualpipev_stage=dualpipev_stage,
         )
 
