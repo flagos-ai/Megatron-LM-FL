@@ -2373,8 +2373,6 @@ class TECudaGraphHelper:
 
         self._capture_finished = True
 
-        self._capture_finished = True
-
     def create_cudagraphs(self):
         """
         Capture CUDA Graphs per TransformerLayer per microbatch.

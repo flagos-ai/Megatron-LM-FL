@@ -31,6 +31,7 @@ def checkpointed_forward(
     padding_mask: Optional[Tensor] = None,
     extract_layer_indices: Optional[Set[int]] = None,
     layer_offset: int = 0,
+    # FlagScale Modify: Preserve token IDs for Engram during activation recomputation.
     input_ids: Optional[Tensor] = None,
 ) -> Union[Tensor, Tuple[Tensor, Tensor]]:
     """Forward method with activation checkpointing.
@@ -89,7 +90,7 @@ def checkpointed_forward(
                     inference_context=None,
                     packed_seq_params=packed_seq_params,
                     padding_mask=padding_mask,
-                    input_ids=input_ids,
+                    input_ids=input_ids,  # FlagScale Modify: required by Engram layers.
                 )
                 with inner_quantization_context:
                     if isinstance(layer, TransformerLayer):
@@ -100,6 +101,7 @@ def checkpointed_forward(
                             "context_mask",
                             "attention_bias",
                             "padding_mask",
+                            # FlagScale Modify: MambaLayer does not accept Engram token IDs.
                             "input_ids",
                         ):
                             layer_kwargs.pop(k, None)
