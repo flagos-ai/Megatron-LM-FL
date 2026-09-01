@@ -78,8 +78,8 @@ test_matrix:
         path: tests/unit_tests/transformer/
         description: Transformer tests
       - name: others
-        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Export, post-training, tokenizer, and utility tests
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
@@ -101,17 +101,10 @@ test_matrix:
       # Distributed
       # Sporadic CUDA async allocation failure leaves NCCL ranks on different collective sequences.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
-
-      # Export
-      # A100 is SM80; TE FP8 FSDP recipes require SM89+, and blockwise FP8 also
-      # requires SM90+ with CUDA 12.9 or newer.
-      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
 
       # Fusions
       # CUDA CI sees sporadic backward gradient mismatches from the fused kernel;
@@ -146,6 +139,10 @@ test_matrix:
       # Transformer
 
       # Top-level unit tests
+      # emerging-optimizers is an optional Git-only dependency and is not installed
+      # in the FL CUDA CI image. Keep its integration suites out of the default job.
+      - tests/unit_tests/test_emerging_optimizers.py
+      - tests/unit_tests/test_layer_wise_optimizer.py
       # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_inference.py

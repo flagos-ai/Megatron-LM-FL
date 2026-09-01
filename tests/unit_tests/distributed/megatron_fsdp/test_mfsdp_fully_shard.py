@@ -14,6 +14,7 @@ import transformer_engine as te
 from packaging import version
 from torch.nn.functional import mse_loss
 from torch.optim import Adam
+from transformer_engine.pytorch.fp8 import check_fp8_block_scaling_support
 
 try:
     from transformer_engine.pytorch.optimizers import FusedAdam
@@ -898,6 +899,13 @@ class TestMegatronFsdpFullyShard:
         """
         Test Megatron-FSDP with FP8 activations and parameters via TransformerEngine.
         """
+        if te_recipe == BLOCKWISE_FP8_RECIPE:
+            # FlagScale: Keep this recipe covered on capable CI nodes while skipping
+            # environments that do not meet its GPU compute capability or CUDA requirement.
+            block_scaling_supported, unsupported_reason = check_fp8_block_scaling_support()
+            if not block_scaling_supported:
+                pytest.skip(f"[Megatron CI/CD] {unsupported_reason}")
+
         if te_recipe == MXFP8_BLOCKWISE_RECIPE:
             # TODO(@cspades, @ko3n1g): Add this test case in.
             pytest.skip(f"[Megatron CI/CD] MXFP8 requires Blackwell nodes to test.")
