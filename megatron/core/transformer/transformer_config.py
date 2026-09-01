@@ -463,6 +463,11 @@ class TransformerConfig(ModelParallelConfig):
     (Ulysses-style all-to-all on Q heads, AllGather on KV when heads insufficient).
     Currently only 'headwise' is supported."""
 
+    fsa_use_fused_kernels: bool = False
+    """Use fused Triton kernels for FSA operations.
+    Currently fuses zigzag reorder + SBHD/BSHD transpose into single kernels,
+    eliminating redundant intermediate tensors."""
+
     gdn_conv_pad_alignment: Optional[int] = None
     """Alignment for causal conv1d input padding in GDN packed sequence mode.
     When set, pads the conv input to a multiple of this value. Incompatible with chunkwise CP."""

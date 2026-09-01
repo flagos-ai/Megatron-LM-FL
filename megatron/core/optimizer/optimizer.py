@@ -60,6 +60,8 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 # FlagScale End
 
+from megatron.core.utils import nvtx_range_pop, nvtx_range_push
+
 
 def _zero_grad_group_helper(
     group: List[torch.nn.Parameter], set_to_none: bool, use_decoupled_grad: bool = False
@@ -628,6 +630,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         """Step the optimizer with ready gradients, return successful."""
         timers = self.config.timers
         # Step the optimizer.
+        nvtx_range_push(msg="optimizer.inner_step")
         if timers is not None:
             timers('optimizer-inner-step', log_level=1).start(
                 barrier=self.config.barrier_with_L1_time
@@ -636,8 +639,10 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             self.optimizer.step()
         if timers is not None:
             timers('optimizer-inner-step').stop()
+        nvtx_range_pop(msg="optimizer.inner_step")
 
         # Update params from main params.
+        nvtx_range_push(msg="optimizer.copy_main_to_model")
         if timers is not None:
             timers('optimizer-copy-main-to-model-params', log_level=1).start(
                 barrier=self.config.barrier_with_L1_time
@@ -653,6 +658,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
 
         if timers is not None:
             timers('optimizer-copy-main-to-model-params').stop()
+        nvtx_range_pop(msg="optimizer.copy_main_to_model")
 
         return True
 
@@ -660,11 +666,14 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
     def step(self):
         timers = self.config.timers
 
+        nvtx_range_push(msg="optimizer.prepare_grads")
         found_inf_flag = self.prepare_grads()
+        nvtx_range_pop(msg="optimizer.prepare_grads")
         if found_inf_flag:
             return False, None, None
 
         # Clip the main gradients.
+        nvtx_range_push(msg="optimizer.clip_grad")
         if timers is not None:
             timers('optimizer-clip-main-grad', log_level=1).start(
                 barrier=self.config.barrier_with_L1_time
@@ -674,6 +683,7 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             grad_norm = self.clip_grad_norm(self.config.clip_grad)
         if timers is not None:
             timers('optimizer-clip-main-grad').stop()
+        nvtx_range_pop(msg="optimizer.clip_grad")
 
         # Count the zeros in the grads.
         if timers is not None:
@@ -684,7 +694,9 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if timers is not None:
             timers('optimizer-count-zeros').stop()
 
+        nvtx_range_push(msg="optimizer.step")
         success = self.step_with_ready_grads()
+        nvtx_range_pop(msg="optimizer.step")
 
         # Successful update.
         return success, grad_norm, num_zeros_in_grad

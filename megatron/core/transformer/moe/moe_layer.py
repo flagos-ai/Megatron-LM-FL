@@ -30,7 +30,7 @@ from megatron.core.transformer.moe.token_dispatcher_inference import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module, not_none
-from megatron.core.utils import internal_api
+from megatron.core.utils import internal_api, nvtx_range_pop, nvtx_range_push
 
 try:
     import flashinfer  # pylint: disable=unused-import
@@ -567,13 +567,19 @@ class MoELayer(BaseMoELayer):
         def custom_forward(hidden_states, intermediate_tensors=None, padding_mask=None):
             try:
                 if "route" in self.fwd_execution_map:
+                    nvtx_range_push(msg="moe.shared_experts")
                     shared_expert_output = self.shared_experts_compute(hidden_states)
+                    nvtx_range_pop(msg="moe.shared_experts")
                     if self.config.log_moe_overload_factor and self.training:
                         self._overload_log_num_local_tokens = (
                             self._num_token_rows_from_moe_hidden_states(hidden_states)
                         )
+                    nvtx_range_push(msg="moe.route")
                     probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
+                    nvtx_range_pop(msg="moe.route")
+                    nvtx_range_push(msg="moe.preprocess")
                     hidden_states, probs = self.preprocess(hidden_states, probs, routing_map)
+                    nvtx_range_pop(msg="moe.preprocess")
 
                     if intermediate_tensors is not None:
                         return hidden_states, probs, shared_expert_output
@@ -590,12 +596,18 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     hidden_states, probs = intermediate_tensors
 
+                nvtx_range_push(msg="moe.dispatch")
                 dispatched_input, probs = self.dispatch(hidden_states, probs)
+                nvtx_range_pop(msg="moe.dispatch")
+                nvtx_range_push(msg="moe.experts_compute")
                 output, mlp_bias = self.routed_experts_compute(dispatched_input, probs)
+                nvtx_range_pop(msg="moe.experts_compute")
                 assert (
                     mlp_bias is None
                 ), f"mlp_bias is not supported for {type(self.token_dispatcher)}"
+                nvtx_range_push(msg="moe.combine")
                 output = self.combine(output)
+                nvtx_range_pop(msg="moe.combine")
 
                 if intermediate_tensors is not None:
                     return output, mlp_bias
@@ -604,7 +616,9 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     output, shared_expert_output = intermediate_tensors
 
+                nvtx_range_push(msg="moe.postprocess")
                 output = self.postprocess(output, shared_expert_output)
+                nvtx_range_pop(msg="moe.postprocess")
 
                 if intermediate_tensors is not None:
                     return output

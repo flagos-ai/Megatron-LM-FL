@@ -11,7 +11,9 @@ from megatron.plugin.decorators import overridable
 
 try:
     from deep_ep import Buffer
-    from deep_ep.utils import EventHandle, EventOverlap
+    # NOTE: deep_ep commit 01dc3aa — EventOverlap is exported from deep_ep.utils.event
+    # but not from deep_ep.utils.__init__, so import from the submodule directly.
+    from deep_ep.utils.event import EventHandle, EventOverlap
 
     HAVE_DEEP_EP = True
 except ImportError:

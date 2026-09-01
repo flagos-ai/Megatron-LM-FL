@@ -1034,11 +1034,13 @@ class Attention(MegatronModule, ABC):
                     num_q_heads_per_tp=num_q_heads,
                     num_kv_heads_per_tp=num_kv_heads,
                     softmax_threshold=softmax_threshold,
+                    use_fused_kernel=self.config.fsa_use_fused_kernels,
                 )
                 # Output is [sq, b, np, hn] (SBHD)
             else:
                 # No CP or CP disabled, use standard FSA
                 # Transpose to BSHD for flash_sparse_attn_func
+                nvtx_range_push(suffix="fsa_kernel")
                 query = query.transpose(0, 1).contiguous()
                 key = key.transpose(0, 1).contiguous()
                 value = value.transpose(0, 1).contiguous()
@@ -1064,6 +1066,7 @@ class Attention(MegatronModule, ABC):
                 )
                 # Convert output back from BSHD [b, sq, np, hn] to SBHD [sq, b, np, hn]
                 output = output.transpose(0, 1).contiguous()
+                nvtx_range_pop(suffix="fsa_kernel")
 
         output = output.reshape(output.size(0), output.size(1), -1)
 
