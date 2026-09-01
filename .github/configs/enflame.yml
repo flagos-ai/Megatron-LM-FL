@@ -1,0 +1,345 @@
+# Enflame Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for Enflame GCU-based testing.
+# Validated on: Enflame L600, 8 CI-visible devices,
+# torch 2.10.0+cpu, torch_gcu 2.10.0+3.7.20260408
+
+hardware_name: enflame
+display_name: 'Enflame Tests'
+setup_script: .github/scripts/set_env_enflame.sh
+
+# CI image for the Enflame environment (built and pushed 2026-08-10, validated on Enflame L600)
+ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260810-enflame-dev
+
+# Runner labels for the Enflame node
+runner_labels:
+  - sy-8g-cicd-megatron
+
+# Container volumes (hardware-specific paths)
+container_volumes:
+  - /home/gitlab-runner/data:/home/gitlab-runner/data
+  - /home/gitlab-runner/tokenizers:/home/gitlab-runner/tokenizers
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=500g
+  --hostname megatron_cicd
+  --user root
+  --ipc=host
+  --pid=host
+  --ulimit nofile=65535:65535
+
+# Device types to run tests on
+device_types:
+  - s60
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    nproc_per_node: 8
+    # Keep executing collected tests after an import/collection error so one
+    # manual run reports the complete platform gap. Collection errors still
+    # make the job fail.
+    device_types:
+      - s60
+    pytest_extra_args:
+      - --continue-on-collection-errors
+      - --tb=short
+    groups:
+      - name: core
+        path: tests/unit_tests/test_*.py megatron/plugin/tests/
+        description: Core unit tests
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      - name: distributed
+        path: tests/unit_tests/distributed/
+        description: Distributed tests
+      - name: dist_checkpointing
+        path: tests/unit_tests/dist_checkpointing/
+        description: Distributed checkpointing tests
+      #- name: tensor_parallel
+      #  path: tests/unit_tests/tensor_parallel/
+      #  description: Tensor parallel tests
+      - name: pipeline_parallel
+        path: tests/unit_tests/pipeline_parallel/
+        description: Pipeline parallel tests
+      - name: data
+        path: tests/unit_tests/data/
+        description: Data tests
+      - name: fusions
+        path: tests/unit_tests/fusions/
+        description: Fusion tests
+      - name: others
+        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: Export, post-training, tokenizer, and utility tests
+    ignored_tests:
+      # core
+      # Enflame GCU: empty_cache() unstable under 8-proc concurrency, ECCL deadlock in cleanup
+      - tests/unit_tests/test_checkpointing.py
+      # torch_gcu has no torch._C._nccl_version; collection error stops entire run
+      - tests/unit_tests/test_nccl_allocator.py
+      # ECCL process group / allreduce failures in distributed integration; 7/7 tests fail
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGridIntegration
+      # ECCL failures in distributed optimizer (same pattern as metax)
+      - tests/unit_tests/test_optimizer.py::test_chained_optimizer
+      - tests/unit_tests/test_optimizer.py::test_chained_optimizer_get_parameters
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_fused_adam
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_optimizer
+      - tests/unit_tests/test_optimizer.py::test_distrib_optimizer_save_load_with_non_tensor_state
+      - tests/unit_tests/test_optimizer.py::test_optim_sharded_state_dict
+      - tests/unit_tests/test_optimizer.py::test_optimizer_reload_model_params
+      - tests/unit_tests/test_optimizer.py::test_get_megatron_optimizer_with_custom_process_groups
+      - tests/unit_tests/test_optimizer.py::test_get_megatron_optimizer_custom_process_groups_validation
+      - tests/unit_tests/test_optimizer.py::test_get_param_groups_no_overrides
+      - tests/unit_tests/test_optimizer.py::test_get_param_groups_overlapping_matches
+      - tests/unit_tests/test_optimizer.py::test_get_param_groups_appling_wd_to_qk_layernorm
+      # ECCL instability in rampup batch size tests; mixed PASS/FAIL across ranks
+      - tests/unit_tests/test_num_microbatches_calculator.py::TestRampupBatchsizeNumMicroBatchesCalculator::test_constructor
+      - tests/unit_tests/test_num_microbatches_calculator.py::test_ramp_up
+      # TE-FL vendor.enflame missing multi_tensor_sgd op (same pattern as ascend)
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
+      # torch.cuda.device_count() returns 2 instead of 8 (torch_gcu lambda bug); same as musa
+      - tests/unit_tests/test_utils.py::test_check_param_hashes_across_dp_replicas
+      # FP8 inference utilities require full TE vendor.enflame FP8 support (incomplete on GCU);
+      # Gloo PG setup fails in test_prepare_model_for_fp8_inference_basic → ECCL collective deadlock (rank counter 3 vs 4)
+      - tests/unit_tests/test_fp8_utils.py
+      # FP8 training with TE + CUDA graphs requires complete vendor.enflame FP8 implementation (not available on GCU)
+      - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_utils.py::test_cross_check_param_hashes_across_dp_replicas
+      - tests/unit_tests/test_utils.py::test_param_norm_linear
+      - tests/unit_tests/test_utils.py::test_param_norm_moe
+      - tests/unit_tests/test_utils.py::test_straggler_detector
+      # ECCL communicator setup failure + distributed directory creation; same as musa
+      - tests/unit_tests/test_training.py::TestTraining::test_build_train_valid_test_data_iterators
+      - tests/unit_tests/test_training.py::TestSaveGrads::test_save_grads
+      # Platform contract tests: Enflame plugin does not implement clock_rate/power_draw/
+      # temperature/utilization (return None — no sensor API on GCU), get_compile_backend
+      # (no custom compiler backend registered), and is_triton_supported (Triton not
+      # available). Ascend/Metax/MUSA implement these via their platform plugins.
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_clock_rate_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_power_draw_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_temperature_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_utilization_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_get_compile_backend_returns_string
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_is_triton_supported_returns_bool
+      # HyperCommGrid tests fail: default process group not initialized (no Utils.initialize_distributed
+      # in test setup). Musa ignores 8 tests, metax ignores the entire file.
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_single_dim
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_multiple_dims
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_with_options
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_create_pg_duplicate_error
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_get_pg_success
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_get_pg_multiple_dims
+      - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_end_to_end_workflow
+      
+      
+      # models
+      # TE-FL vendor.enflame layernorm_fwd: 'NoneType' object has no attribute 'DType'
+      - tests/unit_tests/models/test_bert_model.py::TestBertModel::test_constructor
+      - tests/unit_tests/models/test_bert_model.py::TestBertModelAttentionDimensions::test_local_spec
+      # TE-FL generic_gemm flaky on Enflame; entire class mocks TE versions not installed (2.9.0)
+      - tests/unit_tests/models/test_bert_model.py::TestBertModelAttentionDimensions
+      # TE-FL flaky: 7/8 ranks FAIL in model initialization; same as musa
+      - tests/unit_tests/models/test_bert_model.py::TestBertModel::test_post_process_forward
+      # TE-FL flaky on Enflame; some ranks fail, some pass (generic_gemm instability)
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_constructor
+      # TE-FL vendor.enflame layernorm_fwd DType error; tensors on different GCU devices
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_save_load
+      # Same TE-FL layernorm_fwd DType error as test_save_load; same as musa
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_forward
+      # TE-FL flaky: 8 FAILED then partial PASSED (Enflame-specific)
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_set_input_tensor
+      # ECCL deadlock: rank 2 runtime launch counter mismatch; same as ascend/metax
+      - tests/unit_tests/models/test_heterogeneous_gpt_model.py
+      # flash_attn not available on GCU; collection error during import
+      - tests/unit_tests/models/test_gpt_model.py
+      # Consistently FAILED (8/8) due to TE-FL layernorm; now ECCL intermittent deadlock (3/8 ranks stuck)
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_gpu_forward
+      # ECCL intermittent deadlock across multiple tests in this file; same approach as metax (metax.yml L233)
+      - tests/unit_tests/models/test_llava_model.py
+      # All three platforms (ascend/metax/musa) ignore; ECCL deadlock risk
+      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_mamba_moe_model.py
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py
+      - tests/unit_tests/models/test_mimo_checkpoint.py
+      # TE-FL vendor.enflame layernorm_fwd DType error + tensors on different GCU devices; same as musa
+      - tests/unit_tests/models/test_mimo_submodules.py
+      - tests/unit_tests/models/test_multimodal_projector.py::TestMultimodalProjector::test_forward
+      # ECCL intermittent deadlock across multiple tests in this file; Enflame-specific
+      - tests/unit_tests/models/test_mimo_embedding_alignment.py
+      # torch_gcu missing topsatenScaledDotProductEfficientAttention operator → SIGABRT; musa also ignores (TE layernorm)
+      - tests/unit_tests/models/test_radio_model.py::TestRADIOViTModel::test_forward
+      # TE-FL vendor.enflame FP8 quantization incomplete: test_te_config_resolution_dense
+      # configures tensorwise FP8 recipe, rank 7 fails in FP8 initialization → ECCL collective
+      # deadlock (rank[0-6] counter=8 vs rank[7] counter=7). Kitchen quantization tests are
+      # already skipped via @pytest.mark.skipif(not HAVE_KITCHEN), but TE quantization tests
+      # have no such guard and run on Enflame where HAVE_TE=True.
+      - tests/unit_tests/models/test_gpt_model_quantization.py::TestGPTModelTEQuantizationConfig
+
+
+
+      # distributed
+      # ECCL allgather SIGSEGV in uneven_dtensor._update_offsets_and_cumulative_shape
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py
+      # ECCL SIGSEGV in word embedding gradient allreduce
+      - tests/unit_tests/distributed/test_finalize_model_grads.py
+      # ECCL allreduce deadlock: rank 2 runtime launch counter mismatch; same as ascend/metax
+      - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py
+      - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
+      - tests/unit_tests/distributed/test_torch_fully_sharded_parallel.py
+
+
+      # dist_checkpointing
+      # ECCL all_gather_object deadlock in distributed checkpointing
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      # ECCL all_gather_object deadlock in T5 sharded state dict save/load; metax and cuda ignore entire function
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      # T5 parallel reconfiguration: ECCL deadlock (same pattern as mamba/moe_experts reconfiguration)
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5ModelReconfiguration::test_parallel_reconfiguration_e2e
+      # Mamba model reconfiguration: all test params FAIL from first test (79 FAILED, 0 PASSED)
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      # ECCL all_gather_object deadlock: rank 2 counter 128 < others 129
+      - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py
+      # MoE expert reconfiguration: ECCL deadlock from first test (rank 3 counter 7 < others 8/12); metax ignores entire file
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+      # mcore async save background worker fails/hangs on GCU (subprocess Gloo world_size=1); metax ignores entire function
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_async_is_equivalent_to_sync
+      # nvidia-resiliency-ext (nvrx) not installed on GCU; same as ascend/metax/musa
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
+      # torch.distributed.checkpoint.save (DCP) gather_object -> ECCL ALLGATHER deadlock on GCU;
+      # test_sharded_tensor_checkpointing leaves stuck ALLGATHER, test_multiple_local_shards 6/8 FAILED + SIGABRT
+      - tests/unit_tests/dist_checkpointing/test_checkpointable.py
+      # FP8/FP16 broadcast: ECCL deadlock (rank 2 runtime launch counter 3 < others 6); same as ascend/metax/musa
+      - tests/unit_tests/dist_checkpointing/test_fp8.py
+      # FullyParallelSaveStrategyWrapper all_gather_object on DP sub-group deadlocks ECCL
+      # (test_save_distribution[True] SIGABRT, rank 3/4/5 counter 5 < others 6); metax ignores entire file
+      - tests/unit_tests/dist_checkpointing/test_fully_parallel.py
+      # fully-parallel save + distributed optimizer all_gather_object deadlock on GCU; ascend/metax/musa/cuda all ignore entire file
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      # distributed optimizer checkpointing ECCL deadlock (all_gather_object / reduce_scatter); ascend/metax/cuda ignore entire file
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py
+      # legacy save/load all_gather_object ECCL deadlock (TestLegacySaveAndLoad FAILED); metax/cuda ignore entire file, musa ignores the legacy function
+      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
+      # PP/VPP layout checkpointing ECCL deadlock (both test_save_and_load_checkpoint_pp and _vpp FAILED,
+      # runtime launch counter 12 < others 14); metax ignores entire file
+      - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
+      # torch.distributed.barrier + torch.load(weights_only) deadlock on GCU (6/8 ranks FAIL, 2 hang in
+      # ECCL barrier); metax and cuda ignore entire file, musa ignores only test_safe_globals
+      - tests/unit_tests/dist_checkpointing/test_safe_globals.py
+      # test_single_process_save_load: DTensor DeviceMesh.from_group(...,"cuda") + save() all_gather_object
+      # deadlock on GCU (6/8 FAIL, no pytest summary); ascend ignores entire file, metax/cuda ignore
+      # test_remove_sharded_tensors only
+      - tests/unit_tests/dist_checkpointing/test_serialization.py
+      # test_cached_metadata: save() with use_cached_ckpt_structure=True all_gather_object ECCL deadlock
+      # (6/8 FAIL, no pytest summary); musa ignores both cached-metadata and cpu-tensors functions
+      - tests/unit_tests/dist_checkpointing/test_torch_dist.py::TestCachedMetadata::test_cached_metadata
+      - tests/unit_tests/dist_checkpointing/test_torch_dist.py::TestCPUTensors::test_cpu_tensors_dont_take_too_much_space
+      # test_process_save_load: MultiStorageClient + DTensor DeviceMesh.from_group(...,"cuda") allgather
+      # triggers ECCL communicator setup timeout (rank 0 fails broadcastUniqueECCLID, ranks 2-7 wait
+      # 60s for ecclUniqueId); GCU device type is "gcu" not "cuda"; Enflame-specific
+      - tests/unit_tests/dist_checkpointing/test_msc.py
+
+
+
+      # tensor_parallel
+      # ECCL allreduce SIGSEGV in cross_entropy
+      - tests/unit_tests/tensor_parallel/test_cross_entropy.py::test_vocab_parallel_cross_entropy
+      # ECCL broadcast hang: rank 2 launch counter mismatch, all ranks stuck in init_process_group
+      - tests/unit_tests/tensor_parallel/test_data.py::test_broadcast_data
+      # torch_gcu RNG manual_seed broken → RowParallelLinear weight init mismatch on GCU (assert torch.equal fails)
+      - tests/unit_tests/tensor_parallel/test_initialization.py::Test::test_row_init
+      # TERowParallelLinear (TE-FL vendor.enflame) hangs in TP=4 init/teardown → ECCL runtime launch counter mismatch
+      - tests/unit_tests/tensor_parallel/test_initialization.py::Test::test_te_row_init
+      # ECCL communicator setup times out exchanging ecclUniqueId for TP=8 all-gather;
+      # same root cause as musa MCCL UniqueId exchange timeout (musa ignores both LinearWithFrozenWeight variants)
+      - tests/unit_tests/tensor_parallel/test_layers.py::test_LinearWithFrozenWeight[8-True]
+      # ECCL collective failures in tensor parallel mapping ops (Copy/Reduce/Scatter/Gather); musa ignores all 7 tests
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_CopyToModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ReduceFromModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ScatterToModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromModelParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ScatterToSequenceParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromSequenceParallelRegion
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_ReduceScatterToSequenceParallelRegion
+      # torch_gcu RNG API incomplete: get_rng_state/set_rng_state/manual_seed failures; musa ignores 4 tests
+      - tests/unit_tests/tensor_parallel/test_random.py::test_model_parallel_cuda_manual_seed
+      - tests/unit_tests/tensor_parallel/test_random.py::test_double_fork_cuda_rng_states_tracker
+      - tests/unit_tests/tensor_parallel/test_random.py::test_convert_cuda_rng_state
+      - tests/unit_tests/tensor_parallel/test_random.py::test_checkpoint
+      # split_tensor_into_1d_equal_chunks assert fails on GCU (TP rank shard mismatch);
+      # gather_split_1d_tensor uses .cuda() allgather → ECCL deadlock; musa ignores gather_split
+      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_split_tensor_into_1d_equal_chunks
+      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_gather_split_1d_tensor
+      
+      
+      # pipeline_parallel
+      # ECCL collective failures in bridge communicator
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      # ECCL all_gather deadlock in activation offloading
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      # ECCL p2p send/recv hang + collective failures in multimodule communicator; 7/7 tests fail or deadlock
+      - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py
+      # ECCL collective kernel deadlock (kernel enter counter stuck on default PG) in 8-GPU
+      # multimodule schedules; metax/ascend ignore both 8gpu variants, musa ignores whole file
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+      # ECCL collective deadlock in VPP forward + dist-checkpoint (MoE+MTP); metax ignores
+      # test_forward_vpp, musa/cuda ignore the whole test_pipeline_layout.py
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py::test_forward_vpp
+      # ECCL communicator setup/teardown deadlock while cycling PP=1→4→4/VPP2→2/VPP4 configs;
+      # metax/musa ignore test_get_forward_backward_func
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_get_forward_backward_func
+      # ECCL p2p/collective deadlock in PP>=4 pipelined schedules; musa ignores the same set
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_pipeline_parallel
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_interleaving
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_func_with_uneven_interleaving
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_pipelining_without_interleaving_with_custom_pgs
+      - tests/unit_tests/pipeline_parallel/test_schedules.py::test_forward_backward_pipelining_with_interleaving_with_custom_pgs
+
+
+      # data
+      # HuggingFace tokenizer downloads fail in CI (no network access); same reason as ascend/metax/musa
+      - tests/unit_tests/data/test_bin_reader.py
+      - tests/unit_tests/data/test_preprocess_data.py
+      - tests/unit_tests/data/test_preprocess_mmdata.py
+      - tests/unit_tests/data/test_fim_dataset.py
+      # test_fast_builder: rank 0 creates dataset files in the shared tmp_dist_ckpt dir, but
+      # non-rank-0 ranks hit FileNotFoundError (file_0.idx) after the ECCL barrier; cross-rank
+      # file visibility race on GCU (192 distributed cases, 144 fail). musa ignores it too.
+      - tests/unit_tests/data/test_builder.py::test_fast_builder
+
+
+      # fusions
+      # Triton CUDA kernel not available on GCU
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
+      # TE-FL vendor.enflame missing rmsnorm_bwd_add operator
+      - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+
+
+      # others
+      # ModelOpt not installed on Enflame
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
+      # ECCL deadlock in distributed checkpointing via ModelOpt
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py
+      # FP8 TensorRT-LLM export requires CUDA FP8, not available on GCU
+      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      # CUDA distributed GPU converter
+      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
+      # HuggingFace tokenizer downloads fail in CI (no network access); same reason as ascend/metax/musa
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+      # experimental_fn/cls log via log_single_rank (safe_get_rank reads RANK env under torchrun);
+      # ranks 1-7 suppress the log so caplog.records is empty (assert 0 == 1); same as musa
+      - tests/unit_tests/utils/test_experimental_log_once.py::test_experimental_fn_logs_once
+      - tests/unit_tests/utils/test_experimental_log_once.py::test_experimental_cls_logs_once
+
+
+  functional:
+    train: []

@@ -50,8 +50,8 @@ selected = []
 for item in shlex.split(os.environ["CI_TEST_PATH"]):
     matches = sorted(glob.glob(item)) if glob.has_magic(item) else [item]
     selected.extend(path for path in matches if path not in ignored_files)
-print("\n".join(selected))
-'
+print("\n".join(selected), file=os.fdopen(3, "w"))
+' 3>&1 1>&2
 )
 
 IGNORE_OPTS=()
@@ -62,10 +62,11 @@ done < <(
 import json
 import os
 
+output = os.fdopen(3, "w")
 for item in json.loads(os.environ["CI_IGNORED_TESTS"]):
     prefix = "--deselect=" if "::" in item else "--ignore="
-    print(prefix + item)
-'
+    print(prefix + item, file=output)
+' 3>&1 1>&2
 )
 
 EXTRA_ARGS=()
@@ -76,8 +77,8 @@ done < <(
 import json
 import os
 
-print("\n".join(json.loads(os.environ["CI_PYTEST_EXTRA_ARGS"])))
-'
+print("\n".join(json.loads(os.environ["CI_PYTEST_EXTRA_ARGS"])), file=os.fdopen(3, "w"))
+' 3>&1 1>&2
 )
 
 EXPERIMENTAL_ARGS=()
