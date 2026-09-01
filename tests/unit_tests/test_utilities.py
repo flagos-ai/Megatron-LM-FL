@@ -63,11 +63,15 @@ class Utils:
             master_ip = os.getenv('MASTER_ADDR', 'localhost')
             master_port = os.getenv('MASTER_PORT', '6000')
             init_method += master_ip + ':' + master_port
+            ######## FlagScale Begin ########
+            # Multi-backend CI can spend more than one minute compiling kernels on a rank.
+            # Keep the test store alive long enough for slower ranks to reach group creation.
             rendezvous_iterator = rendezvous(
-                init_method, Utils.rank, Utils.world_size, timeout=timedelta(minutes=1)
+                init_method, Utils.rank, Utils.world_size, timeout=timedelta(minutes=5)
             )
             store, rank, world_size = next(rendezvous_iterator)
-            store.set_timeout(timedelta(minutes=1))
+            store.set_timeout(timedelta(minutes=5))
+            ######## FlagScale End ########
 
             # Use a PrefixStore to avoid accidental overrides of keys used by
             # different systems (e.g. RPC) in case the store is multi-tenant.
