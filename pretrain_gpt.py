@@ -79,6 +79,9 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     BATCH_KEYS = ["attention_mask", "cu_seqlens", "cu_seqlens_padded", "hybrid_cp_group", "labels", "local_cp_size", "loss_mask", "max_seqlen", "position_ids", "tokens"]
 
     args = get_args()
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    device = get_platform().device(args.local_rank)
     config = core_transformer_config_from_args(args)
 
     cp_size = args.context_parallel_size
@@ -95,7 +98,7 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     if tp_rank == 0:
         batch = next(data_iterator)
         for key in BATCH_KEYS:
-            batch[key] = batch[key].cuda(non_blocking=True) if key in batch and batch[key] is not None else None
+            batch[key] = batch[key].to(device, non_blocking=True) if key in batch and batch[key] is not None else None
 
     batch = get_batch_on_this_tp_rank(batch, broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(), broadcast_group=mpu.get_tensor_model_parallel_group(), is_sft=is_sft, is_hybrid_cp=is_hybrid_cp, create_attention_mask_in_dataloader=create_attention_mask_in_dataloader, cp_size=cp_size, tp_rank=tp_rank, micro_batch_size=args.micro_batch_size, seq_length=args.seq_length, mtp_on_this_rank=mtp_on_this_rank, pipeline_model_parallel_size=args.pipeline_model_parallel_size, is_pipeline_first_stage=mpu.is_pipeline_first_stage(), is_pipeline_last_stage=mpu.is_pipeline_last_stage())
     
