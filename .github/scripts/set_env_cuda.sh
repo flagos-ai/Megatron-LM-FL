@@ -5,6 +5,11 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/set_env_common.sh"
 
+# Keep CUDA CI aligned with NVIDIA Transformer Engine semantics. TE-FL defaults
+# to FlagOS-first dispatch, so set the preference explicitly instead of relying
+# on the container's inherited environment.
+ci_export_env TE_FL_PREFER vendor
+
 validate_cuda_capacity() {
   local device_count
   device_count=$(python3 -c \
