@@ -132,13 +132,32 @@ try:
 
 
     HAVE_FSA = True
+    HAVE_FSA_TRITON = True
 except ImportError as e:
-    print(f"[WARNING] flash_sparse_attn not available: {e}")
+    print(f"[WARNING] flash_sparse_attn Triton backend not available: {e}")
     flash_sparse_attn_func = None
     flash_sparse_attn_varlen_func = None
     flash_sparse_attn_with_kvcache_func = None
     flash_sparse_attn_varlen_with_kvcache_func = None
+    window_sizes_heuristic = None
     HAVE_FSA = False
+    HAVE_FSA_TRITON = False
+
+# Check for CUDA backend availability
+try:
+    from flash_sparse_attn.ops.cute.interface import (
+        flash_attn_func as flash_attn_func_cuda,
+        flash_attn_varlen_func as flash_attn_varlen_func_cuda,
+    )
+    HAVE_FSA_CUDA = True
+    # If we have CUDA backend, FSA is available
+    if not HAVE_FSA:
+        HAVE_FSA = True
+        print("[INFO] flash_sparse_attn CUDA backend available (Triton backend not found)")
+except ImportError:
+    flash_attn_func_cuda = None
+    flash_attn_varlen_func_cuda = None
+    HAVE_FSA_CUDA = False
 
 
 class LinearQkv(Protocol):
@@ -939,23 +958,43 @@ class Attention(MegatronModule, ABC):
 
         if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
             # varlen path: query is already [total_tokens, np, hn], no layout change needed
-            output = flash_sparse_attn_varlen_func(
-                query,
-                key,
-                value,
-                packed_seq_params.cu_seqlens_q,
-                packed_seq_params.cu_seqlens_kv,
-                packed_seq_params.max_seqlen_q,
-                packed_seq_params.max_seqlen_kv,
-                is_causal=is_causal,
-                softmax_scale=softmax_scale,
-                softmax_threshold=softmax_threshold,
-                is_local=is_local,
-                is_quant=is_quant,
-                is_autotune=is_autotune,
-                is_split_kv=True,
-                is_split_qo=True,
-            )
+            if self.config.fsa_use_cuda:
+                assert HAVE_FSA_CUDA, (
+                    "fsa_use_cuda=True but CUDA backend is not available. "
+                    "Install with: pip install flash-sparse-attn[cute]"
+                )
+                # CUDA backend always returns (out, lse)
+                output, _lse = flash_attn_varlen_func_cuda(
+                    query,
+                    key,
+                    value,
+                    cu_seqlens_q=packed_seq_params.cu_seqlens_q,
+                    cu_seqlens_k=packed_seq_params.cu_seqlens_kv,
+                    max_seqlen_q=packed_seq_params.max_seqlen_q,
+                    max_seqlen_k=packed_seq_params.max_seqlen_kv,
+                    is_causal=is_causal,
+                    softmax_scale=softmax_scale,
+                    softmax_threshold=softmax_threshold,
+                    is_local=is_local,
+                )
+            else:
+                output = flash_sparse_attn_varlen_func(
+                    query,
+                    key,
+                    value,
+                    packed_seq_params.cu_seqlens_q,
+                    packed_seq_params.cu_seqlens_kv,
+                    packed_seq_params.max_seqlen_q,
+                    packed_seq_params.max_seqlen_kv,
+                    is_causal=is_causal,
+                    softmax_scale=softmax_scale,
+                    softmax_threshold=softmax_threshold,
+                    is_local=is_local,
+                    is_quant=is_quant,
+                    is_autotune=is_autotune,
+                    is_split_kv=True,
+                    is_split_qo=True,
+                )
         elif query.size(0) == 1 and not self.training:
             query = query.squeeze(0)
 
@@ -1035,35 +1074,54 @@ class Attention(MegatronModule, ABC):
                     num_kv_heads_per_tp=num_kv_heads,
                     softmax_threshold=softmax_threshold,
                     use_fused_kernel=self.config.fsa_use_fused_kernels,
+                    use_cuda_backend=self.config.fsa_use_cuda,
                 )
                 # Output is [sq, b, np, hn] (SBHD)
             else:
                 # No CP or CP disabled, use standard FSA
-                # Transpose to BSHD for flash_sparse_attn_func
+                # Transpose to BSHD for flash_sparse_attn_func / flash_attn_func_cuda
                 nvtx_range_push(suffix="fsa_kernel")
                 query = query.transpose(0, 1).contiguous()
                 key = key.transpose(0, 1).contiguous()
                 value = value.transpose(0, 1).contiguous()
 
-                output = flash_sparse_attn_func(
-                    query,
-                    key,
-                    value,
-                    is_causal=is_causal,
-                    softmax_scale=softmax_scale,
-                    query_scale=None,
-                    key_scale=None,
-                    value_scale=None,
-                    window_sizes=local_window_sizes,
-                    softmax_threshold=softmax_threshold,
-                    is_local=is_local,
-                    is_quant=is_quant,
-                    is_split_kv=True,
-                    is_split_qo=True,
-                    pack_gqa=False,
-                    is_autotune=is_autotune,
-                    skip_checks=True,
-                )
+                if self.config.fsa_use_cuda:
+                    assert HAVE_FSA_CUDA, (
+                        "fsa_use_cuda=True but CUDA backend is not available. "
+                        "Install with: pip install flash-sparse-attn[cute]"
+                    )
+                    # CUDA backend always returns (out, lse)
+                    output, _lse = flash_attn_func_cuda(
+                        query,
+                        key,
+                        value,
+                        softmax_scale=softmax_scale,
+                        is_causal=is_causal,
+                        window_sizes=local_window_sizes,
+                        softmax_threshold=softmax_threshold,
+                        is_local=is_local,
+                        pack_gqa=False,
+                    )
+                else:
+                    output = flash_sparse_attn_func(
+                        query,
+                        key,
+                        value,
+                        is_causal=is_causal,
+                        softmax_scale=softmax_scale,
+                        query_scale=None,
+                        key_scale=None,
+                        value_scale=None,
+                        window_sizes=local_window_sizes,
+                        softmax_threshold=softmax_threshold,
+                        is_local=is_local,
+                        is_quant=is_quant,
+                        is_split_kv=True,
+                        is_split_qo=True,
+                        pack_gqa=False,
+                        is_autotune=is_autotune,
+                        skip_checks=True,
+                    )
                 # Convert output back from BSHD [b, sq, np, hn] to SBHD [sq, b, np, hn]
                 output = output.transpose(0, 1).contiguous()
                 nvtx_range_pop(suffix="fsa_kernel")
@@ -1105,24 +1163,41 @@ class Attention(MegatronModule, ABC):
         if max_seqlen_q > 1:
             # Prefill path: q/k/v are [total or sq, b, np, hn]
             q = q.squeeze(1)  # [total, np, hn]
-            output_total = flash_sparse_attn_varlen_func(
-                q,
-                k,
-                v,
-                cu_seqlens_q,
-                cu_seqlens_k,
-                max_seqlen_q,
-                max_seqlen_k,
-                is_causal=True,
-                softmax_scale=softmax_scale,
-                seqused_k=seqlens_k,
-                softmax_threshold=softmax_threshold,
-                is_local=is_local,
-                is_quant=is_quant,
-                is_autotune=is_autotune,
-                is_split_kv=True,
-                is_split_qo=True,
-            )
+            if self.config.fsa_use_cuda and HAVE_FSA_CUDA:
+                # CUDA backend always returns (out, lse)
+                output_total, _lse = flash_attn_varlen_func_cuda(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q=cu_seqlens_q,
+                    cu_seqlens_k=cu_seqlens_k,
+                    max_seqlen_q=max_seqlen_q,
+                    max_seqlen_k=max_seqlen_k,
+                    is_causal=True,
+                    softmax_scale=softmax_scale,
+                    seqused_k=seqlens_k,
+                    softmax_threshold=softmax_threshold,
+                    is_local=is_local,
+                )
+            else:
+                output_total = flash_sparse_attn_varlen_func(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    max_seqlen_q,
+                    max_seqlen_k,
+                    is_causal=True,
+                    softmax_scale=softmax_scale,
+                    seqused_k=seqlens_k,
+                    softmax_threshold=softmax_threshold,
+                    is_local=is_local,
+                    is_quant=is_quant,
+                    is_autotune=is_autotune,
+                    is_split_kv=True,
+                    is_split_qo=True,
+                )
             output_total = output_total.unsqueeze(1)
         else:
             # Decode-only path: q is [b, 1, np, hn] squeezed to [b, np, hn]

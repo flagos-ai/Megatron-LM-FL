@@ -16,6 +16,14 @@ from megatron.core.ssm.mamba_context_parallel import (
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
+# Check CUDA backend availability
+try:
+    from flash_sparse_attn.ops.cute.interface import flash_attn_func as flash_attn_func_cuda
+    HAVE_FSA_CUDA = True
+except ImportError:
+    HAVE_FSA_CUDA = False
+    flash_attn_func_cuda = None
+
 
 def _fsa_headwise_cp_forward(
     query: Tensor,           # [sq_local, b, np_local, hn]
@@ -28,6 +36,7 @@ def _fsa_headwise_cp_forward(
     num_kv_heads_per_tp: int,
     softmax_threshold: float = 0.5,
     use_fused_kernel: bool = False,
+    use_cuda_backend: bool = False,
 ) -> Tensor:
     """
     Headwise CP for FSA with hybrid communication mode:
@@ -51,17 +60,27 @@ def _fsa_headwise_cp_forward(
         softmax_threshold: Threshold for sparse attention
         use_fused_kernel: If True, use fused Triton kernels to eliminate
             redundant intermediate tensors (zigzag + transpose fused).
+        use_cuda_backend: If True, use CUDA (cute) backend instead of Triton.
 
     Returns:
         output: [sq_local, b, np_local, hn] - Attention output
     """
-    try:
-        from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
-    except ImportError as exc:
-        raise ImportError(
-            "flash_sparse_attn library is required for FSA headwise CP. "
-            "Please install it from https://github.com/FlagOpen/flash_sparse_attn"
-        ) from exc
+    if use_cuda_backend:
+        if not HAVE_FSA_CUDA:
+            raise ImportError(
+                "CUDA backend for flash_sparse_attn is not available. "
+                "Install with: pip install flash-sparse-attn[cute]"
+            )
+        flash_attn_kernel = flash_attn_func_cuda
+    else:
+        try:
+            from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
+            flash_attn_kernel = flash_sparse_attn_func
+        except ImportError as exc:
+            raise ImportError(
+                "flash_sparse_attn library is required for FSA headwise CP. "
+                "Please install it from https://github.com/FlagOpen/flash_sparse_attn"
+            ) from exc
 
     # Optionally import fused kernels
     if use_fused_kernel:
@@ -168,13 +187,17 @@ def _fsa_headwise_cp_forward(
     nvtx_range_pop(msg="fsa_cp.kv_comm")
 
     # Step 3: FSA kernel (Q, K, V are all in BSHD layout now)
+    # Both Triton and CUDA backends share the same call signature for this path,
+    # but CUDA returns (out, lse) while Triton returns out only.
     nvtx_range_push(msg="fsa_cp.fsa_kernel")
-    output_bshd = flash_sparse_attn_func(
+    result = flash_attn_kernel(
         q_bshd, k_bshd, v_bshd,
         window_sizes=window_sizes_local,
         softmax_threshold=softmax_threshold,
         pack_gqa=False,
-    )  # [b, sq_global, num_q_heads_per_rank, hn]
+    )
+    # CUDA backend returns (out, lse), Triton returns out only
+    output_bshd = result[0] if isinstance(result, tuple) else result
     nvtx_range_pop(msg="fsa_cp.fsa_kernel")
 
     # Step 4: Transpose BSHD->SBHD + redo zigzag + all-to-all backward

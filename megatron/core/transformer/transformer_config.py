@@ -468,6 +468,14 @@ class TransformerConfig(ModelParallelConfig):
     Currently fuses zigzag reorder + SBHD/BSHD transpose into single kernels,
     eliminating redundant intermediate tensors."""
 
+    fsa_use_cuda: bool = False
+    """Use CUDA (cute) backend for Flash Sparse Attention instead of Triton.
+    Requires flash-sparse-attention installed with [cute] extras:
+    pip install flash-sparse-attention[cute]
+    When True, uses CUTLASS/CUTE kernels which may have different performance
+    characteristics than Triton kernels. Falls back to Triton if CUDA backend
+    is unavailable."""
+
     gdn_conv_pad_alignment: Optional[int] = None
     """Alignment for causal conv1d input padding in GDN packed sequence mode.
     When set, pads the conv input to a multiple of this value. Incompatible with chunkwise CP."""
