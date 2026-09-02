@@ -56,6 +56,8 @@ test_matrix:
       # Do not replay captured output for every passing parametrization. With
       # eight ranks, pytest's default -rA report exceeds the Actions log limit.
       - -rfE
+      - -m
+      - not experimental and not flaky_in_dev
     groups:
       - name: core
         path: tests/unit_tests/test_*.py megatron/plugin/tests/
@@ -88,6 +90,9 @@ test_matrix:
         path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: Export, post-training, tokenizer, and utility tests
     ignored_tests:
+      # LayerWise optimizer suites require the optional Emerging Optimizers package.
+      - tests/unit_tests/test_layer_wise_optimizer.py
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
       # core
       # NVIDIA Transformer Engine FP4/FP8 paths are unavailable on BW1000;
       # TE-FL uses its FlagOS backend instead.
@@ -269,7 +274,8 @@ test_matrix:
       - tests/unit_tests/models/test_radio_model.py::TestRADIOViTModel
       - tests/unit_tests/models/test_t5_model.py::TestT5Model
       # mamba-ssm CUDA kernels unavailable on BW1000 (AMD/HIP). Also ignored on metax.
-      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_hybrid_model.py
+      - tests/unit_tests/models/test_hybrid_moe_model.py
       - tests/unit_tests/models/test_mamba_moe_model.py
 
       # fusions

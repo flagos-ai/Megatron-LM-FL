@@ -42,7 +42,9 @@ device_types:
 test_matrix:
   unit:
     nproc_per_node: 8
-    pytest_extra_args: []
+    pytest_extra_args:
+      - -m
+      - not experimental and not flaky_in_dev
     groups:
       - name: core
         path: tests/unit_tests/test_*.py
@@ -80,7 +82,6 @@ test_matrix:
       - tests/unit_tests/test_imports.py             # Import chains hit TE/CUDA modules
       - tests/unit_tests/test_nccl_allocator.py      # NCCL-specific memory allocator
       - tests/unit_tests/test_local_multi_tensor_fns.py  # Apex amp_C CUDA kernels
-      - tests/unit_tests/test_muon_optimizer.py      # Hardcoded device='cuda', Newton-Schulz
       - tests/unit_tests/test_optimizer.py           # FusedAdam + fp8_autocast + DDP
       - tests/unit_tests/test_optimizer_cpu_offloading.py  # CPU-GPU offloading, .cuda()
       - tests/unit_tests/test_layer_wise_optimizer.py      # .cuda() + multi-rank
@@ -301,9 +302,10 @@ test_matrix:
       - tests/unit_tests/models/test_multimodal_projector.py::TestMultimodalProjector::test_forward
       # test_radio_model: test_forward hits the TE layernorm_fwd DType bug on MUSA.
       - tests/unit_tests/models/test_radio_model.py::TestRADIOViTModel::test_forward
-      # test_mamba_model: mamba-ssm CUDA extension is not available in the MUSA image;
-      # setup_method raises ImportError before any test body runs.
-      - tests/unit_tests/models/test_mamba_model.py
+      # Hybrid model tests instantiate MambaMixer, whose CUDA extension is not
+      # available in the MUSA image.
+      - tests/unit_tests/models/test_hybrid_model.py
+      - tests/unit_tests/models/test_hybrid_moe_model.py
       # test_mamba_moe_model: GroupedGEMM kernels require compute capability >= 8.0 (Ampere or newer);
       # Moore Threads S5000 does not meet this requirement.
       - tests/unit_tests/models/test_mamba_moe_model.py

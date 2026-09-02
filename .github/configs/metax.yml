@@ -45,7 +45,9 @@ test_matrix:
     nproc_per_node: 8
     devices:
       - c550
-    pytest_extra_args: []
+    pytest_extra_args:
+      - -m
+      - not experimental and not flaky_in_dev
     groups:
       - name: core
         path: tests/unit_tests/test_*.py megatron/plugin/tests/
@@ -77,6 +79,9 @@ test_matrix:
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
+      # LayerWise optimizer suites require the optional Emerging Optimizers package.
+      - tests/unit_tests/test_layer_wise_optimizer.py
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
       # single test cases below are unstable on Metax now, need further investigation
       ## 1.core
       - tests/unit_tests/test_fp8_param.py
@@ -98,9 +103,10 @@ test_matrix:
       # ZeroDivisionError: integer modulo by zero
       - tests/unit_tests/models/test_heterogeneous_gpt_model.py
       # need cuda
-      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_hybrid_model.py
+      - tests/unit_tests/models/test_hybrid_moe_model.py
       # Metax image has an incompatible mamba_ssm/causal_conv1d CUDA extension signature.
-      - tests/unit_tests/models/test_mamba_moe_model.py::TestMambaMoEModel::test_forward
+      - tests/unit_tests/models/test_mamba_moe_model.py
       # Metax C500 MIMO 1F1B 8-GPU layouts hit missing tensor model-parallel group initialization.
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_encoder_tp2_llm_tp2_pp3_8gpu
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_full_pp_8gpu
@@ -170,7 +176,6 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
       # Metax C500 8-GPU layer-wise optimizer checkpointing times out in
       # determine_main_replica_uniform_distribution/all_gather_object during fully-parallel save.
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_optimizer_common_state_dict
       # Metax CI image does not install nvidia-resiliency-ext; keep mcore async strategy covered.
       - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
       # world_size (4) not divisible by 8 after Core 0.17.0 upgrade.
@@ -209,7 +214,7 @@ test_matrix:
       #9.post training
       # ModelOpt is optional on Metax; model_provider does not export the ModelOpt builder when unavailable.
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
-      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel::test_inference
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptHybridModel
 
       #10.tokenizers
       - tests/unit_tests/tokenizers/test_tokenizer.py

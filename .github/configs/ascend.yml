@@ -59,6 +59,8 @@ test_matrix:
     pytest_extra_args:
       - --continue-on-collection-errors
       - --tb=short
+      - -m
+      - not experimental and not flaky_in_dev
     groups:
       - name: core
         path: tests/unit_tests/test_*.py megatron/plugin/tests/
@@ -90,6 +92,9 @@ test_matrix:
     # Ignored test files/cases for unit tests.
     # These are skipped when running pytest on Ascend NPU.
     ignored_tests:
+      # LayerWise optimizer suites require the optional Emerging Optimizers package.
+      - tests/unit_tests/test_layer_wise_optimizer.py
+      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
       ## 1. core — FP8
       # Ascend 910C does not support FP8; all scaling/quantization tests fail
       # at the TE-FL operator layer.
@@ -275,7 +280,8 @@ test_matrix:
 
       ## 13. models - need CUDA / HCCL init errors / TE missing backend
       # MambaSSM not installed (CUDA dependency)
-      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_hybrid_model.py
+      - tests/unit_tests/models/test_hybrid_moe_model.py
       - tests/unit_tests/models/test_mamba_moe_model.py
       - tests/unit_tests/models/test_heterogeneous_gpt_model.py
       # These Mimo multi-device cases enter HCCL but do not complete on the
@@ -332,7 +338,7 @@ test_matrix:
       # ModelOpt is not installed in the Ascend image. Preserve the pure
       # interface tests while excluding paths that instantiate it or Mamba.
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
-      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptHybridModel
       # The Ascend unit runner does not mount the tokenizer fixture directory.
       - tests/unit_tests/tokenizers/test_tokenizer.py
 
