@@ -664,3 +664,5 @@ class TestDSv4HybridRopeFusion:
         for name, param in attn_fused.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"No gradient for parameter {name}"
+
+pytestmark = pytest.mark.experimental

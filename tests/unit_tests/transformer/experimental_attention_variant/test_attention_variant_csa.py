@@ -1080,3 +1080,5 @@ class TestApplyRope:
             f"ratio={ratio} stride mismatch: "
             f"max abs diff = {(out_comp - out_ref).abs().max().item():.3e}"
         )
+
+pytestmark = pytest.mark.experimental

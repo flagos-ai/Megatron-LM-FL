@@ -397,3 +397,5 @@ def test_functionality(tp_cp: List[int], qkv_format: str, down_proj_use_column_p
             assert _calculate_tensor_similarity(absorbed_grad, standard_grad) > 0.9999
 
     Utils.destroy_model_parallel()
+
+pytestmark = pytest.mark.experimental

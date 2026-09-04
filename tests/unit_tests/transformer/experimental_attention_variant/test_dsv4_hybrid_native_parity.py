@@ -949,3 +949,5 @@ class TestDSv4HybridNativeParity:
                 f"{backend}-{variant}-{compress_ratio}-{seqlen}:param_grad:{name}",
                 eps=param_eps,
             )
+
+pytestmark = pytest.mark.experimental
