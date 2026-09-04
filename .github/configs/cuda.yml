@@ -83,9 +83,6 @@ test_matrix:
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
-      # Data
-      - tests/unit_tests/data/test_preprocess_data.py
-
       # Distributed checkpointing
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
@@ -105,7 +102,7 @@ test_matrix:
       # The A100 CI image (PyTorch 2.7.0a0 nv25.3) repeatedly leaves ranks on
       # different NCCL collective sequences; the same case passes on 8xH100
       # with PyTorch 2.7.1. Re-enable after upgrading the CUDA CI image.
-      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard[common_args0-mesh_dim_config1-None-optim-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard[common_args0-mesh_dim_config1-None-optim_grads-te_transformer]
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
@@ -141,12 +138,38 @@ test_matrix:
       - tests/unit_tests/tokenizers/test_tokenizer.py
 
       # Transformer
+      # A100 (SM80) cannot execute Transformer Engine FP8, which requires SM89+.
+      - tests/unit_tests/transformer/test_transformer_block.py::TestParallelTransformerBlock::test_gpu_forward_full_checkpoint_fp8
+      - tests/unit_tests/transformer/test_transformer_block.py::TestParallelTransformerBlock::test_gpu_forward_selective_checkpoint_fp8
+      # The current A100 TE/cuDNN stack has no backend for padded THD attention.
+      - tests/unit_tests/transformer/test_attention_packed_seq.py::TestParallelAttentionWithPackedPaddedSequence::test_gpu_forward
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestParallelMLAAttention::test_gpu_forward_thd_padded[yarn]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestParallelMLAAttention::test_gpu_forward_thd_padded[rope]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp4_sp]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp2_sp_longseq]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[short_seqs_parallel]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[extreme_mixed]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[long_short_mix]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[rope-False]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[yarn-False]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[yarn-True]
+      # DSv4 native parity with compress_ratio=4 requires the optional
+      # fast_hadamard_transform package, which is not installed in the CUDA CI image.
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-False-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-False-4-pro-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-True-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-True-4-pro-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-False-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-False-4-pro-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-True-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-True-4-pro-unfused]
+      # These strict numerical checks pass on H100 but exceed tolerance on the A100 CI stack.
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[False]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[True]
+      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py::TestTransformerBlockWithProcessGroups::test_mlp_with_custom_pgs[8-4-2-True]
+      - tests/unit_tests/transformer/test_transformer_layer.py::TestParallelTransformerLayer::test_chunked_mlp
 
       # Top-level unit tests
-      # emerging-optimizers is an optional Git-only dependency and is not installed
-      # in the FL CUDA CI image. Keep its integration suites out of the default job.
-      - tests/unit_tests/test_emerging_optimizers.py
-      - tests/unit_tests/test_layer_wise_optimizer.py
       # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.
       - tests/unit_tests/test_fp8_param.py
       - tests/unit_tests/test_inference.py

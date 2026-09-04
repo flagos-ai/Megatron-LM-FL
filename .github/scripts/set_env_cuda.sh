@@ -18,6 +18,10 @@ validate_cuda_capacity() {
 }
 
 setup_unit_environment() {
+  # Deterministic unit tests must configure cuBLAS before any Python process
+  # can initialize a cuBLAS handle. Export through GITHUB_ENV for the pytest step.
+  ci_export_env CUBLAS_WORKSPACE_CONFIG :4096:8
+
   ci_activate_python_environment
   ci_export_env NCCL_MAX_NCHANNELS 1
   ci_export_env NCCL_NVLS_ENABLE 0
@@ -43,7 +47,7 @@ setup_unit_environment() {
   python3 -m pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
   python3 -m pip install protobuf==6.33.1
   python3 -m pip install \
-    git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.1.0 \
+    git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.2.0 \
     --no-cache-dir
 
   ci_install_project
