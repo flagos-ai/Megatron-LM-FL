@@ -262,9 +262,7 @@ def _ddp_wrap(
             # Only pass to DDP; FSDP variants don't accept full_param_layout.
             if ddp_config.use_distributed_optimizer and DP is DistributedDataParallel:
                 all_params = [
-                    p
-                    for p in model_chunk.parameters()
-                    if p.requires_grad
+                    p for p in model_chunk.parameters() if p.requires_grad
                 ]
                 pp_rank = pg_collection.pp.rank()
                 effective_bucket_size = (
@@ -279,13 +277,6 @@ def _ddp_wrap(
                         pg_collection.dp_cp.size(),
                         ddp_config,
                         expert_data_parallel_world_size=pg_collection.expt_dp.size(),
-                        ######## FlagScale Begin ########
-                        engram_data_parallel_world_size=(
-                            pg_collection.engram_dp.size()
-                            if pg_collection.engram_dp is not None
-                            else None
-                        ),
-                        ######## FlagScale End ########
                     )
                 )
 
