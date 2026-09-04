@@ -747,9 +747,12 @@ class TestParallelMLAAttentionPrecision:
             hidden_states_sbhd = torch.rand(
                 (sequence_length, micro_batch_size, self.parallel_attention.config.hidden_size)
             )
-            attention_mask_sbhd = torch.ones(
-                (1, 1, sequence_length, sequence_length), dtype=bool
-            ).cuda()
+            ######## FlagScale Begin ########
+            # Let the attention mask type generate the causal mask, matching the THD path.
+            # An all-True boolean mask means every position is masked for backends that
+            # consume the explicit mask tensor.
+            attention_mask_sbhd = None
+            ######## FlagScale End ########
             # thd input shape: [sequence length * batch size, 1, hidden size]
             hidden_states_sbhd = hidden_states_sbhd.cuda().bfloat16()
             hidden_states_thd = hidden_states_sbhd.transpose(0, 1).contiguous()
@@ -1059,9 +1062,12 @@ class TestParallelMLAAttentionPrecisionWithRopeFusion:
             hidden_states_sbhd = torch.rand(
                 (sequence_length, micro_batch_size, self.parallel_attention.config.hidden_size)
             )
-            attention_mask_sbhd = torch.ones(
-                (1, 1, sequence_length, sequence_length), dtype=bool
-            ).cuda()
+            ######## FlagScale Begin ########
+            # Let the attention mask type generate the causal mask, matching the THD path.
+            # An all-True boolean mask means every position is masked for backends that
+            # consume the explicit mask tensor.
+            attention_mask_sbhd = None
+            ######## FlagScale End ########
             # thd input shape: [sequence length * batch size, 1, hidden size]
             hidden_states_sbhd = hidden_states_sbhd.cuda().bfloat16()
             hidden_states_thd = hidden_states_sbhd.transpose(0, 1).contiguous()

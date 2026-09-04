@@ -23,9 +23,11 @@ __HUGGINGFACE_BERT_BASE_UNCASED_VOCAB = (
 
 __LOCAL_BERT_VOCAB = "/home/gitlab-runner/data/bert_data/vocab.txt"
 
-__LOCAL_GPT2_MERGE = "/home/gitlab-runner/data/gpt3_data/gpt2-merges.txt"
+######## FlagScale Begin ########
+__LOCAL_GPT2_MERGE = "/opt/data/tokenizers/megatron/gpt2-merges.txt"
 
-__LOCAL_GPT2_VOCAB = "/home/gitlab-runner/data/gpt3_data/gpt2-vocab.json"
+__LOCAL_GPT2_VOCAB = "/opt/data/tokenizers/megatron/gpt2-vocab.json"
+######## FlagScale End ########
 
 
 def dummy_jsonl(odir):
