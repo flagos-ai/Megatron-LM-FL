@@ -20,6 +20,54 @@ from megatron.megalens.trace_aggregate import (
     read_benchmark_file,
     transform,
 )
+from megatron.megalens.utils import (
+    get_tensor_bytes,
+    infer_parallel_sizes_from_loader,
+    infer_parallel_sizes_from_traces,
+)
+
+
+def test_loader_and_raw_events_infer_the_same_parallel_sizes() -> None:
+    traces = [
+        {"ph": "M", "name": "process_name", "pid": 0, "args": {"name": "DP0-PP0-TP0"}},
+        {"ph": "M", "name": "process_name", "pid": 1, "args": {"name": "DP1-PP1-TP1"}},
+        {
+            "ph": "X",
+            "name": "forward-step",
+            "pid": 0,
+            "ts": 1,
+            "dur": 3,
+            "args": {"dp_rk": 0, "pp_rk": 0, "tp_rk": 0},
+        },
+        {
+            "ph": "X",
+            "name": "moe-router",
+            "pid": 1,
+            "ts": 2,
+            "dur": 1,
+            "args": {"dp_rk": 1, "pp_rk": 1, "tp_rk": 1, "ep_size": 4},
+        },
+    ]
+    loader = TraceDataLoader.from_traces(traces)
+
+    assert loader.get_ranks() == [0, 1]
+    assert len(loader.get_events_by_name("forward-step")) == 1
+    assert len(loader.span_events) == 2
+    assert infer_parallel_sizes_from_loader(loader) == {"dp": 2, "pp": 2, "tp": 2, "ep": 4}
+    assert infer_parallel_sizes_from_traces(traces) == {"dp": 2, "pp": 2, "tp": 2, "ep": 4}
+
+
+def test_tensor_bytes_accepts_missing_and_nested_non_tensor_payloads() -> None:
+    assert get_tensor_bytes(None) == 0
+    assert get_tensor_bytes([None, (None, [None])]) == 0
+
+
+def test_report_style_applies_without_leaking_global_settings() -> None:
+    mpl = pytest.importorskip("matplotlib")
+    from megatron.megalens import paper_style
+
+    with mpl.rc_context():
+        paper_style.apply_global_rcparams()
 
 
 def _event(rank: Rank, iteration_id: int, suffix: str) -> Event:

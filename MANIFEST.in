@@ -6,5 +6,4 @@ include megatron/core/datasets/helpers.cpp
 include megatron/core/datasets/Makefile
 global-exclude LICENSE
 recursive-include requirements *
-recursive-exclude megatron/megalens/migration_checks *
 recursive-exclude megatron/megalens/docs *

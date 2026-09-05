@@ -31,7 +31,6 @@ PROBE_NAME_POSITIONS = {"open_trace_scope": 1}
 PROBE_DECORATORS = {"scoped_forward"}
 CONSUMER_METHODS = {"get_events_by_name", "get_events_matching"}
 EVENT_SET_NAMES = ("BASE_TRACING_EVENTS", "FULL_TRACING_EVENTS")
-RUNTIME_EXCLUDED_PARTS = {"migration_checks"}
 FULL_COMMIT_RE = re.compile(r"[0-9a-f]{40}")
 
 
@@ -164,8 +163,7 @@ def _git(repo: Path, *args: str) -> bytes:
 def _python_sources(repo: Path, git_ref: str | None) -> Iterable[tuple[str, str]]:
     if git_ref is None:
         for path in sorted((repo / "megatron").rglob("*.py")):
-            if not RUNTIME_EXCLUDED_PARTS.intersection(path.parts):
-                yield str(path.relative_to(repo)), path.read_text(encoding="utf-8-sig")
+            yield str(path.relative_to(repo)), path.read_text(encoding="utf-8-sig")
         return
 
     listing = _git(
@@ -175,7 +173,6 @@ def _python_sources(repo: Path, git_ref: str | None) -> Iterable[tuple[str, str]
         item
         for item in listing.splitlines()
         if item.endswith(".py")
-        and not RUNTIME_EXCLUDED_PARTS.intersection(Path(item).parts)
     ):
         yield (
             relative_path,

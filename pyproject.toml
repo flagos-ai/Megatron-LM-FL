@@ -16,13 +16,9 @@ include = [
     "megatron.plugin",
     "megatron.plugin.*",
 ]
-exclude = [
-    "megatron.megalens.migration_checks",
-    "megatron.megalens.migration_checks.*",
-]
 
 [tool.setuptools.exclude-package-data]
-"megatron.megalens" = ["migration_checks/*", "migration_checks/*.py", "docs/*"]
+"megatron.megalens" = ["docs/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "megatron.core.package_info.__version__" }

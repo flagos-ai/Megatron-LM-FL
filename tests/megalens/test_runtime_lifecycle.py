@@ -846,6 +846,18 @@ def test_hardware_monitor_initializes_nvml_only_on_first_start(monkeypatch) -> N
     assert calls.count("shutdown") == 1
 
 
+def test_unstarted_hardware_monitor_can_be_drained_and_closed_repeatedly(monkeypatch) -> None:
+    from megatron.megalens import hardware_monitor as hardware_monitor_module
+
+    monkeypatch.setattr(hardware_monitor_module, "_HAS_NVML", False)
+    monitor = hardware_monitor_module.HardwareMonitor()
+    assert monitor.collect_and_clear() == []
+    for _ in range(2):
+        monitor.stop()
+        monitor.shutdown()
+        assert monitor.collect_and_clear() == []
+
+
 def test_writer_initialization_failure_is_synchronous(tmp_path: Path) -> None:
     trace_path = tmp_path / "trace-output"
     trace_path.write_text("occupied", encoding="utf-8")
