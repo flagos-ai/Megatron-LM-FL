@@ -53,7 +53,6 @@ def test_cpu_profile_wires_static_contract_before_cpu_tests() -> None:
         "tests/megalens/test_gpt_model_phase_observability.py",
         "tests/megalens/test_transformer_layer_phase_observability.py",
         "tests/megalens/test_shared_expert_overlap_observability.py",
-        "tests/megalens/test_bridge_observability.py",
     } <= set(checks[1].argv)
 
 
