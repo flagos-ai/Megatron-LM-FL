@@ -19,7 +19,6 @@ CORE_MODULES = (
     "megatron.core.transformer.moe.moe_layer",
     "megatron.core.transformer.moe.observability",
     "megatron.core.transformer.moe.router",
-    "megatron.plugin.dualpipev.observability",
 )
 
 MEGALENS_MODULES = (
@@ -47,7 +46,6 @@ REQUIRED_WHEEL_FILES = frozenset(
         "megatron/core/tensor_parallel/observability.py",
         "megatron/core/transformer/moe/observability.py",
         "megatron/plugin/dualpipev/dualpipev_schedules.py",
-        "megatron/plugin/dualpipev/observability.py",
         "megatron/megalens/__init__.py",
         "megatron/megalens/analyzer.py",
         "megatron/megalens/core_adapter.py",
@@ -69,6 +67,7 @@ REQUIRED_WHEEL_FILES = frozenset(
 )
 
 FORBIDDEN_WHEEL_PREFIXES = (
+    "megatron/plugin/dualpipev/observability.py",
     "megatron/megalens/dp_lifecycle.py",
     "megatron/megalens/docs/",
     "megatron/megalens/migration_checks/",

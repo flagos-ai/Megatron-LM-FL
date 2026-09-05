@@ -117,8 +117,6 @@ BASE_TRACING_EVENTS = {
     'moe-shared-expert',
     'ep-alltoall-dispatch',
     'ep-alltoall-combine',
-    'ep-alltoall-async-launch',
-    'ep-alltoall-async-complete',
     'ep-allgather-dispatch',
     'ep-allgather-combine',
 }
@@ -178,8 +176,6 @@ FULL_TRACING_EVENTS = {
     "moe-shared-expert",
     "ep-alltoall-dispatch",
     "ep-alltoall-combine",
-    "ep-alltoall-async-launch",
-    "ep-alltoall-async-complete",
     "ep-allgather-dispatch",
     "ep-allgather-combine",
 }

@@ -52,18 +52,15 @@ from .hybrid_cp_schedule import hybrid_context_parallel_forward_backward
 Shape = Union[List[int], torch.Size]
 
 
-def _set_pipeline_operation_identity(scope, current_microbatch, vp_stage, dualpipev_stage=None):
+def _set_pipeline_operation_identity(scope, current_microbatch, vp_stage):
     """Fill operation identity only when the phase scope is active."""
     if scope.get("timing_phase") != "framework_phase":
         return
     if current_microbatch is None:
         operation_id = None
     else:
-        if dualpipev_stage is None:
-            vp_identity = "none" if vp_stage is None else vp_stage
-            operation_id = f"pp:microbatch={current_microbatch}:vp={vp_identity}"
-        else:
-            operation_id = f"pp:microbatch={current_microbatch}:dualpipev_stage={dualpipev_stage}"
+        vp_identity = "none" if vp_stage is None else vp_stage
+        operation_id = f"pp:microbatch={current_microbatch}:vp={vp_identity}"
     scope.set("operation_id", operation_id)
 
 
@@ -105,10 +102,6 @@ def _pipeline_phase_context(
     vp_stage,
     is_first_microbatch,
     is_last_stage,
-    schedule=None,
-    schedule_phase=None,
-    dualpipev_stage=None,
-    uses_model_graph=None,
 ):
     """Build phase metadata after the facade confirms that tracing is active."""
     ctx = {
@@ -118,14 +111,6 @@ def _pipeline_phase_context(
         "is_last_stage": _optional_bool(is_last_stage),
         "timing_phase": "framework_phase",
     }
-    if schedule is not None:
-        ctx["schedule"] = schedule
-    if schedule_phase is not None:
-        ctx["schedule_phase"] = schedule_phase
-    if dualpipev_stage is not None:
-        ctx["dualpipev_stage"] = dualpipev_stage
-    if uses_model_graph is not None:
-        ctx["uses_model_graph"] = bool(uses_model_graph)
     return ctx
 
 
@@ -137,10 +122,6 @@ def _pipeline_phase_scope(
     is_first_microbatch,
     is_last_stage,
     slots,
-    schedule=None,
-    schedule_phase=None,
-    dualpipev_stage=None,
-    uses_model_graph=None,
 ):
     gate = prepare_trace_scope(name)
     ctx = None
@@ -150,10 +131,6 @@ def _pipeline_phase_scope(
             vp_stage=vp_stage,
             is_first_microbatch=is_first_microbatch,
             is_last_stage=is_last_stage,
-            schedule=schedule,
-            schedule_phase=schedule_phase,
-            dualpipev_stage=dualpipev_stage,
-            uses_model_graph=uses_model_graph,
         )
     return open_trace_scope(gate, name, ctx=ctx, slots=slots)
 
@@ -664,10 +641,6 @@ def backward_step(
     vp_stage=None,
     is_first_microbatch=None,
     is_last_stage=None,
-    schedule=None,
-    schedule_phase=None,
-    dualpipev_stage=None,
-    uses_model_graph=None,
     pipeline_workload=None,
 ):
     """Backward step through passed-in output tensor.
@@ -691,12 +664,8 @@ def backward_step(
         is_first_microbatch=is_first_microbatch,
         is_last_stage=is_last_stage,
         slots=("operation_id", "num_tokens", "sum_sq_seq_len"),
-        schedule=schedule,
-        schedule_phase=schedule_phase,
-        dualpipev_stage=dualpipev_stage,
-        uses_model_graph=uses_model_graph,
     ) as phase_scope:
-        _set_pipeline_operation_identity(phase_scope, current_microbatch, vp_stage, dualpipev_stage)
+        _set_pipeline_operation_identity(phase_scope, current_microbatch, vp_stage)
         _set_pipeline_workload(phase_scope, pipeline_workload)
 
         # Retain the grad on the input_tensor.

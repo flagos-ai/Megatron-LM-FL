@@ -4,6 +4,8 @@ import torch
 
 from megatron.core import parallel_state
 from megatron.core.utils import make_viewless_tensor
+from megatron.training import get_args
+
 from megatron.plugin.dualpipev.fb_overlap.modules.attention import attention_forward
 from megatron.plugin.dualpipev.fb_overlap.modules.token_dispatcher import (
     alltoall_token_perm1,
@@ -16,8 +18,6 @@ from megatron.plugin.dualpipev.fb_overlap.modules.utils import (
     async_all_to_all,
     detach_tensor,
 )
-from megatron.plugin.dualpipev.observability import wait_async_all_to_all
-from megatron.training import get_args
 
 
 def router_forward(self, hidden_states):
@@ -87,20 +87,12 @@ def transformer_layer_forward_moe(
         self.mlp.token_dispatcher.output_splits,
         self.mlp.token_dispatcher.input_splits,
         self.mlp.token_dispatcher.ep_group,
-        trace_owner=self,
-        pass_direction="forward",
-        logical_phase="dispatch",
-        payload_role="token_hidden_states",
     )
     _, perm1_probs_a2a, perm1_probs_a2a_handle = async_all_to_all(
         perm1_probs,
         self.mlp.token_dispatcher.output_splits,
         self.mlp.token_dispatcher.input_splits,
         self.mlp.token_dispatcher.ep_group,
-        trace_owner=self,
-        pass_direction="forward",
-        logical_phase="dispatch",
-        payload_role="routing_probabilities",
     )
 
     # Shared Experts Forward.
@@ -113,13 +105,9 @@ def transformer_layer_forward_moe(
         self.norm_ckpt2.discard_output()
 
     # overlap perm a2a by shared experts computation.
-    wait_async_all_to_all(
-        perm1_local_input_tokens_a2a_handle, completion_site="forward_dispatch_hidden_ready"
-    )
+    perm1_local_input_tokens_a2a_handle.wait()
     perm1_local_input_tokens_a2a_handle = None
-    wait_async_all_to_all(
-        perm1_probs_a2a_handle, completion_site="forward_dispatch_probabilities_ready"
-    )
+    perm1_probs_a2a_handle.wait()
     perm1_probs_a2a_handle = None
     # perm1_local_input_tokens tensor storage is not need by backward,
     # but backward func of perm1_local_input_tokens, is needed, so resize the storage but keep tensor.
@@ -163,14 +151,8 @@ def transformer_layer_forward_moe(
         self.mlp.token_dispatcher.input_splits,
         self.mlp.token_dispatcher.output_splits,
         self.mlp.token_dispatcher.ep_group,
-        trace_owner=self,
-        pass_direction="forward",
-        logical_phase="combine",
-        payload_role="expert_output",
     )
-    wait_async_all_to_all(
-        unperm1_hidden_states_a2a_handle, completion_site="forward_combine_output_ready"
-    )
+    unperm1_hidden_states_a2a_handle.wait()
     unperm1_hidden_states_a2a_handle = None
 
     # unperm1_hidden_states tensor storage is not need by backward,

@@ -2,61 +2,17 @@ from typing import Dict, List, Literal, Optional, Tuple, Union
 
 import torch
 import torch.distributed as dist
+
 from torch import Tensor
 from torch.autograd.variable import Variable
 
-from megatron.plugin.dualpipev.observability import (
-    async_all_to_all_launch_scope,
-    prepare_async_all_to_all_observation,
-    register_async_all_to_all_work,
-    wait_async_all_to_all,
-)
 from megatron.plugin.platform import get_platform
-
 cur_platform = get_platform()
 
 COMM_STREAM = None
 
 
-def _observed_all_to_all_single(
-    a2a_out, input_, output_split_sizes, input_split_sizes, group, observation
-):
-    if observation.launch_gate is None:
-        handle = dist.all_to_all_single(
-            a2a_out,
-            input_.contiguous(),
-            output_split_sizes=output_split_sizes,
-            input_split_sizes=input_split_sizes,
-            group=group,
-            async_op=True,
-        )
-    else:
-        with async_all_to_all_launch_scope(observation):
-            handle = dist.all_to_all_single(
-                a2a_out,
-                input_.contiguous(),
-                output_split_sizes=output_split_sizes,
-                input_split_sizes=input_split_sizes,
-                group=group,
-                async_op=True,
-            )
-    register_async_all_to_all_work(handle, observation)
-    return handle
-
-
-def async_all_to_all(
-    input_,
-    output_split_sizes,
-    input_split_sizes,
-    group,
-    event=None,
-    stream=None,
-    *,
-    trace_owner=None,
-    pass_direction=None,
-    logical_phase=None,
-    payload_role=None,
-):
+def async_all_to_all(input_, output_split_sizes, input_split_sizes, group, event=None, stream=None):
     world_size = dist.get_world_size(group)
     if world_size == 1:
         return input_, input_, None
@@ -71,15 +27,6 @@ def async_all_to_all(
             device=cur_platform.current_device(),
         )
 
-    observation = prepare_async_all_to_all_observation(
-        input_,
-        trace_owner=trace_owner,
-        group_size=world_size,
-        pass_direction=pass_direction,
-        logical_phase=logical_phase,
-        payload_role=payload_role,
-    )
-
     if event or stream:
         # multi stream wait event
         global COMM_STREAM
@@ -87,28 +34,9 @@ def async_all_to_all(
             COMM_STREAM = cur_platform.Stream(device=cur_platform.current_device())
         with cur_platform.stream(COMM_STREAM):
             if event:
-                wait_async_all_to_all(
-                    event,
-                    terminal=False,
-                    completion_site="comm_stream_dependency_before_forward_dispatch_probabilities",
-                )
+                event.wait()
             if stream:
                 COMM_STREAM.wait_stream(stream)
-            if observation is None:
-                handle = dist.all_to_all_single(
-                    a2a_out,
-                    input_.contiguous(),
-                    output_split_sizes=output_split_sizes,
-                    input_split_sizes=input_split_sizes,
-                    group=group,
-                    async_op=True,
-                )
-            else:
-                handle = _observed_all_to_all_single(
-                    a2a_out, input_, output_split_sizes, input_split_sizes, group, observation
-                )
-    else:
-        if observation is None:
             handle = dist.all_to_all_single(
                 a2a_out,
                 input_.contiguous(),
@@ -117,10 +45,15 @@ def async_all_to_all(
                 group=group,
                 async_op=True,
             )
-        else:
-            handle = _observed_all_to_all_single(
-                a2a_out, input_, output_split_sizes, input_split_sizes, group, observation
-            )
+    else:
+        handle = dist.all_to_all_single(
+            a2a_out,
+            input_.contiguous(),
+            output_split_sizes=output_split_sizes,
+            input_split_sizes=input_split_sizes,
+            group=group,
+            async_op=True,
+        )
     return input_, a2a_out, handle
 
 

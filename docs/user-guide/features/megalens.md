@@ -374,7 +374,7 @@ executed producer supplies them.
 | PP and P2P | `forward`, `backward`, `send-*`, `recv-*`, `p2p-launch`, `p2p-batch-complete`, `combined-forward-backward-step` | Schedule phase, peer group, payload, transport API, request or operation ID, and existing completion boundaries |
 | TP and SP | `tp-allreduce`, `tp-all-gather-*`, `tp-reduce-scatter*`, `tp-linear-async-*`, `sp-layernorm-allreduce`, `embedding-grads-allreduce` | Group, payload size, collective kind, split sizes, async launch, and wait boundaries |
 | DP and optimizer | `dp-allreduce`, `dp-reduce-scatter`, `dp-param-all-gather`, `dp-grad-sync-complete`, `dp-param-sync-complete`, `all-grads-sync`, `optimizer*` | Gradient or parameter role, bucket, DP group, overlap setting, dispatch, and stream dependency |
-| EP and MoE | `moe-router`, `moe-dispatch`, `moe-experts`, `moe-shared-expert`, `moe-combine`, `ep-alltoall-*`, `ep-allgather-*` | Tokens, experts, routing load, dispatcher, capacity, communication payload, and async lifecycle |
+| EP and MoE | `moe-router`, `moe-dispatch`, `moe-experts`, `moe-shared-expert`, `moe-combine`, `ep-alltoall-*`, `ep-allgather-*` | Tokens, experts, routing load, dispatcher, capacity, and communication payload |
 | Hardware and kernels | `CPU_Metrics`, `GPU_Metrics`, `cuda_kernel` | Available CPU/GPU counters and rank-local CUDA kernel start, end, duration, device, and iteration |
 
 Current validated DP Probe and Analysis coverage includes Standard DDP and Megatron Distributed
