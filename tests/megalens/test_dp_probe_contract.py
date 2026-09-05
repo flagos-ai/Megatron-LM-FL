@@ -40,13 +40,7 @@ def _write_trace(
             }
         )
 
-    def dispatch(
-        name: str,
-        operation_id: str,
-        *,
-        async_op: bool = True,
-        **route: object,
-    ) -> None:
+    def dispatch(name: str, operation_id: str, *, async_op: bool = True, **route: object) -> None:
         event(
             name,
             "B",
@@ -139,14 +133,7 @@ def _write_trace(
                 payload_role="parameter_bucket",
                 stage="layerwise_optimizer_param_allgather",
             )
-    rows.append(
-        {
-            "name": "iteration",
-            "ph": "E",
-            "iteration": 1,
-            "duration_wall": timestamp,
-        }
-    )
+    rows.append({"name": "iteration", "ph": "E", "iteration": 1, "duration_wall": timestamp})
 
     rows.append({"name": "iteration", "ph": "B", "pad_before": 0, "iteration": 2})
     stream_join = multi_instance and not wrong_grad_completion_kind
@@ -192,173 +179,10 @@ def _write_trace(
             timing_phase="stream_dependency",
         )
         event("dp-param-sync-complete", "E", completed=True, error_type=None)
-    rows.append(
-        {
-            "name": "iteration",
-            "ph": "E",
-            "iteration": 2,
-            "duration_wall": timestamp,
-        }
-    )
+    rows.append({"name": "iteration", "ph": "E", "iteration": 2, "duration_wall": timestamp})
 
     trace_root.mkdir(parents=True, exist_ok=True)
     path = trace_root / f"benchmark-global-{rank}-data-{rank}-pipeline-0-tensor-0.json"
-    path.write_text(json.dumps(rows), encoding="utf-8")
-
-
-def _write_force_sync_trace(
-    trace_root: Path,
-    *,
-    rank: int,
-    omit_final_param: bool = False,
-) -> None:
-    rows: list[dict[str, object]] = []
-    timestamp = 0
-    group = [0, 1] if rank < 2 else [2, 3]
-
-    def event(name: str, phase: str, **attrs: object) -> None:
-        nonlocal timestamp
-        timestamp += 1
-        rows.append(
-            {
-                "name": name,
-                "ph": phase,
-                "rel_ts": timestamp,
-                "g_rk": rank,
-                "dp_rk": rank % 2,
-                "pp_rk": rank // 2,
-                "tp_rk": 0,
-                **attrs,
-            }
-        )
-
-    def dispatch(
-        name: str,
-        operation_id: str,
-        *,
-        async_op: bool,
-        **route: object,
-    ) -> None:
-        event(
-            name,
-            "B",
-            api_async_op=async_op,
-            async_op=async_op,
-            completion_included=False,
-            data_bytes=32768,
-            group=group,
-            group_size=2,
-            n_buckets=1,
-            operation_id=operation_id,
-            operation_id_scope="rank_local",
-            overlap_enabled=True,
-            timing_phase="async_dispatch" if async_op else "collective_call",
-            **route,
-        )
-        event(name, "E")
-
-    for iteration in (1, 2):
-        rows.append(
-            {
-                "name": "iteration",
-                "ph": "B",
-                "pad_before": 0,
-                "iteration": iteration,
-            }
-        )
-        if iteration == 2:
-            forward_param_id = f"dp:param:forward:{rank}:{iteration}"
-            dispatch(
-                "dp-param-all-gather",
-                forward_param_id,
-                async_op=True,
-                op="all_gather",
-                group_role="intra_optimizer_instance",
-                optimizer_kind="distributed",
-                payload_role="parameter_bucket",
-                stage="distributed_optimizer_param_allgather",
-            )
-            event(
-                "dp-param-sync-complete",
-                "B",
-                completion_guarantee="current_stream_after_wait",
-                completion_included=True,
-                completion_kind="work_wait",
-                completion_site="finish_param_sync",
-                host_blocking_guaranteed=False,
-                launch_observed=True,
-                op="wait",
-                operation_count=1,
-                operation_id=forward_param_id,
-                operation_ids=[forward_param_id],
-                operation_id_scope="rank_local",
-                stage="parameter_allgather_completion",
-                timing_phase="stream_dependency",
-            )
-            event("dp-param-sync-complete", "E", completed=True, error_type=None)
-        for chunk in range(2):
-            grad_id = f"dp:grad:{rank}:{iteration}:{chunk}"
-            dispatch(
-                "dp-reduce-scatter",
-                grad_id,
-                async_op=True,
-                op="reduce_scatter",
-                group_role="intra_optimizer_instance",
-                payload_role="gradient_bucket",
-                stage="intra_instance_reduce_scatter",
-            )
-            event(
-                "dp-grad-sync-complete",
-                "B",
-                completion_guarantee="current_stream_after_wait",
-                completion_included=True,
-                completion_kind="work_wait",
-                completion_site="finish_grad_sync",
-                force_all_reduce=False,
-                host_blocking_guaranteed=False,
-                launch_observed=True,
-                num_distributed_optimizer_instances=1,
-                op="wait",
-                operation_count=1,
-                operation_ids=[grad_id],
-                operation_id_scope="rank_local",
-                operations=[
-                    {
-                        "event_name": "dp-reduce-scatter",
-                        "operation_id": grad_id,
-                        "stage": "intra_instance_reduce_scatter",
-                    }
-                ],
-                stage="gradient_collective_completion",
-                timing_phase="stream_dependency",
-                use_distributed_optimizer=True,
-            )
-            event("dp-grad-sync-complete", "E", completed=True, error_type=None)
-        if not omit_final_param:
-            dispatch(
-                "dp-param-all-gather",
-                f"dp:param:optimizer:{rank}:{iteration}",
-                async_op=True,
-                op="all_gather",
-                group_role="intra_optimizer_instance",
-                optimizer_kind="distributed",
-                payload_role="parameter_bucket",
-                stage="distributed_optimizer_param_allgather",
-            )
-        rows.append(
-            {
-                "name": "iteration",
-                "ph": "E",
-                "iteration": iteration,
-                "duration_wall": timestamp,
-            }
-        )
-
-    trace_root.mkdir(parents=True, exist_ok=True)
-    path = (
-        trace_root
-        / f"benchmark-global-{rank}-data-{rank % 2}-pipeline-{rank // 2}-tensor-0.json"
-    )
     path.write_text(json.dumps(rows), encoding="utf-8")
 
 
@@ -367,37 +191,16 @@ def _write_force_sync_trace(
     (
         (False, False, False, 2, dp_probe_contract.validate_dp_standard_overlap),
         (True, False, False, 2, dp_probe_contract.validate_dp_distopt_overlap),
-        (
-            False,
-            True,
-            False,
-            2,
-            dp_probe_contract.validate_dp_layerwise_overlap,
-        ),
-        (
-            True,
-            False,
-            True,
-            4,
-            dp_probe_contract.validate_dp_multi_instance_distopt_overlap,
-        ),
+        (False, True, False, 2, dp_probe_contract.validate_dp_layerwise_overlap),
+        (True, False, True, 4, dp_probe_contract.validate_dp_multi_instance_distopt_overlap),
     ),
 )
 def test_dp_overlap_contract_accepts_cross_iteration_lifecycle(
-    tmp_path: Path,
-    distopt: bool,
-    layerwise: bool,
-    multi_instance: bool,
-    rank_count: int,
-    validator,
+    tmp_path: Path, distopt: bool, layerwise: bool, multi_instance: bool, rank_count: int, validator
 ) -> None:
     for rank in range(rank_count):
         _write_trace(
-            tmp_path,
-            rank=rank,
-            distopt=distopt,
-            layerwise=layerwise,
-            multi_instance=multi_instance,
+            tmp_path, rank=rank, distopt=distopt, layerwise=layerwise, multi_instance=multi_instance
         )
 
     assert validator(tmp_path) == ()
@@ -424,11 +227,7 @@ def test_dp_distopt_contract_rejects_missing_parameter_completion(tmp_path: Path
 
 def test_dp_multi_instance_contract_requires_stream_join(tmp_path: Path) -> None:
     _write_trace(
-        tmp_path,
-        rank=0,
-        distopt=True,
-        multi_instance=True,
-        wrong_grad_completion_kind=True,
+        tmp_path, rank=0, distopt=True, multi_instance=True, wrong_grad_completion_kind=True
     )
 
     failures = dp_probe_contract.validate_dp_multi_instance_distopt_overlap(tmp_path)
@@ -441,32 +240,4 @@ def test_dp_layerwise_contract_rejects_distopt_route(tmp_path: Path) -> None:
 
     failures = dp_probe_contract.validate_dp_layerwise_overlap(tmp_path)
 
-    assert {"trace.dp.route", "trace.dp.field"} <= {
-        failure.code for failure in failures
-    }
-
-
-def test_dp_force_sync_training_contract_accepts_optimizer_step_pending_work(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        _write_force_sync_trace(tmp_path, rank=rank)
-
-    assert (
-        dp_probe_contract.validate_dp_optimizer_step_force_sync_training(tmp_path)
-        == ()
-    )
-
-
-def test_dp_force_sync_training_contract_requires_the_final_pending_work(
-    tmp_path: Path,
-) -> None:
-    _write_force_sync_trace(tmp_path, rank=0, omit_final_param=True)
-
-    failures = dp_probe_contract.validate_dp_optimizer_step_force_sync_training(
-        tmp_path
-    )
-
-    assert {"trace.dp.event_count", "trace.dp.force_sync"} <= {
-        failure.code for failure in failures
-    }
+    assert {"trace.dp.route", "trace.dp.field"} <= {failure.code for failure in failures}

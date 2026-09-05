@@ -44,9 +44,7 @@ def _write_collective_trace(
         if tp_peer_rank is None
         else [tp_peer_rank]
     )
-    embedding_peer_rank = (
-        1 - rank if embedding_peer_rank is None else embedding_peer_rank
-    )
+    embedding_peer_rank = 1 - rank if embedding_peer_rank is None else embedding_peer_rank
 
     def event(name: str, phase: str, **attrs: object) -> None:
         nonlocal timestamp
@@ -65,14 +63,7 @@ def _write_collective_trace(
         )
 
     def collective(name: str, *, op: str, dim: str) -> None:
-        event(
-            name,
-            "B",
-            op=op,
-            dim=dim,
-            data_bytes=32768,
-            group_size=tensor_parallel_size,
-        )
+        event(name, "B", op=op, dim=dim, data_bytes=32768, group_size=tensor_parallel_size)
         event(name, "E", group=tp_peer_ranks)
 
     def tp_allreduce() -> None:
@@ -119,12 +110,7 @@ def _write_collective_trace(
             completion_included=False,
             timing_phase="launch_attempt",
         )
-        event(
-            "tp-linear-async-launch",
-            "E",
-            api_returned=True,
-            error_type=None,
-        )
+        event("tp-linear-async-launch", "E", api_returned=True, error_type=None)
         if mismatch_completion:
             route["operation_id"] = f"{operation_id}:unknown"
         event(
@@ -144,12 +130,7 @@ def _write_collective_trace(
             timing_phase="stream_dependency",
             wait_role=wait_role,
         )
-        event(
-            "tp-linear-async-complete",
-            "E",
-            completed=True,
-            error_type=None,
-        )
+        event("tp-linear-async-complete", "E", completed=True, error_type=None)
 
     def sp_layernorm_sync() -> None:
         event(
@@ -163,14 +144,7 @@ def _write_collective_trace(
         event("sp-layernorm-allreduce", "E", group=tp_peer_ranks)
 
     for iteration in (1, 2):
-        rows.append(
-            {
-                "name": "iteration",
-                "ph": "B",
-                "pad_before": 0,
-                "iteration": iteration,
-            }
-        )
+        rows.append({"name": "iteration", "ph": "B", "pad_before": 0, "iteration": iteration})
         if include_te_model_scopes:
             for _layer in (1, 2):
                 event("transformer_layer", "B")
@@ -253,9 +227,7 @@ def _write_collective_trace(
                 payload_role="input_gradient",
                 completion_site="linear_backward_dgrad_reduce_scatter_return",
                 wait_role="return",
-                mismatch_completion=mismatched_linear_completion
-                and rank == 0
-                and iteration == 1,
+                mismatch_completion=mismatched_linear_completion and rank == 0 and iteration == 1,
             )
         allreduce_lifecycles = (
             linear_allreduce_count
@@ -264,9 +236,7 @@ def _write_collective_trace(
         )
         for operation_index in range(allreduce_lifecycles):
             linear_lifecycle(
-                operation_id=(
-                    f"tp-linear:{rank}:{iteration}:all-reduce:{operation_index}"
-                ),
+                operation_id=(f"tp-linear:{rank}:{iteration}:all-reduce:{operation_index}"),
                 collective_op="all-reduce",
                 launch_site="linear_backward_dgrad_all_reduce",
                 payload_role="input_gradient",
@@ -275,12 +245,7 @@ def _write_collective_trace(
                 dim=None,
             )
         if include_final_grad_sync:
-            event(
-                "grad-sync",
-                "B",
-                schedule=grad_sync_schedule,
-                timing_phase="framework_phase",
-            )
+            event("grad-sync", "B", schedule=grad_sync_schedule, timing_phase="framework_phase")
             event("all-grads-sync", "B")
             if include_sp_sync and nest_sp_in_all_grads:
                 sp_layernorm_sync()
@@ -295,25 +260,15 @@ def _write_collective_trace(
                     group_size=2,
                     embedding_kind="word",
                 )
-                event(
-                    "embedding-grads-allreduce",
-                    "E",
-                    group=[embedding_peer_rank],
-                )
+                event("embedding-grads-allreduce", "E", group=[embedding_peer_rank])
             event("grad-sync", "E")
         rows.append(
-            {
-                "name": "iteration",
-                "ph": "E",
-                "iteration": iteration,
-                "duration_wall": timestamp,
-            }
+            {"name": "iteration", "ph": "E", "iteration": iteration, "duration_wall": timestamp}
         )
 
     trace_root.mkdir(parents=True, exist_ok=True)
     path = trace_root / (
-        f"benchmark-global-{rank}-data-0-"
-        f"pipeline-{pipeline_rank}-tensor-{tensor_rank}.json"
+        f"benchmark-global-{rank}-data-0-" f"pipeline-{pipeline_rank}-tensor-{tensor_rank}.json"
     )
     path.write_text(json.dumps(rows), encoding="utf-8")
 
@@ -349,22 +304,11 @@ def _write_tp2_pp4_multimicrobatch_trace(
             )
 
         for iteration in (1, 2):
-            rows.append(
-                {
-                    "name": "iteration",
-                    "ph": "B",
-                    "iteration": iteration,
-                    "pad_before": 0,
-                }
-            )
+            rows.append({"name": "iteration", "ph": "B", "iteration": iteration, "pad_before": 0})
             for microbatch in range(4):
                 for name in ("forward-step", "backward-step"):
                     event(name, "B", current_microbatch=microbatch)
-                    event(
-                        name,
-                        "E",
-                        operation_id=f"pp:microbatch={microbatch}:vp=none",
-                    )
+                    event(name, "E", operation_id=f"pp:microbatch={microbatch}:vp=none")
 
             directions = []
             if pipeline_rank > 0:
@@ -373,15 +317,8 @@ def _write_tp2_pp4_multimicrobatch_trace(
                 directions.extend(("send-forward", "recv-backward"))
             for direction in directions:
                 for microbatch in range(4):
-                    peer_rank = rank + (
-                        2 if direction in {"send-forward", "recv-backward"} else -2
-                    )
-                    if (
-                        wrong_peer
-                        and rank == 0
-                        and iteration == 1
-                        and direction == "send-forward"
-                    ):
+                    peer_rank = rank + (2 if direction in {"send-forward", "recv-backward"} else -2)
+                    if wrong_peer and rank == 0 and iteration == 1 and direction == "send-forward":
                         peer_rank = 3
                     operation_microbatch = (
                         0
@@ -391,9 +328,7 @@ def _write_tp2_pp4_multimicrobatch_trace(
                         and direction == "send-forward"
                         else microbatch
                     )
-                    operation_id = (
-                        f"p2p:{rank}:{iteration}:{direction}:{operation_microbatch}"
-                    )
+                    operation_id = f"p2p:{rank}:{iteration}:{direction}:{operation_microbatch}"
                     send_or_recv, pipeline_direction = direction.split("-", 1)
                     operation = {
                         "operation_id": operation_id,
@@ -426,18 +361,12 @@ def _write_tp2_pp4_multimicrobatch_trace(
             if not (missing_sp_end and rank == 0 and iteration == 1):
                 event("sp-layernorm-allreduce", "E")
             rows.append(
-                {
-                    "name": "iteration",
-                    "ph": "E",
-                    "iteration": iteration,
-                    "duration_wall": timestamp,
-                }
+                {"name": "iteration", "ph": "E", "iteration": iteration, "duration_wall": timestamp}
             )
 
         trace_root.mkdir(parents=True, exist_ok=True)
         path = trace_root / (
-            f"benchmark-global-{rank}-data-0-"
-            f"pipeline-{pipeline_rank}-tensor-{tensor_rank}.json"
+            f"benchmark-global-{rank}-data-0-" f"pipeline-{pipeline_rank}-tensor-{tensor_rank}.json"
         )
         path.write_text(json.dumps(rows), encoding="utf-8")
 
@@ -449,17 +378,13 @@ def test_tp2_collective_contract_accepts_first_last_hierarchy(tmp_path: Path) ->
     assert tp_probe_contract.validate_tp2_gqa_collective_hierarchy(tmp_path) == ()
 
 
-def test_tp2_pp4_multimicrobatch_contract_accepts_focused_trace(
-    tmp_path: Path,
-) -> None:
+def test_tp2_pp4_multimicrobatch_contract_accepts_focused_trace(tmp_path: Path) -> None:
     _write_tp2_pp4_multimicrobatch_trace(tmp_path)
 
     assert tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path) == ()
 
 
-def test_tp2_pp4_multimicrobatch_contract_rejects_cross_lane_peer(
-    tmp_path: Path,
-) -> None:
+def test_tp2_pp4_multimicrobatch_contract_rejects_cross_lane_peer(tmp_path: Path) -> None:
     _write_tp2_pp4_multimicrobatch_trace(tmp_path, wrong_peer=True)
 
     failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
@@ -467,9 +392,7 @@ def test_tp2_pp4_multimicrobatch_contract_rejects_cross_lane_peer(
     assert "trace.tp_pp.p2p_operation" in {failure.code for failure in failures}
 
 
-def test_tp2_pp4_multimicrobatch_contract_requires_closed_p2p_scopes(
-    tmp_path: Path,
-) -> None:
+def test_tp2_pp4_multimicrobatch_contract_requires_closed_p2p_scopes(tmp_path: Path) -> None:
     _write_tp2_pp4_multimicrobatch_trace(tmp_path, missing_launch_end=True)
 
     failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
@@ -477,9 +400,7 @@ def test_tp2_pp4_multimicrobatch_contract_requires_closed_p2p_scopes(
     assert "trace.tp.unmatched_begin" in {failure.code for failure in failures}
 
 
-def test_tp2_pp4_multimicrobatch_contract_matches_link_payloads(
-    tmp_path: Path,
-) -> None:
+def test_tp2_pp4_multimicrobatch_contract_matches_link_payloads(tmp_path: Path) -> None:
     _write_tp2_pp4_multimicrobatch_trace(tmp_path, mismatched_payload=True)
 
     failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
@@ -487,9 +408,7 @@ def test_tp2_pp4_multimicrobatch_contract_matches_link_payloads(
     assert "trace.tp_pp.p2p_payload" in {failure.code for failure in failures}
 
 
-def test_tp2_pp4_multimicrobatch_contract_requires_closed_sp_collective(
-    tmp_path: Path,
-) -> None:
+def test_tp2_pp4_multimicrobatch_contract_requires_closed_sp_collective(tmp_path: Path) -> None:
     _write_tp2_pp4_multimicrobatch_trace(tmp_path, missing_sp_end=True)
 
     failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
@@ -497,9 +416,7 @@ def test_tp2_pp4_multimicrobatch_contract_requires_closed_sp_collective(
     assert "trace.tp.unmatched_begin" in {failure.code for failure in failures}
 
 
-def test_tp2_pp4_multimicrobatch_contract_requires_unique_operation_ids(
-    tmp_path: Path,
-) -> None:
+def test_tp2_pp4_multimicrobatch_contract_requires_unique_operation_ids(tmp_path: Path) -> None:
     _write_tp2_pp4_multimicrobatch_trace(tmp_path, duplicate_operation_id=True)
 
     failures = tp_probe_contract.validate_tp2_pp4_multimicrobatch(tmp_path)
@@ -507,105 +424,46 @@ def test_tp2_pp4_multimicrobatch_contract_requires_unique_operation_ids(
     assert "trace.tp_pp.p2p_completion" in {failure.code for failure in failures}
 
 
-def test_tp2_collective_contract_requires_nested_physical_reduce_scatter(
-    tmp_path: Path,
-) -> None:
+def test_tp2_collective_contract_requires_nested_physical_reduce_scatter(tmp_path: Path) -> None:
     for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            omit_nested_reduce_scatter=rank == 0,
-        )
+        _write_collective_trace(tmp_path, rank=rank, omit_nested_reduce_scatter=rank == 0)
 
     failures = tp_probe_contract.validate_tp2_gqa_collective_hierarchy(tmp_path)
 
-    assert "trace.tp.collective_hierarchy" in {
-        failure.code for failure in failures
-    }
+    assert "trace.tp.collective_hierarchy" in {failure.code for failure in failures}
 
 
 def test_tp2_collective_contract_rejects_crossed_scopes(tmp_path: Path) -> None:
     for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            cross_all_gather_scopes=rank == 0,
-        )
+        _write_collective_trace(tmp_path, rank=rank, cross_all_gather_scopes=rank == 0)
 
     failures = tp_probe_contract.validate_tp2_gqa_collective_hierarchy(tmp_path)
 
     assert "trace.tp.nesting" in {failure.code for failure in failures}
 
 
-def test_tp2_no_sp_collective_contract_accepts_gqa_last_dimension(
-    tmp_path: Path,
-) -> None:
+def test_tp2_sp_linear_contract_accepts_all_gather_and_reduce_scatter(tmp_path: Path) -> None:
     for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_first_all_gather=False,
-        )
-
-    assert (
-        tp_probe_contract.validate_tp2_gqa_no_sp_collective_hierarchy(tmp_path)
-        == ()
-    )
-
-
-def test_tp2_no_sp_collective_contract_rejects_first_all_gather(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(tmp_path, rank=rank)
-
-    failures = tp_probe_contract.validate_tp2_gqa_no_sp_collective_hierarchy(
-        tmp_path
-    )
-
-    assert "trace.tp.collective_count" in {
-        failure.code for failure in failures
-    }
-
-
-def test_tp2_sp_linear_contract_accepts_all_gather_and_reduce_scatter(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-        )
+        _write_collective_trace(tmp_path, rank=rank, include_linear_lifecycle=True)
 
     assert tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path) == ()
 
 
-def test_tp2_sp_linear_contract_rejects_unknown_completion_identity(
-    tmp_path: Path,
-) -> None:
+def test_tp2_sp_linear_contract_rejects_unknown_completion_identity(tmp_path: Path) -> None:
     for rank in (0, 1):
         _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            mismatched_linear_completion=True,
+            tmp_path, rank=rank, include_linear_lifecycle=True, mismatched_linear_completion=True
         )
 
     failures = tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path)
 
-    assert "trace.tp_linear.operation_id" in {
-        failure.code for failure in failures
-    }
+    assert "trace.tp_linear.operation_id" in {failure.code for failure in failures}
 
 
 def test_tp2_sp_linear_contract_rejects_allreduce_route(tmp_path: Path) -> None:
     for rank in (0, 1):
         _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_linear_allreduce=True,
+            tmp_path, rank=rank, include_linear_lifecycle=True, include_linear_allreduce=True
         )
 
     failures = tp_probe_contract.validate_tp2_sp_linear_lifecycle(tmp_path)
@@ -613,474 +471,39 @@ def test_tp2_sp_linear_contract_rejects_allreduce_route(tmp_path: Path) -> None:
     assert "trace.tp_linear.route" in {failure.code for failure in failures}
 
 
-def test_tp2_sp_te_linear_contract_accepts_the_mcore_visible_boundary(
-    tmp_path: Path,
-) -> None:
+def test_tp2_sp_final_sync_contract_accepts_layernorm_sibling(tmp_path: Path) -> None:
     for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-            include_te_model_scopes=True,
-        )
-
-    assert tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path) == ()
-
-
-def test_tp2_sp_te_linear_contract_requires_the_outer_te_model_scopes(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path)
-
-    assert "trace.tp_te.scope_count" in {failure.code for failure in failures}
-
-
-def test_tp2_sp_te_linear_contract_requires_attention_before_mlp(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-            include_te_model_scopes=True,
-            reverse_te_model_scopes=True,
-        )
-
-    failures = tp_probe_contract.validate_tp2_sp_te_linear_profile(tmp_path)
-
-    assert "trace.tp_te.scope_hierarchy" in {
-        failure.code for failure in failures
-    }
-
-
-def test_tp2_sp_te_op_fuser_contract_accepts_the_baseline_outer_scopes(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-            include_te_op_fuser_scopes=True,
-        )
-
-    assert tp_probe_contract.validate_tp2_sp_te_op_fuser_profile(tmp_path) == ()
-
-
-def test_tp2_sp_te_op_fuser_contract_rejects_mcore_mlp_scope(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-            include_te_op_fuser_scopes=True,
-            include_op_fuser_mlp_scope=True,
-        )
-
-    failures = tp_probe_contract.validate_tp2_sp_te_op_fuser_profile(tmp_path)
-
-    assert "trace.tp_te_op_fuser.scope_count" in {
-        failure.code for failure in failures
-    }
-
-
-def test_tp2_no_sp_linear_contract_accepts_allreduce(tmp_path: Path) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_allreduce=True,
-        )
-
-    assert tp_probe_contract.validate_tp2_local_allreduce_lifecycle(tmp_path) == ()
-
-
-def test_tp2_no_sp_linear_contract_rejects_sp_routes(tmp_path: Path) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-        )
-
-    failures = tp_probe_contract.validate_tp2_local_allreduce_lifecycle(tmp_path)
-
-    assert "trace.tp_linear.route" in {failure.code for failure in failures}
-
-
-def test_tp2_sp_final_sync_contract_accepts_layernorm_sibling(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_final_grad_sync=True,
-        )
+        _write_collective_trace(tmp_path, rank=rank, include_final_grad_sync=True)
 
     assert tp_probe_contract.validate_tp2_sp_final_grad_sync(tmp_path) == ()
 
 
-def test_tp2_sp_final_sync_contract_rejects_embedding_collective(
-    tmp_path: Path,
-) -> None:
+def test_tp2_sp_final_sync_contract_rejects_embedding_collective(tmp_path: Path) -> None:
     for rank in (0, 1):
         _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_final_grad_sync=True,
-            include_embedding_sync=True,
+            tmp_path, rank=rank, include_final_grad_sync=True, include_embedding_sync=True
         )
 
     failures = tp_probe_contract.validate_tp2_sp_final_grad_sync(tmp_path)
 
-    assert "trace.tp.final_sync_count" in {
-        failure.code for failure in failures
-    }
+    assert "trace.tp.final_sync_count" in {failure.code for failure in failures}
 
 
-def test_tp2_sp_final_sync_contract_rejects_layernorm_inside_all_grads(
-    tmp_path: Path,
-) -> None:
+def test_tp2_sp_final_sync_contract_rejects_layernorm_inside_all_grads(tmp_path: Path) -> None:
     for rank in (0, 1):
         _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_final_grad_sync=True,
-            nest_sp_in_all_grads=True,
+            tmp_path, rank=rank, include_final_grad_sync=True, nest_sp_in_all_grads=True
         )
 
     failures = tp_probe_contract.validate_tp2_sp_final_grad_sync(tmp_path)
 
-    assert "trace.tp.final_sync_parent" in {
-        failure.code for failure in failures
-    }
+    assert "trace.tp.final_sync_parent" in {failure.code for failure in failures}
 
 
-def test_tp2_no_sp_final_sync_contract_accepts_dp_finish_only(
-    tmp_path: Path,
-) -> None:
+def test_tp2_sp_profile_contract_combines_all_three_boundaries(tmp_path: Path) -> None:
     for rank in (0, 1):
         _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_final_grad_sync=True,
-            include_sp_sync=False,
-        )
-
-    assert tp_probe_contract.validate_tp2_no_sp_final_grad_sync(tmp_path) == ()
-
-
-def test_tp2_no_sp_final_sync_contract_rejects_layernorm_collective(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_final_grad_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_tp2_no_sp_final_grad_sync(tmp_path)
-
-    assert "trace.tp.final_sync_count" in {
-        failure.code for failure in failures
-    }
-
-
-def test_tp2_pp2_embedding_final_sync_contract_accepts_two_parallel_axes(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        pipeline_rank, tensor_rank = divmod(rank, 2)
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            pipeline_rank=pipeline_rank,
-            tensor_rank=tensor_rank,
-            tp_peer_rank=rank ^ 1,
-            embedding_peer_rank=rank ^ 2,
-            grad_sync_schedule="non-interleaved-1f1b",
-            include_final_grad_sync=True,
-            include_embedding_sync=True,
-        )
-
-    assert (
-        tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync(tmp_path)
-        == ()
-    )
-
-
-def test_tp2_pp2_embedding_final_sync_contract_rejects_wrong_pp_peer(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        pipeline_rank, tensor_rank = divmod(rank, 2)
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            pipeline_rank=pipeline_rank,
-            tensor_rank=tensor_rank,
-            tp_peer_rank=rank ^ 1,
-            embedding_peer_rank=3 if rank == 0 else rank ^ 2,
-            grad_sync_schedule="non-interleaved-1f1b",
-            include_final_grad_sync=True,
-            include_embedding_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync(
-        tmp_path
-    )
-
-    assert "trace.tp.final_sync_field" in {
-        failure.code for failure in failures
-    }
-
-
-def test_tp2_pp2_embedding_final_sync_contract_requires_each_rank(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        pipeline_rank, tensor_rank = divmod(rank, 2)
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            pipeline_rank=pipeline_rank,
-            tensor_rank=tensor_rank,
-            tp_peer_rank=rank ^ 1,
-            embedding_peer_rank=rank ^ 2,
-            grad_sync_schedule="non-interleaved-1f1b",
-            include_final_grad_sync=True,
-            include_embedding_sync=rank != 0,
-        )
-
-    failures = tp_probe_contract.validate_tp2_pp2_embedding_final_grad_sync(
-        tmp_path
-    )
-
-    assert "trace.tp.final_sync_count" in {
-        failure.code for failure in failures
-    }
-
-
-def test_tp2_local_allreduce_profile_combines_all_three_boundaries(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_first_all_gather=False,
-            include_linear_allreduce=True,
-            include_final_grad_sync=True,
-            include_sp_sync=False,
-        )
-
-    assert tp_probe_contract.validate_tp2_local_allreduce_profile(tmp_path) == ()
-
-
-def test_tp2_sp_profile_contract_combines_all_three_boundaries(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
+            tmp_path, rank=rank, include_linear_lifecycle=True, include_final_grad_sync=True
         )
 
     assert tp_probe_contract.validate_tp2_sp_profile(tmp_path) == ()
-
-
-def test_qwen3_tp2_sp_contract_accepts_only_first_dimension_gqa_collectives(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_last_dim_collectives=False,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    assert tp_probe_contract.validate_qwen3_tp2_sp_profile(tmp_path) == ()
-
-
-def test_qwen3_tp2_sp_contract_rejects_last_dimension_gqa_collectives(
-    tmp_path: Path,
-) -> None:
-    for rank in (0, 1):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_qwen3_tp2_sp_profile(tmp_path)
-
-    assert "trace.tp.collective_count" in {
-        failure.code for failure in failures
-    }
-
-
-def test_qwen3_tp4_sp_contract_accepts_the_full_tp_group(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=4,
-            include_last_dim_collectives=False,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    assert tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path) == ()
-
-
-def test_qwen3_tp4_sp_contract_rejects_an_incomplete_tp_group(
-    tmp_path: Path,
-) -> None:
-    for rank in range(3):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=4,
-            include_last_dim_collectives=False,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path)
-
-    assert {
-        "trace.tp.ranks",
-        "trace.tp_linear.ranks",
-        "trace.tp.final_sync_ranks",
-    } <= {failure.code for failure in failures}
-
-
-def test_qwen3_tp4_sp_contract_rejects_a_tp2_collective_group(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=4,
-            include_last_dim_collectives=False,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    rank_zero = tmp_path / "benchmark-global-0-data-0-pipeline-0-tensor-0.json"
-    rows = json.loads(rank_zero.read_text(encoding="utf-8"))
-    first_collective = next(
-        row
-        for row in rows
-        if row.get("name") == "tp-all-gather-first" and row.get("ph") == "B"
-    )
-    first_collective["group_size"] = 2
-    rank_zero.write_text(json.dumps(rows), encoding="utf-8")
-
-    failures = tp_probe_contract.validate_qwen3_tp4_sp_profile(tmp_path)
-
-    assert "trace.tp.collective_field" in {
-        failure.code for failure in failures
-    }
-
-
-def test_qwen3_tp4_local_no_sp_contract_accepts_per_layer_allreduce(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=4,
-            include_first_all_gather=False,
-            include_last_dim_collectives=False,
-            omit_nested_reduce_scatter=True,
-            tp_allreduce_count=57,
-            linear_allreduce_count=57,
-            include_final_grad_sync=True,
-        )
-
-    assert tp_probe_contract.validate_qwen3_tp4_local_no_sp_profile(tmp_path) == ()
-
-
-def test_qwen3_tp4_local_no_sp_contract_rejects_missing_allreduce(
-    tmp_path: Path,
-) -> None:
-    for rank in range(4):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=4,
-            include_first_all_gather=False,
-            include_last_dim_collectives=False,
-            omit_nested_reduce_scatter=True,
-            tp_allreduce_count=56 if rank == 0 else 57,
-            linear_allreduce_count=57,
-            include_final_grad_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_qwen3_tp4_local_no_sp_profile(tmp_path)
-
-    assert "trace.tp.allreduce_count" in {
-        failure.code for failure in failures
-    }
-
-
-def test_qwen3_tp8_sp_contract_accepts_the_full_tp_group(
-    tmp_path: Path,
-) -> None:
-    for rank in range(8):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=8,
-            include_last_dim_collectives=False,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    assert tp_probe_contract.validate_qwen3_tp8_sp_profile(tmp_path) == ()
-
-
-def test_qwen3_tp8_sp_contract_rejects_last_dimension_gqa_collectives(
-    tmp_path: Path,
-) -> None:
-    for rank in range(8):
-        _write_collective_trace(
-            tmp_path,
-            rank=rank,
-            tensor_parallel_size=8,
-            include_linear_lifecycle=True,
-            include_final_grad_sync=True,
-        )
-
-    failures = tp_probe_contract.validate_qwen3_tp8_sp_profile(tmp_path)
-
-    assert "trace.tp.collective_count" in {
-        failure.code for failure in failures
-    }

@@ -1,10 +1,11 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 """CP coexistence contracts for controlled GPT training profiles."""
 
 from __future__ import annotations
 
 import re
-from collections import Counter, defaultdict
+from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping, Sequence
@@ -15,7 +16,6 @@ from megatron.megalens.trace_aggregate import (
     collect_benchmark_files,
     read_benchmark_file,
 )
-from tests.test_utils.runners import dp_probe_contract
 from tests.test_utils.runners import gpt_probe_contract
 from tests.test_utils.runners.megalens_run_manifest import Failure
 
@@ -30,24 +30,14 @@ class _Span:
 
 
 _DP_SCOPE_NAMES = frozenset(("grad-sync", "all-grads-sync", "dp-allreduce"))
+
 _FORBIDDEN_DP_EVENTS = frozenset(
     ("dp-grad-sync-complete", "dp-reduce-scatter", "dp-param-all-gather")
 )
-_INFRASTRUCTURE_FIELDS = frozenset(
-    ("dev", "iteration", "g_rk", "dp_rk", "pp_rk", "tp_rk")
-)
+
+_INFRASTRUCTURE_FIELDS = frozenset(("dev", "iteration", "g_rk", "dp_rk", "pp_rk", "tp_rk"))
+
 _OPERATION_ID_PATTERN = re.compile(r"^dp:allreduce:[1-9]\d*$")
-_DISTOPT_ROUTE_NAMES = frozenset(
-    (
-        "dp-reduce-scatter",
-        "dp-grad-sync-complete",
-        "dp-param-all-gather",
-        "dp-param-sync-complete",
-    )
-)
-_DISTOPT_DISPATCH_NAMES = frozenset(
-    ("dp-reduce-scatter", "dp-param-all-gather")
-)
 
 
 def _load_iterations(trace_root: Path) -> Mapping[int, Sequence[Iteration]]:
@@ -66,9 +56,7 @@ def _failure(code: str, message: str, *, rank: int, iteration: int) -> Failure:
 
 
 def _pair_dp_scopes(
-    iteration: Iteration,
-    *,
-    rank: int,
+    iteration: Iteration, *, rank: int
 ) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
     pending: list[tuple[str, int, Event, int | None]] = []
     spans: dict[str, list[_Span]] = defaultdict(list)
@@ -93,9 +81,7 @@ def _pair_dp_scopes(
                 )
                 continue
             name, begin_position, begin, parent_position = pending.pop()
-            spans[name].append(
-                _Span(begin, event, begin_position, position, parent_position)
-            )
+            spans[name].append(_Span(begin, event, begin_position, position, parent_position))
         else:
             failures.append(
                 _failure(
@@ -118,77 +104,8 @@ def _pair_dp_scopes(
     return spans, failures
 
 
-def _pair_named_scopes(
-    iteration: Iteration,
-    *,
-    rank: int,
-    names: frozenset[str],
-) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
-    """Pair flat B/E scopes without assuming nesting across route names."""
-
-    pending: dict[str, tuple[int, Event]] = {}
-    spans: dict[str, list[_Span]] = defaultdict(list)
-    failures: list[Failure] = []
-    iteration_id = int(iteration.iteration_id)
-
-    for position, event in enumerate(iteration.events):
-        if event.name not in names:
-            continue
-        if event.ph == "B":
-            if event.name in pending:
-                failures.append(
-                    _failure(
-                        "trace.cp.distopt_pairing",
-                        f"event {event.name!r} begins before its prior scope ends",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-                continue
-            pending[event.name] = (position, event)
-        elif event.ph == "E":
-            begin = pending.pop(event.name, None)
-            if begin is None:
-                failures.append(
-                    _failure(
-                        "trace.cp.distopt_pairing",
-                        f"event {event.name!r} ends without an active begin",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-                continue
-            begin_position, begin_event = begin
-            spans[event.name].append(
-                _Span(begin_event, event, begin_position, position, None)
-            )
-        else:
-            failures.append(
-                _failure(
-                    "trace.cp.distopt_pairing",
-                    f"event {event.name!r} uses unsupported phase {event.ph!r}",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-
-    for name in sorted(pending):
-        failures.append(
-            _failure(
-                "trace.cp.distopt_pairing",
-                f"event {name!r} has an unmatched begin",
-                rank=rank,
-                iteration=iteration_id,
-            )
-        )
-    return spans, failures
-
-
 def _validate_dp_cp_group(
-    iteration: Iteration,
-    *,
-    rank: int,
-    context_parallel_size: int,
+    iteration: Iteration, *, rank: int, context_parallel_size: int
 ) -> tuple[list[Failure], str | None, int | None]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_dp_scopes(iteration, rank=rank)
@@ -204,15 +121,12 @@ def _validate_dp_cp_group(
                 )
             )
 
-    forbidden = sorted(
-        {event.name for event in iteration.events} & _FORBIDDEN_DP_EVENTS
-    )
+    forbidden = sorted({event.name for event in iteration.events} & _FORBIDDEN_DP_EVENTS)
     if forbidden:
         failures.append(
             _failure(
                 "trace.cp.dp_route",
-                f"CP{context_parallel_size} standard DDP observed "
-                f"forbidden events {forbidden}",
+                f"CP{context_parallel_size} standard DDP observed " f"forbidden events {forbidden}",
                 rank=rank,
                 iteration=iteration_id,
             )
@@ -258,9 +172,7 @@ def _validate_dp_cp_group(
         "stage": "main_bucket_allreduce",
         "timing_phase": "collective_call",
     }
-    expected_peer = [
-        peer for peer in range(context_parallel_size) if peer != rank
-    ]
+    expected_peer = [peer for peer in range(context_parallel_size) if peer != rank]
     span = allreduces[0]
     for field, expected in expected_begin.items():
         observed = span.begin.attrs.get(field, "<missing>")
@@ -275,11 +187,7 @@ def _validate_dp_cp_group(
             )
 
     data_bytes = span.begin.attrs.get("data_bytes")
-    if (
-        not isinstance(data_bytes, int)
-        or isinstance(data_bytes, bool)
-        or data_bytes <= 0
-    ):
+    if not isinstance(data_bytes, int) or isinstance(data_bytes, bool) or data_bytes <= 0:
         failures.append(
             _failure(
                 "trace.cp.dp_allreduce_payload",
@@ -291,9 +199,7 @@ def _validate_dp_cp_group(
         data_bytes = None
 
     operation_id = span.begin.attrs.get("operation_id")
-    if not isinstance(operation_id, str) or _OPERATION_ID_PATTERN.fullmatch(
-        operation_id
-    ) is None:
+    if not isinstance(operation_id, str) or _OPERATION_ID_PATTERN.fullmatch(operation_id) is None:
         failures.append(
             _failure(
                 "trace.cp.dp_operation_id",
@@ -330,22 +236,14 @@ def _validate_dp_cp_group(
 
 
 def _validate_tp1_pp1_cp_identity(
-    iteration: Iteration,
-    *,
-    rank: int,
-    context_parallel_size: int,
-    data_parallel_size: int,
+    iteration: Iteration, *, rank: int, context_parallel_size: int, data_parallel_size: int
 ) -> list[Failure]:
     """Validate rank identity for the reviewed TP1/PP1 CP rank order."""
 
     iteration_id = int(iteration.iteration_id)
     failures: list[Failure] = []
     cp_events = sorted(
-        {
-            event.name
-            for event in iteration.events
-            if event.name.startswith(("cp-", "cp_"))
-        }
+        {event.name for event in iteration.events if event.name.startswith(("cp-", "cp_"))}
     )
     if cp_events:
         failures.append(
@@ -357,12 +255,7 @@ def _validate_tp1_pp1_cp_identity(
             )
         )
     cp_fields = sorted(
-        {
-            field
-            for event in iteration.events
-            for field in event.attrs
-            if field.startswith("cp_")
-        }
+        {field for event in iteration.events for field in event.attrs if field.startswith("cp_")}
     )
     if cp_fields:
         failures.append(
@@ -374,12 +267,7 @@ def _validate_tp1_pp1_cp_identity(
             )
         )
     observed_coordinates = {
-        (
-            event.rank.global_rank,
-            event.rank.data,
-            event.rank.pipeline,
-            event.rank.tensor,
-        )
+        (event.rank.global_rank, event.rank.data, event.rank.pipeline, event.rank.tensor)
         for event in iteration.events
     }
     expected_rank_count = context_parallel_size * data_parallel_size
@@ -438,8 +326,7 @@ def _validate_te_dp1_coexistence(
             failures.append(
                 Failure(
                     "trace.cp.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
+                    f"rank {rank} expects iterations [1, 2], " f"observed {list(iteration_ids)}",
                     f"rank={rank}",
                 )
             )
@@ -454,9 +341,7 @@ def _validate_te_dp1_coexistence(
                 )
             )
             iteration_failures, operation_id, data_bytes = _validate_dp_cp_group(
-                iteration,
-                rank=rank,
-                context_parallel_size=context_parallel_size,
+                iteration, rank=rank, context_parallel_size=context_parallel_size
             )
             failures.extend(iteration_failures)
             if data_bytes is not None:
@@ -487,488 +372,3 @@ def validate_cp2_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
     """Validate existing GPT and DP probes for TP1/PP1/CP2/DP1."""
 
     return _validate_te_dp1_coexistence(trace_root, context_parallel_size=2)
-
-
-def validate_cp4_te_coexistence(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate existing GPT and DP probes for TP1/PP1/CP4/DP1."""
-
-    return _validate_te_dp1_coexistence(trace_root, context_parallel_size=4)
-
-
-def _validate_distopt_sync_scopes(
-    iteration: Iteration,
-    *,
-    rank: int,
-) -> tuple[list[Failure], _Span | None]:
-    """Require the per-iteration framework sync hierarchy around DP completion."""
-
-    iteration_id = int(iteration.iteration_id)
-    spans, failures = _pair_dp_scopes(iteration, rank=rank)
-    for name in ("grad-sync", "all-grads-sync"):
-        observed = len(spans.get(name, ()))
-        if observed != 1:
-            failures.append(
-                _failure(
-                    "trace.cp.distopt_sync",
-                    f"event {name!r} has {observed} span(s), expected 1",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-
-    grad_sync = spans.get("grad-sync", ())
-    all_grads_sync = spans.get("all-grads-sync", ())
-    if len(grad_sync) == len(all_grads_sync) == 1:
-        if all_grads_sync[0].parent_begin_position != grad_sync[0].begin_position:
-            failures.append(
-                _failure(
-                    "trace.cp.distopt_sync",
-                    "all-grads-sync must be a direct child of grad-sync",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-        return failures, all_grads_sync[0]
-    return failures, None
-
-
-def _validate_qwen3_distopt_iteration(
-    iteration: Iteration,
-    *,
-    rank: int,
-    context_parallel_size: int,
-    data_parallel_size: int,
-) -> tuple[list[Failure], dict[str, tuple[tuple[int, int], ...]]]:
-    """Validate the DP×CP group carried by existing DistOpt events."""
-
-    iteration_id = int(iteration.iteration_id)
-    failures = _validate_tp1_pp1_cp_identity(
-        iteration,
-        rank=rank,
-        context_parallel_size=context_parallel_size,
-        data_parallel_size=data_parallel_size,
-    )
-    sync_failures, all_grads_sync = _validate_distopt_sync_scopes(
-        iteration,
-        rank=rank,
-    )
-    failures.extend(sync_failures)
-    route_spans, pairing_failures = _pair_named_scopes(
-        iteration,
-        rank=rank,
-        names=_DISTOPT_ROUTE_NAMES,
-    )
-    failures.extend(pairing_failures)
-    selected = [
-        event for event in iteration.events if event.name in _DISTOPT_ROUTE_NAMES
-    ]
-    phase_counts = Counter((event.name, event.ph) for event in selected)
-    reduce_scatter_count = phase_counts[("dp-reduce-scatter", "B")]
-    if reduce_scatter_count <= 0:
-        failures.append(
-            _failure(
-                "trace.cp.distopt_count",
-                "Qwen3 CP DistOpt has no gradient ReduceScatter",
-                rank=rank,
-                iteration=iteration_id,
-            )
-        )
-    expected_counts = {
-        "dp-reduce-scatter": reduce_scatter_count,
-        "dp-grad-sync-complete": reduce_scatter_count,
-        "dp-param-all-gather": phase_counts[("dp-param-all-gather", "B")],
-        "dp-param-sync-complete": phase_counts[("dp-param-all-gather", "B")],
-    }
-    for name, expected in expected_counts.items():
-        observed = (phase_counts[(name, "B")], phase_counts[(name, "E")])
-        if observed != (expected, expected):
-            failures.append(
-                _failure(
-                    "trace.cp.distopt_count",
-                    f"event {name!r} has B/E={observed}, "
-                    f"expected {expected}/{expected}",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-
-    optimizer_group_size = context_parallel_size * data_parallel_size
-    expected_peers = [peer for peer in range(optimizer_group_size) if peer != rank]
-    payloads: dict[str, list[tuple[int, int]]] = defaultdict(list)
-    for event in selected:
-        if event.name not in _DISTOPT_DISPATCH_NAMES:
-            continue
-        if event.ph == "B":
-            for field, expected in {
-                "group_size": optimizer_group_size,
-                "group_role": "intra_optimizer_instance",
-            }.items():
-                if event.attrs.get(field, "<missing>") != expected:
-                    failures.append(
-                        _failure(
-                            "trace.cp.distopt_group",
-                            f"{event.name!r} has {field}="
-                            f"{event.attrs.get(field, '<missing>')!r}, "
-                            f"expected {expected!r}",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-            n_buckets = event.attrs.get("n_buckets")
-            invalid_n_buckets = (
-                not isinstance(n_buckets, int)
-                or isinstance(n_buckets, bool)
-                or n_buckets <= 0
-            )
-            if invalid_n_buckets:
-                failures.append(
-                    _failure(
-                        "trace.cp.distopt_payload",
-                        f"{event.name!r} has invalid n_buckets={n_buckets!r}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-            data_bytes = event.attrs.get("data_bytes")
-            if (
-                not isinstance(data_bytes, int)
-                or isinstance(data_bytes, bool)
-                or data_bytes <= 0
-            ):
-                failures.append(
-                    _failure(
-                        "trace.cp.distopt_payload",
-                        f"{event.name!r} has invalid data_bytes={data_bytes!r}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-            elif not invalid_n_buckets:
-                payloads[event.name].append((data_bytes, n_buckets))
-        elif event.ph == "E" and event.attrs.get("group") != expected_peers:
-            failures.append(
-                _failure(
-                    "trace.cp.distopt_group",
-                    f"{event.name!r} peer group is {event.attrs.get('group')!r}, "
-                    f"expected {expected_peers!r}",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-
-    launches: dict[str, _Span] = {}
-    for name in _DISTOPT_DISPATCH_NAMES:
-        for span in route_spans.get(name, ()):
-            operation_id = span.begin.attrs.get("operation_id")
-            if isinstance(operation_id, str):
-                launches[operation_id] = span
-    for name in ("dp-grad-sync-complete", "dp-param-sync-complete"):
-        for span in route_spans.get(name, ()):
-            operation_ids = span.begin.attrs.get("operation_ids")
-            if not isinstance(operation_ids, list):
-                continue
-            for operation_id in operation_ids:
-                launch = launches.get(operation_id)
-                if launch is not None and launch.end_position >= span.begin_position:
-                    failures.append(
-                        _failure(
-                            "trace.cp.distopt_pairing",
-                            f"event {name!r} begins before dispatch "
-                            f"{operation_id!r} ends",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-            if (
-                name == "dp-grad-sync-complete"
-                and all_grads_sync is not None
-                and not (
-                    all_grads_sync.begin_position
-                    < span.begin_position
-                    < span.end_position
-                    < all_grads_sync.end_position
-                )
-            ):
-                failures.append(
-                    _failure(
-                        "trace.cp.distopt_sync",
-                        "dp-grad-sync-complete must be inside all-grads-sync",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-
-    return failures, {
-        name: tuple(payloads.get(name, ()))
-        for name in sorted(_DISTOPT_DISPATCH_NAMES)
-    }
-
-
-def _validate_qwen3_distopt_coexistence(
-    trace_root: Path,
-    *,
-    context_parallel_size: int,
-    data_parallel_size: int,
-) -> tuple[Failure, ...]:
-    failures = list(
-        gpt_probe_contract.validate_gpt_cp_eager_phases(
-            trace_root,
-            context_parallel_size=context_parallel_size,
-            data_parallel_size=data_parallel_size,
-            expected_layers=28,
-        )
-    )
-    failures.extend(dp_probe_contract.validate_dp_distopt_overlap(trace_root))
-    by_rank = _load_iterations(trace_root)
-    expected_ranks = tuple(range(context_parallel_size * data_parallel_size))
-    observed_ranks = tuple(sorted(by_rank))
-    if observed_ranks != expected_ranks:
-        failures.append(
-            Failure(
-                "trace.cp.ranks",
-                f"Qwen3 CP{context_parallel_size}/DP{data_parallel_size} "
-                "contract expects ranks "
-                f"{list(expected_ranks)}, observed {list(observed_ranks)}",
-                f"qwen3-cp{context_parallel_size}-dp{data_parallel_size}-distopt",
-            )
-        )
-
-    signatures: dict[
-        tuple[int, str], dict[int, tuple[tuple[int, int], ...]]
-    ] = defaultdict(dict)
-    for rank in expected_ranks:
-        iterations = by_rank.get(rank, ())
-        iteration_ids = tuple(item.iteration_id for item in iterations)
-        if iteration_ids != (1, 2):
-            failures.append(
-                Failure(
-                    "trace.cp.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
-                    f"rank={rank}",
-                )
-            )
-        for iteration in iterations:
-            iteration_id = int(iteration.iteration_id)
-            iteration_failures, payloads = _validate_qwen3_distopt_iteration(
-                iteration,
-                rank=rank,
-                context_parallel_size=context_parallel_size,
-                data_parallel_size=data_parallel_size,
-            )
-            failures.extend(iteration_failures)
-            for name, values in payloads.items():
-                signatures[(iteration_id, name)][rank] = values
-
-    for (iteration_id, name), rank_payloads in sorted(signatures.items()):
-        if set(rank_payloads) == set(expected_ranks) and len(
-            set(rank_payloads.values())
-        ) != 1:
-            failures.append(
-                Failure(
-                    "trace.cp.distopt_payload",
-                    f"iteration {iteration_id} {name!r} payload/bucket "
-                    "sequences differ "
-                    f"across DP×CP ranks: {rank_payloads}",
-                    f"iteration={iteration_id}",
-                )
-            )
-    return tuple(failures)
-
-
-def validate_qwen3_v31_q0_sampled_trace(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate sampled Qwen3 Q0 model and DP16 DistOpt activity."""
-
-    failures = list(dp_probe_contract.validate_dp_distopt_sampled_overlap(trace_root))
-    by_rank = _load_iterations(trace_root)
-    expected_ranks = tuple(range(16))
-    observed_ranks = tuple(sorted(by_rank))
-    if observed_ranks != expected_ranks:
-        failures.append(
-            Failure(
-                "trace.cp.ranks",
-                f"Qwen3 V3.1 Q0 expects ranks {list(expected_ranks)}, "
-                f"observed {list(observed_ranks)}",
-                "qwen3-v31-q0-dp16",
-            )
-        )
-
-    reference_iterations = tuple(
-        int(item.iteration_id) for item in by_rank.get(0, ())
-    )
-    if not reference_iterations:
-        failures.append(
-            Failure(
-                "trace.cp.iterations",
-                "Qwen3 V3.1 Q0 has no sampled iteration on rank 0",
-                "rank=0",
-            )
-        )
-    elif reference_iterations != tuple(
-        range(1, reference_iterations[-1] + 1, 1000)
-    ):
-        failures.append(
-            Failure(
-                "trace.cp.iterations",
-                "Qwen3 V3.1 Q0 sampled iterations must start at 1 and "
-                f"advance by 1000; observed {list(reference_iterations)}",
-                "rank=0",
-            )
-        )
-
-    reference_microbatches: dict[int, tuple[int, ...]] = {}
-    signatures: dict[
-        tuple[int, str], dict[int, tuple[tuple[int, int], ...]]
-    ] = defaultdict(dict)
-    for rank in expected_ranks:
-        iterations = by_rank.get(rank, ())
-        iteration_ids = tuple(int(item.iteration_id) for item in iterations)
-        if iteration_ids != reference_iterations:
-            failures.append(
-                Failure(
-                    "trace.cp.iterations",
-                    f"rank {rank} sampled iterations {list(iteration_ids)} "
-                    f"differ from rank 0 {list(reference_iterations)}",
-                    f"rank={rank}",
-                )
-            )
-        for iteration in iterations:
-            iteration_id = int(iteration.iteration_id)
-            microbatches = tuple(
-                event.attrs.get("current_microbatch")
-                for event in iteration.events
-                if event.name == "forward-step" and event.ph == "B"
-            )
-            if microbatches != tuple(range(len(microbatches))) or not microbatches:
-                failures.append(
-                    _failure(
-                        "trace.gpt.microbatches",
-                        "forward-step microbatches must be the contiguous range "
-                        f"0..N-1; observed {list(microbatches)!r}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-            if rank == 0:
-                reference_microbatches[iteration_id] = microbatches
-            elif microbatches != reference_microbatches.get(iteration_id):
-                failures.append(
-                    _failure(
-                        "trace.gpt.microbatches",
-                        f"microbatches {list(microbatches)!r} differ from rank 0 "
-                        f"{list(reference_microbatches.get(iteration_id, ()))!r}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-
-            expected_calls = len(microbatches)
-            failures.extend(
-                gpt_probe_contract._validate_iteration(
-                    iteration,
-                    rank=rank,
-                    expected_counts={
-                        "forward-step": expected_calls,
-                        "decoder": expected_calls,
-                        "decoder-postprocess": expected_calls,
-                        "output_layer": expected_calls,
-                        "loss": expected_calls,
-                    },
-                )
-            )
-            failures.extend(
-                gpt_probe_contract._validate_eager_layers(
-                    iteration,
-                    rank=rank,
-                    expected_layers=28,
-                    expected_calls=expected_calls,
-                )
-            )
-            for name in ("forward-step-calc-loss", "backward-step"):
-                failures.extend(
-                    gpt_probe_contract._validate_single_scope(
-                        iteration,
-                        name,
-                        rank=rank,
-                        expected=expected_calls,
-                    )
-                )
-            failures.extend(
-                gpt_probe_contract._validate_microbatch_ids(
-                    iteration,
-                    ("forward-step", "forward-step-calc-loss", "backward-step"),
-                    rank=rank,
-                    expected=Counter(microbatches),
-                )
-            )
-            failures.extend(
-                gpt_probe_contract._validate_optimizer_phases(
-                    iteration,
-                    rank=rank,
-                )
-            )
-            iteration_failures, payloads = _validate_qwen3_distopt_iteration(
-                iteration,
-                rank=rank,
-                context_parallel_size=1,
-                data_parallel_size=16,
-            )
-            failures.extend(iteration_failures)
-            for name, values in payloads.items():
-                signatures[(iteration_id, name)][rank] = values
-
-    for (iteration_id, name), rank_payloads in sorted(signatures.items()):
-        if set(rank_payloads) == set(expected_ranks) and len(
-            set(rank_payloads.values())
-        ) != 1:
-            failures.append(
-                Failure(
-                    "trace.cp.distopt_payload",
-                    f"iteration {iteration_id} {name!r} payload/bucket sequences "
-                    f"differ across DP16 ranks: {rank_payloads}",
-                    f"iteration={iteration_id}",
-                )
-            )
-    return tuple(failures)
-
-
-def validate_qwen3_cp2_distopt_coexistence(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate Qwen3-0.6B with TP1/PP1/CP2/DP1 DistOpt overlap."""
-
-    return _validate_qwen3_distopt_coexistence(
-        trace_root, context_parallel_size=2, data_parallel_size=1
-    )
-
-
-def validate_qwen3_cp4_distopt_coexistence(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate Qwen3-0.6B with TP1/PP1/CP4/DP1 DistOpt overlap."""
-
-    return _validate_qwen3_distopt_coexistence(
-        trace_root, context_parallel_size=4, data_parallel_size=1
-    )
-
-
-def validate_qwen3_cp2_dp4_distopt_coexistence(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the reduced TP1/PP1/CP2/DP4 DistOpt topology."""
-
-    return _validate_qwen3_distopt_coexistence(
-        trace_root, context_parallel_size=2, data_parallel_size=4
-    )
-
-
-def validate_qwen3_cp2_dp8_distopt_coexistence(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the Q3 TP1/PP1/CP2/DP8 Distributed Optimizer topology."""
-
-    return _validate_qwen3_distopt_coexistence(
-        trace_root, context_parallel_size=2, data_parallel_size=8
-    )

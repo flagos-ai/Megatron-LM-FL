@@ -40,12 +40,7 @@ def _check_environment(root: Path) -> dict[str, str]:
 
 
 def _profile_checks(
-    profile: str,
-    root: Path,
-    python: str,
-    timeout: float,
-    *,
-    source_repo: Path | None = None,
+    profile: str, root: Path, python: str, timeout: float, *, source_repo: Path | None = None
 ) -> list[Check]:
     scanner = root / "tools/probe_contract_scan.py"
     scanner_fixture = root / "tests/megalens/fixtures/probe_scan_gate.json"
@@ -88,9 +83,6 @@ def _profile_checks(
             "tests/megalens/test_probe_contract_scan.py",
             "tests/megalens/test_run_manifest.py",
             "tests/megalens/test_flagscale_run_gate.py",
-            "tests/megalens/test_combined_1f1b_probe_contract.py",
-            "tests/megalens/test_legacy_checkpoint_comparator.py",
-            "tests/megalens/test_dual_node_probe_profiles.py",
             "tests/megalens/test_tp_allreduce_observability.py",
             "tests/megalens/test_tp_allgather_observability.py",
             "tests/megalens/test_tp_reduce_scatter_observability.py",
@@ -100,16 +92,6 @@ def _profile_checks(
             "tests/megalens/test_sp_layernorm_allreduce_observability.py",
             "tests/megalens/test_embedding_grads_allreduce_observability.py",
             "tests/megalens/test_moe_phase_observability.py",
-            "tests/megalens/test_moe_recompute_fp8_probe_contract.py",
-            "tests/megalens/test_deepseek_d0_probe_contract.py",
-            "tests/megalens/test_deepseek_d2_ep8_config.py",
-            "tests/megalens/test_deepseek_tp2_sp_run_gate.py",
-            "tests/megalens/test_deepseek_d1_tp2_sp_probe_contract.py",
-            "tests/megalens/test_moe_capacity_probe_contract.py",
-            "tests/megalens/test_moe_flex_deepep_probe_contract.py",
-            "tests/megalens/test_moe_flex_hybridep_probe_contract.py",
-            "tests/megalens/test_moe_shared_expert_overlap_probe_contract.py",
-            "tests/megalens/test_moe_shared_expert_probe_contract.py",
             "tests/megalens/test_shared_expert_overlap_observability.py",
             "tests/megalens/test_ep_primitive_observability.py",
             "tests/megalens/test_pipeline_schedule_observability.py",
@@ -118,9 +100,6 @@ def _profile_checks(
             "tests/megalens/test_p2p_observability.py",
             "tests/megalens/test_p2p_order_nccl_runner.py",
             "tests/megalens/test_bridge_observability.py",
-            "tests/megalens/test_bridge_probe_contract.py",
-            "tests/megalens/test_mimo_training_probe_contract.py",
-            "tests/megalens/test_mimo_pretrain_probe_contract.py",
             "tests/megalens/test_gate_runner.py",
         ),
         timeout=timeout,
@@ -222,13 +201,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     checks = (
         _target_checks(args.target, root, args.python, args.timeout)
         if args.target
-        else _profile_checks(
-            args.profile,
-            root,
-            args.python,
-            args.timeout,
-            source_repo=source_repo,
-        )
+        else _profile_checks(args.profile, root, args.python, args.timeout, source_repo=source_repo)
     )
     env = _check_environment(root)
     return run_checks(checks, cwd=root, env=env)

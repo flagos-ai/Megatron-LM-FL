@@ -1,4 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 """TP/SP trace contracts for controlled Transformer and MoE profiles."""
 
 from __future__ import annotations
@@ -22,35 +23,11 @@ _COLLECTIVE_SPECS = {
     "tp-reduce-scatter": {"op": "reduce-scatter", "dim": "first"},
     "tp-reduce-scatter-last": {"op": "reduce-scatter", "dim": "last"},
 }
+
 _SP_GQA_COLLECTIVES = frozenset(_COLLECTIVE_SPECS)
-_NO_SP_GQA_COLLECTIVES = frozenset(
-    (
-        "tp-all-gather-last",
-        "tp-reduce-scatter",
-        "tp-reduce-scatter-last",
-    )
-)
-_QWEN3_SP_COLLECTIVES = frozenset(
-    ("tp-all-gather-first", "tp-reduce-scatter")
-)
-_QWEN3_FORBIDDEN_LAST_DIM_COLLECTIVES = frozenset(
-    ("tp-all-gather-last", "tp-reduce-scatter-last")
-)
-_LINEAR_EVENTS = frozenset(
-    ("tp-linear-async-launch", "tp-linear-async-complete")
-)
-_TE_LINEAR_BOUNDARY_EVENTS = _LINEAR_EVENTS | frozenset(
-    ("transformer_layer", "attention", "MLP.forward")
-)
-_TE_OP_FUSER_BOUNDARY_EVENTS = _LINEAR_EVENTS | frozenset(
-    (
-        "transformer_layer",
-        "_forward_attention",
-        "attention",
-        "_forward_mlp",
-        "MLP.forward",
-    )
-)
+
+_LINEAR_EVENTS = frozenset(("tp-linear-async-launch", "tp-linear-async-complete"))
+
 _LINEAR_ROUTE_SPECS = {
     "all-gather": {
         "dim": "first",
@@ -73,8 +50,9 @@ _LINEAR_ROUTE_SPECS = {
         "wait_role": "return",
     },
 }
+
 _SP_LINEAR_ROUTES = frozenset(("all-gather", "reduce-scatter"))
-_ALLREDUCE_LINEAR_ROUTES = frozenset(("all-reduce",))
+
 _LINEAR_LAUNCH_FIELDS = {
     "operation_id_scope": "rank_local",
     "execution_route": "local_linear_direct_async",
@@ -83,6 +61,7 @@ _LINEAR_LAUNCH_FIELDS = {
     "completion_included": False,
     "timing_phase": "launch_attempt",
 }
+
 _LINEAR_COMPLETION_FIELDS = {
     "operation_id_scope": "rank_local",
     "execution_route": "local_linear_direct_async",
@@ -98,6 +77,7 @@ _LINEAR_COMPLETION_FIELDS = {
     "terminal": True,
     "timing_phase": "stream_dependency",
 }
+
 _LINEAR_MATCH_FIELDS = (
     "collective_op",
     "data_bytes",
@@ -106,32 +86,10 @@ _LINEAR_MATCH_FIELDS = (
     "launch_site",
     "payload_role",
 )
+
 _FINAL_SYNC_EVENTS = frozenset(
-    (
-        "grad-sync",
-        "all-grads-sync",
-        "sp-layernorm-allreduce",
-        "embedding-grads-allreduce",
-    )
+    ("grad-sync", "all-grads-sync", "sp-layernorm-allreduce", "embedding-grads-allreduce")
 )
-_TP2_EP4_FLEX_DIRECT_SPECS = {
-    "tp-reduce-scatter": (
-        1,
-        {"op": "reduce-scatter", "dim": "first"},
-    ),
-    "tp-allreduce": (
-        2,
-        {
-            "op": "all_reduce",
-            "timing_phase": "collective_call",
-            "payload_role": "inplace_input_output",
-        },
-    ),
-    "tp-all-gather-first": (
-        2,
-        {"op": "all-gather", "dim": "first"},
-    ),
-}
 
 
 @dataclass(frozen=True)
@@ -159,12 +117,7 @@ def _failure(code: str, message: str, *, rank: int, iteration: int) -> Failure:
 
 
 def _field_failures(
-    event: Event,
-    expected: Mapping[str, object],
-    *,
-    code: str,
-    rank: int,
-    iteration: int,
+    event: Event, expected: Mapping[str, object], *, code: str, rank: int, iteration: int
 ) -> list[Failure]:
     return [
         _failure(
@@ -180,10 +133,7 @@ def _field_failures(
 
 
 def _pair_spans(
-    iteration: Iteration,
-    names: Iterable[str],
-    *,
-    rank: int,
+    iteration: Iteration, names: Iterable[str], *, rank: int
 ) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
     selected = frozenset(names)
     pending: list[tuple[str, int, Event, int | None]] = []
@@ -209,9 +159,7 @@ def _pair_spans(
                 )
                 continue
             _, begin_position, begin, parent_position = pending.pop()
-            spans[event.name].append(
-                _Span(begin, event, begin_position, position, parent_position)
-            )
+            spans[event.name].append(_Span(begin, event, begin_position, position, parent_position))
         else:
             failures.append(
                 _failure(
@@ -235,11 +183,7 @@ def _pair_spans(
 
 
 def _validate_collective_span(
-    span: _Span,
-    *,
-    rank: int,
-    iteration: int,
-    tensor_parallel_size: int,
+    span: _Span, *, rank: int, iteration: int, tensor_parallel_size: int
 ) -> list[Failure]:
     expected = _COLLECTIVE_SPECS[span.begin.name]
     failures = [
@@ -284,9 +228,7 @@ def _validate_collective_span(
                 iteration=iteration,
             )
         )
-    expected_peers = [
-        peer for peer in range(tensor_parallel_size) if peer != rank
-    ]
+    expected_peers = [peer for peer in range(tensor_parallel_size) if peer != rank]
     if group != expected_peers:
         failures.append(
             _failure(
@@ -378,9 +320,7 @@ def _validate_collective_hierarchy(
     physical_spans = spans.get("tp-reduce-scatter", ())
     for outer in spans.get("tp-reduce-scatter-last", ()):
         nested = [
-            inner
-            for inner in physical_spans
-            if inner.parent_begin_position == outer.begin_position
+            inner for inner in physical_spans if inner.parent_begin_position == outer.begin_position
         ]
         if len(nested) != 1:
             failures.append(
@@ -417,11 +357,7 @@ def _validate_collective_hierarchy(
 
 
 def _validate_linear_lifecycle(
-    iteration: Iteration,
-    *,
-    rank: int,
-    expected_routes: frozenset[str],
-    tensor_parallel_size: int,
+    iteration: Iteration, *, rank: int, expected_routes: frozenset[str], tensor_parallel_size: int
 ) -> tuple[list[Failure], set[str]]:
     iteration_id = int(iteration.iteration_id)
     spans, failures = _pair_spans(iteration, _LINEAR_EVENTS, rank=rank)
@@ -487,11 +423,7 @@ def _validate_linear_lifecycle(
                     )
                 )
         data_bytes = begin.attrs.get("data_bytes")
-        if (
-            not isinstance(data_bytes, int)
-            or isinstance(data_bytes, bool)
-            or data_bytes <= 0
-        ):
+        if not isinstance(data_bytes, int) or isinstance(data_bytes, bool) or data_bytes <= 0:
             failures.append(
                 _failure(
                     "trace.tp_linear.field",
@@ -677,10 +609,7 @@ def _validate_final_grad_sync(
         failures.extend(
             _field_failures(
                 grad.begin,
-                {
-                    "schedule": schedule,
-                    "timing_phase": "framework_phase",
-                },
+                {"schedule": schedule, "timing_phase": "framework_phase"},
                 code="trace.tp.final_sync_field",
                 rank=rank,
                 iteration=iteration_id,
@@ -716,8 +645,7 @@ def _validate_final_grad_sync(
             failures.append(
                 _failure(
                     "trace.tp.final_sync_order",
-                    f"event {current.begin.name!r} does not follow "
-                    f"{previous.begin.name!r}",
+                    f"event {current.begin.name!r} does not follow " f"{previous.begin.name!r}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -728,11 +656,7 @@ def _validate_final_grad_sync(
         failures.extend(
             _field_failures(
                 layernorm.begin,
-                {
-                    "group_size": len(tp_peers) + 1,
-                    "reduce_op": "SUM",
-                    "grad_bucket": "sum",
-                },
+                {"group_size": len(tp_peers) + 1, "reduce_op": "SUM", "grad_bucket": "sum"},
                 code="trace.tp.final_sync_field",
                 rank=rank,
                 iteration=iteration_id,
@@ -785,8 +709,7 @@ def _validate_final_grad_sync(
             failures.append(
                 _failure(
                     "trace.tp.final_sync_field",
-                    "sp-layernorm-allreduce repeats begin fields on end: "
-                    f"{sorted(repeated)}",
+                    "sp-layernorm-allreduce repeats begin fields on end: " f"{sorted(repeated)}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -805,10 +728,7 @@ def _validate_final_grad_sync(
         failures.extend(
             _field_failures(
                 embedding.begin,
-                {
-                    "group_size": 2,
-                    "embedding_kind": "word",
-                },
+                {"group_size": 2, "embedding_kind": "word"},
                 code="trace.tp.final_sync_field",
                 rank=rank,
                 iteration=iteration_id,
@@ -823,8 +743,7 @@ def _validate_final_grad_sync(
             failures.append(
                 _failure(
                     "trace.tp.final_sync_field",
-                    "embedding-grads-allreduce has invalid "
-                    f"data_bytes={observed_bytes!r}",
+                    "embedding-grads-allreduce has invalid " f"data_bytes={observed_bytes!r}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -848,9 +767,7 @@ def _validate_final_grad_sync(
                     iteration=iteration_id,
                 )
             )
-        if embedding_peer is not None and embedding.end.attrs.get("group") != [
-            embedding_peer
-        ]:
+        if embedding_peer is not None and embedding.end.attrs.get("group") != [embedding_peer]:
             failures.append(
                 _failure(
                     "trace.tp.final_sync_field",
@@ -874,8 +791,7 @@ def _validate_final_grad_sync(
             failures.append(
                 _failure(
                     "trace.tp.final_sync_field",
-                    "embedding-grads-allreduce repeats begin fields on end: "
-                    f"{sorted(repeated)}",
+                    "embedding-grads-allreduce repeats begin fields on end: " f"{sorted(repeated)}",
                     rank=rank,
                     iteration=iteration_id,
                 )
@@ -912,8 +828,7 @@ def _validate_tp_gqa_collective_hierarchy(
             failures.append(
                 Failure(
                     "trace.tp.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
+                    f"rank {rank} expects iterations [1, 2], " f"observed {list(iteration_ids)}",
                     f"rank={rank}",
                 )
             )
@@ -945,75 +860,13 @@ def _validate_tp_gqa_collective_hierarchy(
     return tuple(failures)
 
 
-def validate_tp2_gqa_collective_hierarchy(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
+def validate_tp2_gqa_collective_hierarchy(trace_root: Path) -> tuple[Failure, ...]:
     return _validate_tp_gqa_collective_hierarchy(
         trace_root,
         tensor_parallel_size=2,
         required_names=_SP_GQA_COLLECTIVES,
         forbidden_names=frozenset(),
         profile_name="tp2-gqa-sp",
-    )
-
-
-def validate_tp2_gqa_no_sp_collective_hierarchy(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    return _validate_tp_gqa_collective_hierarchy(
-        trace_root,
-        tensor_parallel_size=2,
-        required_names=_NO_SP_GQA_COLLECTIVES,
-        forbidden_names=frozenset(("tp-all-gather-first",)),
-        profile_name="tp2-gqa-no-sp",
-    )
-
-
-def _validate_qwen3_tp_sp_collective_hierarchy(
-    trace_root: Path, *, tensor_parallel_size: int
-) -> tuple[Failure, ...]:
-    return _validate_tp_gqa_collective_hierarchy(
-        trace_root,
-        tensor_parallel_size=tensor_parallel_size,
-        required_names=_QWEN3_SP_COLLECTIVES,
-        forbidden_names=_QWEN3_FORBIDDEN_LAST_DIM_COLLECTIVES,
-        profile_name=f"qwen3-tp{tensor_parallel_size}-sp",
-        expected_counts={
-            "tp-all-gather-first": 2,
-            "tp-all-gather-last": 0,
-            "tp-reduce-scatter": 1,
-            "tp-reduce-scatter-last": 0,
-        },
-    )
-
-
-def validate_qwen3_tp2_sp_collective_hierarchy(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP2."""
-
-    return _validate_qwen3_tp_sp_collective_hierarchy(
-        trace_root, tensor_parallel_size=2
-    )
-
-
-def validate_qwen3_tp4_sp_collective_hierarchy(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP4."""
-
-    return _validate_qwen3_tp_sp_collective_hierarchy(
-        trace_root, tensor_parallel_size=4
-    )
-
-
-def validate_qwen3_tp8_sp_collective_hierarchy(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the first-dimension TP/SP route used by Qwen3 GQA8 on TP8."""
-
-    return _validate_qwen3_tp_sp_collective_hierarchy(
-        trace_root, tensor_parallel_size=8
     )
 
 
@@ -1045,8 +898,7 @@ def _validate_tp_linear_lifecycle(
             failures.append(
                 Failure(
                     "trace.tp_linear.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
+                    f"rank {rank} expects iterations [1, 2], " f"observed {list(iteration_ids)}",
                     f"rank={rank}",
                 )
             )
@@ -1095,76 +947,6 @@ def validate_tp2_sp_linear_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
-def validate_tp2_local_allreduce_lifecycle(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate_tp_linear_lifecycle(
-        trace_root,
-        tensor_parallel_size=2,
-        expected_routes=_ALLREDUCE_LINEAR_ROUTES,
-        profile_name="tp2-local-allreduce",
-    )
-
-
-def _validate_qwen3_tp_sp_linear_lifecycle(
-    trace_root: Path, *, tensor_parallel_size: int
-) -> tuple[Failure, ...]:
-    return _validate_tp_linear_lifecycle(
-        trace_root,
-        tensor_parallel_size=tensor_parallel_size,
-        expected_routes=_SP_LINEAR_ROUTES,
-        profile_name=f"qwen3-tp{tensor_parallel_size}-sp",
-        expected_operation_count=2,
-    )
-
-
-def validate_qwen3_tp2_sp_linear_lifecycle(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP2/SP."""
-
-    return _validate_qwen3_tp_sp_linear_lifecycle(
-        trace_root, tensor_parallel_size=2
-    )
-
-
-def validate_qwen3_tp4_sp_linear_lifecycle(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP4/SP."""
-
-    return _validate_qwen3_tp_sp_linear_lifecycle(
-        trace_root, tensor_parallel_size=4
-    )
-
-
-def validate_qwen3_tp8_sp_linear_lifecycle(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the two MCore Local Linear AG/RS operations in Qwen3 TP8/SP."""
-
-    return _validate_qwen3_tp_sp_linear_lifecycle(
-        trace_root, tensor_parallel_size=8
-    )
-
-
-def _validate_qwen3_tp_sp_absences(
-    trace_root: Path, *, tensor_parallel_size: int
-) -> tuple[Failure, ...]:
-    failures: list[Failure] = []
-    for rank, iterations in _load_iterations(trace_root).items():
-        for iteration in iterations:
-            if any(event.name == "tp-allreduce" for event in iteration.events):
-                failures.append(
-                    _failure(
-                        "trace.tp.collective_count",
-                        f"Qwen3 TP{tensor_parallel_size}/SP must not use the "
-                        "non-SP TP all-reduce route",
-                        rank=rank,
-                        iteration=int(iteration.iteration_id),
-                    )
-                )
-    return tuple(failures)
-
-
 def _validate_tp_final_grad_sync(
     trace_root: Path,
     *,
@@ -1195,8 +977,7 @@ def _validate_tp_final_grad_sync(
             failures.append(
                 Failure(
                     "trace.tp.final_sync_iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
+                    f"rank {rank} expects iterations [1, 2], " f"observed {list(iteration_ids)}",
                     f"rank={rank}",
                 )
             )
@@ -1235,142 +1016,7 @@ def validate_tp2_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
     )
 
 
-def validate_tp2_no_sp_final_grad_sync(trace_root: Path) -> tuple[Failure, ...]:
-    return _validate_tp_final_grad_sync(
-        trace_root,
-        tensor_parallel_size=2,
-        schedule="no-pipelining",
-        expect_sp_layernorm=False,
-        profile_name="tp2-local-allreduce",
-    )
-
-
-def validate_tp2_pp2_embedding_final_grad_sync(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    failures: list[Failure] = []
-    by_rank = _load_iterations(trace_root)
-    expected_ranks = (0, 1, 2, 3)
-    if tuple(sorted(by_rank)) != expected_ranks:
-        failures.append(
-            Failure(
-                "trace.tp.final_sync_ranks",
-                "TP2xPP2 embedding contract expects ranks [0, 1, 2, 3], "
-                f"observed {sorted(by_rank)}",
-                "tp2-pp2-embedding",
-            )
-        )
-
-    rank_coordinates: dict[int, tuple[int, int]] = {}
-    for rank in expected_ranks:
-        iterations = by_rank.get(rank, ())
-        coordinates = {
-            (event.rank.data, event.rank.pipeline, event.rank.tensor)
-            for iteration in iterations
-            for event in iteration.events
-        }
-        coordinate = next(iter(coordinates)) if len(coordinates) == 1 else None
-        if (
-            coordinate is not None
-            and coordinate[0] == 0
-            and coordinate[1] in (0, 1)
-            and coordinate[2] in (0, 1)
-        ):
-            _, pipeline_rank, tensor_rank = coordinate
-            rank_coordinates[rank] = (int(pipeline_rank), int(tensor_rank))
-        else:
-            failures.append(
-                Failure(
-                    "trace.tp.final_sync_coordinates",
-                    f"rank {rank} has invalid coordinates {sorted(map(str, coordinates))}",
-                    f"rank={rank}",
-                )
-            )
-
-    coordinate_to_rank = {
-        coordinate: rank for rank, coordinate in rank_coordinates.items()
-    }
-    expected_coordinates = {
-        (pipeline, tensor)
-        for pipeline in (0, 1)
-        for tensor in (0, 1)
-    }
-    if set(coordinate_to_rank) != expected_coordinates:
-        failures.append(
-            Failure(
-                "trace.tp.final_sync_coordinates",
-                "TP2xPP2 coordinates are "
-                f"{sorted(coordinate_to_rank)}, expected {sorted(expected_coordinates)}",
-                "tp2-pp2-embedding",
-            )
-        )
-
-    sp_bytes: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
-    embedding_bytes: dict[tuple[int, int], dict[int, int]] = defaultdict(dict)
-    for rank in expected_ranks:
-        iterations = by_rank.get(rank, ())
-        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
-        if iteration_ids != (1, 2):
-            failures.append(
-                Failure(
-                    "trace.tp.final_sync_iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
-                    f"rank={rank}",
-                )
-            )
-        coordinate = rank_coordinates.get(rank)
-        if coordinate is None:
-            continue
-        pipeline_rank, tensor_rank = coordinate
-        tp_peer = coordinate_to_rank.get((pipeline_rank, 1 - tensor_rank))
-        embedding_peer = coordinate_to_rank.get((1 - pipeline_rank, tensor_rank))
-        if tp_peer is None or embedding_peer is None:
-            continue
-        for iteration in iterations:
-            iteration_id = int(iteration.iteration_id)
-            iteration_failures, sp_payload, embedding_payload = (
-                _validate_final_grad_sync(
-                    iteration,
-                    rank=rank,
-                    schedule="non-interleaved-1f1b",
-                    expect_sp_layernorm=True,
-                    tp_peers=(tp_peer,),
-                    embedding_peer=embedding_peer,
-                )
-            )
-            failures.extend(iteration_failures)
-            if sp_payload is not None:
-                sp_bytes[(iteration_id, pipeline_rank)][rank] = sp_payload
-            if embedding_payload is not None:
-                embedding_bytes[(iteration_id, tensor_rank)][rank] = embedding_payload
-
-    for (iteration, pipeline_rank), rank_bytes in sorted(sp_bytes.items()):
-        if len(rank_bytes) == 2 and len(set(rank_bytes.values())) != 1:
-            failures.append(
-                Failure(
-                    "trace.tp.final_sync_field",
-                    f"iteration {iteration} PP rank {pipeline_rank} has unequal "
-                    f"SP payload bytes {rank_bytes}",
-                    f"iteration={iteration} pp_rank={pipeline_rank}",
-                )
-            )
-    for (iteration, tensor_rank), rank_bytes in sorted(embedding_bytes.items()):
-        if len(rank_bytes) == 2 and len(set(rank_bytes.values())) != 1:
-            failures.append(
-                Failure(
-                    "trace.tp.final_sync_field",
-                    f"iteration {iteration} TP rank {tensor_rank} has unequal "
-                    f"embedding payload bytes {rank_bytes}",
-                    f"iteration={iteration} tp_rank={tensor_rank}",
-                )
-            )
-    return tuple(failures)
-
-
-def validate_tp2_pp4_multimicrobatch(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
+def validate_tp2_pp4_multimicrobatch(trace_root: Path) -> tuple[Failure, ...]:
     """Validate the focused eight-rank TP2xPP4 integration smoke."""
 
     failures: list[Failure] = []
@@ -1414,12 +1060,7 @@ def validate_tp2_pp4_multimicrobatch(
             )
         )
 
-    peer_stage = {
-        "send-forward": 1,
-        "recv-backward": 1,
-        "recv-forward": -1,
-        "send-backward": -1,
-    }
+    peer_stage = {"send-forward": 1, "recv-backward": 1, "recv-forward": -1, "send-backward": -1}
     sent_payloads: dict[tuple[int, int, int, str], Counter[int]] = defaultdict(Counter)
     received_payloads: dict[tuple[int, int, int, str], Counter[int]] = defaultdict(Counter)
     for (pipeline_rank, tensor_rank), rank in coordinates.items():
@@ -1434,9 +1075,7 @@ def validate_tp2_pp4_multimicrobatch(
                 )
             )
         expected_directions = {
-            name
-            for name, delta in peer_stage.items()
-            if 0 <= pipeline_rank + delta < 4
+            name for name, delta in peer_stage.items() if 0 <= pipeline_rank + delta < 4
         }
         for iteration in iterations:
             iteration_id = int(iteration.iteration_id)
@@ -1446,13 +1085,9 @@ def validate_tp2_pp4_multimicrobatch(
             failures.extend(pairing_failures)
             for name in ("forward-step", "backward-step"):
                 spans = compute_spans.get(name, ())
-                microbatches = [
-                    span.begin.attrs.get("current_microbatch") for span in spans
-                ]
+                microbatches = [span.begin.attrs.get("current_microbatch") for span in spans]
                 operation_ids = [span.end.attrs.get("operation_id") for span in spans]
-                expected_ids = [
-                    f"pp:microbatch={microbatch}:vp=none" for microbatch in range(4)
-                ]
+                expected_ids = [f"pp:microbatch={microbatch}:vp=none" for microbatch in range(4)]
                 if microbatches != list(range(4)) or operation_ids != expected_ids:
                     failures.append(
                         _failure(
@@ -1466,12 +1101,7 @@ def validate_tp2_pp4_multimicrobatch(
 
             p2p_spans, pairing_failures = _pair_spans(
                 iteration,
-                (
-                    "p2p-launch",
-                    "p2p-batch-complete",
-                    "p2p-batch-device-sync",
-                    *peer_stage,
-                ),
+                ("p2p-launch", "p2p-batch-complete", "p2p-batch-device-sync", *peer_stage),
                 rank=rank,
             )
             failures.extend(pairing_failures)
@@ -1523,8 +1153,7 @@ def validate_tp2_pp4_multimicrobatch(
                 )
             for operation in operations:
                 direction = (
-                    f"{operation.get('direction')}-"
-                    f"{operation.get('pipeline_direction')}"
+                    f"{operation.get('direction')}-" f"{operation.get('pipeline_direction')}"
                 )
                 expected_peer = coordinates.get(
                     (pipeline_rank + peer_stage.get(direction, 99), tensor_rank)
@@ -1552,9 +1181,7 @@ def validate_tp2_pp4_multimicrobatch(
                     str(operation.get("pipeline_direction")),
                 )
                 payloads = (
-                    sent_payloads
-                    if operation.get("direction") == "send"
-                    else received_payloads
+                    sent_payloads if operation.get("direction") == "send" else received_payloads
                 )
                 payloads[key][data_bytes] += 1
 
@@ -1584,548 +1211,10 @@ def validate_tp2_pp4_multimicrobatch(
     return tuple(failures)
 
 
-def validate_tp2_local_allreduce_profile(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    validators = (
-        validate_tp2_gqa_no_sp_collective_hierarchy,
-        validate_tp2_local_allreduce_lifecycle,
-        validate_tp2_no_sp_final_grad_sync,
-    )
-    return tuple(
-        failure
-        for validator in validators
-        for failure in validator(trace_root)
-    )
-
-
 def validate_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
     validators = (
         validate_tp2_gqa_collective_hierarchy,
         validate_tp2_sp_linear_lifecycle,
         validate_tp2_sp_final_grad_sync,
     )
-    return tuple(
-        failure
-        for validator in validators
-        for failure in validator(trace_root)
-    )
-
-
-def _validate_qwen3_tp_sp_profile(
-    trace_root: Path, *, tensor_parallel_size: int
-) -> tuple[Failure, ...]:
-    return (
-        *_validate_qwen3_tp_sp_collective_hierarchy(
-            trace_root, tensor_parallel_size=tensor_parallel_size
-        ),
-        *_validate_qwen3_tp_sp_linear_lifecycle(
-            trace_root, tensor_parallel_size=tensor_parallel_size
-        ),
-        *_validate_tp_final_grad_sync(
-            trace_root,
-            tensor_parallel_size=tensor_parallel_size,
-            schedule="no-pipelining",
-            expect_sp_layernorm=True,
-            profile_name=f"qwen3-tp{tensor_parallel_size}-sp",
-        ),
-        *_validate_qwen3_tp_sp_absences(
-            trace_root, tensor_parallel_size=tensor_parallel_size
-        ),
-    )
-
-
-def validate_qwen3_tp2_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate the fixed Qwen3-0.6B TP2/SP communication boundary."""
-
-    return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=2)
-
-
-def validate_qwen3_tp4_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate the fixed Qwen3-0.6B TP4/SP communication boundary."""
-
-    return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=4)
-
-
-def validate_qwen3_tp8_sp_profile(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate the fixed Qwen3-0.6B TP8/SP communication boundary."""
-
-    return _validate_qwen3_tp_sp_profile(trace_root, tensor_parallel_size=8)
-
-
-def _validate_qwen3_tp4_local_no_sp_collectives(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate the fixed collective counts of the local control."""
-
-    failures: list[Failure] = []
-    by_rank = _load_iterations(trace_root)
-    expected_ranks = tuple(range(4))
-    if tuple(sorted(by_rank)) != expected_ranks:
-        failures.append(
-            Failure(
-                "trace.tp.ranks",
-                "Qwen3 TP4 local/no-SP contract expects ranks [0, 1, 2, 3], "
-                f"observed {sorted(by_rank)}",
-                "qwen3-tp4-local-no-sp",
-            )
-        )
-
-    selected_names = ("tp-allreduce", *_COLLECTIVE_SPECS)
-    for rank in expected_ranks:
-        iterations = by_rank.get(rank, ())
-        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
-        if iteration_ids != (1, 2):
-            failures.append(
-                Failure(
-                    "trace.tp.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
-                    f"rank={rank}",
-                )
-            )
-        for iteration in iterations:
-            iteration_id = int(iteration.iteration_id)
-            spans, pairing_failures = _pair_spans(
-                iteration,
-                selected_names,
-                rank=rank,
-            )
-            failures.extend(pairing_failures)
-            observed_allreduces = len(spans.get("tp-allreduce", ()))
-            if observed_allreduces != 57:
-                failures.append(
-                    _failure(
-                        "trace.tp.allreduce_count",
-                        f"event 'tp-allreduce' has {observed_allreduces} span(s), "
-                        "expected 57",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-            for name in _COLLECTIVE_SPECS:
-                observed = len(spans.get(name, ()))
-                if observed:
-                    failures.append(
-                        _failure(
-                            "trace.tp.collective_count",
-                            f"event {name!r} has {observed} span(s), expected 0",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-    return tuple(failures)
-
-
-def validate_qwen3_tp4_local_no_sp_profile(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate Qwen3 TP4 with MCore local layers and sequence parallel off."""
-
-    return (
-        *_validate_qwen3_tp4_local_no_sp_collectives(trace_root),
-        *_validate_tp_linear_lifecycle(
-            trace_root,
-            tensor_parallel_size=4,
-            expected_routes=_ALLREDUCE_LINEAR_ROUTES,
-            profile_name="qwen3-tp4-local-no-sp",
-            expected_operation_count=57,
-        ),
-        *_validate_tp_final_grad_sync(
-            trace_root,
-            tensor_parallel_size=4,
-            schedule="no-pipelining",
-            expect_sp_layernorm=True,
-            profile_name="qwen3-tp4-local-no-sp",
-        ),
-    )
-
-
-def _validate_tp2_ep4_flex_iteration(
-    iteration: Iteration,
-    *,
-    rank: int,
-) -> tuple[list[Failure], set[str]]:
-    """Validate the model-TP domain in the fixed TP2/ETP1/EP4 workload."""
-
-    iteration_id = int(iteration.iteration_id)
-    failures: list[Failure] = []
-    spans, pairing_failures = _pair_spans(
-        iteration,
-        _TP2_EP4_FLEX_DIRECT_SPECS,
-        rank=rank,
-    )
-    failures.extend(pairing_failures)
-    expected_coordinates = (rank // 2, 0, rank % 2)
-    expected_peer = [rank ^ 1]
-    for name, (expected_count, expected_fields) in (
-        _TP2_EP4_FLEX_DIRECT_SPECS.items()
-    ):
-        direct_spans = spans.get(name, ())
-        if len(direct_spans) != expected_count:
-            failures.append(
-                _failure(
-                    "trace.tp_ep.collective_count",
-                    f"event {name!r} has {len(direct_spans)} span(s), "
-                    f"expected {expected_count}",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-        for span in direct_spans:
-            failures.extend(
-                _field_failures(
-                    span.begin,
-                    {**expected_fields, "group_size": 2},
-                    code="trace.tp_ep.collective_field",
-                    rank=rank,
-                    iteration=iteration_id,
-                )
-            )
-            data_bytes = span.begin.attrs.get("data_bytes")
-            if (
-                not isinstance(data_bytes, int)
-                or isinstance(data_bytes, bool)
-                or data_bytes <= 0
-            ):
-                failures.append(
-                    _failure(
-                        "trace.tp_ep.collective_field",
-                        f"event {name!r} has invalid data_bytes={data_bytes!r}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-            coordinates = (
-                span.begin.rank.data,
-                span.begin.rank.pipeline,
-                span.begin.rank.tensor,
-            )
-            if coordinates != expected_coordinates:
-                failures.append(
-                    _failure(
-                        "trace.tp_ep.coordinates",
-                        f"event {name!r} uses coordinates {coordinates}, "
-                        f"expected {expected_coordinates}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-            if span.end.attrs.get("group") != expected_peer:
-                failures.append(
-                    _failure(
-                        "trace.tp_ep.collective_group",
-                        f"event {name!r} has peer group="
-                        f"{span.end.attrs.get('group')!r}, expected {expected_peer!r}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-
-    linear_failures, operation_ids = _validate_linear_lifecycle(
-        iteration,
-        rank=rank,
-        expected_routes=_SP_LINEAR_ROUTES,
-        tensor_parallel_size=2,
-    )
-    failures.extend(linear_failures)
-    if len(operation_ids) != 2:
-        failures.append(
-            _failure(
-                "trace.tp_ep.linear_count",
-                f"model-TP Linear lifecycle has {len(operation_ids)} operation(s), "
-                "expected 2",
-                rank=rank,
-                iteration=iteration_id,
-            )
-        )
-    return failures, operation_ids
-
-
-def validate_tp2_ep4_flex_tp_domain(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate model TP2 for the fixed ETP1×EP4 Flex profile."""
-
-    failures: list[Failure] = []
-    by_rank = _load_iterations(trace_root)
-    expected_ranks = tuple(range(8))
-    if tuple(sorted(by_rank)) != expected_ranks:
-        failures.append(
-            Failure(
-                "trace.tp_ep.ranks",
-                f"expected ranks {expected_ranks}, observed {tuple(sorted(by_rank))}",
-                "tp2-etp1-ep4-flex",
-            )
-        )
-
-    for rank in expected_ranks:
-        iterations = by_rank.get(rank, ())
-        iteration_ids = tuple(iteration.iteration_id for iteration in iterations)
-        if iteration_ids != (1, 2):
-            failures.append(
-                Failure(
-                    "trace.tp_ep.iterations",
-                    f"rank {rank} expects iterations [1, 2], "
-                    f"observed {list(iteration_ids)}",
-                    f"rank={rank}",
-                )
-            )
-        rank_operation_ids: set[str] = set()
-        for iteration in iterations:
-            iteration_failures, operation_ids = _validate_tp2_ep4_flex_iteration(
-                iteration,
-                rank=rank,
-            )
-            failures.extend(iteration_failures)
-            duplicates = rank_operation_ids & operation_ids
-            if duplicates:
-                failures.append(
-                    _failure(
-                        "trace.tp_linear.operation_id",
-                        f"operation IDs repeat across iterations: {sorted(duplicates)}",
-                        rank=rank,
-                        iteration=int(iteration.iteration_id),
-                    )
-                )
-            rank_operation_ids.update(operation_ids)
-    return tuple(failures)
-
-
-def _validate_tp2_sp_te_linear_boundary(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate the MCore-visible boundary around the controlled TE Linear route."""
-
-    failures: list[Failure] = []
-    by_rank = _load_iterations(trace_root)
-    expected_counts = {
-        "transformer_layer": 2,
-        "attention": 2,
-        "MLP.forward": 2,
-        "tp-linear-async-launch": 2,
-        "tp-linear-async-complete": 2,
-    }
-    expected_routes = Counter(("all-gather", "reduce-scatter"))
-
-    for rank in (0, 1):
-        for iteration in by_rank.get(rank, ()):
-            iteration_id = int(iteration.iteration_id)
-            spans, pairing_failures = _pair_spans(
-                iteration,
-                _TE_LINEAR_BOUNDARY_EVENTS,
-                rank=rank,
-            )
-            failures.extend(pairing_failures)
-            for name, expected in expected_counts.items():
-                observed = len(spans.get(name, ()))
-                if observed != expected:
-                    failures.append(
-                        _failure(
-                            "trace.tp_te.scope_count",
-                            f"event {name!r} has {observed} span(s), expected {expected}",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-
-            layers = spans.get("transformer_layer", ())
-            attention = spans.get("attention", ())
-            mlp = spans.get("MLP.forward", ())
-            for layer in layers:
-                layer_attention = tuple(
-                    span
-                    for span in attention
-                    if span.parent_begin_position == layer.begin_position
-                )
-                layer_mlp = tuple(
-                    span
-                    for span in mlp
-                    if span.parent_begin_position == layer.begin_position
-                )
-                if len(layer_attention) != 1 or len(layer_mlp) != 1:
-                    failures.append(
-                        _failure(
-                            "trace.tp_te.scope_hierarchy",
-                            "each transformer layer must directly contain one "
-                            "attention and one MLP scope",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-                    continue
-                attention_span = layer_attention[0]
-                mlp_span = layer_mlp[0]
-                if not (
-                    layer.begin_position
-                    < attention_span.begin_position
-                    < attention_span.end_position
-                    < mlp_span.begin_position
-                    < mlp_span.end_position
-                    < layer.end_position
-                ):
-                    failures.append(
-                        _failure(
-                            "trace.tp_te.scope_hierarchy",
-                            "transformer layer scopes must follow attention then MLP",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-
-            routes = Counter(
-                str(span.begin.attrs.get("collective_op"))
-                for span in spans.get("tp-linear-async-launch", ())
-            )
-            if routes != expected_routes:
-                failures.append(
-                    _failure(
-                        "trace.tp_te.linear_routes",
-                        f"MCore-visible Linear routes are {dict(routes)}, "
-                        f"expected {dict(expected_routes)}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-    return tuple(failures)
-
-
-def validate_tp2_sp_te_linear_profile(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate TE model scopes plus the TP/SP operations visible at MCore boundaries."""
-
-    validators = (
-        validate_tp2_sp_profile,
-        _validate_tp2_sp_te_linear_boundary,
-    )
-    return tuple(
-        failure
-        for validator in validators
-        for failure in validator(trace_root)
-    )
-
-
-def _validate_tp2_sp_te_op_fuser_boundary(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate the outer scopes retained when TEFusedMLP replaces MCore MLP."""
-
-    failures: list[Failure] = []
-    by_rank = _load_iterations(trace_root)
-    expected_counts = {
-        "transformer_layer": 2,
-        "_forward_attention": 2,
-        "attention": 2,
-        "_forward_mlp": 2,
-        "MLP.forward": 0,
-        "tp-linear-async-launch": 2,
-        "tp-linear-async-complete": 2,
-    }
-    expected_routes = Counter(("all-gather", "reduce-scatter"))
-
-    for rank in (0, 1):
-        for iteration in by_rank.get(rank, ()):
-            iteration_id = int(iteration.iteration_id)
-            spans, pairing_failures = _pair_spans(
-                iteration,
-                _TE_OP_FUSER_BOUNDARY_EVENTS,
-                rank=rank,
-            )
-            failures.extend(pairing_failures)
-            for name, expected in expected_counts.items():
-                observed = len(spans.get(name, ()))
-                if observed != expected:
-                    failures.append(
-                        _failure(
-                            "trace.tp_te_op_fuser.scope_count",
-                            f"event {name!r} has {observed} span(s), expected {expected}",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-
-            layers = spans.get("transformer_layer", ())
-            attention_outer = spans.get("_forward_attention", ())
-            attention = spans.get("attention", ())
-            mlp = spans.get("_forward_mlp", ())
-            for layer in layers:
-                layer_attention_outer = tuple(
-                    span
-                    for span in attention_outer
-                    if span.parent_begin_position == layer.begin_position
-                )
-                layer_mlp = tuple(
-                    span
-                    for span in mlp
-                    if span.parent_begin_position == layer.begin_position
-                )
-                if len(layer_attention_outer) != 1 or len(layer_mlp) != 1:
-                    failures.append(
-                        _failure(
-                            "trace.tp_te_op_fuser.scope_hierarchy",
-                            "each transformer layer must directly contain one outer "
-                            "attention scope and one outer MLP scope",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-                    continue
-                attention_outer_span = layer_attention_outer[0]
-                inner_attention = tuple(
-                    span
-                    for span in attention
-                    if span.parent_begin_position == attention_outer_span.begin_position
-                )
-                if len(inner_attention) != 1:
-                    failures.append(
-                        _failure(
-                            "trace.tp_te_op_fuser.scope_hierarchy",
-                            "each outer attention scope must directly contain one attention scope",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-                    continue
-                attention_span = inner_attention[0]
-                mlp_span = layer_mlp[0]
-                if not (
-                    layer.begin_position
-                    < attention_outer_span.begin_position
-                    < attention_span.begin_position
-                    < attention_span.end_position
-                    < attention_outer_span.end_position
-                    < mlp_span.begin_position
-                    < mlp_span.end_position
-                    < layer.end_position
-                ):
-                    failures.append(
-                        _failure(
-                            "trace.tp_te_op_fuser.scope_hierarchy",
-                            "transformer layer scopes must follow outer attention then outer MLP",
-                            rank=rank,
-                            iteration=iteration_id,
-                        )
-                    )
-
-            routes = Counter(
-                str(span.begin.attrs.get("collective_op"))
-                for span in spans.get("tp-linear-async-launch", ())
-            )
-            if routes != expected_routes:
-                failures.append(
-                    _failure(
-                        "trace.tp_te_op_fuser.linear_routes",
-                        f"MCore-visible Linear routes are {dict(routes)}, "
-                        f"expected {dict(expected_routes)}",
-                        rank=rank,
-                        iteration=iteration_id,
-                    )
-                )
-    return tuple(failures)
-
-
-def validate_tp2_sp_te_op_fuser_profile(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate TE op-fuser outer scopes plus MCore-visible TP/SP operations."""
-
-    validators = (
-        validate_tp2_sp_profile,
-        _validate_tp2_sp_te_op_fuser_boundary,
-    )
-    return tuple(
-        failure
-        for validator in validators
-        for failure in validator(trace_root)
-    )
+    return tuple(failure for validator in validators for failure in validator(trace_root))

@@ -17,6 +17,35 @@ Use this guide to add MegaLens to an existing, working Megatron-LM or FlagScale 
 Start with framework tracing and a short capture window. Add hardware counters or CUDA kernels only
 when the question requires device-side evidence.
 
+## Representative validation configurations
+
+The upstream runner retains ten self-contained, two-iteration configurations in
+`tests/megalens/fixtures/`. Each supports `--mode trace-off` and `--mode trace-on`.
+The YAML filename selects the corresponding Trace and training-artifact checks.
+
+| Configuration | GPUs | Profile |
+|---|---:|---|
+| `flagscale_single_node_smoke.yaml` | 1 | `pp1` |
+| `flagscale_single_node_pp2_smoke.yaml` | 2 | `pp2` |
+| `flagscale_single_node_tp2_sp_local_smoke.yaml` | 2 | `tp2-sp-local` |
+| `flagscale_single_node_tp2_pp4_multimicrobatch_smoke.yaml` | 8 | `tp2-pp4-multimicrobatch` |
+| `flagscale_single_node_dp2_standard_overlap_smoke.yaml` | 2 | `dp2-standard-ddp-overlap` |
+| `flagscale_single_node_dp2_distopt_overlap_smoke.yaml` | 2 | `dp2-distopt-overlap` |
+| `flagscale_single_node_ep2_smoke.yaml` | 2 | `ep2-alltoall` / `ep2-allgather` |
+| `flagscale_single_node_cp2_te_smoke.yaml` | 2 | `cp2-te` |
+| `flagscale_single_node_gpt_eager_continuous_cupti_smoke.yaml` | 1 | `gpt-eager-continuous-cupti` |
+| `flagscale_single_node_te_cuda_graph_full_cupti_smoke.yaml` | 1 | `te-full-cuda-kernels` |
+
+Use `--ep-dispatcher allgather` to select the second EP route. Custom YAML filenames require an
+explicit supported `--profile`; choose a contract matching the configuration's topology and behavior.
+Run `python3 tests/test_utils/runners/run_flagscale_megalens.py --help` for the supported options.
+
+The broader model, topology, and backend validation matrix is preserved at revision
+`7af30d0c7d509da8ceab4381e375528ce9e05a6e`. Reproduce those scenarios from a separate checkout of
+that complete revision, including its runners and contracts. Historical GPU results remain tied to
+their recorded source and image revisions. Narrowing the validation matrix preserves the Probe,
+Trace, and analyzer implementations; the narrowed runner has CPU validation without a new GPU run.
+
 ## Enable a framework trace
 
 ### FlagScale YAML
@@ -26,7 +55,7 @@ The recorded formal GPU runs use FlagScale revision
 `docker/Dockerfile.work`.
 Keep that image definition as the reproduction contract for those runs.
 
-Current dev-image acceptance uses a temporary image derived from
+The recorded dev-image acceptance used a temporary image derived from
 `harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856`, with
 Megatron-LM-FL revision `13ef6ae7ed8e3ac35143f3e03526674d12194fc6` and FlagScale revision
 `067efe6f1b00bc9416e22cfe46c52990e10bf045` installed.

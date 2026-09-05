@@ -1,4 +1,5 @@
 # Copyright (c) 2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+
 """Exact trace contracts for the controlled GPT training profiles."""
 
 from __future__ import annotations
@@ -19,6 +20,7 @@ from tests.test_utils.runners.megalens_run_manifest import Failure
 _MODEL_PHASES = frozenset(
     ("forward-step", "decoder", "decoder-postprocess", "output_layer", "loss")
 )
+
 _EAGER_TREE_PHASES = frozenset(
     (
         "decoder",
@@ -29,6 +31,7 @@ _EAGER_TREE_PHASES = frozenset(
         "MLP.forward",
     )
 )
+
 _EAGER_LAYER_SEQUENCE = (
     ("transformer_layer", "B"),
     ("_forward_attention", "B"),
@@ -41,7 +44,9 @@ _EAGER_LAYER_SEQUENCE = (
     ("_forward_mlp", "E"),
     ("transformer_layer", "E"),
 )
+
 _OPTIMIZER_PHASES = frozenset(("optimizer", "optimizer-step", "optimizer-postprocess"))
+
 _OPTIMIZER_SEQUENCE = (
     ("optimizer", "B"),
     ("optimizer-step", "B"),
@@ -50,25 +55,11 @@ _OPTIMIZER_SEQUENCE = (
     ("optimizer-postprocess", "B"),
     ("optimizer-postprocess", "E"),
 )
+
 _CUDA_GRAPH_INNER_PHASES = frozenset(
-    (
-        "transformer_layer",
-        "_forward_attention",
-        "attention",
-        "_forward_mlp",
-        "MLP.forward",
-    )
+    ("transformer_layer", "_forward_attention", "attention", "_forward_mlp", "MLP.forward")
 )
-_FULL_ITERATION_CAPTURED_PHASES = frozenset(
-    (
-        *_MODEL_PHASES,
-        *_CUDA_GRAPH_INNER_PHASES,
-        "forward-step-calc-loss",
-        "backward-step",
-        "grad-sync",
-        "all-grads-sync",
-    )
-)
+
 _CUDA_KERNEL_REQUIRED_FIELDS = frozenset(
     (
         "record_type",
@@ -88,12 +79,8 @@ _CUDA_KERNEL_REQUIRED_FIELDS = frozenset(
         "tp_rk",
     )
 )
-_CUDA_GRAPH_MODEL_KERNEL_MARKERS = (
-    "gemm",
-    "nvjet_",
-    "sdpa",
-    "transformer_engine::",
-)
+
+_CUDA_GRAPH_MODEL_KERNEL_MARKERS = ("gemm", "nvjet_", "sdpa", "transformer_engine::")
 
 
 @dataclass(frozen=True)
@@ -118,10 +105,7 @@ def _failure(code: str, message: str, *, rank: int, iteration: int) -> Failure:
 
 
 def _pair_spans(
-    iteration: Iteration,
-    names: Iterable[str],
-    *,
-    rank: int,
+    iteration: Iteration, names: Iterable[str], *, rank: int
 ) -> tuple[Mapping[str, Sequence[_Span]], list[Failure]]:
     selected = frozenset(names)
     open_events: dict[str, list[Event]] = defaultdict(list)
@@ -181,36 +165,23 @@ def _direct_parent(child: _Span, spans: Mapping[str, Sequence[_Span]]) -> str | 
     if not enclosing:
         return None
     return min(
-        enclosing,
-        key=lambda span: (
-            span.end.rel_ts - span.begin.rel_ts,
-            -span.begin.rel_ts,
-        ),
+        enclosing, key=lambda span: (span.end.rel_ts - span.begin.rel_ts, -span.begin.rel_ts)
     ).begin.name
 
 
 def _validate_iteration(
-    iteration: Iteration,
-    *,
-    rank: int,
-    expected_counts: Mapping[str, int],
+    iteration: Iteration, *, rank: int, expected_counts: Mapping[str, int]
 ) -> list[Failure]:
     iteration_id = int(iteration.iteration_id)
     failures: list[Failure] = []
     phase_counts = Counter(
-        (event.name, event.ph)
-        for event in iteration.events
-        if event.name in _MODEL_PHASES
+        (event.name, event.ph) for event in iteration.events if event.name in _MODEL_PHASES
     )
     spans, pairing_failures = _pair_spans(iteration, _MODEL_PHASES, rank=rank)
     failures.extend(pairing_failures)
 
     for name, expected in expected_counts.items():
-        observed = (
-            phase_counts[(name, "B")],
-            phase_counts[(name, "E")],
-            len(spans.get(name, ())),
-        )
+        observed = (phase_counts[(name, "B")], phase_counts[(name, "E")], len(spans.get(name, ())))
         if observed != (expected, expected, expected):
             failures.append(
                 _failure(
@@ -244,7 +215,10 @@ def _validate_iteration(
 
     decoder = spans.get("decoder", ())
     postprocess = spans.get("decoder-postprocess", ())
-    if len(decoder) == len(postprocess) == 1 and decoder[0].end.rel_ts > postprocess[0].begin.rel_ts:
+    if (
+        len(decoder) == len(postprocess) == 1
+        and decoder[0].end.rel_ts > postprocess[0].begin.rel_ts
+    ):
         failures.append(
             _failure(
                 "trace.gpt.order",
@@ -256,10 +230,7 @@ def _validate_iteration(
 
     output_layer = spans.get("output_layer", ())
     loss = spans.get("loss", ())
-    if (
-        len(output_layer) == len(loss) == 1
-        and output_layer[0].end.rel_ts > loss[0].begin.rel_ts
-    ):
+    if len(output_layer) == len(loss) == 1 and output_layer[0].end.rel_ts > loss[0].begin.rel_ts:
         failures.append(
             _failure(
                 "trace.gpt.order",
@@ -272,21 +243,13 @@ def _validate_iteration(
 
 
 def _validate_eager_layers(
-    iteration: Iteration,
-    *,
-    rank: int,
-    expected_layers: int,
-    expected_calls: int = 1,
+    iteration: Iteration, *, rank: int, expected_layers: int, expected_calls: int = 1
 ) -> list[Failure]:
     observed = tuple(
-        (event.name, event.ph)
-        for event in iteration.events
-        if event.name in _EAGER_TREE_PHASES
+        (event.name, event.ph) for event in iteration.events if event.name in _EAGER_TREE_PHASES
     )
     expected_call = (
-        (("decoder", "B"),)
-        + _EAGER_LAYER_SEQUENCE * expected_layers
-        + (("decoder", "E"),)
+        (("decoder", "B"),) + _EAGER_LAYER_SEQUENCE * expected_layers + (("decoder", "E"),)
     )
     expected = expected_call * expected_calls
     if observed == expected:
@@ -303,23 +266,16 @@ def _validate_eager_layers(
     ]
 
 
-def _validate_optimizer_phases(
-    iteration: Iteration,
-    *,
-    rank: int,
-) -> list[Failure]:
+def _validate_optimizer_phases(iteration: Iteration, *, rank: int) -> list[Failure]:
     observed = tuple(
-        (event.name, event.ph)
-        for event in iteration.events
-        if event.name in _OPTIMIZER_PHASES
+        (event.name, event.ph) for event in iteration.events if event.name in _OPTIMIZER_PHASES
     )
     if observed == _OPTIMIZER_SEQUENCE:
         return []
     return [
         _failure(
             "trace.optimizer.sequence",
-            f"optimizer phase sequence is {observed!r}, "
-            f"expected {_OPTIMIZER_SEQUENCE!r}",
+            f"optimizer phase sequence is {observed!r}, " f"expected {_OPTIMIZER_SEQUENCE!r}",
             rank=rank,
             iteration=int(iteration.iteration_id),
         )
@@ -327,11 +283,7 @@ def _validate_optimizer_phases(
 
 
 def _validate_single_scope(
-    iteration: Iteration,
-    name: str,
-    *,
-    rank: int,
-    expected: int = 1,
+    iteration: Iteration, name: str, *, rank: int, expected: int = 1
 ) -> list[Failure]:
     spans, failures = _pair_spans(iteration, (name,), rank=rank)
     observed = len(spans.get(name, ()))
@@ -348,14 +300,10 @@ def _validate_single_scope(
 
 
 def _validate_cuda_graph_replay_inner_phases_absent(
-    iteration: Iteration,
-    *,
-    rank: int,
+    iteration: Iteration, *, rank: int
 ) -> list[Failure]:
     observed = Counter(
-        event.name
-        for event in iteration.events
-        if event.name in _CUDA_GRAPH_INNER_PHASES
+        event.name for event in iteration.events if event.name in _CUDA_GRAPH_INNER_PHASES
     )
     if not observed:
         return []
@@ -367,55 +315,6 @@ def _validate_cuda_graph_replay_inner_phases_absent(
             iteration=int(iteration.iteration_id),
         )
     ]
-
-
-def _validate_full_iteration_captured_phases_absent(
-    iteration: Iteration,
-    *,
-    rank: int,
-) -> list[Failure]:
-    observed = Counter(
-        event.name
-        for event in iteration.events
-        if event.name in _FULL_ITERATION_CAPTURED_PHASES
-    )
-    if not observed:
-        return []
-    return [
-        _failure(
-            "trace.gpt.full_iteration_replay_inner",
-            f"full-iteration CUDA Graph replay contains captured events {dict(observed)!r}",
-            rank=rank,
-            iteration=int(iteration.iteration_id),
-        )
-    ]
-
-
-def _validate_microbatch_ids(
-    iteration: Iteration,
-    names: Iterable[str],
-    *,
-    rank: int,
-    expected: Counter[int],
-) -> list[Failure]:
-    failures: list[Failure] = []
-    for name in names:
-        observed = Counter(
-            event.attrs.get("current_microbatch")
-            for event in iteration.events
-            if event.name == name and event.ph == "B"
-        )
-        if observed != expected:
-            failures.append(
-                _failure(
-                    "trace.gpt.microbatches",
-                    f"event {name!r} uses microbatches {dict(observed)!r}, "
-                    f"expected {dict(expected)!r}",
-                    rank=rank,
-                    iteration=int(iteration.iteration_id),
-                )
-            )
-    return failures
 
 
 def _validate_gpt_model_phases(
@@ -484,34 +383,12 @@ def _validate_gpt_model_phases(
             if eager_layers_by_rank is not None and rank in eager_layers_by_rank:
                 failures.extend(
                     _validate_eager_layers(
-                        iteration,
-                        rank=rank,
-                        expected_layers=eager_layers_by_rank[rank],
+                        iteration, rank=rank, expected_layers=eager_layers_by_rank[rank]
                     )
                 )
             if validate_optimizer:
                 failures.extend(_validate_optimizer_phases(iteration, rank=rank))
     return tuple(failures)
-
-
-def validate_gpt_pp1_model_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate one-microbatch GPT model phases on a single pipeline stage."""
-
-    return _validate_gpt_model_phases(
-        trace_root,
-        expected_pipeline_ranks={0: 0},
-        postprocess_ranks=frozenset((0,)),
-    )
-
-
-def validate_gpt_pp2_model_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate one-microbatch GPT model phases across two pipeline stages."""
-
-    return _validate_gpt_model_phases(
-        trace_root,
-        expected_pipeline_ranks={0: 0, 1: 1},
-        postprocess_ranks=frozenset((1,)),
-    )
 
 
 def validate_gpt_pp2_training_phases(trace_root: Path) -> tuple[Failure, ...]:
@@ -537,10 +414,7 @@ def validate_gpt_pp1_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
 
 
 def _validate_gpt_pp1_eager_kernel_windows(
-    trace_root: Path,
-    *,
-    expected_iterations: tuple[int, int],
-    shared_profiler_window: bool,
+    trace_root: Path, *, expected_iterations: tuple[int, int], shared_profiler_window: bool
 ) -> tuple[Failure, ...]:
     """Validate CUPTI ownership across two eager GPT iterations."""
 
@@ -587,9 +461,7 @@ def _validate_gpt_pp1_eager_kernel_windows(
                 or attrs["record_type"] != "cuda_kernel"
                 or attrs["device"] != 0
                 or attrs["iteration"] != iteration_id
-                or tuple(
-                    attrs[field] for field in ("g_rk", "dp_rk", "pp_rk", "tp_rk")
-                )
+                or tuple(attrs[field] for field in ("g_rk", "dp_rk", "pp_rk", "tp_rk"))
                 != (0, 0, 0, 0)
             ):
                 ownership_errors += 1
@@ -659,12 +531,10 @@ def _validate_gpt_pp1_eager_kernel_windows(
     )
     if anchors_are_valid:
         profiler_values = [
-            next(iter(profiler_anchors[iteration]))
-            for iteration in expected_iterations
+            next(iter(profiler_anchors[iteration])) for iteration in expected_iterations
         ]
         iteration_values = [
-            next(iter(iteration_anchors[iteration]))
-            for iteration in expected_iterations
+            next(iter(iteration_anchors[iteration])) for iteration in expected_iterations
         ]
         anchors_are_valid = iteration_values[0] < iteration_values[1]
         if shared_profiler_window:
@@ -672,18 +542,15 @@ def _validate_gpt_pp1_eager_kernel_windows(
                 anchors_are_valid
                 and len(set(profiler_values)) == 1
                 and all(
-                    start < iteration_values[1]
-                    for start in kernel_starts[expected_iterations[0]]
+                    start < iteration_values[1] for start in kernel_starts[expected_iterations[0]]
                 )
                 and all(
-                    start >= iteration_values[1]
-                    for start in kernel_starts[expected_iterations[1]]
+                    start >= iteration_values[1] for start in kernel_starts[expected_iterations[1]]
                 )
             )
         else:
-            anchors_are_valid = (
-                anchors_are_valid
-                and len(set(profiler_values)) == len(expected_iterations)
+            anchors_are_valid = anchors_are_valid and len(set(profiler_values)) == len(
+                expected_iterations
             )
     if not anchors_are_valid:
         failures.append(
@@ -697,27 +564,11 @@ def _validate_gpt_pp1_eager_kernel_windows(
     return tuple(failures)
 
 
-def validate_gpt_pp1_eager_continuous_kernel_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
+def validate_gpt_pp1_eager_continuous_kernel_phases(trace_root: Path) -> tuple[Failure, ...]:
     """Validate one CUPTI window spanning two eager GPT iterations."""
 
     return _validate_gpt_pp1_eager_kernel_windows(
-        trace_root,
-        expected_iterations=(1, 2),
-        shared_profiler_window=True,
-    )
-
-
-def validate_gpt_pp1_eager_interrupted_kernel_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate separate CUPTI windows around a skipped eager iteration."""
-
-    return _validate_gpt_pp1_eager_kernel_windows(
-        trace_root,
-        expected_iterations=(1, 3),
-        shared_profiler_window=False,
+        trace_root, expected_iterations=(1, 2), shared_profiler_window=True
     )
 
 
@@ -779,15 +630,9 @@ def _validate_layerwise_full_cuda_graph_phases(
         failures.extend(_validate_single_scope(iteration, "backward-step", rank=0))
         failures.extend(_validate_optimizer_phases(iteration, rank=0))
         if iteration_id == 1:
-            failures.extend(
-                _validate_eager_layers(iteration, rank=0, expected_layers=2)
-            )
+            failures.extend(_validate_eager_layers(iteration, rank=0, expected_layers=2))
         elif iteration_id == 2:
-            failures.extend(
-                _validate_cuda_graph_replay_inner_phases_absent(
-                    iteration, rank=0
-                )
-            )
+            failures.extend(_validate_cuda_graph_replay_inner_phases_absent(iteration, rank=0))
     return tuple(failures)
 
 
@@ -795,97 +640,12 @@ def validate_te_full_cuda_graph_phases(trace_root: Path) -> tuple[Failure, ...]:
     """Validate TE whole-layer eager and replay visibility."""
 
     return _validate_layerwise_full_cuda_graph_phases(
-        trace_root,
-        owner="TE",
-        profile_name="te-full-cuda-graph",
-    )
-
-
-def validate_te_attention_cuda_graph_mlp_recompute_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate MLP forward and recompute outside TE attention Graphs."""
-
-    failures = list(
-        _validate_gpt_model_phases(
-            trace_root,
-            expected_pipeline_ranks={0: 0},
-            postprocess_ranks=frozenset((0,)),
-            validate_optimizer=True,
-        )
-    )
-    iterations = _load_iterations(trace_root).get(0, ())
-    hidden_phases = frozenset(
-        ("transformer_layer", "_forward_attention", "attention", "_forward_mlp")
-    )
-    for iteration in iterations:
-        iteration_id = int(iteration.iteration_id)
-        failures.extend(_validate_single_scope(iteration, "backward-step", rank=0))
-        spans, span_failures = _pair_spans(
-            iteration, ("decoder", "backward-step", "MLP.forward"), rank=0
-        )
-        failures.extend(span_failures)
-        decoder = spans.get("decoder", ())
-        backward = spans.get("backward-step", ())
-        mlp = spans.get("MLP.forward", ())
-        if len(decoder) == len(backward) == 1:
-            forward_calls = sum(
-                decoder[0].begin.rel_ts <= call.begin.rel_ts
-                and call.end.rel_ts <= decoder[0].end.rel_ts
-                for call in mlp
-            )
-            recompute_calls = sum(
-                backward[0].begin.rel_ts <= call.begin.rel_ts
-                and call.end.rel_ts <= backward[0].end.rel_ts
-                for call in mlp
-            )
-        else:
-            forward_calls = recompute_calls = 0
-        if len(mlp) != 4 or forward_calls != 2 or recompute_calls != 2:
-            failures.append(
-                _failure(
-                    "trace.gpt.cuda_graph_recompute_mlp",
-                    "TE attention Graph iteration requires two forward and two "
-                    "backward-recompute MLP.forward scopes; observed "
-                    f"total={len(mlp)}, forward={forward_calls}, "
-                    f"recompute={recompute_calls}",
-                    rank=0,
-                    iteration=iteration_id,
-                )
-            )
-
-        hidden = Counter(
-            event.name for event in iteration.events if event.name in hidden_phases
-        )
-        if hidden:
-            failures.append(
-                _failure(
-                    "trace.gpt.cuda_graph_attention_inner",
-                    f"TE attention Graph exposed captured Core events {dict(hidden)!r}",
-                    rank=0,
-                    iteration=iteration_id,
-                )
-            )
-    return tuple(failures)
-
-
-def validate_local_layerwise_full_cuda_graph_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate local whole-layer eager and replay visibility."""
-
-    return _validate_layerwise_full_cuda_graph_phases(
-        trace_root,
-        owner="local",
-        profile_name="local-layerwise-full-cuda-graph",
+        trace_root, owner="TE", profile_name="te-full-cuda-graph"
     )
 
 
 def _validate_layerwise_cuda_graph_kernel_phases(
-    trace_root: Path,
-    *,
-    framework_contract: Callable[[Path], tuple[Failure, ...]],
-    owner: str,
+    trace_root: Path, *, framework_contract: Callable[[Path], tuple[Failure, ...]], owner: str
 ) -> tuple[Failure, ...]:
     """Validate rank-local device work for eager and layerwise Graph replay."""
 
@@ -894,11 +654,7 @@ def _validate_layerwise_cuda_graph_kernel_phases(
 
     for iteration in iterations:
         iteration_id = int(iteration.iteration_id)
-        kernels = [
-            event
-            for event in iteration.events
-            if event.name == "cuda_kernel"
-        ]
+        kernels = [event for event in iteration.events if event.name == "cuda_kernel"]
         if not kernels:
             failures.append(
                 _failure(
@@ -966,10 +722,7 @@ def _validate_layerwise_cuda_graph_kernel_phases(
                 iteration_id == 2
                 and duration > 0
                 and "nccl" not in kernel_name
-                and any(
-                    marker in kernel_name
-                    for marker in _CUDA_GRAPH_MODEL_KERNEL_MARKERS
-                )
+                and any(marker in kernel_name for marker in _CUDA_GRAPH_MODEL_KERNEL_MARKERS)
             ):
                 replay_compute_kernels += 1
 
@@ -1023,161 +776,12 @@ def _validate_layerwise_cuda_graph_kernel_phases(
     return tuple(failures)
 
 
-def validate_local_layerwise_cuda_graph_kernel_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate rank-local device work for eager and local Graph replay."""
-
-    return _validate_layerwise_cuda_graph_kernel_phases(
-        trace_root,
-        framework_contract=validate_local_layerwise_full_cuda_graph_phases,
-        owner="local whole-layer",
-    )
-
-
-def validate_te_full_cuda_graph_kernel_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
+def validate_te_full_cuda_graph_kernel_phases(trace_root: Path) -> tuple[Failure, ...]:
     """Validate rank-local device work for eager and TE Graph replay."""
 
     return _validate_layerwise_cuda_graph_kernel_phases(
-        trace_root,
-        framework_contract=validate_te_full_cuda_graph_phases,
-        owner="TE whole-layer",
+        trace_root, framework_contract=validate_te_full_cuda_graph_phases, owner="TE whole-layer"
     )
-
-
-def validate_local_full_iteration_cuda_graph_phases(
-    trace_root: Path,
-) -> tuple[Failure, ...]:
-    """Validate two eager microbatches then local full-iteration replay."""
-
-    failures: list[Failure] = []
-    by_rank = _load_iterations(trace_root)
-    observed_ranks = tuple(sorted(by_rank))
-    if observed_ranks != (0,):
-        failures.append(
-            Failure(
-                "trace.gpt.ranks",
-                "local full-iteration CUDA Graph expects only global rank 0; "
-                f"observed {list(observed_ranks)}",
-                "local-full-iteration-cuda-graph",
-            )
-        )
-
-    iterations = by_rank.get(0, ())
-    iteration_ids = tuple(int(item.iteration_id) for item in iterations)
-    if iteration_ids != (1, 2, 3):
-        failures.append(
-            Failure(
-                "trace.gpt.iterations",
-                "local full-iteration CUDA Graph expects iterations [1, 2, 3]; "
-                f"observed {list(iteration_ids)}",
-                "rank=0",
-            )
-        )
-
-    for iteration in iterations:
-        iteration_id = int(iteration.iteration_id)
-        observed_pp_ranks = {event.rank.pipeline for event in iteration.events}
-        if observed_pp_ranks != {0}:
-            failures.append(
-                _failure(
-                    "trace.gpt.pipeline_rank",
-                    f"events use pipeline ranks {sorted(observed_pp_ranks)}, expected [0]",
-                    rank=0,
-                    iteration=iteration_id,
-                )
-            )
-        failures.extend(_validate_optimizer_phases(iteration, rank=0))
-        if iteration_id == 1:
-            failures.extend(
-                _validate_iteration(
-                    iteration,
-                    rank=0,
-                    expected_counts={
-                        "forward-step": 2,
-                        "decoder": 2,
-                        "decoder-postprocess": 2,
-                        "output_layer": 2,
-                        "loss": 2,
-                    },
-                )
-            )
-            for name, expected in (
-                ("forward-step-calc-loss", 2),
-                ("grad-sync", 1),
-                ("all-grads-sync", 1),
-            ):
-                failures.extend(
-                    _validate_single_scope(
-                        iteration, name, rank=0, expected=expected
-                    )
-                )
-            failures.extend(
-                _validate_single_scope(
-                    iteration, "backward-step", rank=0, expected=2
-                )
-            )
-            failures.extend(
-                _validate_eager_layers(
-                    iteration,
-                    rank=0,
-                    expected_layers=2,
-                    expected_calls=2,
-                )
-            )
-            failures.extend(
-                _validate_microbatch_ids(
-                    iteration,
-                    (
-                        "forward-step",
-                        "forward-step-calc-loss",
-                        "backward-step",
-                    ),
-                    rank=0,
-                    expected=Counter((0, 1)),
-                )
-            )
-        elif iteration_id in {2, 3}:
-            failures.extend(
-                _validate_full_iteration_captured_phases_absent(
-                    iteration, rank=0
-                )
-            )
-    return tuple(failures)
-
-
-def _validate_qwen3_tp_eager_phases(
-    trace_root: Path, *, tensor_parallel_size: int
-) -> tuple[Failure, ...]:
-    """Validate one full 28-layer Qwen3 stage on every TP rank."""
-
-    ranks = range(tensor_parallel_size)
-    return _validate_gpt_model_phases(
-        trace_root,
-        expected_pipeline_ranks={rank: 0 for rank in ranks},
-        postprocess_ranks=frozenset(ranks),
-        eager_layers_by_rank={rank: 28 for rank in ranks},
-    )
-
-
-def validate_qwen3_tp2_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate one full 28-layer Qwen3 stage on both TP2 ranks."""
-
-    return _validate_qwen3_tp_eager_phases(trace_root, tensor_parallel_size=2)
-
-
-def validate_qwen3_tp4_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate one full 28-layer Qwen3 stage on all TP4 ranks."""
-
-    return _validate_qwen3_tp_eager_phases(trace_root, tensor_parallel_size=4)
-
-
-def validate_qwen3_tp8_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate one full 28-layer Qwen3 stage on all TP8 ranks."""
-
-    return _validate_qwen3_tp_eager_phases(trace_root, tensor_parallel_size=8)
 
 
 def validate_gpt_cp_eager_phases(
@@ -1208,12 +812,4 @@ def validate_gpt_cp_dp1_eager_phases(
         context_parallel_size=context_parallel_size,
         data_parallel_size=1,
         expected_layers=expected_layers,
-    )
-
-
-def validate_gpt_cp2_eager_phases(trace_root: Path) -> tuple[Failure, ...]:
-    """Validate two CP ranks sharing one complete two-layer GPT stage."""
-
-    return validate_gpt_cp_dp1_eager_phases(
-        trace_root, context_parallel_size=2
     )
