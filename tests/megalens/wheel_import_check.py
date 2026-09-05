@@ -32,7 +32,6 @@ MEGALENS_MODULES = (
     # Shared analysis support and retained parallelism analyzers.
     "megatron.megalens.event_catalog",
     "megatron.megalens.nested_aggregation",
-    "megatron.megalens.dp_lifecycle",
     "megatron.megalens.pp_analyzer",
     "megatron.megalens.dp_analyzer",
     "megatron.megalens.tp_analyzer",
@@ -53,7 +52,6 @@ REQUIRED_WHEEL_FILES = frozenset(
         "megatron/megalens/analyzer.py",
         "megatron/megalens/core_adapter.py",
         "megatron/megalens/data_loader.py",
-        "megatron/megalens/dp_lifecycle.py",
         "megatron/megalens/dp_analyzer.py",
         "megatron/megalens/ep_analyzer.py",
         "megatron/megalens/event_catalog.py",
@@ -71,6 +69,7 @@ REQUIRED_WHEEL_FILES = frozenset(
 )
 
 FORBIDDEN_WHEEL_PREFIXES = (
+    "megatron/megalens/dp_lifecycle.py",
     "megatron/megalens/docs/",
     "megatron/megalens/migration_checks/",
     "megatron/megalens/pig",
