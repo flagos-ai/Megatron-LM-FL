@@ -7,8 +7,7 @@ Run with:
 """
 
 import logging
-from contextlib import ExitStack, contextmanager, nullcontext
-from dataclasses import dataclass
+from contextlib import ExitStack, contextmanager
 from functools import partial
 
 import pytest
@@ -25,7 +24,7 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.models.mimo.config.base_configs import MimoModelConfig
 from megatron.core.models.mimo.config.role import MIMO_LANGUAGE_MODULE_KEY
 from megatron.core.models.mimo.model.base import MimoModel
-from megatron.core.models.mimo.optimizer import MimoOptimizer, get_mimo_optimizer
+from megatron.core.models.mimo.optimizer import get_mimo_optimizer
 from megatron.core.models.mimo.submodules.vision import VisionModalitySubmodules
 from megatron.core.models.vision.multimodal_projector import MultimodalProjector
 from megatron.core.optimizer.optimizer_config import OptimizerConfig
@@ -56,23 +55,6 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # Helper Functions (with grid tracking and PG caching from edc8159)
 # ============================================================================
-
-
-@dataclass
-class MimoTrainingState:
-    """State produced by one controlled MiMo forward/backward/update."""
-
-    model: MimoModel
-    optimizer: MimoOptimizer
-    optimizer_config: OptimizerConfig
-    encoder_grid: HyperCommGrid
-    llm_grid: HyperCommGrid
-    optimizer_success: bool
-    grad_norm: float
-    num_zeros: int | None
-    parameter_count: int
-    changed_parameter_count: int
-
 
 _active_grids: list = []
 _embedding_pg_cache: dict = {}
@@ -311,14 +293,7 @@ def get_vision_submodules_spec(
 
 
 def get_mimo_model(
-    encoder_name,
-    encoder_grid,
-    llm_grid,
-    hidden_size,
-    num_layers,
-    vocab_size,
-    seq_len,
-    use_distributed_optimizer=True,
+    encoder_name, encoder_grid, llm_grid, hidden_size, num_layers, vocab_size, seq_len
 ):
     """Create MIMO model with TransformerBlock encoder and GPTModel LLM."""
     language_pg = get_pg_collection_with_embedding_groups(llm_grid, is_language_model=True)
@@ -355,9 +330,7 @@ def get_mimo_model(
 
     # Wrap with DDP
     ddp_config = DistributedDataParallelConfig(
-        overlap_grad_reduce=True,
-        bucket_size=10000,
-        use_distributed_optimizer=use_distributed_optimizer,
+        overlap_grad_reduce=True, bucket_size=10000, use_distributed_optimizer=True
     )
 
     if mimo_model.language_model is not None:
@@ -435,8 +408,7 @@ class DataIterator:
         input_ids = torch.cat([image_tokens, text_tokens], dim=1)
 
         labels = input_ids.clone()
-        # Megatron masks loss outside cross entropy; labels must remain valid vocabulary IDs.
-        labels[input_ids == self.image_token_id] = 0
+        labels[input_ids == self.image_token_id] = -100
 
         loss_mask = torch.ones(
             self.micro_batch_size, self.seq_length, device='cuda', dtype=torch.float32
@@ -479,9 +451,6 @@ def run_mimo_1f1b_test(
     seq_length=64,
     micro_batch_size=2,
     num_microbatches=4,
-    use_distributed_optimizer=True,
-    iteration_context=None,
-    return_run_state=False,
 ):
     """Run MIMO model through 1F1B schedule and verify."""
     # Clear NVTE env vars that the conftest set_env fixture sets to '0'.
@@ -514,7 +483,6 @@ def run_mimo_1f1b_test(
         num_layers=num_layers,
         vocab_size=vocab_size,
         seq_len=seq_length,
-        use_distributed_optimizer=use_distributed_optimizer,
     )
 
     # Build schedule functions using pre-created pg_collections (no leaks)
@@ -552,7 +520,7 @@ def run_mimo_1f1b_test(
         weight_decay=0.01,
         clip_grad=1.0,
         bf16=True,
-        use_distributed_optimizer=use_distributed_optimizer,
+        use_distributed_optimizer=True,
     )
     optimizer = get_mimo_optimizer(mimo_model, opt_config)
 
@@ -618,39 +586,31 @@ def run_mimo_1f1b_test(
             if output is None:
                 return torch.tensor(0.0, device='cuda', requires_grad=True), {'loss_reduced': 0.0}
 
-            loss = torch.sum(output.float().view(-1) * loss_mask.float().view(-1))
+            loss = output.float().sum()
             return loss, {'loss_reduced': loss}
 
         batch = next(data_iterator) if data_iterator is not None else {'input_ids': None}
         output_tensor, loss_mask = model(**batch)
         return output_tensor, partial(loss_func, loss_mask)
 
-    parameters_before = {
-        name: parameter.detach().clone()
-        for name, parameter in mimo_model.named_parameters()
-    }
-    with nullcontext() if iteration_context is None else iteration_context:
-        optimizer.zero_grad()
-        losses = schedule.forward_backward_pipelining_without_interleaving(
-            forward_step_func=step_func,
-            data_iterator=data_iterator,
-            model=[mimo_model],
-            num_microbatches=num_microbatches,
-            seq_length=seq_length,
-            micro_batch_size=micro_batch_size,
-            forward_only=False,
-            p2p_communicator=communicator,
-            pg_collection=pg_collection,
-        )
+    optimizer.zero_grad()
 
-        # Optimizer step with global gradient clipping
-        success, grad_norm, num_zeros = optimizer.step()
+    losses = schedule.forward_backward_pipelining_without_interleaving(
+        forward_step_func=step_func,
+        data_iterator=data_iterator,
+        model=[mimo_model],
+        num_microbatches=num_microbatches,
+        seq_length=seq_length,
+        micro_batch_size=micro_batch_size,
+        forward_only=False,
+        p2p_communicator=communicator,
+        pg_collection=pg_collection,
+    )
+
+    # Optimizer step with global gradient clipping
+    success, grad_norm, num_zeros = optimizer.step()
     assert success, "Optimizer step failed"
     assert grad_norm is not None and grad_norm > 0, f"Expected positive grad norm, got {grad_norm}"
-    changed_parameter_count = sum(
-        not torch.equal(parameters_before[name], parameter)
-        for name, parameter in mimo_model.named_parameters()
-    )
 
     # Verify results on last LLM stage
     if is_rank_in_grid(llm_grid) and is_pp_last_stage(llm_grid.get_pg("pp")):
@@ -658,19 +618,6 @@ def run_mimo_1f1b_test(
         for loss_dict in losses:
             assert 'loss_reduced' in loss_dict
 
-    if return_run_state:
-        return losses, MimoTrainingState(
-            model=mimo_model,
-            optimizer=optimizer,
-            optimizer_config=opt_config,
-            encoder_grid=encoder_grid,
-            llm_grid=llm_grid,
-            optimizer_success=success,
-            grad_norm=float(grad_norm),
-            num_zeros=num_zeros,
-            parameter_count=len(parameters_before),
-            changed_parameter_count=changed_parameter_count,
-        )
     return losses
 
 

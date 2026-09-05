@@ -23,61 +23,31 @@ from megatron.core.parallel_state import (
 sys.path.append(
     os.path.abspath(os.path.join(os.path.dirname(__file__), os.path.pardir, os.path.pardir))
 )
-from examples.mimo.data.mock import (
+from data.energon_avlm_task_encoder import llava_avlm_dataloader_provider
+from data.energon_vlm_task_encoder import llava_vlm_dataloader_provider
+from data.mock import (
     train_valid_test_datasets_provider as mock_train_valid_test_datasets_provider,
 )
-from examples.mimo.model_providers.mock import model_provider_mock_vlm_single_encoder
-from examples.mimo.utils.data_helpers import broadcast_nested_data_batch
+from model_providers.llava_avlm import model_provider_llava_avlm
+from model_providers.llava_vlm import model_provider_llava_vlm
+from model_providers.mock import model_provider_mock_vlm_single_encoder
+from utils.data_helpers import broadcast_nested_data_batch
 
 from megatron.core.enums import ModelType
 
-_PROVIDER_NAMES = ("mock", "llava_vlm", "video_llava_vlm", "llava_avlm")
+_MODEL_PROVIDERS = {
+    "mock": model_provider_mock_vlm_single_encoder,
+    "llava_vlm": model_provider_llava_vlm,
+    "video_llava_vlm": partial(model_provider_llava_vlm, is_video_input=True),
+    "llava_avlm": model_provider_llava_avlm,
+}
 
-
-def _get_dataset_provider(name: str):
-    """Resolve only the selected dataset provider and its optional dependencies."""
-
-    if name == "mock":
-        return mock_train_valid_test_datasets_provider
-    if name in {"llava_vlm", "video_llava_vlm"}:
-        from examples.mimo.data.energon_vlm_task_encoder import (
-            llava_vlm_dataloader_provider,
-        )
-
-        if name == "video_llava_vlm":
-            return partial(llava_vlm_dataloader_provider, is_video_input=True)
-        return llava_vlm_dataloader_provider
-    if name == "llava_avlm":
-        from examples.mimo.data.energon_avlm_task_encoder import (
-            llava_avlm_dataloader_provider,
-        )
-
-        return llava_avlm_dataloader_provider
-    raise ValueError(
-        f"Unsupported dataset provider '{name}'. "
-        f"Available providers: {list(_PROVIDER_NAMES)}"
-    )
-
-
-def _get_model_provider(name: str):
-    """Resolve only the selected model provider and its optional dependencies."""
-
-    if name == "mock":
-        return model_provider_mock_vlm_single_encoder
-    if name in {"llava_vlm", "video_llava_vlm"}:
-        from examples.mimo.model_providers.llava_vlm import model_provider_llava_vlm
-
-        if name == "video_llava_vlm":
-            return partial(model_provider_llava_vlm, is_video_input=True)
-        return model_provider_llava_vlm
-    if name == "llava_avlm":
-        from examples.mimo.model_providers.llava_avlm import model_provider_llava_avlm
-
-        return model_provider_llava_avlm
-    raise ValueError(
-        f"Unsupported model provider '{name}'. "
-        f"Available providers: {list(_PROVIDER_NAMES)}"
-    )
+_DATASET_PROVIDERS = {
+    "mock": mock_train_valid_test_datasets_provider,
+    "llava_vlm": llava_vlm_dataloader_provider,
+    "video_llava_vlm": partial(llava_vlm_dataloader_provider, is_video_input=True),
+    "llava_avlm": llava_avlm_dataloader_provider,
+}
 
 def add_mimo_args(parser):
     """Add MIMO-specific arguments to the parser."""
@@ -228,15 +198,21 @@ def train_valid_test_datasets_provider(*provider_args, **provider_kwargs):
         **provider_kwargs: Additional keyword arguments for the dataset provider
     """
     runtime_args = get_args()
-    dataset_provider = _get_dataset_provider(runtime_args.dataset_provider)
-    if runtime_args.dataset_provider != "mock":
-        # Calculate max_seq_length from total_seq_length
-        max_seq_length = runtime_args.total_seq_length
-        print_rank_0(f"MIMO Training: Using max_seq_length = {max_seq_length} "
-            f"(total_seq_length: {runtime_args.total_seq_length})")
+    try:
+        dataset_provider = _DATASET_PROVIDERS[runtime_args.dataset_provider]
+        if runtime_args.dataset_provider != "mock":
+            # Calculate max_seq_length from total_seq_length
+            max_seq_length = runtime_args.total_seq_length
+            print_rank_0(f"MIMO Training: Using max_seq_length = {max_seq_length} "
+                f"(total_seq_length: {runtime_args.total_seq_length})")
 
-        # Add configs to provider_kwargs
-        provider_kwargs['max_seq_length'] = max_seq_length
+            # Add configs to provider_kwargs
+            provider_kwargs['max_seq_length'] = max_seq_length
+    except KeyError as e:
+        raise ValueError(
+            f"Unsupported dataset provider '{runtime_args.dataset_provider}'. "
+            f"Available providers: {list(_DATASET_PROVIDERS.keys())}"
+        ) from e
 
     return dataset_provider(*provider_args, **provider_kwargs)
 
@@ -266,14 +242,15 @@ def model_provider(
     runtime_args = get_args()
     pg_collection = framework_kwargs.get('pg_collection')
 
-    builder_fn = _get_model_provider(runtime_args.model_provider)
+    try:
+        builder_fn = _MODEL_PROVIDERS[runtime_args.model_provider]
+    except KeyError as e:
+        raise ValueError(
+            f"Unsupported model provider '{runtime_args.model_provider}'. "
+            f"Available providers: {list(_MODEL_PROVIDERS.keys())}"
+        ) from e
 
-    if runtime_args.model_provider == "mock":
-        builder_kwargs = {
-            "special_token_id": runtime_args.image_token_id,
-            "pg_collection": pg_collection,
-        }
-    elif runtime_args.model_provider in {"llava_vlm", "video_llava_vlm"}:
+    if runtime_args.model_provider == "llava_vlm":
         builder_kwargs = {
             "image_special_token_id": image_special_token_id,
             "pg_collection": pg_collection,
@@ -284,6 +261,9 @@ def model_provider(
             "audio_special_token_id": audio_special_token_id,
             "pg_collection": pg_collection,
         }
+    else:
+        raise ValueError(f"Unknown model provider: {runtime_args.model_provider}. Must be one of ['llava_vlm', 'llava_avlm', 'mock]")
+
     return builder_fn(
         pre_process,
         post_process,
