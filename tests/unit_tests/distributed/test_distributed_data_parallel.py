@@ -30,10 +30,13 @@ class TestModel(torch.nn.Module):
 class TestDistributedDataParallel:
     @classmethod
     def setup_class(cls):
+        cls.grid = None
         Utils.initialize_model_parallel()
 
     @classmethod
     def teardown_class(cls):
+        if cls.grid is not None:
+            cls.grid.destroy()
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(
@@ -79,6 +82,7 @@ class TestDistributedDataParallel:
 
         # Create HyperCommGrid with dimension ep, pp, dp (reversed from device mesh order)
         grid = HyperCommGrid([1, 1, 1, 1, dp_size], ["tp", "cp", "ep", "pp", "dp"])
+        self.grid = grid
 
         # Create process groups config with ONLY dp group
         pg_collection = ProcessGroupCollection()
