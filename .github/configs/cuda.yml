@@ -102,7 +102,7 @@ test_matrix:
       # The A100 CI image (PyTorch 2.7.0a0 nv25.3) repeatedly leaves ranks on
       # different NCCL collective sequences; the same case passes on 8xH100
       # with PyTorch 2.7.1. Re-enable after upgrading the CUDA CI image.
-      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard[common_args0-mesh_dim_config1-None-optim_grads-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
       - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
@@ -168,6 +168,9 @@ test_matrix:
       - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[True]
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py::TestTransformerBlockWithProcessGroups::test_mlp_with_custom_pgs[8-4-2-True]
       - tests/unit_tests/transformer/test_transformer_layer.py::TestParallelTransformerLayer::test_chunked_mlp
+      # On the A100 CI stack, shared-expert all-to-all backward can leave ranks on
+      # different default-PG collective sequences and hit the NCCL watchdog timeout.
+      - tests/unit_tests/transformer/moe/test_shared_experts.py
 
       # Top-level unit tests
       # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.

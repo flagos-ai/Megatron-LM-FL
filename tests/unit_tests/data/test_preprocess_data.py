@@ -232,8 +232,13 @@ def test_preprocess_data_gpt_optimal_workers():
             "--max-documents",
             "1002",
         ]
-        sys.argv = ["/opt/megatron-lm/tools/preprocess_data.py"] + gpt_args
-        runpy.run_path("/opt/megatron-lm/tools/preprocess_data.py", run_name="__main__")
+        ######## FlagScale Begin ########
+        preprocess_data_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../../tools/preprocess_data.py")
+        )
+        sys.argv = [preprocess_data_script] + gpt_args
+        runpy.run_path(preprocess_data_script, run_name="__main__")
+        ######## FlagScale End ########
 
 
 def bert_vocab(odir):
