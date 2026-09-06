@@ -28,6 +28,8 @@ runner_labels:
 container_volumes:
   - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
   - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /mnt/airs-business/cicd/baai_datasets:/opt/data/datasets
+  - /mnt/airs-business/cicd/baai_tokenizers:/opt/data/tokenizers
 
 # Container options (hardware-specific settings)
 container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
