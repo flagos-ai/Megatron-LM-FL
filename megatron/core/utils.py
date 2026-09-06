@@ -2023,6 +2023,7 @@ def get_batch_on_this_tp_rank(
     pipeline_model_parallel_size: int = 1,
     is_pipeline_first_stage: bool = False,
     is_pipeline_last_stage: bool = False,
+    is_dualpipev: bool = False,  # FlagScale Modify
 ):
     """Broadcast batch tensors from TP rank 0 to all other ranks in the TP group.
 
@@ -2063,6 +2064,8 @@ def get_batch_on_this_tp_rank(
         pipeline_model_parallel_size (int): Number of pipeline-parallel stages.
         is_pipeline_first_stage (bool): Whether this rank is on the first PP stage.
         is_pipeline_last_stage (bool): Whether this rank is on the last PP stage.
+        is_dualpipev (bool): Whether DualPipeV is enabled. The physical first
+            PP stage needs both input and target tensors in this mode.
 
     Returns:
         dict[str, torch.Tensor]: The batch dict with all tensors populated on
@@ -2114,8 +2117,14 @@ def get_batch_on_this_tp_rank(
                 _broadcast(batch['local_cp_size'])
 
         elif is_pipeline_first_stage:
-            batch["labels"] = None
-            batch["loss_mask"] = None
+            ######## FlagScale Begin ########
+            if is_dualpipev:
+                _broadcast(batch['labels'])
+                _broadcast(batch['loss_mask'])
+            ######## FlagScale End ########
+            else:
+                batch["labels"] = None
+                batch["loss_mask"] = None
 
             _broadcast(batch['tokens'])
             _broadcast(batch['position_ids'])
@@ -2225,8 +2234,14 @@ def get_batch_on_this_tp_rank(
                 _broadcast(local_cp_size)
 
         elif is_pipeline_first_stage:
-            labels = None
-            loss_mask = None
+            ######## FlagScale Begin ########
+            if is_dualpipev:
+                _broadcast(labels)
+                _broadcast(loss_mask)
+            ######## FlagScale End ########
+            else:
+                labels = None
+                loss_mask = None
 
             _broadcast(tokens)
             _broadcast(position_ids)
