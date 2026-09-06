@@ -632,13 +632,13 @@ class TransformerConfig(ModelParallelConfig):
     'selective' activation checkpointing."""
 
     ######## FlagScale Begin ########
-    recompute_granularity_per_stage_micro_batch: Optional[List] = None
+    recompute_granularity_per_stage_micro_batch: Optional[List[str]] = None
     """Fine-grained recompute granularity control per pipeline stage and micro-batch."""
 
-    recompute_method_per_stage_micro_batch: Optional[List] = None
+    recompute_method_per_stage_micro_batch: Optional[List[str]] = None
     """Fine-grained recompute method control per pipeline stage and micro-batch."""
 
-    recompute_num_layers_per_stage_micro_batch: Optional[List] = None
+    recompute_num_layers_per_stage_micro_batch: Optional[List[str]] = None
     """Fine-grained recompute num_layers control per pipeline stage and micro-batch."""
     ######## FlagScale End ########
     distribute_saved_activations: Optional[bool] = False
