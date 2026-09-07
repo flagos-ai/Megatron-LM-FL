@@ -2,13 +2,15 @@
 
 import logging
 from dataclasses import dataclass
-from typing import Any, Callable, ClassVar, Literal, override
+from typing import Any, Callable, ClassVar, Literal
+
+from typing_extensions import override  # FlagScale Modify for py310
 
 from megatron.core.distributed.distributed_data_parallel_config import DistributedDataParallelConfig
 from megatron.core.enums import ModelType
+from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_inference_stack_spec
 from megatron.core.models.hybrid.hybrid_layer_specs import (
     hybrid_stack_spec as default_hybrid_stack_spec,
-    hybrid_inference_stack_spec,
 )
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
@@ -17,11 +19,7 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import Float16Module, MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
-from megatron.training.models.base import (
-    ModelBuilder,
-    ModelConfig,
-    compose_hooks,
-)
+from megatron.training.models.base import ModelBuilder, ModelConfig, compose_hooks
 from megatron.training.models.dist_utils import unimodal_build_distributed_models
 from megatron.training.vocab_utils import calculate_padded_vocab_size
 
