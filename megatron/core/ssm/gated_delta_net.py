@@ -32,6 +32,7 @@ from megatron.core.transformer.utils import (
     sharded_state_dict_default,
 )
 from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+from megatron.plugin.decorators import overridable
 
 # TODO: Implement GatedDeltaNetContextParallel
 # from .gated_delta_net_context_parallel import GatedDeltaNetContextParallel
@@ -42,9 +43,16 @@ try:
 
     HAVE_FLA = True
 except ImportError:
+    l2norm = None
     chunk_gated_delta_rule = None
 
     HAVE_FLA = False
+
+if HAVE_FLA:
+    # Keep the FLA call sites intact while allowing platform plugins to replace
+    # the imported kernels locally in this module.
+    l2norm = overridable(l2norm)
+    chunk_gated_delta_rule = overridable(chunk_gated_delta_rule)
 
 try:
     from causal_conv1d import causal_conv1d_fn
