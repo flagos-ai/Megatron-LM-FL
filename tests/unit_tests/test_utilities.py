@@ -111,9 +111,8 @@ class Utils:
             return
 
         try:
-                # Flush pending device work before the barrier so slow ranks don't
-                # time out while fast ranks tear down process groups.
-                # NOTE(zhaoyinglia): there is not keyword argument 'timeout' in torch.distributed.barrier()
+            # Flush pending device work before the barrier so slow ranks don't
+            # time out while fast ranks tear down process groups.
             cur_platform.synchronize()
             torch.distributed.barrier()
         except Exception:
@@ -121,7 +120,7 @@ class Utils:
             return
         ps.destroy_model_parallel()
         Utils.inited = False
-        torch.cuda.memory.empty_cache()
+        cur_platform.empty_cache()  # FlagScale Modify
 
     @staticmethod
     def initialize_model_parallel(

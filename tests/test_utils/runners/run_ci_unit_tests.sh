@@ -89,8 +89,11 @@ done < <(
 import json
 import os
 
-print("\n".join(json.loads(os.environ.get("CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS", "[]"))))
-'
+print(
+    "\n".join(json.loads(os.environ.get("CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS", "[]"))),
+    file=os.fdopen(3, "w"),
+)
+' 3>&1 1>&2
 )
 
 if [ "${#TEST_PATHS[@]}" -eq 0 ]; then

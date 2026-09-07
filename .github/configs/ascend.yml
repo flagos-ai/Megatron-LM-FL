@@ -53,11 +53,7 @@ test_matrix:
     nproc_per_node: 8
     devices:
       - 910c
-    # Keep executing collected tests after an import/collection error so one
-    # manual run reports the complete platform gap. Collection errors still
-    # make the job fail.
     pytest_extra_args:
-      - --continue-on-collection-errors
       - --tb=short
       - -m
       - not experimental and not flaky_in_dev

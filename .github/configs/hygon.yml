@@ -49,7 +49,6 @@ test_matrix:
   unit:
     nproc_per_node: 8
     pytest_extra_args:
-      - --continue-on-collection-errors
       # Keep successful multi-rank stdout out of the live Actions log. Pytest
       # still includes captured output for failures.
       - --capture=fd

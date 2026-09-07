@@ -114,6 +114,10 @@ test_matrix:
       - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGridIntegration
       # torch.cuda.nvtx is not provided by the MUSA PyTorch build.
       - tests/unit_tests/test_utils.py::test_nvtx_range
+      # The S5000 MUSA PyTorch build does not define ProcessGroupNCCL. This
+      # pre-init fallback case can hit that missing CUDA compatibility symbol
+      # during pytest cleanup even though the function under test is CPU-only.
+      - tests/unit_tests/test_utils.py::TestGetLocalRankPreinit::test_defaults_to_zero_with_warning
       # core-test_utils.py flaky tests that hang on MUSA MCCL collective communication.
       # test_check/cross_check_param_hashes call torch.distributed.all_gather() which deadlocks
       # with partial ranks stalling while others complete. test_param_norm_* use DistributedDataParallel
