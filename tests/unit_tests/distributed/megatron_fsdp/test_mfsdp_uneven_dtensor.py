@@ -54,8 +54,8 @@ def distributed_setup():
         "device": device,
     }
 
-    if dist.is_initialized():
-        dist.destroy_process_group()
+    # The default process group is shared by the pytest session. Destroying it here
+    # invalidates DeviceMesh groups before later distributed test modules run.
 
 
 # ---------- Helper: broadcast-based global tensor creation ----------

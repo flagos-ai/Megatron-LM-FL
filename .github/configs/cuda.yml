@@ -85,6 +85,10 @@ test_matrix:
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
+      # Data
+      # Requires the upstream HuggingFace tokenizer fixture, which is not present in FL CI assets.
+      - tests/unit_tests/data/test_fim_dataset.py
+
       # Distributed checkpointing
       - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
       - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load

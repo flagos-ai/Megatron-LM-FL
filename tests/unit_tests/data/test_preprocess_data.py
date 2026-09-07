@@ -206,11 +206,15 @@ def test_preprocess_data_gpt():
 
 def test_preprocess_data_gpt_optimal_workers():
     with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = os.path.join(temp_dir, "optimal_workers_input.jsonl")
+        with open(input_path, "w", encoding="utf-8") as writer:
+            for index in range(1002):
+                writer.write(json.dumps({"text": f"Sample document {index}"}) + "\n")
 
         # gpt specific args
         gpt_args = [
             "--input",
-            "/opt/data/datasets/dclm/dclm.jsonl",
+            input_path,
             "--output-prefix",
             f"{temp_dir}/optimal_workers",
             "--tokenizer-type",
