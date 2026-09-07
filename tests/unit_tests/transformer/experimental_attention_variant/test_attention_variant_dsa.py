@@ -9,6 +9,7 @@ import megatron.core.parallel_state as parallel_state
 from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
     get_dsa_module_spec_for_backend,
     get_experimental_attention_variant_module_spec,
+    get_transformer_block_with_experimental_attention_variant_spec,
 )
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.process_groups_config import ProcessGroupCollection
@@ -16,6 +17,7 @@ from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.transformer.experimental_attention_variant.dsa import (
+    _DSA_TOPK_HOLDER_ATTR,
     DSAIndexer,
     DSAIndexerLossAutoScaler,
     DSAIndexerSubmodules,
@@ -23,11 +25,13 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
     DSAttentionSubmodules,
     FusedDSAIndexerLoss,
     _compute_index_scores,
+    _dsa_source_layer,
     compute_dsa_indexer_loss,
     fused_qk_topk_naive,
     rotate_activation,
 )
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
+from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import MLATransformerConfig
 from tests.unit_tests.test_utilities import Utils
 
@@ -1731,3 +1735,246 @@ class TestDSAModuleSpecDispatch:
         config = self._make_dsa_config(qk_l2_norm=True)
         with pytest.raises(AssertionError, match="qk_l2_norm is not supported"):
             get_dsa_module_spec_for_backend(config, backend=None)
+
+
+# ======================================================================================
+# DSA IndexShare: cross-layer top-k sharing (GLM5/GLM5.1/GLM5.2 DSA structure)
+# ======================================================================================
+
+
+class TestDSAIndexerTypeRule:
+    """Fast, CPU-only coverage of the indexer_type_rule / indexer_types expansion.
+
+    Covers ``TransformerConfig._parse_indexer_type_rule`` (the compact rule parser),
+    ``__post_init__`` expansion into ``indexer_types``, the MTP-incompatibility guard,
+    and ``_dsa_source_layer`` resolution — none of which need a GPU.
+    """
+
+    @pytest.mark.parametrize(
+        "rule, num_layers, expected",
+        [
+            # prefix + cyclic pattern fills the rest
+            ("2*full + repeat(full, shared, shared, shared)", 6,
+             ["full", "full", "full", "shared", "shared", "shared"]),
+            # prefix + cyclic middle + suffix
+            ("2*full + repeat(full, shared) + 1*full", 6,
+             ["full", "full", "full", "shared", "full", "full"]),
+            # alternating pattern for all layers
+            ("repeat(full, shared)", 4, ["full", "shared", "full", "shared"]),
+            # single 'full' term inside a repeat prefix
+            ("full + repeat(full, shared, shared)", 5,
+             ["full", "full", "shared", "shared", "full"]),
+        ],
+    )
+    def test_parse_indexer_type_rule(self, rule, num_layers, expected):
+        assert TransformerConfig._parse_indexer_type_rule(rule, num_layers) == expected
+
+    def test_parse_indexer_type_rule_only_one_repeat(self):
+        with pytest.raises(ValueError, match="only one repeat"):
+            TransformerConfig._parse_indexer_type_rule(
+                "repeat(full, shared) + repeat(full)", 4
+            )
+
+    def test_parse_indexer_type_rule_prefix_exceeds_num_layers(self):
+        with pytest.raises(ValueError, match="exceeds num_layers"):
+            TransformerConfig._parse_indexer_type_rule("6*full + repeat(shared)", 4)
+
+    def test_parse_indexer_type_rule_no_repeat_length_mismatch(self):
+        # Without repeat() the explicit list must match num_layers exactly.
+        with pytest.raises(ValueError, match="!= "):
+            TransformerConfig._parse_indexer_type_rule("2*full", 6)
+
+    def test_dsa_source_layer_resolution(self):
+        # 1-indexed layer numbers; each 'shared' resolves to the nearest preceding 'full'.
+        indexer_types = ["full", "shared", "shared", "full", "shared"]
+        assert _dsa_source_layer(indexer_types, 2) == 1
+        assert _dsa_source_layer(indexer_types, 3) == 1
+        assert _dsa_source_layer(indexer_types, 5) == 4
+
+    def test_dsa_source_layer_no_preceding_full(self):
+        # A 'shared' layer with no preceding 'full' (e.g. layer 1) is a config error.
+        with pytest.raises(ValueError, match="no preceding 'full'"):
+            _dsa_source_layer(["shared", "full"], 1)
+
+
+class TestDSAIndexShareConfig:
+    """Config-construction coverage for IndexShare (rule expansion + guards)."""
+
+    @pytest.fixture(scope='class', autouse=True)
+    def setup_method(self):
+        Utils.initialize_model_parallel(
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+        )
+        yield
+        Utils.destroy_model_parallel()
+
+    def _make_config(self, **kwargs):
+        return MLATransformerConfig(
+            num_layers=6,
+            hidden_size=256,
+            num_attention_heads=16,
+            use_cpu_initialization=True,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+            q_lora_rank=64,
+            kv_lora_rank=64,
+            qk_head_dim=64,
+            qk_pos_emb_head_dim=32,
+            v_head_dim=64,
+            rope_type='rope',
+            rotary_base=10000,
+            rotary_percent=1.0,
+            experimental_attention_variant="dsa",
+            dsa_indexer_n_heads=8,
+            dsa_indexer_head_dim=64,
+            dsa_indexer_topk=32,
+            **kwargs,
+        )
+
+    def test_rule_expanded_in_post_init(self):
+        """indexer_type_rule is expanded into indexer_types during __post_init__."""
+        config = self._make_config(
+            indexer_type_rule="2*full + repeat(full, shared, shared, shared)"
+        )
+        assert config.indexer_types == [
+            "full", "full", "full", "shared", "shared", "shared"
+        ]
+
+    def test_indexer_types_length_must_match_num_layers(self):
+        with pytest.raises(AssertionError, match="must equal"):
+            self._make_config(indexer_types=["full", "shared"])
+
+    def test_indexer_types_reject_unknown_type(self):
+        with pytest.raises(AssertionError, match="indexer_types must only contain"):
+            self._make_config(indexer_types=["full", "share", "full", "full", "full", "full"])
+
+    def test_index_share_with_mtp_is_rejected(self):
+        """IndexShare ('shared') is not yet supported together with MTP layers."""
+        with pytest.raises(NotImplementedError, match="not yet supported"):
+            self._make_config(
+                indexer_type_rule="repeat(full, shared)", mtp_num_layers=1
+            )
+
+
+class TestDSAIndexShareEndToEnd:
+    """End-to-end forward + backward over a TransformerBlock with shared indexers.
+
+    Ports the standalone smoke test (scripts/smoke_test_glm5_dsa.py) into the suite:
+    it exercises the whole IndexShare path — rule expansion, ``indexer=None`` on
+    'shared' layers with a resolved source layer, and the per-forward top-k holder
+    that flows top-k from 'full' layers to 'shared' layers within a single forward.
+    """
+
+    @pytest.fixture(scope='class', autouse=True)
+    def setup_method(self):
+        Utils.initialize_model_parallel(
+            tensor_model_parallel_size=1, pipeline_model_parallel_size=1
+        )
+        torch.manual_seed(123)
+        model_parallel_cuda_manual_seed(123)
+        yield
+        Utils.destroy_model_parallel()
+
+    def _build_config(self, num_layers, indexer_type_rule):
+        return MLATransformerConfig(
+            num_layers=num_layers,
+            hidden_size=256,
+            ffn_hidden_size=512,
+            num_attention_heads=16,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+            tensor_model_parallel_size=1,
+            pipeline_model_parallel_size=1,
+            sequence_parallel=False,
+            add_bias_linear=False,
+            multi_latent_attention=True,
+            q_lora_rank=64,
+            kv_lora_rank=64,
+            qk_head_dim=64,
+            qk_pos_emb_head_dim=32,
+            v_head_dim=64,
+            rope_type="rope",
+            rotary_base=10000,
+            rotary_percent=1.0,
+            experimental_attention_variant="dsa",
+            dsa_indexer_n_heads=8,
+            dsa_indexer_head_dim=64,
+            dsa_indexer_topk=32,
+            dsa_indexer_loss_coeff=1.0,
+            dsa_indexer_use_sparse_loss=False,
+            indexer_type_rule=indexer_type_rule,
+        )
+
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.parametrize(
+        "num_layers, indexer_type_rule",
+        [
+            (6, "repeat(full, shared, shared)"),
+            (6, "2*full + repeat(full, shared)"),
+        ],
+    )
+    def test_index_share_forward_backward(self, num_layers, indexer_type_rule):
+        seq_len = 32
+        batch_size = 2
+
+        config = self._build_config(num_layers, indexer_type_rule)
+        # __post_init__ expands the rule; the block must start with a 'full' layer.
+        assert config.indexer_types is not None
+        assert len(config.indexer_types) == num_layers
+        assert config.indexer_types[0] == "full", "first layer must be 'full' to seed top-k"
+        n_shared = sum(t == "shared" for t in config.indexer_types)
+        assert n_shared > 0, "rule produced no 'shared' layers — nothing to exercise"
+
+        spec = get_transformer_block_with_experimental_attention_variant_spec(config)
+        block = TransformerBlock(config=config, spec=spec, post_layer_norm=True).cuda()
+        block.train()
+
+        # Structural invariant: 'shared' layers have no indexer and resolve a valid
+        # preceding 'full' source layer; 'full' layers own an indexer.
+        for i, layer in enumerate(block.layers):
+            core = layer.self_attention.core_attention
+            want_shared = config.indexer_types[i] == "shared"
+            has_indexer = getattr(core, "indexer", None) is not None
+            assert has_indexer != want_shared, (
+                f"layer {i} ({config.indexer_types[i]}): indexer presence contradicts type"
+            )
+            if want_shared:
+                assert core.skip_topk and core.source_layer is not None
+                assert config.indexer_types[core.source_layer - 1] == "full"
+
+        # ---- forward (attention_mask=None -> DSA builds a causal mask internally) ----
+        hidden_states = torch.randn(
+            seq_len, batch_size, config.hidden_size, dtype=torch.bfloat16, device="cuda"
+        ).requires_grad_(True)
+
+        output = block(
+            hidden_states=hidden_states,
+            attention_mask=None,
+            attn_mask_type=AttnMaskType.causal,
+        )
+        assert output.shape == (seq_len, batch_size, config.hidden_size)
+
+        # With attention_mask=None the top-k holder rides on config (the mask-free
+        # carrier). Every 'full' layer must have published its top-k; every 'shared'
+        # layer must be able to resolve its source in the holder.
+        holder = getattr(config, _DSA_TOPK_HOLDER_ATTR, None)
+        assert holder is not None, "DSA top-k holder was not created on the carrier"
+        for i, layer in enumerate(block.layers):
+            core = layer.self_attention.core_attention
+            if config.indexer_types[i] == "full":
+                assert core.layer_number in holder, (
+                    f"full layer {i} did not publish top-k to the holder"
+                )
+            else:
+                assert core.source_layer in holder, (
+                    f"shared layer {i} could not resolve source layer in the holder"
+                )
+
+        # ---- backward ----
+        loss = output.float().sum()
+        loss.backward()
+        assert hidden_states.grad is not None, "no gradient flowed to the input"
+        n_with_grad = sum(
+            1 for p in block.parameters() if p.requires_grad and p.grad is not None
+        )
+        assert n_with_grad > 0

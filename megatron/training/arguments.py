@@ -3276,6 +3276,28 @@ def _add_experimental_attention_variant_args(parser):
         'and fall back to unfused PyTorch implementations.',
         dest='apply_dsa_kernel_fusion',
     )
+    # DSA indexer sharing (GLM5/GLM5.1/GLM5.2 style DSA structure)
+    group.add_argument(
+        '--indexer-types',
+        type=str,
+        nargs='+',
+        default=None,
+        help="Per-layer DSA indexer type. Space-separated list of 'full'/'shared' with "
+        "length equal to --num-layers. 'full' means the layer computes its own top-k "
+        "indices; 'shared' means the layer reuses the previous layer's top-k indices "
+        "(no indexer). Mutually exclusive with --indexer-type-rule. "
+        "Example: --indexer-types full shared shared shared",
+    )
+    group.add_argument(
+        '--indexer-type-rule',
+        type=str,
+        default=None,
+        help="Compact rule string expanded into --indexer-types in TransformerConfig. "
+        "Supported syntax: 'N*type' (N consecutive layers), 'repeat(type, ...)' "
+        "(cyclic pattern filling remaining layers), segments joined with '+' where "
+        "segments before repeat() are prefix and segments after are suffix. "
+        "Example: '2*full + repeat(full, shared, shared, shared) + 1*full'.",
+    )
     return parser
 
 def _add_heterogeneous_args(parser):
