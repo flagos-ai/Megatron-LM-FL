@@ -314,12 +314,11 @@ def build_data_parallel_buffer_index(
         if item.numel() < chunk_size_factor:
             fragment_items.append((item_id, item))
         else:
-            item[1:].numel()
             regular_items.append((item_id, item))
 
     # Sort the fragments so that items with larger sizes come first.
     # When filling the remaining space, prioritize placing the larger fragments first.
-    sorted(fragment_items, key=lambda id_item: -id_item[1].numel())
+    fragment_items = sorted(fragment_items, key=lambda id_item: -id_item[1].numel())
 
     # For all bucket parameters, add information on the parameter to the item index map,
     # and add the size of the parameter to the bucket.
@@ -1381,19 +1380,21 @@ def _get_parameter_groups(
     param_to_name = {p: name for name, p in module.named_parameters()}
     # fsdp_units is a list of lists of parameter names, one list per FSDP unit module.
     fsdp_units = []
+    # print(f"{policy.fsdp_unit_modules=}")
     if policy.fsdp_unit_modules:
         fsdp_modules = []
         # Loop through all sub-modules of the module.
         for m in module.modules():
             # Skip nested FSDP module, i.e. FSDP modules already have their
             # sub-module parameters registered.
-            if any(is_submodule(module, fsdp_module) for fsdp_module in fsdp_modules):
+            if any(is_submodule(m, fsdp_module) for fsdp_module in fsdp_modules):
                 continue
             # If the sub-module is a FSDP unit module, add its parameter (names)
             # to the list of FSDP units.
             if isinstance(m, tuple(policy.fsdp_unit_modules)):
                 fsdp_units.append([param_to_name[p] for p in m.parameters()])
                 fsdp_modules.append(m)
+        # print(f"{fsdp_modules=}")
 
     def _does_param_require_new_bucket(param):
         """
@@ -1408,12 +1409,15 @@ def _get_parameter_groups(
             and policy.data_parallel_sharding_strategy != "no_shard"
         )
 
+    # print(f"{fsdp_units=}")
+
     is_expert_parameter = lambda n, p: ".experts." in n
 
     # Step 1: Group the parameters according to their execution order and attributes.
     # FSDP unit module parameters are split into multiple parameter sub-groups.
     # All parameters in the module are assigned a parameter group, even non-FSDP modules.
     parameter_groups = []
+    params_to_name = {}
     for name, param in module.named_parameters():
         # We need this information to correctly dynamically allocate Tensors!
         is_fp8 = is_float8tensor(param)
@@ -1441,12 +1445,14 @@ def _get_parameter_groups(
             # Parameters are grouped by their attributes and FSDP unit module ID.
             if group_attrs == param_attrs:
                 param_group.params.append(param)
+                params_to_name[param] = name
                 found_group = True
                 break
 
         # If the parameter does not belong to any group, create a new group for it.
         if not found_group:
             parameter_groups.append(ParameterGroup([param], **param_attrs))
+            params_to_name[param] = name
 
     # Step 2: Bucket the parameters based on the guide bucket size.
     # Parameter groups can be split into multiple buckets based on bucket size.
@@ -1499,29 +1505,48 @@ def _get_parameter_groups(
 
     # Step 3: Split parameter groups to meet communication segmentation requirements.
     new_bucket_groups = []
-    for group in bucket_groups:
+    for idx, group in enumerate(bucket_groups):
         params = sorted(
             group.params, key=lambda p: to_local_if_dtensor(p).shape[1:].numel(), reverse=True
         )
+        # print(f"{idx=}, {len(params)=} ************************************")
+        # for param in params:
+        #     param_name = params_to_name[param]
+        #     print(f"{param_name=}")
         while len(params) > 0:
             chunk_size_factor = to_local_if_dtensor(params[0]).shape[1:].numel()
             same_factor_params = []
             remaining_params = []
+            # print(f"before: {chunk_size_factor=}")
             for param in params:
                 param_shape = to_local_if_dtensor(param).shape
+                # param_name = params_to_name[param]
+                # flag = (
+                #     param_shape[1:].numel() == chunk_size_factor
+                #     or (
+                #         chunk_size_factor % param_shape[1:].numel() == 0
+                #         and param_shape.numel() % chunk_size_factor == 0
+                #     )
+                #     or (param_shape.numel() < chunk_size_factor)
+                # )
+                # print(f"{param_name=}, {param_shape=}, {flag=}")
                 if (
                     param_shape[1:].numel() == chunk_size_factor
                     or (
                         chunk_size_factor % param_shape[1:].numel() == 0
                         and param_shape.numel() % chunk_size_factor == 0
                     )
-                    or (param_shape.numel() < chunk_size_factor)
+                    or (
+                        len(param_shape) <= 1
+                        and (param_shape.numel() < chunk_size_factor)
+                    )
                 ):
                     same_factor_params.append(param)
                 else:
-                    lcm_chunk_size_factor = math.lcm(chunk_size_factor, param_shape[1:].numel())
-                    chunk_size_factor = lcm_chunk_size_factor
-                    same_factor_params.append(param)
+                    # lcm_chunk_size_factor = math.lcm(chunk_size_factor, param_shape[1:].numel())
+                    # chunk_size_factor = lcm_chunk_size_factor
+                    remaining_params.append(param)
+            # print(f"after: {chunk_size_factor=}")
             # Create a new parameter group with the same chunk size factor.
             new_bucket_groups.append(
                 ParameterGroup(
@@ -2805,6 +2830,7 @@ class ParamAndGradBuffer:
                     self.bucketing_policy.data_parallel_sharding_strategy != "no_shard"
                 )
 
+                # print(f"{wbuf=}, {tbuf=}, {mbuf=}, {param_name=}")
                 # Register model training and high-precision parameters as DTensor(s).
                 if mbuf:
                     dist_param = make_fsdp_dtensor(
@@ -4678,6 +4704,7 @@ def make_fsdp_dtensor(
     else:
         local_shape = (-1,)
 
+    # print(f"{local_tensor.shape=}, {local_shape=}")
     # Create the FSDP-compliant DTensor
     fsdp_tensor = DTensor.from_local(
         local_tensor=local_tensor.view(local_shape),
