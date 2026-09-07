@@ -23,6 +23,7 @@ from megatron.core.transformer.enums import CudaGraphScope
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import internal_api, is_te_min_version
+from megatron.plugin.decorators import overridable
 
 ########## FlagScale Begin ##########
 from megatron.plugin.platform import get_platform
@@ -536,6 +537,24 @@ def unpermute(
     return output_tokens.to(dtype=input_dtype)
 
 
+@overridable
+def _sort_chunks_by_idxs(
+    input: torch.Tensor,
+    split_sizes: torch.Tensor,
+    sorted_idxs: torch.Tensor,
+    probs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Reference chunk reorder used when no platform plugin overrides it."""
+    input_chunks = torch.split(input, split_sizes.tolist(), dim=0)
+    output = torch.cat([input_chunks[i] for i in sorted_idxs.tolist()], dim=0)
+    if probs is not None:
+        prob_chunks = torch.split(probs, split_sizes.tolist(), dim=0)
+        permuted_probs = torch.cat([prob_chunks[i] for i in sorted_idxs.tolist()], dim=0)
+    else:
+        permuted_probs = None
+    return output, permuted_probs
+
+
 def sort_chunks_by_idxs(
     input: torch.Tensor,
     split_sizes: torch.Tensor,
@@ -571,14 +590,7 @@ def sort_chunks_by_idxs(
             )
         return fused_sort_chunks_by_index_with_probs(input, probs, split_sizes, sorted_idxs)
 
-    input = torch.split(input, split_sizes.tolist(), dim=0)
-    output = torch.cat([input[i] for i in sorted_idxs.tolist()], dim=0)
-    if probs is not None:
-        probs = torch.split(probs, split_sizes.tolist(), dim=0)
-        permuted_probs = torch.cat([probs[i] for i in sorted_idxs.tolist()], dim=0)
-    else:
-        permuted_probs = None
-    return output, permuted_probs
+    return _sort_chunks_by_idxs(input, split_sizes, sorted_idxs, probs)
 
 
 def group_limited_topk(
