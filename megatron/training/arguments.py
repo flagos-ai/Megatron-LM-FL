@@ -2060,6 +2060,7 @@ def _add_network_size_args(parser):
         "bias_dropout_fusion",
         "apply_rope_fusion",
         "apply_dsa_kernel_fusion",
+        "apply_dsa_indexer_loss_fusion",
     ]
     transformer_factory = ArgumentGroupFactory(TransformerConfig, exclude=exclude)
     transformer_group = transformer_factory.build_group(parser, "transformer configuration")
@@ -3275,6 +3276,13 @@ def _add_experimental_attention_variant_args(parser):
         help='Disable fused DSA sparse-attention kernels (FlashMLA + cuDNN DSA) '
         'and fall back to unfused PyTorch implementations.',
         dest='apply_dsa_kernel_fusion',
+    )
+    group.add_argument(
+        '--no-dsa-indexer-loss-fusion',
+        action='store_false',
+        help='Disable the fused Triton DSA indexer-loss kernels and fall back to the '
+        'unfused PyTorch implementation.',
+        dest='apply_dsa_indexer_loss_fusion',
     )
     return parser
 
