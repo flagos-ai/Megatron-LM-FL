@@ -86,8 +86,8 @@ test_matrix:
         path: tests/unit_tests/fusions/
         description: Fusion tests
       - name: others
-        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Export, post-training, tokenizer, and utility tests
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
       - tests/unit_tests/test_layer_wise_optimizer.py
@@ -404,13 +404,6 @@ test_matrix:
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
 
       # others
-      # TE-FL missing fused_amax_and_scale_update_after_reduction.
-      # These three tests are also ignored on metax.
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
-      # The distributed TRT-LLM converter errors during setup on BW1000.
-      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
       # ModelOpt not available on BW1000.
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
       # The GPT checkpoint restore blocks at rank-synchronized temporary

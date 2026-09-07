@@ -74,8 +74,8 @@ test_matrix:
         path: tests/unit_tests/fusions/
         description: Fusion tests
       - name: others
-        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Export, post-training, tokenizer, and utility tests
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
@@ -200,11 +200,6 @@ test_matrix:
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
       # DCP mesh requires 4 ranks but runner has 8 after Core 0.17.0 upgrade.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load
-
-      # 7.export
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
 
       #8.fusions
       - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py

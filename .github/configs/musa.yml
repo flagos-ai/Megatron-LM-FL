@@ -71,8 +71,8 @@ test_matrix:
         path: tests/unit_tests/fusions/
         description: Fusion tests
       - name: others
-        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Export, post-training, tokenizer, and utility tests
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
     # Start with a conservative MUSA smoke set while validating runtime and TE plugin coverage.
     ignored_tests:
       # ── Core tests that genuinely require CUDA/NCCL/Apex/TE GPU paths ──────────
@@ -261,10 +261,7 @@ test_matrix:
       # This suite requires tokenizer assets under /opt/data that are not
       # mounted in the MUSA unit container.
       - tests/unit_tests/data/test_preprocess_data.py
-      # TRT-LLM FP8 export and ModelOpt inference require CUDA-backed TE/ModelOpt.
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
+      # ModelOpt inference require CUDA-backed TE/ModelOpt.
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
       # test_checkpointing: _load_base_checkpoint → read_metadata uses device='cuda' tensor

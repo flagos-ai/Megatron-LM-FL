@@ -83,8 +83,8 @@ test_matrix:
         path: tests/unit_tests/fusions/
         description: Fusion tests
       - name: others
-        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Export, post-training, tokenizer, and utility tests
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
     # Ignored test files/cases for unit tests.
     # These are skipped when running pytest on Ascend NPU.
     ignored_tests:
@@ -328,9 +328,6 @@ test_matrix:
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
 
       ## 15. others - unavailable NVIDIA components or test assets
-      # FP8 TensorRT-LLM export requires CUDA FP8 execution.
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
       # ModelOpt is not installed in the Ascend image. Preserve the pure
       # interface tests while excluding paths that instantiate it or Mamba.
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder

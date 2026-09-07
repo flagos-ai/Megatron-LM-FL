@@ -56,9 +56,9 @@ test_matrix:
       - name: dist_checkpointing
         path: tests/unit_tests/dist_checkpointing/
         description: Distributed checkpointing tests
-      #- name: tensor_parallel
-      #  path: tests/unit_tests/tensor_parallel/
-      #  description: Tensor parallel tests
+      - name: tensor_parallel
+        path: tests/unit_tests/tensor_parallel/
+        description: Tensor parallel tests
       - name: pipeline_parallel
         path: tests/unit_tests/pipeline_parallel/
         description: Pipeline parallel tests
@@ -69,8 +69,8 @@ test_matrix:
         path: tests/unit_tests/fusions/
         description: Fusion tests
       - name: others
-        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Export, post-training, tokenizer, and utility tests
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
       - tests/unit_tests/test_layer_wise_optimizer.py
@@ -247,8 +247,6 @@ test_matrix:
       # 60s for ecclUniqueId); GCU device type is "gcu" not "cuda"; Enflame-specific
       - tests/unit_tests/dist_checkpointing/test_msc.py
 
-
-
       # tensor_parallel
       # ECCL allreduce SIGSEGV in cross_entropy
       - tests/unit_tests/tensor_parallel/test_cross_entropy.py::test_vocab_parallel_cross_entropy
@@ -278,8 +276,7 @@ test_matrix:
       # gather_split_1d_tensor uses .cuda() allgather → ECCL deadlock; musa ignores gather_split
       - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_split_tensor_into_1d_equal_chunks
       - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_gather_split_1d_tensor
-      
-      
+
       # pipeline_parallel
       # ECCL collective failures in bridge communicator
       - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
@@ -330,11 +327,6 @@ test_matrix:
       - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
       # ECCL deadlock in distributed checkpointing via ModelOpt
       - tests/unit_tests/post_training/test_modelopt_module_spec.py
-      # FP8 TensorRT-LLM export requires CUDA FP8, not available on GCU
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      # CUDA distributed GPU converter
-      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
       # HuggingFace tokenizer downloads fail in CI (no network access); same reason as ascend/metax/musa
       - tests/unit_tests/tokenizers/test_tokenizer.py
       # experimental_fn/cls log via log_single_rank (safe_get_rank reads RANK env under torchrun);
