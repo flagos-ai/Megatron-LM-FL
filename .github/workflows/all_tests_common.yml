@@ -103,6 +103,7 @@ jobs:
           unit_nproc=$(yq -r '.test_matrix.unit.nproc_per_node // ""' "$config_file")
           unit_groups=$(yq -o=json -I=0 '.test_matrix.unit.groups // []' "$config_file")
           unit_extra=$(yq -o=json -I=0 '.test_matrix.unit.pytest_extra_args // []' "$config_file")
+          unit_experimental_extra=$(yq -o=json -I=0 '.test_matrix.unit.experimental_pytest_extra_args // []' "$config_file")
           ignored=$(yq -o=json -I=0 '.test_matrix.unit.ignored_tests // []' "$config_file")
           train_matrix=$(yq -o=json -I=0 '.test_matrix.functional.train // []' "$config_file")
           runtime_environment=$(yq -o=json -I=0 '.te_fl.runtime.environment // {}' "$config_file")
@@ -143,6 +144,7 @@ jobs:
             echo "train_test_matrix=$train_matrix"
             echo "unit_test_groups=$unit_groups"
             echo "unit_pytest_extra_args=$unit_extra"
+            echo "unit_experimental_pytest_extra_args=$unit_experimental_extra"
             echo "ignored_tests=$ignored"
             echo "te_fl_runtime_environment=$runtime_environment"
             echo "te_fl_install_pip_args=$install_pip_args"

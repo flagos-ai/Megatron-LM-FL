@@ -33,11 +33,14 @@ if [ ! -x "$PYTHON_BIN" ]; then
   exit 1
 fi
 
+# Optional workflow inputs may be explicitly passed as an empty string.
+export CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS="${CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS:-[]}"
+
 "$PYTHON_BIN" -c \
   "import json, os; value = json.loads(os.environ['CI_IGNORED_TESTS']); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
 "$PYTHON_BIN" -c \
   "import json, os; value = json.loads(os.environ['CI_PYTEST_EXTRA_ARGS']); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
-python3 -c \
+"$PYTHON_BIN" -c \
   "import json, os; value = json.loads(os.environ.get('CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS', '[]')); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
 
 TEST_PATHS=()
@@ -91,7 +94,7 @@ EXPERIMENTAL_ARGS=()
 while IFS= read -r item; do
   [ -n "$item" ] && EXPERIMENTAL_ARGS+=("$item")
 done < <(
-  python3 -c '
+  "$PYTHON_BIN" -c '
 import json
 import os
 
