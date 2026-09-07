@@ -380,35 +380,34 @@ def dummy_function(*args, **kwargs):
 
 def torch_all_reduce_double_dtype_bypass_wrapper(fn):
     @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if torch.is_tensor(args[0]) and args[0].dtype == torch.double:
-            args = list(args)
-            args[0] = args[0].float()
-            handle = fn(*args, **kwargs)
+    def wrapper(tensor, *args, **kwargs):
+        if torch.is_tensor(tensor) and tensor.dtype == torch.double:
+            reduced = tensor.float()
+            handle = fn(reduced, *args, **kwargs)
             if handle is not None:
                 handle.wait()
-            args[0] = args[0].double()
-            return None
+            # all_reduce is in-place: conversion must not discard the result.
+            # Keep this dtype fallback blocking even for async requests, and
+            # preserve the Work handle expected by asynchronous callers.
+            with torch.no_grad():
+                tensor.copy_(reduced)
+            return handle
 
-        return fn(*args, **kwargs)
+        return fn(tensor, *args, **kwargs)
 
     return wrapper
 
 
 def dummy_compile(*args, **kwargs):
+    # Compilation is disabled on this backend. Preserve the original object
+    # so nn.Module methods, parameters and state_dict remain accessible.
     if len(args) > 0 and callable(args[0]):
-        def wrapper(*fn_args, **fn_kwargs):
-            return args[0](*fn_args, **fn_kwargs)
+        return args[0]
 
-        return wrapper
-    else:
-        def compile_wrapper(fn):
-            def wrapper(*fn_args, **fn_kwargs):
-                return fn(*fn_args, **fn_kwargs)
+    def compile_wrapper(fn):
+        return fn
 
-            return wrapper
-
-        return compile_wrapper
+    return compile_wrapper
 
 
 def version_wrapper(fn):
