@@ -1,0 +1,966 @@
+# FlagScale baseline: 6d775cd01d5c822f9413b9952a81652c917d273e
+# Purpose: preserve the Megatron-LM-FL MegaLens lifecycle and dense-batch Graph compatibility through FlagScale's vendored training overlay.
+diff --git a/flagscale/train/megatron/training/arguments.py b/flagscale/train/megatron/training/arguments.py
+index 2105958a79d5f1adbd61344a78a42c92ecc8d450..07615c5427fc843cb3d2263af2b43aef863a41fc 100644
+--- a/flagscale/train/megatron/training/arguments.py
++++ b/flagscale/train/megatron/training/arguments.py
+@@ -9,6 +9,7 @@ import os
+ from pathlib import Path
+ import re
+ import types
++import warnings
+ 
+ import torch
+ import torch.nn.functional as F
+@@ -86,9 +87,95 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
+     parser = _add_msc_args(parser)
+     parser = _add_kitchen_quantization_arguments(parser)
+     parser = _add_sft_args(parser)
++    parser = _add_megalens_args(parser)
+ 
+     return parser
+ 
++
++def _add_megalens_args(parser):
++    group = parser.add_argument_group(title='megalens')
++    group.add_argument(
++        '--trace',
++        action='store_true',
++        help='Enable rank-local MegaLens training traces.',
++    )
++    group.add_argument(
++        '--trace-mode',
++        type=int,
++        default=1,
++        choices=[0, 1],
++        help='0 records the lightweight sentinel; 1 records framework scopes.',
++    )
++    group.add_argument(
++        '--hardware-monitor',
++        action='store_true',
++        help='Sample hardware counters during active MegaLens iterations.',
++    )
++    group.add_argument('--trace-dir', type=str, default='trace_output')
++    group.add_argument('--trace-interval', type=int, default=1000)
++    group.add_argument('--continuous-trace-iterations', type=int, default=1)
++    group.add_argument(
++        '--trace-granularity',
++        choices=['base', 'full'],
++        default='full',
++    )
++    group.add_argument('--sentinel-hw-sample-ms', type=float, default=100.0)
++    group.add_argument('--sentinel-flush-interval', type=int, default=100)
++    group.add_argument(
++        '--trace-gather-to-rank0',
++        action='store_true',
++        default=False,
++        help='Use the legacy collective single-writer trace path.',
++    )
++    group.add_argument(
++        '--trace-cupti-kernels',
++        choices=['auto', 'on', 'off'],
++        default='off',
++        help=(
++            'Optional CUDA kernel-level tracing via torch.profiler. "auto" enables '
++            'kernel capture for mode-1 full traces, "on" forces it for mode-1 '
++            'traces, and "off" disables it.'
++        ),
++    )
++    return parser
++
++
++def _validate_megalens_args(args):
++    if args.hardware_monitor and not args.trace:
++        raise ValueError('--hardware-monitor requires --trace')
++    if not args.trace:
++        return
++    if args.trace_interval <= 0:
++        raise ValueError('--trace-interval must be greater than zero')
++    if not 0 < args.continuous_trace_iterations <= args.trace_interval:
++        raise ValueError(
++            '--continuous-trace-iterations must be in [1, trace-interval]'
++        )
++    if args.sentinel_hw_sample_ms <= 0:
++        raise ValueError('--sentinel-hw-sample-ms must be greater than zero')
++    if args.sentinel_flush_interval <= 0:
++        raise ValueError('--sentinel-flush-interval must be greater than zero')
++    kernel_capture_requested = (
++        args.trace_mode != 0 and args.trace_cupti_kernels != 'off'
++    )
++    if args.cuda_graph_impl != 'none':
++        warnings.warn(
++            'MegaLens tracing with CUDA Graphs records eager and graph-external '
++            'framework scopes; Python scopes inside managed capture/replay are '
++            'unavailable.',
++            RuntimeWarning,
++            stacklevel=2,
++        )
++    if (
++        kernel_capture_requested
++        and args.profile
++        and args.use_pytorch_profiler
++    ):
++        raise ValueError(
++            'MegaLens kernel capture cannot nest the Megatron PyTorch profiler'
++        )
++
++
+ def parse_args(extra_args_provider=None, ignore_unknown_args=False):
+     """Parse all arguments."""
+     parser = argparse.ArgumentParser(description='Megatron-LM Arguments',
+@@ -322,6 +409,8 @@ def tuple_type(x):
+ 
+ def validate_args(args, defaults={}):
+ 
++    _validate_megalens_args(args)
++
+     # Temporary
+     assert args.non_persistent_ckpt_type in ['global', 'local', None], \
+         'Currently only global and local checkpoints are supported'
+diff --git a/flagscale/train/megatron/training/global_vars.py b/flagscale/train/megatron/training/global_vars.py
+index 530030c8f3db745d98349b13d2d5f862f07ab168..c0678ead56f705db6bcf6024c9c2dfd9497d11a7 100644
+--- a/flagscale/train/megatron/training/global_vars.py
++++ b/flagscale/train/megatron/training/global_vars.py
+@@ -31,6 +31,7 @@ _GLOBAL_ADLR_AUTORESUME = None
+ _GLOBAL_TIMERS = None
+ _GLOBAL_ENERGY_MONITOR = None
+ _GLOBAL_SIGNAL_HANDLER = None
++_GLOBAL_MEGALENS_RUNTIME = None
+ 
+ ########## FlagScale Begin ##########
+ _GLOBAL_SPIKY_LOSS_DETECTOR = None
+@@ -89,6 +90,18 @@ def get_signal_handler():
+     return _GLOBAL_SIGNAL_HANDLER
+ 
+ 
++def get_megalens_runtime():
++    """Return the lazily-created per-rank MegaLens runtime."""
++    _ensure_var_is_initialized(_GLOBAL_MEGALENS_RUNTIME, 'MegaLens runtime')
++    return _GLOBAL_MEGALENS_RUNTIME
++
++
++def get_tracer():
++    """Return the active MegaLens tracer, or ``None`` when tracing is disabled."""
++    runtime = _GLOBAL_MEGALENS_RUNTIME
++    return runtime.tracer if runtime is not None else None
++
++
+ def _set_signal_handler(exit_signal):
+ 
+     global _GLOBAL_SIGNAL_HANDLER
+@@ -109,6 +122,8 @@ def _graceful_shutdown(signum, frame):
+     from megatron.training.utils import print_rank_0
+     print_rank_0("\nTermination requested. Performing orderly shutdown.")
+ 
++    shutdown_megalens_runtime(graceful=False)
++
+     try:
+         if torch.distributed.is_available() and torch.distributed.is_initialized():
+             # synchronize all ranks before exiting
+@@ -160,6 +175,8 @@ def set_global_variables(args, build_tokenizer=True):
+     if args.disable_jit_fuser:
+         disable_jit_fuser()
+ 
++    _set_megalens_runtime(args)
++
+ 
+ def set_global_writers(args):
+     """Set tensorboard-writer and wandb writer.
+@@ -211,6 +228,9 @@ def unset_global_variables():
+     global _GLOBAL_TIMERS
+     global _GLOBAL_ENERGY_MONITOR
+     global _GLOBAL_SIGNAL_HANDLER
++    global _GLOBAL_MEGALENS_RUNTIME
++
++    shutdown_megalens_runtime(graceful=False)
+ 
+     _GLOBAL_ARGS = None
+     _GLOBAL_NUM_MICROBATCHES_CALCULATOR = None
+@@ -222,6 +242,7 @@ def unset_global_variables():
+     _GLOBAL_TIMERS = None
+     _GLOBAL_ENERGY_MONITOR = None
+     _GLOBAL_SIGNAL_HANDLER = None
++    _GLOBAL_MEGALENS_RUNTIME = None
+ 
+     unset_num_microbatches_calculator()
+ 
+@@ -231,6 +252,30 @@ def set_args(args):
+     _GLOBAL_ARGS = args
+ 
+ 
++def _set_megalens_runtime(args):
++    """Create MegaLens only when tracing was explicitly requested."""
++    global _GLOBAL_MEGALENS_RUNTIME
++    _ensure_var_is_not_initialized(_GLOBAL_MEGALENS_RUNTIME, 'MegaLens runtime')
++    if not getattr(args, 'trace', False):
++        return
++
++    from megatron.megalens.runtime import MegaLensRuntime
++
++    _GLOBAL_MEGALENS_RUNTIME = MegaLensRuntime(args)
++
++
++def shutdown_megalens_runtime(*, graceful: bool) -> None:
++    """Idempotently close MegaLens before distributed/global teardown."""
++    global _GLOBAL_MEGALENS_RUNTIME
++    runtime = _GLOBAL_MEGALENS_RUNTIME
++    if runtime is None:
++        return
++    try:
++        runtime.shutdown(graceful=graceful)
++    finally:
++        _GLOBAL_MEGALENS_RUNTIME = None
++
++
+ def _build_tokenizer(args):
+     """Initialize tokenizer."""
+     global _GLOBAL_TOKENIZER
+@@ -374,6 +419,8 @@ def _ensure_var_is_not_initialized(var, name):
+     assert var is None, '{} is already initialized.'.format(name)
+ 
+ def destroy_global_vars():
++    shutdown_megalens_runtime(graceful=False)
++
+     global _GLOBAL_ARGS
+     _GLOBAL_ARGS = None
+ 
+diff --git a/flagscale/train/megatron/training/training.py b/flagscale/train/megatron/training/training.py
+index d48ddfb2b83a5d9ec775371b903684ecb090f789..983bc4d597bc7cafc5677be5d21c93a6dea19bb8 100644
+--- a/flagscale/train/megatron/training/training.py
++++ b/flagscale/train/megatron/training/training.py
+@@ -44,12 +44,13 @@ import math
+ import os
+ import socket
+ import sys
+-from contextlib import nullcontext
++from contextlib import ExitStack, nullcontext
+ from pathlib import Path
+ from typing import Any, Optional, Dict
+ 
+ import torch.distributed
+ 
++from megatron.core.observability import trace_scope
+ from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
+ from megatron.core.optimizer_param_scheduler import get_canonical_lr_for_logging
+ from .log_handler import CustomHandler
+@@ -249,6 +250,8 @@ from megatron.training.global_vars import (
+     get_one_logger,
+     get_tokenizer,
+     get_energy_monitor,
++    get_megalens_runtime,
++    shutdown_megalens_runtime,
+ )
+ from . import one_logger_utils
+ from .dgrad_logging import enable_dgrad_logging, disable_dgrad_logging, save_dgrads
+@@ -933,6 +936,28 @@ def preprocess_common_state_dict(common_state_dict):
+     return preprocessed_common_state_dict
+ 
+ 
++def _owns_megalens_runtime(pretrain_func):
++    """Ensure failures across the pretrain lifecycle close MegaLens."""
++
++    @functools.wraps(pretrain_func)
++    def wrapped(*args, **kwargs):
++        try:
++            result = pretrain_func(*args, **kwargs)
++        except BaseException:
++            try:
++                shutdown_megalens_runtime(graceful=False)
++            except BaseException:
++                logging.getLogger(__name__).exception(
++                    "MegaLens non-graceful shutdown failed while handling a pretrain failure"
++                )
++            raise
++        shutdown_megalens_runtime(graceful=True)
++        return result
++
++    return wrapped
++
++
++@_owns_megalens_runtime
+ def pretrain(
+     train_valid_test_dataset_provider,
+     model_provider,
+@@ -2187,7 +2212,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
+         profile_cuda=profile_cuda,
+     ):
+         timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
+-        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
++        with trace_scope("optimizer"):
++            update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+         # get max attention logit for logging and run clip_qk()
+         # Part of MuonClip Optimizer step
+         log_max_attention_logit = 0
+@@ -2196,58 +2222,68 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
+     
+         timers('optimizer').stop()
+ 
+-    # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
+-    # so we must gather across mp ranks
+-    update_successful = logical_and_across_model_parallel_group(update_successful)
+-    # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
+-    # so we must gather across mp ranks
+-    grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
+-    if args.log_num_zeros_in_grad:
+-        num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
+-
+-    # Vision momentum.
+-    if args.vision_pretraining and args.vision_pretraining_type == "dino":
+-        unwrapped_model = unwrap_model(model[0])
+-        unwrapped_model.update_momentum(args.curr_iteration)
+-
+-    # Update learning rate.
+-    if update_successful:
+-        increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
+-        opt_param_scheduler.step(increment=increment)
+-        skipped_iter = 0
+-    else:
+-        skipped_iter = 1
+-
+-    # Empty unused memory.
+-    if args.empty_unused_memory_level >= 2:
+-        cur_platform.empty_cache()
+-
+-    is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
+-    if args.use_dualpipev:
+-        is_last_stage = mpu.is_pipeline_first_stage(ignore_virtual=True)
+-    if is_last_stage:
+-        # Average loss across microbatches.
+-        loss_reduced = {}
+-
+-        for key in losses_reduced[0].keys():
+-            val = [x[key].view(-1) for x in losses_reduced]
+-            if val[0].numel() == 2:
+-                # there is one dict per microbatch. in new reporting, we average
+-                # over the total number of tokens across the global batch.
+-                val = torch.vstack(val).sum(dim=0)
+-                torch.distributed.all_reduce(
+-                    val,
+-                    group=mpu.get_data_parallel_group(with_context_parallel=True)
+-                )
+-                loss_reduced[key] = val[0] / val[1]
+-            elif val[0].numel() == 1:
+-                # legacy behavior, we average over the number of microbatches
+-                val = torch.cat(val).mean()
+-                loss_reduced[key] = val
+-            else:
+-                raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
++    with trace_scope("optimizer-postprocess"):
++        # when freezing sub-models we may have a mixture of successful and unsucessful ranks,
++        # so we must gather across mp ranks
++        update_successful = logical_and_across_model_parallel_group(update_successful)
++        # grad_norm and num_zeros_in_grad will be None on ranks without trainable params,
++        # so we must gather across mp ranks
++        grad_norm = reduce_max_stat_across_model_parallel_group(grad_norm)
++        if args.log_num_zeros_in_grad:
++            num_zeros_in_grad = reduce_max_stat_across_model_parallel_group(num_zeros_in_grad)
++
++        # Vision momentum.
++        if args.vision_pretraining and args.vision_pretraining_type == "dino":
++            unwrapped_model = unwrap_model(model[0])
++            unwrapped_model.update_momentum(args.curr_iteration)
++
++        # Update learning rate.
++        if update_successful:
++            increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
++            opt_param_scheduler.step(increment=increment)
++            skipped_iter = 0
++        else:
++            skipped_iter = 1
++
++        # Empty unused memory.
++        if args.empty_unused_memory_level >= 2:
++            cur_platform.empty_cache()
++
++        is_last_stage = mpu.is_pipeline_last_stage(ignore_virtual=True)
++        if args.use_dualpipev:
++            is_last_stage = mpu.is_pipeline_first_stage(ignore_virtual=True)
++        if is_last_stage:
++            # Average loss across microbatches.
++            loss_reduced = {}
++
++            for key in losses_reduced[0].keys():
++                val = [x[key].view(-1) for x in losses_reduced]
++                if val[0].numel() == 2:
++                    # there is one dict per microbatch. in new reporting, we average
++                    # over the total number of tokens across the global batch.
++                    val = torch.vstack(val).sum(dim=0)
++                    torch.distributed.all_reduce(
++                        val, group=mpu.get_data_parallel_group(with_context_parallel=True)
++                    )
++                    loss_reduced[key] = val[0] / val[1]
++                elif val[0].numel() == 1:
++                    # legacy behavior, we average over the number of microbatches
++                    val = torch.cat(val).mean()
++                    loss_reduced[key] = val
++                else:
++                    raise ValueError(f"Invalid value shape: {val[0].shape} for key {key}")
++            return (
++                loss_reduced,
++                skipped_iter,
++                should_checkpoint,
++                should_exit,
++                exit_code,
++                grad_norm,
++                num_zeros_in_grad,
++                log_max_attention_logit,
++            )
+         return (
+-            loss_reduced,
++            {},
+             skipped_iter,
+             should_checkpoint,
+             should_exit,
+@@ -2256,7 +2292,6 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
+             num_zeros_in_grad,
+             log_max_attention_logit,
+         )
+-    return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, log_max_attention_logit
+ 
+ 
+ def training_log(
+@@ -3264,212 +3299,277 @@ def train(
+     # Run training iterations till done.
+     buffered_rollouts = None
++    if args.trace and args.skip_samples_range and args.rampup_batch_size is not None:
++        raise ValueError(
++            "MegaLens tracing does not support --skip-samples-range with "
++            "--rampup-batch-size; use --skip-iters-range or a fixed global batch size"
++        )
+     while iteration < args.train_iters:
+-        if (args.profile 
+-            and (len(args.profile_ranks) == 0 or
+-                 torch.distributed.get_rank() in args.profile_ranks)):
+-            if args.use_pytorch_profiler:
+-                prof.step()
+-            elif iteration == args.profile_step_start:
+-                torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStart())
+-                nsys_nvtx_context = torch.autograd.profiler.emit_nvtx(record_shapes=True)
+-                nsys_nvtx_context.__enter__()
+-
+-        ft_integration.on_checkpointing_start()
+-        maybe_finalize_async_save(blocking=False)
+-        ft_integration.on_checkpointing_end(is_async_finalization=True)
+-        # Update the timeout for all process groups after initialization
+-        # We update the timeout after the first successful iteration,
+-        # which takes longer than others usually
+-        if args.distributed_timeout_seconds_after_init is not None and iteration == start_iteration+1:
+-            # TODO: some dynamic timeout setting is required
+-            # based on the iteration time considering interval-based steps (e.g. eval, checkpoint)
+-            # e.g. timeout for normal iterations vs timeout for iterations with checkpoint
+-            # this timeout is triggered when there's no collective communication
+-            # for the duration of timeout
+-            update_pg_timeout(timedelta(seconds=args.distributed_timeout_seconds_after_init))
+-        # Update number of microbatches first without consistency check to decide if a
+-        # checkpoint should be saved. If the number of microbatches is different
+-        # from the previous iteration, save a checkpoint. Then run consistency check
+-        # to make sure training configuration is still valid.
+-        # Standard microbatch update (sequence packing overrides this in rl_utils.py)
+-        update_num_microbatches(args.consumed_train_samples, consistency_check=False, verbose=True)
+-        # Skip automatic checkpoint on microbatch changes when sequence packing is active
+-        # as it intentionally reconfigures microbatches
+-        if get_num_microbatches() != num_microbatches and iteration != 0 \
+-            and args.save_when_num_microbatches_change: ####### FlagScale Add #######
+-            if args.rl_use_sequence_packing:
+-                print_rank_0(
+-                    f"[Sequence Packing] Skipping automatic checkpoint at iteration {iteration} "
+-                    f"(microbatch change: {num_microbatches} -> {get_num_microbatches()})"
++        skip_iteration = (iteration + 1) in args.iterations_to_skip
++        range_skip_enabled = bool(args.skip_samples_range or args.skip_iters_range)
++        trace_iteration = getattr(args, 'trace', False) and not skip_iteration
++        range_skip_active = False
++        if trace_iteration:
++            if args.skip_samples_range:
++                current_global_batch_size = get_current_global_batch_size()
++                range_skip_active = (
++                    args.consumed_train_samples + current_global_batch_size
++                    > args.skip_samples_range[0]
++                    and args.consumed_train_samples < args.skip_samples_range[1]
++                )
++            elif args.skip_iters_range:
++                range_skip_active = (
++                    args.skip_iters_range[0] <= iteration < args.skip_iters_range[1]
++                )
++        megalens_runtime = (
++            get_megalens_runtime() if getattr(args, 'trace', False) else None
++        )
++        if megalens_runtime is not None and (skip_iteration or range_skip_active):
++            megalens_runtime.tracer.close_trace_window()
++        with ExitStack() as iteration_stack:
++            if trace_iteration and not range_skip_active:
++                if not megalens_runtime.tracer.is_mode0():
++                    # Align mode-1 iteration starts across the default WORLD process group.
++                    torch.distributed.barrier()
++                iteration_stack.enter_context(
++                    megalens_runtime.iteration(
++                        iteration + 1,
++                        enable_hw_monitor=getattr(args, 'hardware_monitor', False),
++                    )
+                 )
+-            else:
+-                assert get_num_microbatches() > num_microbatches, (
+-                    f"Number of microbatches should be increasing due to batch size rampup; "
+-                    f"instead going from {num_microbatches} to {get_num_microbatches()}"
++
++            if (
++                args.profile
++                and (
++                    len(args.profile_ranks) == 0
++                    or torch.distributed.get_rank() in args.profile_ranks
+                 )
+-                if args.save is not None:
+-                    save_checkpoint_and_time(
+-                        iteration,
+-                        model,
+-                        optimizer,
+-                        opt_param_scheduler,
+-                        num_floating_point_operations_so_far,
+-                        checkpointing_context,
+-                        train_data_iterator=train_data_iterator,
++            ):
++                if args.use_pytorch_profiler:
++                    prof.step()
++                elif iteration == args.profile_step_start:
++                    torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStart())
++                    nsys_nvtx_context = torch.autograd.profiler.emit_nvtx(record_shapes=True)
++                    nsys_nvtx_context.__enter__()
++
++            ft_integration.on_checkpointing_start()
++            maybe_finalize_async_save(blocking=False)
++            ft_integration.on_checkpointing_end(is_async_finalization=True)
++            # Update the timeout for all process groups after initialization
++            # We update the timeout after the first successful iteration,
++            # which takes longer than others usually
++            if (
++                args.distributed_timeout_seconds_after_init is not None
++                and iteration == start_iteration + 1
++            ):
++                # TODO: some dynamic timeout setting is required
++                # based on the iteration time considering interval-based steps (e.g. eval, checkpoint)
++                # e.g. timeout for normal iterations vs timeout for iterations with checkpoint
++                # this timeout is triggered when there's no collective communication
++                # for the duration of timeout
++                update_pg_timeout(timedelta(seconds=args.distributed_timeout_seconds_after_init))
++            # Update number of microbatches first without consistency check to decide if a
++            # checkpoint should be saved. If the number of microbatches is different
++            # from the previous iteration, save a checkpoint. Then run consistency check
++            # to make sure training configuration is still valid.
++            # Standard microbatch update (sequence packing overrides this in rl_utils.py)
++            update_num_microbatches(
++                args.consumed_train_samples, consistency_check=False, verbose=True
++            )
++            # Skip automatic checkpoint on microbatch changes when sequence packing is active
++            # as it intentionally reconfigures microbatches
++            if (
++                get_num_microbatches() != num_microbatches
++                and iteration != 0
++                and args.save_when_num_microbatches_change
++            ):  ####### FlagScale Add #######
++                if args.rl_use_sequence_packing:
++                    print_rank_0(
++                        f"[Sequence Packing] Skipping automatic checkpoint at iteration {iteration} "
++                        f"(microbatch change: {num_microbatches} -> {get_num_microbatches()})"
+                     )
+-        num_microbatches = get_num_microbatches()
+-        update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
+-
+-        # Capture CUDA Graphs.
+-        if (
+-            args.cuda_graph_impl == "transformer_engine"
+-            and not cuda_graph_helper.capture_finished()
+-            and iteration - start_iteration == args.cuda_graph_warmup_steps
+-        ):
+-            if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
+-                disable_forward_pre_hook(model, param_sync=False)
+-            cuda_graph_helper.create_cudagraphs()
+-            if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
+-                enable_forward_pre_hook(model)
+-                cuda_graph_helper.cuda_graph_set_manual_hooks()
+-
+-        # Completely skip iteration if needed.
+-        if (iteration + 1) in args.iterations_to_skip:
+-            # Dummy train_step to fast forward train_data_iterator.
+-            dummy_train_step(train_data_iterator)
+-            if iteration == start_iteration:
+-                start_iteration = iteration + 1
+-            iteration += 1
+-            batch_size = (
+-                mpu.get_data_parallel_world_size() * args.micro_batch_size * get_num_microbatches()
++                else:
++                    assert get_num_microbatches() > num_microbatches, (
++                        f"Number of microbatches should be increasing due to batch size rampup; "
++                        f"instead going from {num_microbatches} to {get_num_microbatches()}"
++                    )
++                    if args.save is not None:
++                        save_checkpoint_and_time(
++                            iteration,
++                            model,
++                            optimizer,
++                            opt_param_scheduler,
++                            num_floating_point_operations_so_far,
++                            checkpointing_context,
++                            train_data_iterator=train_data_iterator,
++                        )
++            num_microbatches = get_num_microbatches()
++            update_num_microbatches(
++                args.consumed_train_samples, consistency_check=True, verbose=True
+             )
+-            args.consumed_train_samples += batch_size
+-            args.skipped_train_samples += batch_size
+-            continue
+-
+-        args.curr_iteration = iteration
+ 
+-        ########## FlagScale Begin ##########
+-        if args.skip_samples_range or args.skip_iters_range:
+-            current_global_batch_size = get_current_global_batch_size()
+-            start_skip_iteration = 0
+-            end_skip_iteration = 0
+-            if args.skip_samples_range:
+-                if args.consumed_train_samples + current_global_batch_size > args.skip_samples_range[0] and args.consumed_train_samples < args.skip_samples_range[1]:
+-                    num_skipped_iters = (args.skip_samples_range[1] - args.consumed_train_samples + current_global_batch_size - 1) // current_global_batch_size
+-                    args.skip_samples_range[1] = args.consumed_train_samples + num_skipped_iters * current_global_batch_size
+-                    start_skip_iteration = iteration
+-                    end_skip_iteration = iteration + num_skipped_iters
+-            else:
+-                if iteration >= args.skip_iters_range[0] and iteration < args.skip_iters_range[1]:
+-                    start_skip_iteration = iteration
+-                    end_skip_iteration = args.skip_iters_range[1]
+-            while iteration >= start_skip_iteration and iteration < end_skip_iteration:
+-                if mpu.is_pipeline_first_stage() or mpu.is_pipeline_last_stage():
+-                    for _ in range(get_num_microbatches()):
+-                        _ = next(train_data_iterator)
+-                args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
+-                                           args.micro_batch_size * \
+-                                           get_num_microbatches()
+-                update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
++            # Capture CUDA Graphs.
++            if (
++                args.cuda_graph_impl == "transformer_engine"
++                and not cuda_graph_helper.capture_finished()
++                and iteration - start_iteration == args.cuda_graph_warmup_steps
++            ):
++                if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
++                    disable_forward_pre_hook(model, param_sync=False)
++                cuda_graph_helper.create_cudagraphs()
++                if args.cuda_graph_warmup_steps > 0 and should_disable_forward_pre_hook(args):
++                    enable_forward_pre_hook(model)
++                    cuda_graph_helper.cuda_graph_set_manual_hooks()
++
++            # Completely skip iteration if needed.
++            if skip_iteration:
++                # Dummy train_step to fast forward train_data_iterator.
++                dummy_train_step(train_data_iterator)
++                if iteration == start_iteration:
++                    start_iteration = iteration + 1
+                 iteration += 1
++                batch_size = (
++                    mpu.get_data_parallel_world_size()
++                    * args.micro_batch_size
++                    * get_num_microbatches()
++                )
++                args.consumed_train_samples += batch_size
++                args.skipped_train_samples += batch_size
++                continue
+ 
+             args.curr_iteration = iteration
+-            if rerun_state_machine.current_iteration != iteration:
+-                print_rank_0(f"Setting rerun_state_machine.current_iteration to {iteration}...")
+-                rerun_state_machine.current_iteration = iteration
+-        ########## FlagScale end ##########
+-
+-        # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
+-        # It is similar to a PPO epoch.
+ 
+-        if args.perform_rl_step:
+-            if optimizer is None:
+-                # Release stale CUDA cached memory before inference.
+-                cur_platform.empty_cache()
+-            with torch.no_grad():
+-                train_data_iterator = rl_utils.get_grpo_data_iterator(
+-                    model, inference_model, optimizer, iteration, ref_state_dict,
+-                    grpo_iterations=args.grpo_iterations,
+-                    grpo_prompts_per_step=args.grpo_prompts_per_step,
+-                    grpo_group_size=args.grpo_group_size,
+-                    global_batch_size=args.global_batch_size,
+-                    sequence_packing=args.rl_use_sequence_packing,
+-                    buffered_rollouts=buffered_rollouts,
+-                    is_correction=args.rl_inference_logprobs_is_correction,
++            ########## FlagScale Begin ##########
++            if range_skip_enabled:
++                current_global_batch_size = get_current_global_batch_size()
++                start_skip_iteration = 0
++                end_skip_iteration = 0
++                if args.skip_samples_range:
++                    if args.consumed_train_samples + current_global_batch_size > args.skip_samples_range[0] and args.consumed_train_samples < args.skip_samples_range[1]:
++                        num_skipped_iters = (args.skip_samples_range[1] - args.consumed_train_samples + current_global_batch_size - 1) // current_global_batch_size
++                        args.skip_samples_range[1] = args.consumed_train_samples + num_skipped_iters * current_global_batch_size
++                        start_skip_iteration = iteration
++                        end_skip_iteration = iteration + num_skipped_iters
++                else:
++                    if iteration >= args.skip_iters_range[0] and iteration < args.skip_iters_range[1]:
++                        start_skip_iteration = iteration
++                        end_skip_iteration = args.skip_iters_range[1]
++                while iteration >= start_skip_iteration and iteration < end_skip_iteration:
++                    if mpu.is_pipeline_first_stage() or mpu.is_pipeline_last_stage():
++                        for _ in range(get_num_microbatches()):
++                            _ = next(train_data_iterator)
++                    args.consumed_train_samples += mpu.get_data_parallel_world_size() * \
++                                               args.micro_batch_size * \
++                                               get_num_microbatches()
++                    update_num_microbatches(args.consumed_train_samples, consistency_check=True, verbose=True)
++                    iteration += 1
++
++                args.curr_iteration = iteration
++                if rerun_state_machine.current_iteration != iteration:
++                    print_rank_0(f"Setting rerun_state_machine.current_iteration to {iteration}...")
++                    rerun_state_machine.current_iteration = iteration
++            ########## FlagScale end ##########
++
++            if trace_iteration and range_skip_active:
++                if not megalens_runtime.tracer.is_mode0():
++                    # Align mode-1 iteration starts after FlagScale advances range-skipped steps.
++                    torch.distributed.barrier()
++                iteration_stack.enter_context(
++                    megalens_runtime.iteration(
++                        iteration + 1,
++                        enable_hw_monitor=getattr(args, 'hardware_monitor', False),
++                    )
+                 )
+-                # Buffered rollouts are used as a state container for setups when
+-                # we use previously-generated data for an update.
+-                buffered_rollouts = train_data_iterator
+ 
+-        if args.skip_train:
+-            # RL inference-only mode: skip gradient updates, just collect rollouts.
+-            loss_dict = {}
+-            skipped_iter = 0
+-            should_checkpoint = False
+-            should_exit = False
+-            exit_code = 0
+-            grad_norm = 0.0
+-            num_zeros_in_grad = 0
+-            max_attention_logit = None
+-        else:
+-            if perf_callback is not None:
+-                perf_monitor_start_iteration(iteration)
+-            ft_integration.on_training_step_start()
+-            (
+-                loss_dict,
+-                skipped_iter,
+-                should_checkpoint,
+-                should_exit,
+-                exit_code,
+-                grad_norm,
+-                num_zeros_in_grad,
+-                max_attention_logit,
+-            ) = train_step(
+-                forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
+-            )
+-            ft_integration.on_training_step_end()
+-            if perf_callback is not None:
+-                perf_monitor_end_iteration(iteration, writer, wandb_writer)
+-        if should_checkpoint:
+-            save_checkpoint_and_time(
+-                iteration,
+-                model,
+-                optimizer,
+-                opt_param_scheduler,
+-                num_floating_point_operations_so_far,
+-                checkpointing_context,
+-                train_data_iterator=train_data_iterator,
+-            )
+-        if should_exit:
+-            break
++            # For GRPO, we keep the data for a few epochs. DeepSeekMath paper calls this number $\mu$.
++            # It is similar to a PPO epoch.
+ 
+-        # Enable forward pre-hooks after first set of forward and backward passes.
+-        # When running in fp16, skip all NaN iterations until steady-state loss scaling value
+-        # is reached.
+-        if iteration == start_iteration:
+-            if skipped_iter:
+-                # Only enable forward pre-hook after a training step has successfully run. Relevant
+-                # for fp16 codepath where first XX iterations are skipped until steady-state loss
+-                # scale value is reached.
+-                start_iteration = iteration + 1
++            if args.perform_rl_step:
++                if optimizer is None:
++                    # Release stale CUDA cached memory before inference.
++                    cur_platform.empty_cache()
++                with torch.no_grad():
++                    train_data_iterator = rl_utils.get_grpo_data_iterator(
++                        model, inference_model, optimizer, iteration, ref_state_dict,
++                        grpo_iterations=args.grpo_iterations,
++                        grpo_prompts_per_step=args.grpo_prompts_per_step,
++                        grpo_group_size=args.grpo_group_size,
++                        global_batch_size=args.global_batch_size,
++                        sequence_packing=args.rl_use_sequence_packing,
++                        buffered_rollouts=buffered_rollouts,
++                        is_correction=args.rl_inference_logprobs_is_correction,
++                    )
++                    # Buffered rollouts are used as a state container for setups when
++                    # we use previously-generated data for an update.
++                    buffered_rollouts = train_data_iterator
++
++            if args.skip_train:
++                # RL inference-only mode: skip gradient updates, just collect rollouts.
++                loss_dict = {}
++                skipped_iter = 0
++                should_checkpoint = False
++                should_exit = False
++                exit_code = 0
++                grad_norm = 0.0
++                num_zeros_in_grad = 0
++                max_attention_logit = None
+             else:
+-                # Enable forward pre-hook after training step has successfully run. All subsequent
+-                # forward passes will use the forward pre-hook / `param_sync_func` in
+-                # `forward_backward_func`.
+-                if should_disable_forward_pre_hook(args):
+-                    enable_forward_pre_hook(model)
+-                    config.param_sync_func = param_sync_func
+-                    pre_hook_enabled = True
+-                    # Set the manual hooks here since it's not set right after the capturing.
+-                    if (
+-                        args.cuda_graph_impl == "transformer_engine"
+-                        and args.cuda_graph_warmup_steps == 0
+-                    ):
+-                        assert (
+-                            cuda_graph_helper.capture_finished()
+-                        ), "CUDA Graph capture should have been finished."
+-                        cuda_graph_helper.cuda_graph_set_manual_hooks()
++                if perf_callback is not None:
++                    perf_monitor_start_iteration(iteration)
++                ft_integration.on_training_step_start()
++                (
++                    loss_dict,
++                    skipped_iter,
++                    should_checkpoint,
++                    should_exit,
++                    exit_code,
++                    grad_norm,
++                    num_zeros_in_grad,
++                    max_attention_logit,
++                ) = train_step(
++                    forward_step_func, train_data_iterator, model, optimizer, opt_param_scheduler, config, forward_backward_func, iteration=iteration
++                )
++                ft_integration.on_training_step_end()
++                if perf_callback is not None:
++                    perf_monitor_end_iteration(iteration, writer, wandb_writer)
++            if should_checkpoint:
++                save_checkpoint_and_time(
++                    iteration,
++                    model,
++                    optimizer,
++                    opt_param_scheduler,
++                    num_floating_point_operations_so_far,
++                    checkpointing_context,
++                    train_data_iterator=train_data_iterator,
++                )
++            if should_exit:
++                break
++
++            # Enable forward pre-hooks after first set of forward and backward passes.
++            # When running in fp16, skip all NaN iterations until steady-state loss scaling value
++            # is reached.
++            if iteration == start_iteration:
++                if skipped_iter:
++                    # Only enable forward pre-hook after a training step has successfully run. Relevant
++                    # for fp16 codepath where first XX iterations are skipped until steady-state loss
++                    # scale value is reached.
++                    start_iteration = iteration + 1
++                else:
++                    # Enable forward pre-hook after training step has successfully run. All subsequent
++                    # forward passes will use the forward pre-hook / `param_sync_func` in
++                    # `forward_backward_func`.
++                    if should_disable_forward_pre_hook(args):
++                        enable_forward_pre_hook(model)
++                        config.param_sync_func = param_sync_func
++                        pre_hook_enabled = True
++                        # Set the manual hooks here since it's not set right after the capturing.
++                        if (
++                            args.cuda_graph_impl == "transformer_engine"
++                            and args.cuda_graph_warmup_steps == 0
++                        ):
++                            assert (
++                                cuda_graph_helper.capture_finished()
++                            ), "CUDA Graph capture should have been finished."
++                            cuda_graph_helper.cuda_graph_set_manual_hooks()
+ 
+         iteration += 1
+
+@@ -3745,4 +3845,5 @@ def train(
+         one_logger_utils.finish()
+         if args.perform_rl_step:
+             rl_utils.rl_inference_interface_shutdown()
++        shutdown_megalens_runtime(graceful=True)
+         sys.exit(exit_code)
+
+diff --git a/flagscale/train/megatron/training/utils.py b/flagscale/train/megatron/training/utils.py
+index 7c5d65730020c110573a3d3bfd982532f4c9e8b5..16749a9f5332ada8b43187a582cef8a04f066e3e 100644
+--- a/flagscale/train/megatron/training/utils.py
++++ b/flagscale/train/megatron/training/utils.py
+@@ -621,5 +621,6 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
+ 
+     args = get_args()
++    broadcast_packed_sequence_metadata = args.hybrid_context_parallel or args.sft
+ 
+     def _broadcast(item):
+         if item is not None:
+@@ -684,16 +685,18 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
+             _broadcast(batch['loss_mask'])
+             _broadcast(batch['attention_mask'])
+             _broadcast(batch['position_ids'])
+-            _broadcast_cu_seqlens(batch['cu_seqlens'])
+-            _broadcast(batch['max_seqlen'])
++            if broadcast_packed_sequence_metadata:
++                _broadcast_cu_seqlens(batch['cu_seqlens'])
++                _broadcast(batch['max_seqlen'])
+             _broadcast(batch['local_cp_size'])
+ 
+         elif mpu.is_pipeline_first_stage():
+             _broadcast(batch['tokens'])
+             _broadcast(batch['attention_mask'])
+             _broadcast(batch['position_ids'])
+-            _broadcast_cu_seqlens(batch['cu_seqlens'])
+-            _broadcast(batch['max_seqlen'])
++            if broadcast_packed_sequence_metadata:
++                _broadcast_cu_seqlens(batch['cu_seqlens'])
++                _broadcast(batch['max_seqlen'])
+             ######### FlagScale Begin ########
+             if mpu.get_dualpipev_pipeline_model_parallel_world_size() is not None:
+                 _broadcast(batch['loss_mask'])
+@@ -747,7 +750,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
+             device=cur_platform.device(),
+         )
+         cu_seqlens = None
+-        if args.hybrid_context_parallel or args.sft:
++        if broadcast_packed_sequence_metadata:
+             max_seqlen = torch.empty(
+                 1,
+                 dtype=torch.int32,
+@@ -784,8 +787,9 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
+             _broadcast(loss_mask)
+             _broadcast(attention_mask)
+             _broadcast(position_ids)
+-            cu_seqlens = _broadcast_cu_seqlens()
+-            _broadcast(max_seqlen)
++            if broadcast_packed_sequence_metadata:
++                cu_seqlens = _broadcast_cu_seqlens()
++                _broadcast(max_seqlen)
+             _broadcast(local_cp_size)
+ 
+         elif mpu.is_pipeline_first_stage():
+@@ -792,8 +796,9 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
+             _broadcast(tokens)
+             _broadcast(attention_mask)
+             _broadcast(position_ids)
+-            cu_seqlens = _broadcast_cu_seqlens()
+-            _broadcast(max_seqlen)
++            if broadcast_packed_sequence_metadata:
++                cu_seqlens = _broadcast_cu_seqlens()
++                _broadcast(max_seqlen)
+             ######### FlagScale Modify ########
+             if mpu.get_dualpipev_pipeline_model_parallel_world_size() is not None:
+                 _broadcast(loss_mask)

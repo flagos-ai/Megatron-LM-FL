@@ -6,6 +6,7 @@ from typing import Optional, Union
 import torch
 
 from megatron.core.jit import jit_fuser
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import (
     MoEAuxLossAutoScaler,
@@ -21,6 +22,18 @@ from megatron.core.transformer.moe.moe_utils import (
     switch_load_balancing_loss_func,
     topk_routing_with_score_function,
     z_loss_func,
+)
+from megatron.core.transformer.moe.observability import (
+    ROUTER_WORKLOAD_SLOTS,
+    collect_router_assignment_fields,
+    collect_router_loss_fields,
+    dispatch_fields_requested,
+    observe_router_assignments_before_drop,
+    observe_router_loss,
+    publish_dispatch_fields,
+    router_trace_context,
+    router_workload,
+    set_trace_fields,
 )
 from megatron.core.transformer.moe.router_replay import RouterReplay
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -56,6 +69,7 @@ class Router(ABC, MegatronModule):
         self.moe_aux_loss_func = None
         self.layer_number = layer_number
         self.is_mtp_layer = is_mtp_layer
+        self.ep_group = pg_collection.ep
         self.tp_group = pg_collection.tp
         self.cp_group = pg_collection.cp
         self.tp_cp_group = pg_collection.tp_cp
@@ -100,9 +114,13 @@ class Router(ABC, MegatronModule):
         """
         if self.weight.device.type == 'cpu':
             # move weights to GPU
-            self.weight.data = self.weight.data.to(device=cur_platform.current_device())  # FlagScale Add
+            self.weight.data = self.weight.data.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Add
         if self.bias is not None and self.bias.device.type == 'cpu':
-            self.bias.data = self.bias.data.to(device=cur_platform.current_device())  # FlagScale Add
+            self.bias.data = self.bias.data.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Add
 
         # Convert to specified datatype for routing computation if enabled
         router_dtype = input.dtype
@@ -241,7 +259,9 @@ class TopKRouter(Router):
             )
             self.register_buffer(
                 'ga_steps',
-                torch.tensor(0, dtype=torch.float32, device=cur_platform.current_device()),  # FlagScale Add
+                torch.tensor(
+                    0, dtype=torch.float32, device=cur_platform.current_device()
+                ),  # FlagScale Add
                 persistent=False,
             )
         else:
@@ -348,6 +368,7 @@ class TopKRouter(Router):
             moe_aux_loss_coeff=aux_loss_coeff,
             fused=self.config.moe_router_fusion,
         )
+        observe_router_loss("load_balancing_loss", aux_loss, aux_loss_coeff)
         probs = self.attach_and_log_load_balancing_loss(
             probs,
             aux_loss_coeff,
@@ -403,6 +424,7 @@ class TopKRouter(Router):
             / bsz
         )
 
+        observe_router_loss("seq_load_balancing_loss", aux_loss, seq_aux_loss_coeff)
         probs = self.attach_and_log_load_balancing_loss(
             probs,
             seq_aux_loss_coeff,
@@ -448,6 +470,7 @@ class TopKRouter(Router):
             moe_aux_loss_coeff=global_aux_loss_coeff,
             fused=self.config.moe_router_fusion,
         )
+        observe_router_loss("global_load_balancing_loss", global_aux_loss, global_aux_loss_coeff)
         probs = self.attach_and_log_load_balancing_loss(
             probs,
             global_aux_loss_coeff,
@@ -547,6 +570,7 @@ class TopKRouter(Router):
             # Skip Z loss calculations when using torch.no_grad() or checkpointing.
             moe_z_loss_coeff = self.config.moe_z_loss_coeff / self.tp_cp_group.size()
             z_loss = z_loss_func(logits, moe_z_loss_coeff, padding_mask=padding_mask)
+            observe_router_loss("z_loss", z_loss, moe_z_loss_coeff)
             if self.calculate_per_token_loss:
                 # The expected final scaling for z_loss gradients is
                 # 1/(num_micro_batches * dp_size).
@@ -715,6 +739,13 @@ class TopKRouter(Router):
                 router_replay=self.router_replay,
             )
 
+        # Preserve the source pre-drop assignment count only for an accepted eager trace call.
+        if (
+            self.config.moe_expert_capacity_factor is not None
+            and not self.config.moe_pad_expert_input_to_capacity
+        ):
+            observe_router_assignments_before_drop(routing_map)
+
         # Apply token dropping to probs and routing_map.
         if self.config.moe_expert_capacity_factor is not None:
             probs, routing_map = apply_router_token_dropping(
@@ -801,7 +832,37 @@ class TopKRouter(Router):
                 logits, self.config.moe_router_force_biased, self.layer_number
             )
 
-        probs, routing_map = self.routing(logits, padding_mask=padding_mask, input_ids=input_ids)
+        router_gate = prepare_trace_scope("moe-router")
+        router_context = router_trace_context(self) if router_gate is not None else None
+        dispatch_fields_enabled = dispatch_fields_requested()
+        with open_trace_scope(
+            router_gate, "moe-router", attrs=router_context, slots=ROUTER_WORKLOAD_SLOTS
+        ) as router_scope:
+            if router_gate is None and not dispatch_fields_enabled:
+                probs, routing_map = self.routing(
+                    logits, padding_mask=padding_mask, input_ids=input_ids
+                )
+            else:
+                with (
+                    collect_router_assignment_fields() as router_assignment_fields,
+                    collect_router_loss_fields() as router_loss_fields,
+                ):
+                    probs, routing_map = self.routing(
+                        logits, padding_mask=padding_mask, input_ids=input_ids
+                    )
+                fields = router_workload(
+                    probs,
+                    routing_map,
+                    capacity_factor=self.config.moe_expert_capacity_factor,
+                    pad_to_capacity=self.config.moe_pad_expert_input_to_capacity,
+                    routed_tokens_before_drop=(
+                        router_assignment_fields.routed_tokens_before_drop()
+                    ),
+                )
+                fields.update(router_loss_fields.fields())
+                publish_dispatch_fields(fields)
+                if router_gate is not None:
+                    set_trace_fields(router_scope, fields)
 
         return probs, routing_map
 
@@ -814,6 +875,9 @@ class TopKRouter(Router):
         """Save the state dict of the router."""
         self._maintain_float32_expert_bias()  # switch to float32 before saving
         return super()._save_to_state_dict(*args, **kwargs)
+
+
+setattr(TopKRouter.forward, "__megatron_trace_event__", "moe-router")
 
 
 class InferenceTopKRouter(TopKRouter):

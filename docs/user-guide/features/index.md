@@ -15,6 +15,7 @@ Advanced feature guides for key Megatron Core capabilities.
 :maxdepth: 2
 
 fine_grained_activation_offloading
+megalens
 moe
 context_parallel
 custom_fsdp

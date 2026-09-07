@@ -2,8 +2,13 @@
 
 import torch
 
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
 from megatron.core.parallel_state import get_global_memory_buffer
-from megatron.core.utils import get_tensor_model_parallel_group_if_none, is_torch_min_version
+from megatron.core.utils import (
+    get_process_group_peer_ranks,
+    get_tensor_model_parallel_group_if_none,
+    is_torch_min_version,
+)
 
 from .utils import split_tensor_along_last_dim
 
@@ -25,16 +30,62 @@ cur_platform = get_platform()
 # FlagScale End
 
 
+def _tp_allreduce_context(input_, group_size: int) -> dict[str, object]:
+    """Build TP all-reduce metadata only after the probe gate accepts it."""
+    return {
+        "data_bytes": int(input_.numel() * input_.element_size()),
+        "group_size": group_size,
+        "op": "all_reduce",
+        "timing_phase": "collective_call",
+        "payload_role": "inplace_input_output",
+    }
+
+
+def _tp_all_gather_context(
+    input_, group_size: int, dim: str, split_sizes=None
+) -> dict[str, object]:
+    """Build the source-compatible TP all-gather metadata after its gate accepts."""
+    ctx = {
+        "data_bytes": int(input_.numel() * input_.element_size()),
+        "group_size": group_size,
+        "op": "all-gather",
+        "dim": dim,
+    }
+    if split_sizes is not None:
+        ctx["split_sizes"] = split_sizes
+    return ctx
+
+
+def _tp_reduce_scatter_context(
+    input_, group_size: int, dim: str, split_sizes=None
+) -> dict[str, object]:
+    """Build source-compatible TP reduce-scatter metadata after its gate accepts."""
+    ctx = {
+        "data_bytes": int(input_.numel() * input_.element_size()),
+        "group_size": group_size,
+        "op": "reduce-scatter",
+        "dim": dim,
+    }
+    if split_sizes is not None:
+        ctx["split_sizes"] = split_sizes
+    return ctx
+
+
 def _reduce(input_, group):
     """All-reduce the input tensor across model parallel group."""
     assert group is not None, "group should not be None"
 
-    # Bypass the function if we are using only 1 GPU.
-    if group.size() == 1:
-        return input_
+    group_size = int(group.size())
+    gate = prepare_trace_scope("tp-allreduce")
+    ctx = _tp_allreduce_context(input_, group_size) if gate is not None else None
+    with open_trace_scope(gate, "tp-allreduce", ctx=ctx, slots=("group",)) as scope:
+        # Preserve the source no-op scope while bypassing the collective for one rank.
+        if group_size == 1:
+            return input_
 
-    # All-reduce.
-    torch.distributed.all_reduce(input_.contiguous(), group=group)
+        if scope.get("op") == "all_reduce":
+            scope.set("group", get_process_group_peer_ranks(group))
+        torch.distributed.all_reduce(input_.contiguous(), group=group)
 
     return input_
 
@@ -94,8 +145,15 @@ def _gather_along_last_dim(input_, group):
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
-    dist_all_gather_func(output, input_.contiguous(), group=group)
+    output = torch.empty(
+        dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+    )  # FlagScale Add
+    gate = prepare_trace_scope("tp-all-gather-last")
+    ctx = _tp_all_gather_context(input_, world_size, "last") if gate is not None else None
+    with open_trace_scope(gate, "tp-all-gather-last", ctx=ctx, slots=("group",)) as scope:
+        dist_all_gather_func(output, input_.contiguous(), group=group)
+        if gate is not None:
+            scope.set("group", get_process_group_peer_ranks(group))
     tensor_list = output.chunk(world_size, dim=0)
     output = torch.cat(tensor_list, dim=-1).contiguous()
 
@@ -113,7 +171,14 @@ def _reduce_scatter_along_last_dim(input_, group):
         input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
     )
     concat_tensor = torch.cat(split_tensors, dim=0)
-    output = _reduce_scatter_along_first_dim(concat_tensor, group=group).reshape(target_shape)
+    gate = prepare_trace_scope("tp-reduce-scatter-last")
+    ctx = (
+        _tp_reduce_scatter_context(concat_tensor, world_size, "last") if gate is not None else None
+    )
+    with open_trace_scope(gate, "tp-reduce-scatter-last", ctx=ctx, slots=("group",)) as scope:
+        output = _reduce_scatter_along_first_dim(concat_tensor, group=group).reshape(target_shape)
+        if gate is not None:
+            scope.set("group", get_process_group_peer_ranks(group))
     return output
 
 
@@ -144,16 +209,32 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
-        dist_all_gather_func(output, input_.contiguous(), group=group)
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Add
     else:
         dim_size[0] = sum(output_split_sizes)
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Add
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
-        torch.distributed.all_gather(output_tensor_list, input_, group=group)
+
+    gate = prepare_trace_scope("tp-all-gather-first")
+    ctx = (
+        _tp_all_gather_context(input_, world_size, "first", output_split_sizes)
+        if gate is not None
+        else None
+    )
+    with open_trace_scope(gate, "tp-all-gather-first", ctx=ctx, slots=("group",)) as scope:
+        if output_split_sizes is None:
+            dist_all_gather_func(output, input_.contiguous(), group=group)
+        else:
+            torch.distributed.all_gather(output_tensor_list, input_, group=group)
+        if gate is not None:
+            scope.set("group", get_process_group_peer_ranks(group))
 
     return output
 
@@ -184,8 +265,9 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Add
-        dist_reduce_scatter_func(output, input_.contiguous(), group=group)
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Add
     else:
         rank = group.rank()
         input_tensor_list = list(torch.split(input_, input_split_sizes, dim=0))
@@ -196,7 +278,20 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
             )
         else:
             output = torch.empty_like(input_tensor_list[rank])
-        torch.distributed.reduce_scatter(output, input_tensor_list, group=group)
+
+    gate = prepare_trace_scope("tp-reduce-scatter")
+    ctx = (
+        _tp_reduce_scatter_context(input_, world_size, "first", input_split_sizes)
+        if gate is not None
+        else None
+    )
+    with open_trace_scope(gate, "tp-reduce-scatter", ctx=ctx, slots=("group",)) as scope:
+        if input_split_sizes is None:
+            dist_reduce_scatter_func(output, input_.contiguous(), group=group)
+        else:
+            torch.distributed.reduce_scatter(output, input_tensor_list, group=group)
+        if gate is not None:
+            scope.set("group", get_process_group_peer_ranks(group))
     return output
 
 

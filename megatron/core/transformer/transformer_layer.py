@@ -15,6 +15,7 @@ from torch import Tensor
 from megatron.core import parallel_state, tensor_parallel
 from megatron.core.dist_checkpointing.mapping import ShardedStateDict
 from megatron.core.dist_checkpointing.utils import apply_prefix_mapping
+from megatron.core.observability import open_trace_scope, prepare_trace_scope, trace_scope
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
@@ -783,13 +784,26 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
-        hidden_states, context = self._forward_attention(*args, **kwargs)
-        output = self._forward_mlp(
-            hidden_states,
-            kwargs.get("inference_context", None),
-            padding_mask=kwargs.get("padding_mask", None),
-            input_ids=kwargs.get("input_ids", None),
-        )
+        transformer_layer_gate = prepare_trace_scope("transformer_layer")
+        if transformer_layer_gate is not None:
+            with open_trace_scope(transformer_layer_gate, "transformer_layer"):
+                with trace_scope("_forward_attention"):
+                    hidden_states, context = self._forward_attention(*args, **kwargs)
+                with trace_scope("_forward_mlp"):
+                    output = self._forward_mlp(
+                        hidden_states,
+                        kwargs.get("inference_context", None),
+                        padding_mask=kwargs.get("padding_mask", None),
+                        input_ids=kwargs.get("input_ids", None),
+                    )
+        else:
+            hidden_states, context = self._forward_attention(*args, **kwargs)
+            output = self._forward_mlp(
+                hidden_states,
+                kwargs.get("inference_context", None),
+                padding_mask=kwargs.get("padding_mask", None),
+                input_ids=kwargs.get("input_ids", None),
+            )
         return output, context
 
     def _forward_pre_mlp_layernorm(self, hidden_states: Tensor):
