@@ -167,6 +167,55 @@ fi
 # Extract training params
 PARAMS=("${PARAMS[@]}" "${TRAINING_PARAMS_ARRAY[@]}")
 
+# Hugging Face copies custom tokenizer code into HF_MODULES_CACHE when
+# trust_remote_code is enabled. Preload it once before torchrun so that all
+# ranks read a fully populated dynamic-module cache instead of writing to it
+# concurrently.
+TOKENIZER_TYPE=""
+TOKENIZER_MODEL=""
+TOKENIZER_USE_FAST="true"
+TRUST_REMOTE_CODE="false"
+for ((i = 0; i < ${#TRAINING_PARAMS_ARRAY[@]}; i++)); do
+    case "${TRAINING_PARAMS_ARRAY[$i]}" in
+        --tokenizer-type)
+            TOKENIZER_TYPE="${TRAINING_PARAMS_ARRAY[$((i + 1))]:-}"
+            ;;
+        --tokenizer-model)
+            TOKENIZER_MODEL="${TRAINING_PARAMS_ARRAY[$((i + 1))]:-}"
+            ;;
+        --tokenizer-hf-no-use-fast)
+            TOKENIZER_USE_FAST="false"
+            ;;
+        --trust-remote-code)
+            TRUST_REMOTE_CODE="true"
+            ;;
+    esac
+done
+
+if [[ "$TOKENIZER_TYPE" == "HuggingFaceTokenizer" && "$TRUST_REMOTE_CODE" == "true" ]]; then
+    if [[ -z "$TOKENIZER_MODEL" ]]; then
+        echo "--tokenizer-model is required when preloading a Hugging Face tokenizer." >&2
+        exit 1
+    fi
+
+    echo "Preloading Hugging Face tokenizer before torchrun: $TOKENIZER_MODEL"
+    uv run --no-sync python - "$TOKENIZER_MODEL" "$TOKENIZER_USE_FAST" <<'PY'
+import sys
+
+from transformers import AutoTokenizer
+
+
+tokenizer_path = sys.argv[1]
+use_fast = sys.argv[2].lower() == "true"
+tokenizer = AutoTokenizer.from_pretrained(
+    tokenizer_path,
+    trust_remote_code=True,
+    use_fast=use_fast,
+)
+print(f"Preloaded tokenizer: {type(tokenizer).__name__} ({len(tokenizer)} tokens)")
+PY
+fi
+
 # Set PYTHONPATH
 export PYTHONPATH="$(pwd):${PYTHONPATH:-}"
 export WANDB_API_KEY="${WANDB_API_KEY:-}"
