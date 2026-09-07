@@ -11,7 +11,7 @@ ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:manual-20260828-cuda-dev
 
 # Runner labels for A100 node
 runner_labels:
-  - nv-8g-cicd-megatron
+  - flagcicd-a100
 
 # Container volumes (hardware-specific paths)
 # container_volumes:
@@ -95,6 +95,10 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/models/test_mamba.py
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
       - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
+      - tests/unit_tests/data/test_preprocess_data.py
+      # Downloads GPT-2 tokenizer files when the mounted offline fixture is absent.
+      # CI runners cannot rely on external Hugging Face/S3 access.
+      - tests/unit_tests/data/test_preprocess_mmdata.py
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
@@ -209,3 +213,21 @@ test_matrix:
         golden_platform: dgx_a100
         enable_lightweight_mode: false
         gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: cuda
+  build_environment:
+    NVTE_FRAMEWORK: pytorch
+    NVTE_WITH_USERBUFFERS: "0"
+    NVTE_WITH_CUDA: "1"
+    NVTE_WITH_NCCL_EP: "0"
+    NVTE_CUDA_ARCHS: "80"
+    CMAKE_CUDA_ARCHITECTURES: "80"
+    TORCH_CUDA_ARCH_LIST: "8.0"
+  runtime:
+    environment:
+      TE_FL_PREFER: flagos
+    install_pip_args: []
+    pip_packages: [flag-gems, sqlalchemy]

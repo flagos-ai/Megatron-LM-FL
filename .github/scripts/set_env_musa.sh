@@ -38,13 +38,52 @@ validate_musa_capacity() {
   ci_validate_device_capacity "$device_count"
 }
 
+prepare_musa_te_runtime() {
+  # Some MUSA runtime images provide torch_musa but omit torchada.  The latter
+  # is the CUDA-to-MUSA adapter required by Megatron's CUDA-facing code paths.
+  # Install only the adapter package so the image-provided Torch/MUSA pair is
+  # not replaced by pip dependency resolution.
+  if ! python3 -c "import torchada" >/dev/null 2>&1; then
+    python3 -m pip install torchada \
+      --ignore-requires-python --no-deps --no-cache-dir
+  fi
+  python3 -c \
+    "import torchada; print(f'torchada import passed: {torchada.__file__}')"
+
+  # The MUSA image can carry NVIDIA FlashAttention package metadata without
+  # its CUDA extension. TE treats the metadata as availability and imports the
+  # missing flash_attn_*_cuda module before backend selection.
+  python3 -m pip uninstall -y flash-attn flash-attn-3 flash-attn-4 \
+    >/dev/null 2>&1 || true
+
+  # Megatron and TE-FL are installed with --no-deps to preserve the
+  # image-provided Torch/MUSA pair. Let onnxscript resolve its own ONNX-only
+  # dependencies, including onnx_ir, before TE imports its ONNX extensions.
+  if ! python3 -c "import onnxscript" >/dev/null 2>&1; then
+    python3 -m pip install onnxscript --no-cache-dir
+  fi
+  python3 -c \
+    "import onnxscript; print(f'onnxscript import passed: {onnxscript.__file__}')"
+}
+
+install_flash_attn_collection_stub() {
+  if [ "${CI_TEST_GROUP:-}" != "models" ]; then
+    return
+  fi
+
+  # MUSA cannot use the NVIDIA FlashAttention package.  Keep a collection-only
+  # version marker so Megatron's version-gated tests are skipped cleanly.
+  local stub_dir=/tmp/megatron-ci-stubs
+  mkdir -p "$stub_dir/flash_attn"
+  printf '__version__ = "0.0.0"\n' > "$stub_dir/flash_attn/__init__.py"
+  ci_export_env PYTHONPATH "$stub_dir:${PYTHONPATH:-}"
+  python3 -c "import flash_attn; assert flash_attn.__version__ == '0.0.0'"
+}
+
 install_musa_compatibility_layer() {
   # Keep the image-provided torch/torch_musa pair intact while redirecting
   # legacy CUDA APIs and device strings used by Megatron tests to MUSA.
-  python3 -m pip install \
-    torchada==0.1.40 \
-    --no-deps \
-    --no-cache-dir
+  python3 -c "import torchada; print(f'image-provided torchada import passed: {torchada.__file__}')"
 
   # Create this only after installing the project so pip cannot import Megatron
   # through the compatibility layer while it is still building editable metadata.
@@ -104,12 +143,23 @@ setup_unit_environment() {
     openai
     httpx
     nltk
+    absl-py
   )
   python3 -m pip install "${test_dependencies[@]}" --no-cache-dir
   python3 -m pip install fastapi uvicorn --no-cache-dir
+  if [ "${CI_TEST_GROUP:-}" = "models" ]; then
+    # rl_utils imports SummaryWriter while model tests are being collected.
+    # Install only the frontend so the image-provided torch/MUSA, NumPy, and
+    # protobuf versions remain unchanged.
+    python3 -m pip install "tensorboard==2.17.1" --no-deps --no-cache-dir
+    python3 -c \
+      "from torch.utils.tensorboard import SummaryWriter; print('MUSA TensorBoard dependency validated')"
+  fi
+  prepare_musa_te_runtime
 
   echo "Skipping NVIDIA CUPTI and Emerging-Optimizers dependencies on MUSA."
   ci_install_project --ignore-requires-python
+  install_flash_attn_collection_stub
   install_musa_compatibility_layer
   validate_musa_capacity
 }
@@ -117,7 +167,9 @@ setup_unit_environment() {
 setup_build_environment() {
   ci_activate_python_environment
   configure_musa_runtime
+  prepare_musa_te_runtime
   ci_install_project --ignore-requires-python
+  install_musa_compatibility_layer
   validate_musa_capacity
 }
 
@@ -131,6 +183,7 @@ case "$CI_TEST_SUITE" in
 
     # Functional test toolchain and Python 3.10-compatible project install.
     ci_setup_functional_environment --ignore-requires-python
+    prepare_musa_te_runtime
     ci_install_local_tokenizer_dependencies
     ci_validate_qwen_assets /opt/data/datasets /opt/data/tokenizers
     install_musa_compatibility_layer

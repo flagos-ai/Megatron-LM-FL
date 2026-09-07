@@ -8,17 +8,26 @@ on:
   workflow_dispatch: # Allows manual triggering
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.actor }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  te_fl_prepare:
+    # CUDA is the only platform that builds the TE-FL native wheel in CI.
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: cuda
+
   run_tests:
+    needs: te_fl_prepare
     # Package manager and environment settings are read from .github/configs/cuda.yml
     uses: ./.github/workflows/all_tests_common.yml
     with:
       platform: cuda
       run_unit_tests: true
       run_functional_tests: true
+      te_fl_prepare: true
+      te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
 
   all_tests:
     needs: run_tests

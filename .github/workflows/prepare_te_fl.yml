@@ -1,0 +1,209 @@
+name: Prepare TE-FL Wheel
+
+on:
+  workflow_call:
+    inputs:
+      platform: {required: true, type: string}
+      image_override: {required: false, type: string, default: ''}
+    outputs:
+      cache_key:
+        value: ${{ jobs.prepare.outputs.cache_key }}
+
+jobs:
+  resolve:
+    name: resolve-${{ inputs.platform }}-te-fl-config
+    runs-on: ubuntu-latest
+    outputs:
+      image: ${{ steps.config.outputs.image }}
+      runs_on: ${{ steps.config.outputs.runs_on }}
+      container_volumes: ${{ steps.config.outputs.container_volumes }}
+      container_options: ${{ steps.config.outputs.container_options }}
+      setup_script: ${{ steps.config.outputs.setup_script }}
+      nproc_per_node: ${{ steps.config.outputs.nproc_per_node }}
+      build_environment: ${{ steps.config.outputs.build_environment }}
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          set -euo pipefail
+          if ! command -v yq >/dev/null 2>&1; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
+            sudo chmod 0755 /usr/local/bin/yq
+          fi
+          yq --version
+
+      - name: Read and validate TE-FL configuration
+        id: config
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          IMAGE_OVERRIDE: ${{ inputs.image_override }}
+        run: |
+          set -euo pipefail
+
+          config_file=".github/configs/${PLATFORM}.yml"
+          if [ ! -f "$config_file" ]; then
+            echo "::error::Platform configuration not found: $config_file" >&2
+            exit 1
+          fi
+
+          image=$(yq -r '.ci_image // ""' "$config_file")
+          if [ -n "$IMAGE_OVERRIDE" ]; then
+            image="$IMAGE_OVERRIDE"
+          fi
+          runs_on=$(yq -o=json -I=0 '.runner_labels // []' "$config_file")
+          volumes=$(yq -o=json -I=0 '.container_volumes // []' "$config_file")
+          options=$(yq -r '.container_options // ""' "$config_file")
+          setup_script=$(yq -r '.setup_script // ""' "$config_file")
+          nproc_per_node=$(yq -r '.test_matrix.unit.nproc_per_node // ""' "$config_file")
+          prepare=$(yq -r '.te_fl.prepare // false' "$config_file")
+          build_mode=$(yq -r '.te_fl.build_mode // ""' "$config_file")
+          build_environment=$(yq -o=json -I=0 '.te_fl.build_environment // {}' "$config_file")
+
+          if [ -z "$image" ]; then
+            echo "::error::ci_image is required in $config_file" >&2
+            exit 1
+          fi
+          if [ "$runs_on" = '[]' ] || [ -z "$setup_script" ]; then
+            echo "::error::runner_labels and setup_script are required in $config_file" >&2
+            exit 1
+          fi
+          if [ "$prepare" != true ]; then
+            echo "::error::TE-FL preparation must be enabled in $config_file" >&2
+            exit 1
+          fi
+          case "$build_mode" in
+            cuda|python) ;;
+            *)
+              echo "::error::te_fl.build_mode must be 'cuda' or 'python' in $config_file" >&2
+              exit 1
+              ;;
+          esac
+          if [ "$build_mode" = python ] && \
+             [ "$(yq -r '.te_fl.build_environment.TE_FL_SKIP_CUDA // ""' "$config_file")" != 1 ]; then
+            echo "::error::Python-only TE-FL preparation requires TE_FL_SKIP_CUDA=1" >&2
+            exit 1
+          fi
+          if ! [[ "$nproc_per_node" =~ ^[1-9][0-9]*$ ]]; then
+            echo "::error::unit nproc_per_node must be a positive integer" >&2
+            exit 1
+          fi
+
+          {
+            echo "image=$image"
+            echo "runs_on=$runs_on"
+            echo "container_volumes=$volumes"
+            echo "container_options=$options"
+            echo "setup_script=$setup_script"
+            echo "nproc_per_node=$nproc_per_node"
+            echo "build_environment=$build_environment"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Platform: $PLATFORM"
+          echo "Image: $image"
+          echo "TE-FL build mode: $build_mode"
+
+  prepare:
+    name: te-fl-${{ inputs.platform }}
+    needs: resolve
+    defaults:
+      run:
+        shell: bash
+    runs-on: ${{ fromJson(needs.resolve.outputs.runs_on) }}
+    container:
+      image: ${{ needs.resolve.outputs.image }}
+      volumes: ${{ fromJson(needs.resolve.outputs.container_volumes) }}
+      options: ${{ needs.resolve.outputs.container_options }}
+    outputs:
+      cache_key: ${{ steps.cache_key.outputs.key }}
+    steps:
+      - name: Checkout Megatron source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Checkout TransformerEngine-FL
+        uses: actions/checkout@v4
+        with:
+          repository: flagos-ai/TransformerEngine-FL
+          ref: main
+          path: te-fl
+          fetch-depth: 1
+          submodules: recursive
+
+      - name: Resolve TE-FL cache key
+        id: cache_key
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          IMAGE: ${{ needs.resolve.outputs.image }}
+        run: |
+          set -euo pipefail
+          commit=$(git -C "$GITHUB_WORKSPACE/te-fl" rev-parse HEAD)
+          if ! [[ "$commit" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Unable to resolve a full TE-FL commit" >&2
+            exit 1
+          fi
+          echo "TE-FL commit: $commit"
+          image_key=$(printf '%s' "$IMAGE" | sha256sum | awk '{print $1}')
+          key="te-fl-${PLATFORM}-${commit}-${image_key}"
+          echo "key=$key" >> "$GITHUB_OUTPUT"
+          echo "TE-FL wheel cache key: $key"
+
+      - name: Restore TE-FL wheel cache
+        id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: te-fl-wheel
+          key: ${{ steps.cache_key.outputs.key }}
+
+      - name: Setup build environment
+        if: steps.cache.outputs.cache-hit != 'true'
+        working-directory: ${{ github.workspace }}
+        env:
+          CI_TEST_SUITE: build
+          CI_NPROC_PER_NODE: ${{ needs.resolve.outputs.nproc_per_node }}
+          MEGATRON_CI_IMAGE: ${{ needs.resolve.outputs.image }}
+          TE_FL_BUILD_ENV_JSON: ${{ needs.resolve.outputs.build_environment }}
+          SETUP_SCRIPT: ${{ needs.resolve.outputs.setup_script }}
+        run: |
+          set -euo pipefail
+          if [[ "$SETUP_SCRIPT" = /* || "$SETUP_SCRIPT" == *".."* || ! -f "$GITHUB_WORKSPACE/$SETUP_SCRIPT" ]]; then
+            echo "::error::Invalid platform setup script: $SETUP_SCRIPT" >&2
+            exit 1
+          fi
+
+          source "$GITHUB_WORKSPACE/.github/scripts/set_env_common.sh"
+          if [ "$TE_FL_BUILD_ENV_JSON" != "{}" ]; then
+            ci_apply_env_json "$TE_FL_BUILD_ENV_JSON"
+          fi
+          bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
+
+      - name: Build TE-FL wheel on cache miss
+        if: steps.cache.outputs.cache-hit != 'true'
+        env:
+          TE_FL_REPO: ${{ github.workspace }}/te-fl
+          OUTPUT_DIR: ${{ github.workspace }}/te-fl-wheel
+        run: bash .github/docker/build_te_fl_native.sh
+
+      - name: Check prepared wheel
+        run: |
+          set -euo pipefail
+          mapfile -t wheels < <(
+            find "$GITHUB_WORKSPACE/te-fl-wheel" -maxdepth 1 -type f \
+              -name 'transformer_engine*.whl' -print | sort
+          )
+          if [ "${#wheels[@]}" -ne 1 ]; then
+            echo "::error::Expected exactly one prepared TE-FL wheel, found ${#wheels[@]}" >&2
+            printf '  %s\n' "${wheels[@]}" >&2
+            exit 1
+          fi
+          echo "Prepared TE-FL wheel: ${wheels[0]}"
+
+      - name: Save TE-FL wheel cache
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: te-fl-wheel
+          key: ${{ steps.cache_key.outputs.key }}

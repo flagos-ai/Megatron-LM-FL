@@ -44,8 +44,14 @@ setup_unit_environment() {
     nltk
     msgpack
   )
-  python3 -m pip install torch boto3 "${test_dependencies[@]}" --no-cache-dir
-  python3 -m pip install fastapi uvicorn --no-cache-dir
+  local pip_index_args=(
+    --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    --timeout 300
+    --retries 10
+    --no-cache-dir
+  )
+  python3 -m pip install torch boto3 "${test_dependencies[@]}" "${pip_index_args[@]}"
+  python3 -m pip install fastapi uvicorn "${pip_index_args[@]}"
 
   echo "Skipping NVIDIA CUPTI dependencies on MetaX."
   ci_install_project
@@ -54,6 +60,7 @@ setup_unit_environment() {
 
 setup_build_environment() {
   ci_activate_python_environment
+  setup_metax_toolchain
   ci_install_project
   validate_metax_capacity
 }

@@ -5,20 +5,49 @@ on:
     branches: ["main", "dev", "dev-musa"]
   pull_request:
     branches: ["main"]
-  workflow_dispatch: # Allows manual triggering
+  workflow_dispatch:
+    inputs:
+      image_override:
+        description: >-
+          Optional image override for this run. Replaces the configured ci_image.
+        required: false
+        type: string
+        default: ''
+      run_unit_tests:
+        description: 'Run unit tests'
+        required: false
+        type: boolean
+        default: true
+      run_functional_tests:
+        description: 'Run functional tests'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.actor }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
+  te_fl_prepare:
+    name: prepare-te-fl-musa
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: musa
+      image_override: ${{ github.event.inputs.image_override || '' }}
+
   run_tests:
+    name: run-tests
+    needs: te_fl_prepare
     # Package manager and environment settings are read from .github/configs/musa.yml
     uses: ./.github/workflows/all_tests_common.yml
     with:
       platform: musa
-      run_unit_tests: true
-      run_functional_tests: true
+      run_unit_tests: ${{ github.event.inputs.run_unit_tests != 'false' }}
+      run_functional_tests: ${{ github.event.inputs.run_functional_tests != 'false' }}
+      te_fl_prepare: true
+      te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
+      image_override: ${{ github.event.inputs.image_override || '' }}
 
   all_tests:
     needs: run_tests

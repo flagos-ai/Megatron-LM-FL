@@ -297,3 +297,18 @@ test_matrix:
         enable_lightweight_mode: false
         data_path: /home/gitlab-runner/data
         gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: flagos
+    install_pip_args: []
+    # MetaX Triton is supplied by the image; no public triton-metax package is
+    # available from the runtime Python index.
+    pip_packages: [flag-gems, sqlalchemy]

@@ -441,3 +441,16 @@ test_matrix:
         data_path: /opt/data/datasets
         # This baseline is recorded with TP2/PP2 on four devices (DP=1).
         gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: flagos
+    install_pip_args: [--ignore-requires-python]
+    pip_packages: [flag-gems, sqlalchemy]

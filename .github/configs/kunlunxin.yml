@@ -182,6 +182,9 @@ test_matrix:
       # after prior rank failures, triggering the 600s watchdog and aborting the
       # entire test session.
       - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_empty_load
+      # Uneven 1D sharding with an empty shard can segfault in the XCCL runtime
+      # during checkpoint collectives/teardown.
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_uneven_1d_sharding[src_split7-dest_split7]
       # FlagCX gather_object() fails with "flagcxComm not fully initialized"
       # during sharded tensor checkpointing and multi-local-shard save/load;
       # same root cause as test_forward_vpp (upstream MUSA PR #100 changes).
@@ -304,7 +307,7 @@ test_matrix:
         enable_lightweight_mode: false
         data_cache_path: /tmp/megatron-data-cache
         gpus_per_node: 1
-      # Benchmark disabled: with TE_FL_PREFER=vendor, the first iteration takes
+      # Benchmark disabled: with the KunLunXin vendor backend, the first iteration takes
       # 40+ minutes on seq=4096/TP2/PP2 (likely vendor kernel shape config or
       # fallback compilation overhead at long sequence). The 20-iteration run
       # would exceed the 60-minute functional test timeout. Regular (seq=256)
@@ -320,3 +323,15 @@ test_matrix:
       #  enable_lightweight_mode: false
       #  data_cache_path: /tmp/megatron-data-cache
       #  gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: vendor
+    install_pip_args: [--ignore-requires-python]
