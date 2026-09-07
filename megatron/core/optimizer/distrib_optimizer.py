@@ -672,11 +672,14 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         inner_state_dict = self.optimizer.state_dict()
         state_dict = {}
 
-        # Extract 'step', for non-Apex/TE support.
-        if not HAVE_APEX_OR_TE:
+        # State layout follows the optimizer instance, not installed optional packages.
+        native_torch_optimizer = isinstance(
+            self.optimizer, (torch.optim.Adam, torch.optim.AdamW)
+        )
+        if native_torch_optimizer or not HAVE_APEX_OR_TE:
             steps = list(set([s["step"].item() for s in inner_state_dict["state"].values()]))
-            assert len(steps) == 1
-            step = steps[0]
+            assert len(steps) <= 1, f"Inconsistent per-parameter steps: {steps}"
+            step = steps[0] if steps else 0
         elif isinstance(self.optimizer, HybridDeviceOptimizer):
             step = None
             for optimizer in self.optimizer.sub_optimizers:
@@ -705,7 +708,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         state_dict['optimizer'] = {k: v for k, v in inner_state_dict.items() if k != "state"}
         for param_group in state_dict["optimizer"]["param_groups"]:
             del param_group["params"]
-            if not HAVE_APEX_OR_TE:
+            if native_torch_optimizer or not HAVE_APEX_OR_TE:
                 # Native PyTorch param group requires step (i.e., iteration).
                 param_group["step"] = step
             elif (
@@ -852,15 +855,18 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             # Retrieve existing optimizer state.
             state_dict_state = inner_state_dict["state"]
 
-        # Extract 'step', for non-Apex/TE support.
-        if not HAVE_APEX_OR_TE:
+        # Restore native Adam state even when TE or Apex is available.
+        native_torch_optimizer = isinstance(
+            self.optimizer, (torch.optim.Adam, torch.optim.AdamW)
+        )
+        if native_torch_optimizer or not HAVE_APEX_OR_TE:
             steps = list(set([g["step"] for g in state_dict["optimizer"]["param_groups"]]))
             assert len(steps) == 1
             step = torch.tensor(steps[0], dtype=torch.float)
 
             for s in state_dict_state.values():
                 # Native PyTorch state dict requires step (i.e., iteration).
-                s["step"] = step
+                s["step"] = step.detach().clone()
         elif isinstance(self.optimizer, HybridDeviceOptimizer):
             # Handle Torch AdamW special case, which, unlike FusedAdam, Torch AdamW
             # has an extra optimizer state "step".

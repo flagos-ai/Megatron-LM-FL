@@ -56,6 +56,7 @@ from megatron.core.optimizer_param_scheduler import (
 )
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.fsdp_dtensor_checkpoint import get_global_unique_param_name
+from megatron.plugin.decorators import overridable
 
 from ..distributed.param_and_grad_buffer import _ParamAndGradBuffer
 from ..transformer.module import MegatronModule
@@ -456,6 +457,15 @@ def _get_param_groups_and_buffers(
     return param_groups, buffers
 
 
+@overridable
+def _get_adam_class(config: OptimizerConfig, kwargs: Dict[str, Any]):
+    """Select the Adam implementation and its backend-specific arguments."""
+    if USING_PYTORCH_OPTIMIZER:
+        return torch.optim.AdamW if config.decoupled_weight_decay else torch.optim.Adam
+    kwargs["adam_w_mode"] = config.decoupled_weight_decay
+    return Adam
+
+
 def _get_megatron_optimizer_based_on_param_groups(
     config: OptimizerConfig,
     model_chunks: List[MegatronModule],
@@ -547,13 +557,7 @@ def _get_megatron_optimizer_based_on_param_groups(
                 "capturable": config.optimizer_cuda_graph,
             }
 
-            # set Adam class and weight decay mode depending
-            # on source of optimizer (Torch or TE/Apex)
-            if USING_PYTORCH_OPTIMIZER:
-                adam_cls = torch.optim.AdamW if config.decoupled_weight_decay else torch.optim.Adam
-            else:
-                kwargs["adam_w_mode"] = config.decoupled_weight_decay
-                adam_cls = Adam
+            adam_cls = _get_adam_class(config, kwargs)
 
             if config.use_precision_aware_optimizer:
                 kwargs.update(
@@ -586,6 +590,17 @@ def _get_megatron_optimizer_based_on_param_groups(
                     for p in group['params']:
                         if len(opt.state[p]) == 0:
                             if config is None or not config.use_precision_aware_optimizer:
+                                if isinstance(opt, (torch.optim.Adam, torch.optim.AdamW)):
+                                    # Native Adam keeps a scalar step per parameter, including
+                                    # when moments are initialized before checkpoint loading.
+                                    step_device = (
+                                        p.device
+                                        if group.get('fused', False) or group.get('capturable', False)
+                                        else 'cpu'
+                                    )
+                                    opt.state[p]['step'] = torch.zeros(
+                                        (), dtype=torch.float32, device=step_device
+                                    )
                                 opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
                                 opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
                             else:

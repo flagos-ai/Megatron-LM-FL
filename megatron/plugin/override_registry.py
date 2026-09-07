@@ -11,6 +11,16 @@ The ``@override`` decorator on the implementation function is no longer needed.
 
 from megatron.plugin.decorators import register
 
+# =============================================================================
+# Optimizer - NPU fused AdamW
+# =============================================================================
+register(
+    target="megatron.core.optimizer._get_adam_class",
+    impl="megatron.plugin.Ascend.optimizer.adamw.get_adam_class",
+    vendor="npu",
+)
+
+
 
 # =============================================================================
 # Optimizer - clip_grads
