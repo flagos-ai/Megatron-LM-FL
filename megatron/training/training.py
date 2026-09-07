@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 """Pretrain utilities."""
 import time
@@ -38,6 +38,7 @@ from datetime import datetime, timedelta
 import functools
 import gc
 import inspect
+import json
 import logging
 import math
 import os
@@ -166,6 +167,13 @@ from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataPa
 from megatron.core.optimizer.optimizer import param_group_identifier_keys
 
 from megatron.core.optimizer.qk_clip import clip_qk
+from megatron.plugin.slideformer import (
+    MegatronSlideFormerConfig,
+    MegatronSlideFormerEngineConfig,
+    apply_kernel_policy,
+    apply_true_megatron_slideformer,
+    prepare_kernel_policy,
+)
 
 try:
     from megatron.core.distributed import TorchFullyShardedDataParallel as torch_FSDP
@@ -254,6 +262,140 @@ from . import ft_integration
 stimer = StragglerDetector()
 
 from megatron.core.msc_utils import MultiStorageClientFeature, open_file
+
+
+def _get_slideformer_config() -> MegatronSlideFormerConfig:
+    return MegatronSlideFormerConfig.from_env()
+
+
+def _slideformer_enabled() -> bool:
+    return _get_slideformer_config().enable
+
+
+def _validate_slideformer_runtime(slideformer_config: MegatronSlideFormerConfig | None = None) -> None:
+    slideformer_config = slideformer_config or _get_slideformer_config()
+    if not slideformer_config.enable:
+        return
+    args = get_args()
+    slideformer_config.validate(
+        tensor_model_parallel_size=mpu.get_tensor_model_parallel_world_size(),
+        pipeline_model_parallel_size=mpu.get_pipeline_model_parallel_world_size(),
+        data_parallel_size=mpu.get_data_parallel_world_size(),
+        expert_model_parallel_size=getattr(args, "expert_model_parallel_size", 1),
+        num_microbatches=get_num_microbatches(),
+        recompute_granularity=getattr(args, "recompute_granularity", None),
+        recompute_method=getattr(args, "recompute_method", None),
+    )
+
+
+def _apply_slideformer_if_enabled(model):
+    slideformer_config = _get_slideformer_config()
+    if not slideformer_config.enable:
+        return None
+    _validate_slideformer_runtime(slideformer_config)
+    if len(model) != 1:
+        raise ValueError("Megatron-LM-FL SlideFormer currently supports one model chunk only")
+    kernel_report = apply_kernel_policy(model[0], slideformer_config, runtime_args=get_args())
+    engine = apply_true_megatron_slideformer(
+        model[0],
+        config=MegatronSlideFormerEngineConfig(
+            lr=get_args().lr,
+            betas=(get_args().adam_beta1, get_args().adam_beta2),
+            eps=get_args().adam_eps,
+            weight_decay=get_args().weight_decay,
+            activation_offload=slideformer_config.activation_offload,
+            offload_after_forward=slideformer_config.activation_offload,
+            prefetch=slideformer_config.param_prefetch,
+            window_size=slideformer_config.window_size,
+            chunk_size_mb=slideformer_config.chunk_size_mb,
+            nvme_offload_fraction=slideformer_config.nvme_offload_fraction,
+            offload_dir=slideformer_config.offload_dir or "./slideformer_offload",
+            double_buffer=slideformer_config.double_buffer,
+            gpu_buffer_count=slideformer_config.gpu_buffer_count,
+            activation_backend=slideformer_config.activation_backend,
+            activation_slot_prefetch=slideformer_config.activation_slot_prefetch,
+            activation_slot_gpu_window=slideformer_config.activation_slot_gpu_window,
+            unified_h2d_scheduler=slideformer_config.unified_h2d_scheduler,
+            max_outstanding_h2d=slideformer_config.max_outstanding_h2d,
+            activation_offload_min_numel=slideformer_config.activation_offload_min_numel,
+            activation_offload_max_dim=slideformer_config.activation_offload_max_dim,
+            activation_offload_max_tensors_per_layer=slideformer_config.activation_offload_max_tensors_per_layer,
+            overlap_grad_d2h_cpu_adam=slideformer_config.overlap_grad_d2h_cpu_adam,
+            optimizer_pipeline_depth=slideformer_config.optimizer_pipeline_depth,
+            optimizer_worker_count=slideformer_config.optimizer_worker_count,
+            cpu_adam_per_layer_optimizer=slideformer_config.cpu_adam_per_layer_optimizer,
+            shared_cpu_buffers=slideformer_config.shared_cpu_buffers,
+            cpu_grad_buffer_count=slideformer_config.cpu_grad_buffer_count,
+            cpu_param_staging_buffer_count=slideformer_config.cpu_param_staging_buffer_count,
+            te_fused_main_grad=slideformer_config.te_fused_main_grad,
+            fp32_master_params=slideformer_config.fp32_master_params,
+            qkv_layout_backend=(
+                slideformer_config.qkv_layout_backend
+                if slideformer_config.kernel_policy != "off"
+                and not (
+                    slideformer_config.qkv_layout_backend == "auto"
+                    and slideformer_config.attention_backend == "megatron"
+                )
+                else "megatron"
+            ),
+        ),
+    )
+    print_rank_0(
+        "Megatron-LM-FL SlideFormer true engine enabled; kernel report: "
+        + json.dumps(kernel_report, sort_keys=True)
+    )
+    return engine
+
+
+def _attach_slideformer_raw_model_grad_sync_shims(model_module):
+    def finish_grad_sync(*args, **kwargs):
+        return None
+
+    def start_grad_sync(*args, **kwargs):
+        return None
+
+    def start_param_sync(*args, **kwargs):
+        return None
+
+    def scale_gradients(scaling_factor):
+        for param in model_module.parameters():
+            grad = getattr(param, "main_grad", None)
+            if grad is None:
+                grad = param.grad
+            if grad is not None:
+                grad.mul_(scaling_factor)
+
+    def zero_grad_buffer(*args, **kwargs):
+        model_module.zero_grad(set_to_none=True)
+
+    setattr(model_module, "finish_grad_sync", finish_grad_sync)
+    setattr(model_module, "start_grad_sync", start_grad_sync)
+    setattr(model_module, "start_param_sync", start_param_sync)
+    setattr(model_module, "scale_gradients", scale_gradients)
+    setattr(model_module, "zero_grad_buffer", zero_grad_buffer)
+
+
+def _model_has_slideformer_engine(model) -> bool:
+    return any(
+        getattr(model_chunk, "_megatron_slideformer_engine", None) is not None
+        for model_chunk in model
+    )
+
+
+def _should_skip_native_checkpoint_for_slideformer(model, optimizer) -> bool:
+    return optimizer is None and _model_has_slideformer_engine(model)
+
+
+def _slideformer_checkpoint_exists(load_dir) -> bool:
+    return load_dir is not None and (Path(load_dir) / "slideformer" / "latest.pt").exists()
+
+
+def _get_loaded_slideformer_iteration(model) -> int:
+    for model_chunk in model:
+        engine = getattr(model_chunk, "_megatron_slideformer_engine", None)
+        if engine is not None:
+            return int(getattr(engine, "_megatron_slideformer_loaded_iteration", 0) or 0)
+    return 0
 
 
 def destroy_global_state():
@@ -1519,6 +1661,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     if (
         not (args.use_torch_fsdp2 and args.use_cpu_initialization)
         and not args.init_model_with_meta_device
+        and not (_slideformer_enabled() and not wrap_with_ddp)
     ):
         for model_module in model:
             model_module.cuda(torch.cuda.current_device())
@@ -1527,6 +1670,10 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
     if args.fp16 or args.bf16:
         config = get_model_config(model[0])
         model = [Float16Module(config, model_module) for model_module in model]
+
+    if _slideformer_enabled() and not wrap_with_ddp:
+        for model_module in model:
+            _attach_slideformer_raw_model_grad_sync_shims(model_module)
 
     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
@@ -1723,14 +1870,30 @@ def setup_model_and_optimizer(
     # Skip optimizer when not training. In RL inference-only mode (skip_train + perform_rl_step),
     # --no-load-optim controls whether the optimizer is skipped (saving memory) or created
     # (required for --rl-offload-optimizer-during-inference).
-    skip_optimizer = args.skip_train and (not args.perform_rl_step or args.no_load_optim)
-    wrap_with_ddp = not skip_optimizer
+    slideformer_config = _get_slideformer_config()
+    if slideformer_config.enable:
+        _validate_slideformer_runtime(slideformer_config)
+        # Building the full model on CUDA defeats layer sliding and prevents
+        # models larger than device memory from reaching the offload engine.
+        args.use_cpu_initialization = True
+        prepare_kernel_policy(args, slideformer_config)
+    skip_optimizer = (
+        args.skip_train and (not args.perform_rl_step or args.no_load_optim)
+    ) or slideformer_config.enable
+    wrap_with_ddp = not skip_optimizer and not slideformer_config.enable
     model = get_model(model_provider_func, model_type, wrap_with_ddp=wrap_with_ddp)
     unwrapped_model = unwrap_model(model)
+    slideformer_engine = _apply_slideformer_if_enabled(model)
 
     one_logger and one_logger.log_metrics({"app_build_optimzer_start_time": one_logger_utils.get_timestamp_in_ms()})
     if skip_optimizer:
         optimizer, opt_param_scheduler = None, None
+        if slideformer_engine is not None:
+            model[0]._megatron_slideformer_engine = slideformer_engine
+            if not args.skip_train:
+                opt_param_scheduler = get_optimizer_param_scheduler(
+                    slideformer_engine.layer_optimizer
+                )
         # In RL inference-only mode, train_iters must still be set despite having no optimizer.
         if args.perform_rl_step:
             update_train_iters(args)
@@ -1828,15 +1991,27 @@ def setup_model_and_optimizer(
         )
         timers('load-checkpoint', log_level=0).start(barrier=True)
 
-        args.iteration, args.num_floating_point_operations_so_far = load_checkpoint(
-            model,
-            optimizer,
-            opt_param_scheduler,
-            checkpointing_context=checkpointing_context,
-            skip_load_to_model_and_opt=HAVE_FSDP2
-            and getattr(args, "use_torch_fsdp2", False)
-            and args.ckpt_format == "torch_dist",
-        )
+        if slideformer_config.enable and _slideformer_checkpoint_exists(args.load):
+            loaded_iteration = slideformer_engine.load_checkpoint(
+                args.load, opt_param_scheduler=opt_param_scheduler
+            )
+            slideformer_engine._megatron_slideformer_loaded_iteration = loaded_iteration
+            args.iteration = _get_loaded_slideformer_iteration(model)
+            args.num_floating_point_operations_so_far = 0
+            print_rank_0(
+                "Skipping Megatron native checkpoint load because Megatron-LM-FL "
+                "SlideFormer state was loaded by the SlideFormer engine."
+            )
+        else:
+            args.iteration, args.num_floating_point_operations_so_far = load_checkpoint(
+                model,
+                optimizer,
+                opt_param_scheduler,
+                checkpointing_context=checkpointing_context,
+                skip_load_to_model_and_opt=HAVE_FSDP2
+                and getattr(args, "use_torch_fsdp2", False)
+                and args.ckpt_format == "torch_dist",
+            )
         timers('load-checkpoint').stop(barrier=True)
         timers.log(['load-checkpoint'])
         one_logger and one_logger.log_metrics(
@@ -1898,6 +2073,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     """Single training step."""
     args = get_args()
     timers = get_timers()
+    if _slideformer_enabled():
+        _validate_slideformer_runtime()
 
     rerun_state_machine = get_rerun_state_machine()
     save_dgrads_in_this_iteration = (args.save_dgrads_interval is not None and
@@ -1907,10 +2084,19 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     while rerun_state_machine.should_run_forward_backward(data_iterator):
         # Set grad to zero.
         for model_chunk in model:
-            model_chunk.zero_grad_buffer()
+            if hasattr(model_chunk, "zero_grad_buffer"):
+                model_chunk.zero_grad_buffer()
+            else:
+                model_chunk.zero_grad(set_to_none=True)
             # If saving main_grads in this iteration, then all-reduce instead of reduce-scatter.
             model_chunk.force_all_reduce = save_wgrads_in_this_iteration
-        optimizer.zero_grad()
+        if optimizer is not None:
+            optimizer.zero_grad()
+        else:
+            for model_chunk in model:
+                engine = getattr(model_chunk, "_megatron_slideformer_engine", None)
+                if engine is not None:
+                    engine.zero_unmanaged_grads()
 
         if has_nvidia_modelopt:
             # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
@@ -1994,7 +2180,14 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # Update parameters.
 
     timers('optimizer', log_level=1).start(barrier=args.barrier_with_L1_time)
-    update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
+    if optimizer is None:
+        for model_chunk in model:
+            engine = getattr(model_chunk, "_megatron_slideformer_engine", None)
+            if engine is not None:
+                engine.step_unmanaged_params()
+        update_successful, grad_norm, num_zeros_in_grad = True, None, 0
+    else:
+        update_successful, grad_norm, num_zeros_in_grad = optimizer.step()
 
     # get max attention logit for logging and run clip_qk()
     # Part of MuonClip Optimizer step
@@ -2021,7 +2214,8 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     # Update learning rate.
     if update_successful:
         increment = get_num_microbatches() * args.micro_batch_size * args.data_parallel_size
-        opt_param_scheduler.step(increment=increment)
+        if opt_param_scheduler is not None:
+            opt_param_scheduler.step(increment=increment)
         skipped_iter = 0
     else:
         skipped_iter = 1
@@ -2473,6 +2667,25 @@ def save_checkpoint_and_time(
     args = get_args()
     timers = get_timers()
     energy_monitor = get_energy_monitor()
+
+    if _should_skip_native_checkpoint_for_slideformer(model, optimizer):
+        saved_paths = []
+        for model_chunk in model:
+            engine = getattr(model_chunk, "_megatron_slideformer_engine", None)
+            if engine is not None and args.save:
+                saved_paths.append(
+                    engine.save_checkpoint(
+                        args.save,
+                        iteration,
+                        opt_param_scheduler=opt_param_scheduler,
+                    )
+                )
+        print_rank_0(
+            "Skipping Megatron native checkpoint because Megatron-LM-FL SlideFormer "
+            "owns decoder CPU master parameters and optimizer state. Saved "
+            f"SlideFormer state: {', '.join(str(path) for path in saved_paths) or 'none'}"
+        )
+        return
 
     # Synchronize forward pre-hook state before checkpoint save to avoid race conditions
     if should_disable_forward_pre_hook(args):
