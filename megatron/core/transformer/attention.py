@@ -810,7 +810,20 @@ class Attention(MegatronModule, ABC):
                 softmax_scale = self.softmax_scale
             else:
                 softmax_scale = q.shape[-1] ** -0.5
-            if HAVE_FA3:
+            if cur_platform.device_name() == "npu":
+                # NPU: no flash-attn on 910B4; the platform provides the paged
+                # prefill op (gather + torch_npu.npu_fusion_attention).
+                output_total = cur_platform.paged_prefill_attention(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    seqlens_k,
+                    block_table,
+                    num_heads=self.num_attention_heads_per_partition,
+                )
+            elif HAVE_FA3:
                 # TODO(ksanthanam): Replace with call to flash_attn_varlen_func once
                 # it accepts block_table
                 output_total = self._flash_attention_3_forward_wrapper(
@@ -842,6 +855,26 @@ class Attention(MegatronModule, ABC):
                 )
             output_total = output_total.unsqueeze(1)
         else:  # decode only
+            if cur_platform.device_name() == "npu":
+                # NPU: no flash-attn / FlashMLA kernels available (910B4); the
+                # platform provides the CANN paged attention op (see
+                # PlatformNPU.paged_decode_attention for the measured (block_size,
+                # head_size) support boundary).
+                if isinstance(self.config, MLATransformerConfig):
+                    raise NotImplementedError(
+                        "MLA decode is not supported on NPU (no FlashMLA kernel)"
+                    )
+                output_total = cur_platform.paged_decode_attention(
+                    q,
+                    k,
+                    block_table,
+                    seqlens_k,
+                    value_cache=v,
+                    num_heads=self.num_attention_heads_per_partition,
+                    num_kv_heads=self.num_query_groups_per_partition,
+                    scale_value=q.shape[-1] ** -0.5,
+                )
+                return output_total
             # If using MLA we use the FlashMLA kernel
             if isinstance(self.config, MLATransformerConfig):
                 softmax_scale = self.softmax_scale
@@ -940,9 +973,12 @@ class Attention(MegatronModule, ABC):
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if inference_context and inference_context.is_dynamic_batching():
-            assert HAVE_FA3 or is_fa_min_version(
-                "2.7.3"
-            ), "flash attn verion v2.7.3 and above is required for dynamic batching."
+            # Platforms with a native paged-attention op (e.g. NPU) skip the
+            # flash-attn version gate; see PlatformBase.requires_flash_attn_for_dynamic_batching.
+            if cur_platform.requires_flash_attn_for_dynamic_batching():
+                assert HAVE_FA3 or is_fa_min_version(
+                    "2.7.3"
+                ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
         is_inference_mode = inference_context is not None and not self.training
