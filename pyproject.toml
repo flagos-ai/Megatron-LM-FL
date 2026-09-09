@@ -67,9 +67,39 @@ training = [
     "flask-restful",
     "sentencepiece",
     "tiktoken",
-    "wandb",
-    "transformers",
+    "wandb==0.28.2",
+    "transformers==5.15.0",
     "accelerate",
+    # modelopt 0.43.0 is the last release with a torch>=2.6 floor (0.44.0+
+    # requires torch>=2.8). Vendor backends running torch 2.7.1 (e.g. cambricon
+    # NEUWARE 4.4.3) cannot upgrade torch, so 0.43.0 is the ceiling for them.
+    # post_training verified with 0.43.0 on NEUWARE 4.4.3 + 4.7.2 (2026-08-22).
+    "nvidia-modelopt[torch]==0.43.0",
+    "tqdm==4.70.0",
+    "datasets==5.0.1",
+    "pyarrow==21.0.0",
+]
+
+# RL (megatron/rl) runtime deps. All pinned to the exact versions verified on
+# the hygon DTK 26.04 backend (2026-08-17 E2E). The (datasets 5.0.1, pyarrow
+# 21.0.0) pair is the tested combination — datasets 5.0.1 artifacts are
+# unreadable by pyarrow <=25 (ArrowInvalid, see verification report §5.2).
+rl = [
+    "pydantic==2.12.5",
+    "tensorboard==2.19.0",
+    "wandb==0.28.2",
+    "httpx==0.28.1",
+    "tqdm==4.70.0",
+    "openai[aiohttp]==3.1.0",
+    "uvicorn==0.52.3",
+    "fastapi==0.141.1",
+    "datasets==5.0.1",
+    "pyarrow==21.0.0",
+    "transformers==5.15.0",
+    "pyzmq==27.1.0",
+    "msgpack==1.2.1",
+    "quart==0.20.0",
+    "hypercorn==0.18.0",
 ]
 
 ### 'mlm' group is deprecated. please use 'training' instead ###
@@ -83,7 +113,7 @@ mlm = [
 ]
 
 dev = [
-    "nvidia-modelopt[torch]; sys_platform != 'darwin'",
+    "nvidia-modelopt[torch]",
     "transformer-engine[pytorch,core_cu13]",
     "nvidia-resiliency-ext",
     "tqdm",
@@ -182,7 +212,15 @@ no-build-isolation-package = [
     "transformer-engine-torch",
 ]
 link-mode = "copy"
-conflicts = [[{ extra = "lts" }, { extra = "dev" }]]
+conflicts = [
+    [{ extra = "lts" }, { extra = "dev" }],
+    [{ extra = "lts" }, { extra = "training" }],
+    [{ extra = "lts" }, { extra = "rl" }],
+    [{ extra = "dev" }, { extra = "training" }],
+    [{ extra = "dev" }, { extra = "rl" }],
+    [{ group = "build" }, { extra = "training" }],
+    [{ group = "test" }, { extra = "rl" }],
+]
 # We don't define override-dependencies globally but rather locally where we need it.
 # For instance, when installing into a PyTorch base image, we don't want to install torch, 
 # torchvision, and triton.
