@@ -37,8 +37,6 @@ device_types:
 test_matrix:
   unit:
     nproc_per_node: 8
-    devices:
-      - generic
     pytest_extra_args: []
     groups:
       - name: models

@@ -11,15 +11,15 @@ ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260717-ascend-dev
 
 # Runner labels for the Ascend node
 runner_labels:
-  - hw-4g-cicd-megatron
+  - flagcicd-910c
 
-# Container volumes (hardware-specific paths)
+# Container volumes (local runner assets under /data)
 # NOTE: /usr/local/Ascend/add-ons does not exist on this runner; not mounted.
 container_volumes:
   - /usr/local/Ascend/driver:/usr/local/Ascend/driver
   - /usr/local/sbin/npu-smi:/usr/local/sbin/npu-smi
-  - /home/secure/cicd_dev/megatron-lm-fl/ci-assets/datasets:/home/gitlab-runner/data
-  - /home/secure/cicd_dev/megatron-lm-fl/ci-assets/tokenizers:/home/gitlab-runner/tokenizers
+  - /data/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data
+  - /data/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers
 
 # Container options (hardware-specific settings)
 container_options: >-
@@ -345,6 +345,7 @@ test_matrix:
         golden_environment: dev
         golden_platform: 910c
         enable_lightweight_mode: false
+        data_path: /home/gitlab-runner/data
         data_cache_path: /tmp/megatron-data-cache
         gpus_per_node: 1
       - model: gpt
@@ -354,5 +355,6 @@ test_matrix:
         golden_environment: dev
         golden_platform: 910c
         enable_lightweight_mode: false
+        data_path: /home/gitlab-runner/data
         data_cache_path: /tmp/megatron-data-cache
         gpus_per_node: 4

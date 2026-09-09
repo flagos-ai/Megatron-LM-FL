@@ -105,7 +105,9 @@ ENVEOF
 }
 
 ci_install_uv_compatibility_shim() {
-  if command -v uv >/dev/null 2>&1; then
+  local force_shim="${1:-false}"
+
+  if [ "$force_shim" != "true" ] && command -v uv >/dev/null 2>&1; then
     uv --version
     return
   fi
@@ -153,6 +155,49 @@ ci_setup_functional_environment() {
   ci_install_uv_compatibility_shim
   python3 -m pip install pybind11 --no-cache-dir
   ci_install_project "$@"
+}
+
+ci_install_local_tokenizer_dependencies() {
+  # Transformers >= 4.47 validates mounted local tokenizer paths as Hub repo
+  # ids. Keep the functional images on the version that accepts local paths.
+  python3 -m pip install \
+    "transformers<4.47.0" \
+    "huggingface_hub<0.27.0" \
+    --no-cache-dir --quiet
+}
+
+ci_validate_qwen_assets() {
+  local data_root="${1:-/home/gitlab-runner/data}"
+  local tokenizer_root="${2:-/home/gitlab-runner/tokenizers}"
+  local data_prefix="$data_root/pile_wikipedia_demo/pile_wikipedia_demo"
+  local tokenizer_path="$tokenizer_root/qwentokenizer"
+  local -a required_paths=(
+    "${data_prefix}.bin"
+    "${data_prefix}.idx"
+    "$tokenizer_path/tokenizer_config.json"
+    "$tokenizer_path/tokenization_qwen.py"
+    "$tokenizer_path/qwen.tiktoken"
+  )
+  local -a missing_paths=()
+  local path
+
+  for path in "${required_paths[@]}"; do
+    if [ ! -f "$path" ]; then
+      missing_paths+=("$path")
+    fi
+  done
+
+  if [ "${#missing_paths[@]}" -ne 0 ]; then
+    echo "::error::Functional assets are missing inside the container"
+    for path in "${missing_paths[@]}"; do
+      echo "  missing: $path"
+    done
+    return 1
+  fi
+
+  echo "Functional assets validated"
+  echo "  dataset: $data_prefix"
+  echo "  tokenizer: $tokenizer_path"
 }
 
 ci_validate_device_capacity() {

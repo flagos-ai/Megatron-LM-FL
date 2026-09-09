@@ -195,6 +195,8 @@ case "$CI_TEST_SUITE" in
   functional)
     validate_ascend_torch
     ci_setup_functional_environment
+    ci_install_local_tokenizer_dependencies
+    ci_validate_qwen_assets /home/gitlab-runner/data /home/gitlab-runner/tokenizers
     install_ascend_uv_system_python_shim
     install_ascend_functional_dependencies
     configure_ascend_runtime

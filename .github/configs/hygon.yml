@@ -1,0 +1,445 @@
+hardware_name: hygon
+display_name: 'Hygon Tests'
+setup_script: .github/scripts/set_env_hygon.sh
+
+# Built from the documented DTK image with FlagGems, TransformerEngine-FL, and
+# the test dependencies preinstalled, so CI setup only installs this project.
+ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260728-hygon-dev
+
+runner_labels:
+  - hg-8g-cicd-megatron
+
+# The DTK PyTorch package loads driver-side runtime libraries from /opt/hyhal.
+# Use the local runner asset set. Keep both container layouts because the
+# Hygon functional cases use the legacy /opt/data paths.
+container_volumes:
+  - /opt/hyhal:/opt/hyhal
+  - /data/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data
+  - /data/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /data/megatron-ci-assets-20260726/baai_datasets:/opt/data/datasets
+  - /data/megatron-ci-assets-20260726/baai_tokenizers:/opt/data/tokenizers
+
+container_options: >-
+  --ipc=host
+  --shm-size=500g
+  --hostname megatron_cicd
+  --add-host megatron_cicd:127.0.0.1
+  --user root
+  --ulimit nofile=65535:65535
+  --env DTK_HOME=/opt/dtk
+  --env GEMS_VENDOR=amd
+  --env ROCM_PATH=/opt/dtk
+  --env HIP_PATH=/opt/dtk/hip
+  --env HSA_PATH=/opt/dtk/hsa
+  --env HIP_CLANG_PATH=/opt/dtk/llvm/bin
+  --env DEVICE_LIB_PATH=/opt/dtk/amdgcn/bitcode
+  --env PATH=/opt/dtk/bin:/opt/dtk/hip/bin:/opt/dtk/llvm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+  --env LD_LIBRARY_PATH=/opt/hyhal/lib/criu:/opt/hyhal/lib/rocprofiler:/opt/hyhal/lib:/opt/dtk/hip/lib:/opt/dtk/lib:/opt/dtk/llvm/lib:/opt/dtk/dcc/lib:/opt/dtk/aillvm/lib:/opt/dtk/hsa/lib
+  --device=/dev/kfd
+  --device=/dev/mkfd
+  --device=/dev/dri
+  --group-add video
+  --cap-add=SYS_PTRACE
+  --security-opt seccomp=unconfined
+
+device_types:
+  - bw1000
+
+test_matrix:
+  unit:
+    nproc_per_node: 8
+    pytest_extra_args:
+      - --continue-on-collection-errors
+      # Keep successful multi-rank stdout out of the live Actions log. Pytest
+      # still includes captured output for failures.
+      - --capture=fd
+      # Do not replay captured output for every passing parametrization. With
+      # eight ranks, pytest's default -rA report exceeds the Actions log limit.
+      - -rfE
+    groups:
+      - name: core
+        path: tests/unit_tests/test_*.py megatron/plugin/tests/
+        description: Core unit tests
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      # The Hygon distributed group is temporarily omitted. After applying the
+      # backend exclusions below, only the reduce-scatter accumulation and
+      # Torch FSDP2 files remained; both fail before consistent process-group
+      # teardown on BW1000, so scheduling the group provides no valid coverage.
+      # Re-enable this group when either boundary is supported by the DTK stack.
+      - name: dist_checkpointing
+        path: tests/unit_tests/dist_checkpointing/
+        description: Distributed checkpointing tests
+      - name: tensor_parallel
+        path: tests/unit_tests/tensor_parallel/
+        description: Tensor parallel tests
+      - name: pipeline_parallel
+        path: tests/unit_tests/pipeline_parallel/
+        description: Pipeline parallel tests
+      # The Hygon data group is temporarily omitted. Existing backend and
+      # fixture exclusions leave only test_bin_reader.py, which starts ten
+      # preprocessing workers on each of the eight ranks and leaves one rank
+      # blocked until the unit-test hard timeout.
+      - name: fusions
+        path: tests/unit_tests/fusions/
+        description: Fusion tests
+      - name: others
+        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: Export, post-training, tokenizer, and utility tests
+    ignored_tests:
+      # core
+      # NVIDIA Transformer Engine FP4/FP8 paths are unavailable on BW1000;
+      # TE-FL uses its FlagOS backend instead.
+      - tests/unit_tests/test_fp4_param.py
+      - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_fp8_utils.py
+      # All four distributed cases here use TempNamedDir(sync=True), whose
+      # barriers deadlock the surviving ranks when any rank errors during
+      # fixture setup or teardown. The rank-0-only tmp_path_dist_ckpt fixture
+      # races under 8-way concurrency, so the group never reaches its summary
+      # and the hard timeout terminates it. Same root cause metax records for
+      # dist_checkpointing/test_safe_globals.py.
+      - tests/unit_tests/test_checkpointing.py
+      # Exercises NVIDIA NCCL memory allocator APIs directly.
+      - tests/unit_tests/test_nccl_allocator.py
+      # TE-FL precision-aware fused Adam pathway not supported on BW1000.
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_fused_adam
+      # Every 8-rank custom device-mesh parametrization fails on BW1000 and
+      # leaves the following ranks in the same group until torchrun kills the
+      # job. Keep the scalar optimizer coverage enabled.
+      - tests/unit_tests/test_optimizer.py::test_get_megatron_optimizer_with_custom_process_groups
+      # These distributed-optimizer state and custom process-group validation
+      # paths require TE/NCCL semantics that the BW1000 TE-FL/RCCL stack does
+      # not provide. The same nodes are excluded for MetaX; keep the remaining
+      # non-distributed optimizer coverage enabled.
+      - tests/unit_tests/test_optimizer.py::test_distrib_optimizer_save_load_with_non_tensor_state
+      - tests/unit_tests/test_optimizer.py::test_optim_sharded_state_dict
+      - tests/unit_tests/test_optimizer.py::test_optimizer_reload_model_params
+      - tests/unit_tests/test_optimizer.py::test_get_megatron_optimizer_custom_process_groups_validation
+      # TE-FL multi_tensor_sgd API version mismatch (8 args vs 11).
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer
+      # BW1000 CPU offload overlap exceeds CUDA tolerance.
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
+      # TE-FL broadcast shape mismatch ([] vs [1]).
+      - tests/unit_tests/test_utils.py::test_param_norm_linear
+      - tests/unit_tests/test_utils.py::test_param_norm_moe
+      # These flaky distributed utilities require every rank to enter the same
+      # communicator sequence. On BW1000 the late core suite reaches them with
+      # divergent process-group state, so ranks wait for NCCL IDs that rank 0
+      # never publishes. MUSA excludes the same three nodes.
+      - tests/unit_tests/test_utils.py::test_check_param_hashes_across_dp_replicas
+      - tests/unit_tests/test_utils.py::test_cross_check_param_hashes_across_dp_replicas
+      - tests/unit_tests/test_utils.py::test_straggler_detector
+      # HyperCommGrid mocks new_subgroups_by_enumeration but
+      # hyper_comm_grid.py:161 calls dist.get_rank() which requires an
+      # active process group; 7 of 8 Hygon ranks fail.
+      - tests/unit_tests/test_hyper_comm_grid.py
+      # This file repeatedly creates and destroys 8-rank model-parallel
+      # process groups. The BW1000 RCCL runtime can leave ranks on different
+      # collective sequences after the first reconfiguration, so the remaining
+      # ranks wait until the unit-test hard timeout terminates the job.
+      - tests/unit_tests/test_parallel_state.py
+      # These fixtures create fresh model-parallel groups late in the core
+      # test process. BW1000 can fail the RCCL bootstrap on only a subset of
+      # ranks, after which the following ranks diverge and wait for timeout.
+      - tests/unit_tests/test_process_groups_config.py::TestPGConfigDefaultInitialization::test_default_initialization
+      - tests/unit_tests/test_training.py::TestTraining::test_build_train_valid_test_data_iterators
+      - tests/unit_tests/test_training.py::TestTraining::test_closed_formula_vocab_size_with_padding
+      # setup_method creates NCCL and Gloo groups on all eight ranks. In the
+      # observed divergent state, Gloo subgroup creation waits for 30 minutes.
+      # MUSA also excludes both late TestTraining/TestSaveGrads nodes.
+      - tests/unit_tests/test_training.py::TestSaveGrads::test_save_grads
+
+
+      # distributed
+      # This file explicitly documents that it leaves corrupted NCCL state and
+      # must run in an isolated bucket. All executable methods are already
+      # unsupported on BW1000, while test_fully_shard is unconditionally
+      # skipped upstream, so ignoring the file removes no Hygon coverage.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py
+      # Class setup creates model-parallel groups before the dp_size=2 case can
+      # skip on an 8-rank job. BW1000 intermittently fails that RCCL bootstrap;
+      # later distributed tests then enter different process-group sequences.
+      # MetaX excludes this file for the same distributed-test boundary.
+      - tests/unit_tests/distributed/test_distributed_data_parallel.py
+      # Both layernorm variants and the first word-embedding all-reduce variant
+      # fail across BW1000 ranks before teardown can restore a consistent
+      # process-group state. The remaining variant then waits on collectives
+      # entered by only a subset of ranks.
+      - tests/unit_tests/distributed/test_finalize_model_grads.py
+      # The PP=4 conditional-embedding all-reduce fails across BW1000 ranks
+      # before process-group teardown. MetaX and Ascend exclude the same file.
+      - tests/unit_tests/distributed/test_grad_reduce_for_replicated_embedder.py
+      # The first MoE gradient-sync parametrization fails across ranks and the
+      # next one waits until the hard timeout. CUDA, MetaX, and Ascend exclude
+      # this file at the backend boundary.
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      # The first bucket-size cases now fail across BW1000 ranks before
+      # teardown, and the next parametrization blocks in model-parallel group
+      # setup until the job timeout. Every executable test in this file uses
+      # the same DDP buffer / gradient-collective boundary; CUDA, MetaX, and
+      # Ascend also exclude the complete file.
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py
+      # All four FP32-accumulation combinations error across BW1000 ranks before
+      # teardown. MetaX and Ascend exclude the same reduce-scatter boundary.
+      - tests/unit_tests/distributed/test_reduce_scatter_with_fp32_accumulation.py
+      # DTK exposes the FSDP2 API, but both constructors fail during the Hygon
+      # communicator setup; the explicit-process-group case then blocks until
+      # the unit hard timeout. MetaX and MUSA exclude this file as unsupported.
+      - tests/unit_tests/distributed/test_torch_fully_sharded_parallel.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_compatible_with_nd_parallel
+      # The remaining TestFullyShardedDataParallel methods all initialize the
+      # same unsupported BW1000 FSDP communicator in class setup.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestFullyShardedDataParallel
+      # data
+      # Hardcoded /opt/data and /opt/megatron-lm paths, plus a vocab download
+      # with no timeout that hangs the rank group. Also ignored on cuda/metax.
+      - tests/unit_tests/data/test_preprocess_data.py
+      # Starts ten preprocessing workers per torchrun rank. Seven BW1000 ranks
+      # complete in 112-165s, while the remaining rank never returns and is
+      # terminated by the 2700s unit-test timeout. MetaX also excludes it.
+      - tests/unit_tests/data/test_bin_reader.py
+      # Every data test that builds a process group fails here, while the two
+      # that never touch torch.distributed pass. Utils.initialize_distributed()
+      # does not reuse torchrun's env:// rendezvous; it opens a second TCPStore
+      # on the same MASTER_ADDR:MASTER_PORT that torchrun's static rendezvous
+      # already holds, so rank 0 never publishes ncclUniqueId and the other
+      # ranks exhaust the 60s store timeout test_utilities.py sets. This also
+      # covers the earlier test_fast_builder barrier hang. test_fim_dataset.py
+      # is ignored on metax too; the other three are not, and ascend ignores
+      # nothing in this group.
+      - tests/unit_tests/data/test_builder.py
+      - tests/unit_tests/data/test_fim_dataset.py
+      - tests/unit_tests/data/test_gpt_dataset.py
+      - tests/unit_tests/data/test_multimodal_dataset.py
+      # Downloads the GPT-2 vocabulary and merge file from an external URL
+      # without a timeout or retry. The Hygon runner's connection was cut
+      # mid-response, so this test is not deterministic CI coverage here.
+      - tests/unit_tests/data/test_preprocess_mmdata.py::test_preprocess_mmdata
+
+
+      # models
+      # Intermittently hangs after test_forward with no output from any rank and
+      # no error; only the 30-min hard timeout ends it. Not ignored on metax.
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_save_load
+      # Hangs during RCCL communicator bootstrap; all tests in this file trigger
+      # the rank-0 hang in process-group setup on Hygon BW1000.
+      # Ascend ignores test_constructor and test_gpu_forward.
+      - tests/unit_tests/models/test_base_embedding.py
+      # All class tests initialize a model-parallel group in setup_method; the
+      # first setup errors on BW1000 and the remaining ranks are then killed.
+      - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel
+      # Every test errors in setup_method on all eight ranks, the same way
+      # test_base_embedding.py did before it was ignored. Both files open
+      # setup_method with Utils.initialize_model_parallel, and the group is
+      # killed before pytest emits a traceback, so the whole file is ignored.
+      - tests/unit_tests/models/test_bert_model.py
+      # The model-parallel setup in TestGPTModel fails on BW1000 before the
+      # class tests run and leaves the remaining ranks blocked.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTModel
+      # setup_class initializes an 8-rank RCCL group before the 2/4/8-GPU
+      # methods can apply their own world-size skips. Rank 0 then fails to
+      # publish the NCCL unique ID and every other rank times out in setup.
+      # Deselect the class rather than its individual methods.
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule
+      # MIMO checkpoint same HyperCommGrid + TE attention issue as above.
+      - tests/unit_tests/models/test_mimo_checkpoint.py
+      # TE-FL FlagGems backend missing these operators.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTWithDynamicInference::test_dynamic_inference_padding_with_fp8
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelTokenParallel::test_process_embedding_token_parallel
+      # TE operation-based GPT setup waits for an RCCL communicator on BW1000;
+      # the class fails before its forward test can run.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTWithFusedOps
+      # The TE activation-function parametrizations use the same model-parallel
+      # setup and leave the remaining ranks blocked on BW1000.
+      - tests/unit_tests/models/test_gpt_model.py::test_gpt_with_te_activation_func
+      # Both classes initialize model parallelism in setup_method; the Hygon
+      # RCCL bootstrap errors before their model assertions can run.
+      - tests/unit_tests/models/test_gpt_model_quantization.py::TestGPTModelTEQuantizationConfig
+      - tests/unit_tests/models/test_heterogeneous_gpt_model.py::TestHeterogeneousGPTModel
+      # These model classes also initialize model parallelism unconditionally;
+      # keep their CPU-only helper coverage while avoiding the same BW1000
+      # RCCL bootstrap path.
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelVisionEncoders
+      - tests/unit_tests/models/test_mimo_submodules.py::TestBaseSubmodule
+      - tests/unit_tests/models/test_mimo_submodules.py::TestVisionSubmodule
+      - tests/unit_tests/models/test_multimodal_projector.py::TestMultimodalProjector
+      - tests/unit_tests/models/test_radio_model.py::TestRADIOViTModel
+      - tests/unit_tests/models/test_t5_model.py::TestT5Model
+      # mamba-ssm CUDA kernels unavailable on BW1000 (AMD/HIP). Also ignored on metax.
+      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/models/test_mamba_moe_model.py
+
+      # fusions
+      # TE-FL FlagGems backend missing rmsnorm_bwd_add operator.
+      # Also ignored on metax.
+      - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # FlagGems fused kernel reduction order differs from the torch baseline;
+      # the fp32 weight-grad check at 1e-6 tolerance fails on some ranks
+      # (inputs are unseeded randn, so it depends on the draw).
+      - tests/unit_tests/fusions/test_weighted_squared_relu_fusion.py::test_weighted_squared_relu_fusion
+      # The conflict test initializes a model-parallel group and times out
+      # waiting for the BW1000 NCCL unique id before exercising the warning.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestApplyRotaryPosEmbMlaFusionConflict::test_mla_rotary_interleaved_with_apply_rope_fusion_emits_warning_and_uses_unfused
+
+
+      # dist_checkpointing
+      # A rank-local serialization failure can remove the session-scoped
+      # tmp_dist_ckpt directory or leave ranks on different barriers. The next
+      # save/load cases then fail across ranks and eventually time out instead
+      # of producing a stable backend result. Exclude this synchronized file as
+      # one boundary; Ascend does the same, while the old node-only exclusion
+      # did not contain the failure cascade on BW1000.
+      - tests/unit_tests/dist_checkpointing/test_serialization.py
+      # dist_checkpointing — all also ignored on metax.
+      # MambaSSM unavailable on BW1000 (AMD/HIP).
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      # TE-FL missing quantize operator (fp8 paths).
+      - tests/unit_tests/dist_checkpointing/test_fp8.py
+      # The first fully-parallel save/load cases produce different rank
+      # assignments on BW1000. Later tests in the file rebuild TP/DP groups,
+      # share checkpoint directories, and enter collectives, so the rank
+      # divergence leaves surviving ranks waiting indefinitely. MetaX excludes
+      # the same file at this backend boundary.
+      - tests/unit_tests/dist_checkpointing/test_fully_parallel.py
+      # Global metadata reuse fails on BW1000.
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      # The only MSC save/load case fails across ranks after creating a TP=2,
+      # PP=4 checkpoint group, and its synchronized temporary directory then
+      # prevents the group from reaching clean teardown.
+      - tests/unit_tests/dist_checkpointing/test_msc.py
+      # The only executable legacy non-persistent checkpoint case fails on all
+      # ranks. CUDA and MetaX also exclude this file.
+      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
+      # Optimizer resharding fails on BW1000.
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py
+      # Both the PP case and every VPP reconfiguration reached in the BW1000
+      # run fail across ranks. Repeated TP/PP rebuilds then leave later ranks
+      # waiting until the hard timeout. MetaX excludes the same file.
+      - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
+      # Both torch-dist tests rebuild model-parallel groups. Cached metadata
+      # loses the BW1000 RCCL rendezvous after 60s; the following CPU tensor
+      # case then blocks while creating its 8-rank Gloo group for 1800s.
+      - tests/unit_tests/dist_checkpointing/test_torch_dist.py
+      # All ranks share tmp_path_dist_ckpt, but pytest cleanup on one rank can
+      # remove its parent while another rank is still writing safe-globals
+      # checkpoints. CUDA and MetaX exclude the same file.
+      - tests/unit_tests/dist_checkpointing/test_safe_globals.py
+      # MoE expert reconfiguration not compatible with TE-FL.
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+      # TE-FL missing fused_amax_and_scale_update_after_reduction operator.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
+      # All four async save/load parametrizations fail on BW1000 before the
+      # checkpoint group reaches teardown and the job exits with 137.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_async_is_equivalent_to_sync
+      # The TE-FL MLP checkpoint reconfiguration path fails before all ranks
+      # reach the next process-group transition and then deadlocks the group.
+      # MetaX has the same image-level incompatibility.
+      - tests/unit_tests/dist_checkpointing/models/test_mlp_glu.py
+      # Every BERT parametrization that ran failed, including the local-spec
+      # combination that never touches TE, so this is the BERT sharded-state-dict
+      # path rather than a TE-FL operator gap. The (1,1)->(2,2) reconfiguration
+      # then deadlocks while rebuilding the process group after those failures
+      # and no rank reaches the pytest summary. At 60-209s per case the file's
+      # 17 tests also exhaust the 1800s budget on their own, starving the other
+      # 577 tests in this group. test_gpt_model.py is the next file of the same
+      # weight and shares the sharded-state-dict path.
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      # T5 shares that sharded-state-dict path. Both parametrizations that ran
+      # failed on all eight ranks, including te-local which never touches TE,
+      # so this is the checkpoint path rather than a TE-FL operator gap. The
+      # group is then killed before pytest reports, leaving 526 of 528 tests
+      # unrun. MetaX ignores the function; the whole file is needed here for
+      # the same budget reason as test_bert_model.py.
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py
+      # CheckpointableProtocol initializes a fresh process group in setup and
+      # both tests error on BW1000 before the group can be torn down.
+      - tests/unit_tests/dist_checkpointing/test_checkpointable.py::TestCheckpointableProtocol
+
+      # tensor_parallel
+      # This cross-entropy case fails on the BW1000 backend before its
+      # process-group cleanup, causing following cases to diverge by rank.
+      - tests/unit_tests/tensor_parallel/test_cross_entropy.py::test_vocab_parallel_cross_entropy
+      # These tests initialize additional model-parallel groups under torchrun;
+      # RCCL fails during that bootstrap on BW1000 and cascades to all ranks.
+      - tests/unit_tests/tensor_parallel/test_data.py::test_broadcast_data
+      # The initialization suite repeats the same 1-rank -> 4-rank group
+      # teardown/rebuild sequence for regular and TE linear layers.  Once the
+      # first case poisons RCCL state, later cases either fail or wait for the
+      # Hygon unit-test hard timeout.
+      - tests/unit_tests/tensor_parallel/test_initialization.py
+      # This file is the first remaining tensor-parallel test after the
+      # exclusions above. Its TP=1 case stalls while creating model-parallel
+      # groups on the 8-rank job; one rank exits and 175 partial groups abort.
+      - tests/unit_tests/tensor_parallel/test_layers.py
+      # All seven mapping tests repeatedly initialize TP=4/PP=2 groups. Ranks
+      # diverge during RCCL unique-ID rendezvous (success on some ranks, 60s
+      # store timeout on others), so later group creation is no longer aligned.
+      - tests/unit_tests/tensor_parallel/test_mappings.py
+      # These are the remaining tests that initialize model-parallel groups.
+      # The first one fails the default 8-rank RCCL barrier on ranks 1-7. If it
+      # is deselected, either tensor utility becomes the first communicator
+      # bootstrap and can hit the same timeout, so exclude the complete chain.
+      - tests/unit_tests/tensor_parallel/test_random.py::test_model_parallel_cuda_manual_seed
+      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_split_tensor_into_1d_equal_chunks
+      - tests/unit_tests/tensor_parallel/test_tensor_parallel_utils.py::test_gather_split_1d_tensor
+      # These checkpoint helpers reinitialize model-parallel groups after the
+      # RNG tests.  A later RCCL group bootstrap can hang on BW1000 even when
+      # the earlier RNG cases pass; retain the non-distributed RNG coverage.
+      - tests/unit_tests/tensor_parallel/test_random.py::test_checkpoint
+      - tests/unit_tests/tensor_parallel/test_random.py::test_checkpoint_without_output
+      - tests/unit_tests/tensor_parallel/test_random.py::test_checkpoint_without_output_view_sharing_regression
+
+      # pipeline_parallel
+      # TE-FL FlagGems te_general_grouped_gemm broadcast shape mismatch.
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+
+      # others
+      # TE-FL missing fused_amax_and_scale_update_after_reduction.
+      # These three tests are also ignored on metax.
+      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
+      # The distributed TRT-LLM converter errors during setup on BW1000.
+      - tests/unit_tests/export/trtllm/test_trtllm_distributed_gpu_converter.py
+      # ModelOpt not available on BW1000.
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
+      # The GPT checkpoint restore blocks at rank-synchronized temporary
+      # directory setup until the Hygon unit-test hard timeout terminates it.
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py
+      # tokenizers.Encoding has no 'copy' attribute in this image.
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+      # The test branches on torch.distributed.is_initialized() while
+      # log_single_rank() falls back to the RANK env var, so under torchrun
+      # with no initialized process group ranks 1-7 expect a record that
+      # safe_get_rank() suppressed. Every other platform passes only because
+      # an earlier file in this group leaves a process group initialized;
+      # hygon ignores all four of those files, so utils/ runs first and the
+      # guard mismatch surfaces.
+      - tests/unit_tests/utils/test_experimental_log_once.py
+
+  functional:
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_hygon
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: bw1000
+        enable_lightweight_mode: false
+        data_path: /opt/data/datasets
+        gpus_per_node: 1
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_hygon
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: bw1000
+        enable_lightweight_mode: false
+        data_path: /opt/data/datasets
+        # This baseline is recorded with TP2/PP2 on four devices (DP=1).
+        gpus_per_node: 4

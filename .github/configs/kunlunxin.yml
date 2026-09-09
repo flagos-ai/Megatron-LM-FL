@@ -1,0 +1,320 @@
+# KunLunXin Hardware Configuration for Megatron-LM-FL
+# This file defines CI/CD settings for KunLunXin P800-based testing.
+
+hardware_name: kunlunxin
+display_name: 'KunLunXin Tests'
+setup_script: .github/scripts/set_env_kunlunxin.sh
+
+# CI image for KunLunXin P800 environment
+ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260804-kunlunxin-dev
+
+# Runner labels for the KunLunXin node
+runner_labels:
+  - kl-8g-cicd-megatron
+
+# Container volumes (hardware-specific paths)
+container_volumes:
+  - /home/flagscale_cicd/flask/static:/workspace/report
+  - /home/flagscale_cicd/flask/config:/workspace/config
+  - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
+  - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
+  # Mount KunLunXin XPU driver runtime libraries and tools.
+  - /usr/local/xpu:/usr/local/xpu
+
+# Container options (hardware-specific settings)
+container_options: >-
+  --privileged
+  --shm-size=64G
+  --hostname megatron_cicd
+  --user root
+  --ipc=host
+  --ulimit nofile=1048576:1048576
+
+# Device types to run tests on
+device_types:
+  - p800
+
+# Test matrix configuration
+test_matrix:
+  unit:
+    nproc_per_node: 8
+    pytest_extra_args: []
+    groups:
+      - name: core
+        path: tests/unit_tests/test_*.py megatron/plugin/tests/
+        description: Core unit tests
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      - name: distributed
+        path: tests/unit_tests/distributed/
+        description: Distributed tests
+      - name: dist_checkpointing
+        path: tests/unit_tests/dist_checkpointing/
+        description: Distributed checkpointing tests
+      - name: tensor_parallel
+        path: tests/unit_tests/tensor_parallel/
+        description: Tensor parallel tests
+      - name: pipeline_parallel
+        path: tests/unit_tests/pipeline_parallel/
+        description: Pipeline parallel tests
+      - name: data
+        path: tests/unit_tests/data/
+        description: Data tests
+      - name: fusions
+        path: tests/unit_tests/fusions/
+        description: Fusion tests
+      - name: others
+        path: tests/unit_tests/export/ tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: Export, post-training, tokenizer, and utility tests
+    ignored_tests:
+
+      #core
+      # KunLunXin uses FlagCx, not NCCL; nccl_allocator.so is never built.
+      - tests/unit_tests/test_nccl_allocator.py
+      # the test asserts master weights stay bit-identical to the FP32
+      # FusedAdam reference after 1000 steps, which only holds for the CUDA
+      # kernel. ascend and metax ignore this case for the same reason.
+      - tests/unit_tests/test_optimizer.py::test_precision_aware_fused_adam
+      # multi_tensor_adam_param_remainder is NOT IMPLEMENTED in XMLIR
+      # (error code=4); TE-FL reference.torch fallback also fails.
+      # metax ignores this case for the same reason.
+      - tests/unit_tests/test_optimizer.py::test_distrib_optimizer_save_load_with_non_tensor_state
+      # multi_tensor_sgd signature mismatch between TE-FL and XMLIR;
+      # the reference.torch fallback expects 8 args but gets 11. ascend
+      # ignores all SGD parametrizations of this test for the same reason.
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer
+      # CPU-GPU overlap correctness depends on CUDA stream semantics that
+      # differ on XPU; the numerical comparison drifts outside the tolerance
+      # used by the test. ascend and metax also ignore this case.
+      - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
+      # straggler-detector teardown crashes the FlagCx communicator during
+      # pytest session shutdown. ascend and metax also ignore this case.
+      - tests/unit_tests/test_utils.py::test_straggler_detector
+      # core-XMLIR mock intercepts torch.cuda.utilization() and loads
+      # /usr/local/xcudart/lib/libxpunvidia-ml.so.1 (NVML shim) which is
+      # absent in the CI image; ascend ignores this for the same reason.
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_utilization_returns_numeric
+      # XCCL/FlagCX process group teardown corrupts memory during
+      # test_get_tensor_model_parallel_src_rank; the subsequent pytest
+      # reset_env_vars fixture calls os.environ.update() on the corrupted
+      # heap and triggers SIGSEGV (exitcode -11), killing the entire session.
+      # metax and ascend are not affected as their communication libraries
+      # handle teardown without memory corruption.
+      - tests/unit_tests/test_parallel_state.py::test_get_tensor_model_parallel_src_rank
+      #models
+      # Hangs during DDP initialization allocating 1.3B params per rank on XPU.
+      - tests/unit_tests/models/test_heterogeneous_gpt_model.py
+      # Hangs during distributed init (FlagCx communicator setup) on XPU.
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_constructor
+      # SIGSEGV in XMLIR during FlagCx distributed init (setup_method →
+      # initialize_model_parallel). ascend also ignores this case.
+      - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_gpu_forward
+      # All 8-GPU MIMO schedules and checkpoint hang during DDP initialization
+      # (FlagCx) on XPU. ascend and metax also ignore these.
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py
+      - tests/unit_tests/models/test_mimo_checkpoint.py
+      # Fails token-parallel embedding processing on XPU.
+      # ascend and metax also ignore this case.
+      - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelTokenParallel::test_process_embedding_token_parallel
+      # mamba-ssm CUDA extension not installed in kunlunxin image.
+      # ascend and metax also ignore this case.
+      - tests/unit_tests/models/test_mamba_model.py
+      # mamba-ssm CUDA extension not installed in kunlunxin image.
+      # ascend and metax also ignore this case.
+      - tests/unit_tests/models/test_mamba_moe_model.py
+
+      #distributed
+      # FSDP tests are incompatible with XPU; ascend ignores most tests in
+      # this directory and metax ignores a subset.
+      - tests/unit_tests/distributed/megatron_fsdp/
+      # bucket_group_cpu_sync produces different numerical results on XPU.
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers
+      # Hangs during expert-parallel gradient sync on XPU; ascend and metax
+      # ignore the entire file for the same reason.
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      # FP32 local gradient accumulation produces different numerical results
+      # on XPU; the scaled extra-main-grad comparison fails.
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::TestFP32LocalGradAccumulation::test_scale_gradients_scales_extra_main_grads
+
+      #dist_checkpointing
+      # Hang during DDP initialization on XPU; metax ignores entire files.
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py
+      # mamba-ssm CUDA extension not installed; hangs during DDP init on XPU.
+      # ascend and metax also ignore this file.
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      # XCCL pthread_create failed during MoE expert reconfiguration on XPU.
+      # ascend and metax also ignore this file.
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+      # nvidia-resiliency-ext is not installed in the KunLunXin image.
+      # ascend and metax also ignore this case.
+      - tests/unit_tests/dist_checkpointing/test_async_save.py::TestAsyncSave::test_get_async_strategy[nvrx]
+      # FP8 checkpointing tests require TE FP8 support not available on XPU.
+      # ascend and metax also ignore this file.
+      - tests/unit_tests/dist_checkpointing/test_fp8.py
+      # Fails on XPU; ascend and metax also ignore this file.
+      - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
+      # FlagCX gather() / gather_object() fails with "flagcxComm not fully
+      # initialized" during fully-parallel save/load and cross-rank DP reads;
+      # metax ignores the entire file for the same reason.
+      - tests/unit_tests/dist_checkpointing/test_fully_parallel.py
+      # Gloo backend fails to connect across ranks on XPU; metax ignores
+      # the entire file for the same reason.
+      - tests/unit_tests/dist_checkpointing/test_optimizer.py
+      # dist_checkpointing-test_remove_sharded_tensors triggers an XCCL
+      # ALLREDUCE deadlock (SeqNum=1324); all 8 ranks block for 10 minutes
+      # until the Watchdog fires and terminates the session with exitcode 1.
+      # metax also ignores this case for the same reason (MACA deadlock).
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors
+      # VPP checkpoint reconfiguration tests use a sub-world Gloo
+      # process group that fails to initialize on XPU; metax and ascend also ignore
+      # this file for the same reason.
+      - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
+      # test_empty_load calls torch.distributed.barrier() inside
+      # its context manager; XMLIR intercepts it as an XCCL ALLREDUCE which deadlocks
+      # after prior rank failures, triggering the 600s watchdog and aborting the
+      # entire test session.
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_empty_load
+      # FlagCX gather_object() fails with "flagcxComm not fully initialized"
+      # during sharded tensor checkpointing and multi-local-shard save/load;
+      # same root cause as test_forward_vpp (upstream MUSA PR #100 changes).
+      - tests/unit_tests/dist_checkpointing/test_checkpointable.py::TestCheckpointableProtocol::test_sharded_tensor_checkpointing
+      - tests/unit_tests/dist_checkpointing/test_checkpointable.py::TestCheckpointableProtocol::test_multiple_local_shards
+      # FlagCX gather() fails with "flagcxComm not fully initialized" during
+      # T5 encoder/decoder parallel reconfiguration; same root cause as above.
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5ModelReconfiguration::test_parallel_reconfiguration_e2e
+
+      # pipeline_parallel
+      # All bridge_communicator tests with complex topologies (multi-grid, 2D
+      # fan-in/fan-out, transformer blocks) trigger XCCL/FlagCX collective
+      # deadlocks. Four cases identified: test_send_backward_recv_backward,
+      # test_send_forward_recv_backward_send_backward_recv_forward (ALLREDUCE
+      # SeqNum=8 in _communicate_shapes()), test_bridge_communicator_with_
+      # transformer_blocks (rank desync: some in teardown barrier, others in
+      # all_reduce), and test_2d_fan_in_fwd_bwd (ALLREDUCE SeqNum=32). Each
+      # blocks 600s until Watchdog aborts the session, killing ~100+ unrun
+      # tests. Metax ignores 2 of these cases; ascend ignores none (HCCL
+      # handles these topologies). Ignoring the entire file to avoid burning
+      # 10+ minutes per new failure and losing the rest of the test session.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py
+      # test_send_forward_recv_forward_with_transformer_blocks triggers an XCCL
+      # COALESCED collective deadlock (SeqNum=7/13 across different ranks),
+      # blocking all 8 ranks for 600s until the Watchdog fires and terminates
+      # the session with exitcode 1, killing ~85 unrun tests. The test
+      # initializes multiple Gloo process groups for MultiModule communicator
+      # topology, then deadlocks inside a COALESCED operation during
+      # transformer block communication. Metax ignores the entire
+      # test_multimodule_communicator.py file for "runtime aborts in
+      # multimodule bridge communicator teardown"; ascend does not ignore
+      # (HCCL handles this topology).
+      - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py
+      # Hangs after printing the Activation Offload Summary: test body completes
+      # but teardown never finishes (destroy_process_group/barrier). All
+      # parametrized variants exhibit the same pattern. Metax ignores for
+      # "flaky fine-grained activation offload paths"; Ascend ignores because
+      # "the pytest session never reports a summary".
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
+      - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      # teardown_class deadlocks in destroy_model_parallel → barrier(), XCCL
+      # ALLREDUCE SeqNum=12 times out after 600s. Metax and Ascend also ignore.
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+      # FlagCX backend error in group.gather() during VPP (Virtual Pipeline
+      # Parallel) execution; first parametrized case triggers FLAGCX error
+      # (backend_flagcx.cpp:1035), subsequent cases fail with "num microbatches
+      # calculator is already initialized". Metax also ignores this function.
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py::test_forward_vpp
+
+
+      # data
+      # test_bin_reader requires multi-storage-client (optional dependency for
+      # S3/OSS remote storage), which is not installed in the kunlunxin image.
+      # metax also ignores this test for the same reason.
+      - tests/unit_tests/data/test_bin_reader.py
+      # initialize_distributed() opens a second TCPStore on the same
+      # MASTER_ADDR:MASTER_PORT that torchrun already holds; rank 0 never
+      # publishes ncclUniqueId and other ranks exhaust the 60s store timeout,
+      # causing all 204 parametrized cases to each block 60s and trip the
+      # 60-min CI hard timeout. Hygon ignores these files for the same reason.
+      - tests/unit_tests/data/test_builder.py
+      # All distributed dataset tests timeout on TCPStore initialization
+      # (torch.distributed.init_process_group); rank 4/7/2/5 repeatedly wait
+      # 60s for socket connection to localhost:29500 and fail. Root cause:
+      # XPU/XCCL initialization overhead causes some ranks to miss the TCPStore
+      # rendezvous window (1 minute timeout in test_utilities.py:54). Tests
+      # without distributed init (test_preprocess_data_gpt) pass successfully.
+      # metax ignores only test_preprocess_mmdata; kunlunxin TCPStore timeout
+      # affects all distributed dataset tests.
+      - tests/unit_tests/data/test_fim_dataset.py
+      - tests/unit_tests/data/test_gpt_dataset.py
+      - tests/unit_tests/data/test_multimodal_dataset.py
+      - tests/unit_tests/data/test_preprocess_mmdata.py
+      # test_preprocess_data_gpt_optimal_workers hardcodes /opt/megatron-lm/tools/
+      # instead of using the actual working directory; test_preprocess_data_bert
+      # fails on BERT tokenizer sentence boundary assertion (expects "[SEP] [CLS]"
+      # between sentences but the tokenizer merges them into one). metax and ascend
+      # both ignore the entire file for these reasons.
+      - tests/unit_tests/data/test_preprocess_data.py::test_preprocess_data_gpt_optimal_workers
+      - tests/unit_tests/data/test_preprocess_data.py::test_preprocess_data_bert
+
+      # fusions
+      # MLA YaRN RoPE fused kernel is CUDA/Triton-only; on XPU the fused
+      # apply returns zero tensors, causing float division by zero in the tolerance
+      # check. ascend and metax also ignore this file.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
+      # TE-FL on KunLunXin does not implement rmsnorm_bwd_add (fused
+      # RMSNorm backward + residual add); only rmsnorm_bwd is available.
+      # ascend and metax also ignore this file for the same reason.
+      - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+
+
+      # others
+      # FP8 execution requires device compute capability >= 8.9 (NVIDIA H100/
+      # RTX4090); XPU does not meet this requirement. ascend and metax also ignore.
+      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
+      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
+      # modelopt_gpt_mamba_builder is not registered on XPU; model_provider
+      # module lacks the attribute. ascend and metax also ignore this case.
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder
+      # mamba-ssm CUDA extension is not installed in the KunLunXin image;
+      # fixture setup instantiating MambaStack fails with ImportError.
+      # ascend ignores the entire TestModelOptMambaModel class for the same reason.
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMambaModel
+      # test_sharded_state_dict_restore triggers FLAGCX backend error in
+      # gather_object() (backend_flagcx.cpp:1035: flagcxComm not fully initialized).
+      # Same root cause as test_forward_vpp. Metax/ascend do not encounter this.
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptGPTModel::test_sharded_state_dict_restore
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptMLAMoE::test_sharded_state_dict_restore
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py::TestModelOptLlama4MoE::test_sharded_state_dict_restore
+      # tokenizer files at /opt/data/tokenizers/ are absent or not in the
+      # HuggingFace repo_name format required by AutoTokenizer >= 4.x.
+      # ascend and metax also ignore this entire file.
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+  functional:
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_kunlunxin
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: p800
+        enable_lightweight_mode: false
+        data_cache_path: /tmp/megatron-data-cache
+        gpus_per_node: 1
+      # Benchmark disabled: with TE_FL_PREFER=vendor, the first iteration takes
+      # 40+ minutes on seq=4096/TP2/PP2 (likely vendor kernel shape config or
+      # fallback compilation overhead at long sequence). The 20-iteration run
+      # would exceed the 60-minute functional test timeout. Regular (seq=256)
+      # now completes in ~30 minutes, down from 38 minutes with flagos. Re-enable
+      # benchmark after vendor kernel coverage and initialization time are
+      # optimized for long sequences.
+      #- model: gpt
+      #  test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_kunlunxin
+      #  training_script: pretrain_gpt.py
+      #  n_repeat: 1
+      #  golden_environment: dev
+      #  golden_platform: p800
+      #  enable_lightweight_mode: false
+      #  data_cache_path: /tmp/megatron-data-cache
+      #  gpus_per_node: 4

@@ -14,22 +14,16 @@ ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
 
 # Runner labels for Metax node
 runner_labels:
-  - mx-4g-cicd-megatron
+  - mx-8g-cicd-megatron
 
-# Container volumes (hardware-specific paths)
-# container_volumes:
-#   - /home/flagscale_cicd/flask/static:/workspace/report
-#   - /home/flagscale_cicd/flask/config:/workspace/config
-#   - /home/flagscale_cicd/docker/docker_build/docker_data:/home/gitlab-runner/data
-#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers:/home/gitlab-runner/tokenizers
-#   - /home/flagscale_cicd/docker/docker_build/docker_data/Megatron-LM/datasets:/opt/data/datasets
-#   - /home/flagscale_cicd/docker/docker_build/docker_tokenizers/Megatron-LM/tokenizers:/opt/data/tokenizers
-
-# The mx-4g-cicd-megatron runner publishes shared artifacts under
-# /mnt/airs-business. Using the legacy /mnt/op paths creates empty bind mounts.
+# Container volumes (local runner assets under /data)
 container_volumes:
-  - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
-  - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /home/flagscale_cicd/flask/static:/workspace/report
+  - /home/flagscale_cicd/flask/config:/workspace/config
+  - /data/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data
+  - /data/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /data/megatron-ci-assets-20260726/baai_datasets:/opt/data/datasets
+  - /data/megatron-ci-assets-20260726/baai_tokenizers:/opt/data/tokenizers
 
 # Container options (hardware-specific settings)
 container_options: >-
@@ -292,6 +286,7 @@ test_matrix:
         golden_environment: dev
         golden_platform: c550
         enable_lightweight_mode: false
+        data_path: /home/gitlab-runner/data
         gpus_per_node: 1
       - model: gpt
         test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_metax
@@ -300,4 +295,5 @@ test_matrix:
         golden_environment: dev
         golden_platform: c550
         enable_lightweight_mode: false
+        data_path: /home/gitlab-runner/data
         gpus_per_node: 4

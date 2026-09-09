@@ -142,13 +142,19 @@ jobs:
 
   unit_tests_complete:
     name: unit_tests_complete
-    if: always() && inputs.run_unit_tests
+    # Keep a successful gate when unit tests are disabled so functional tests
+    # do not inherit a skipped dependency.
+    if: always()
     needs: 
       - unit_tests
     runs-on: ubuntu-latest
     steps:
       - name: Check unit tests result
         run: |
+          if [ "${{ inputs.run_unit_tests }}" != "true" ]; then
+            echo "Unit tests disabled; allowing functional tests to proceed"
+            exit 0
+          fi
           if [ "${{ needs.unit_tests.result }}" != "success" ]; then
             echo "❌ Unit tests failed: ${{ needs.unit_tests.result }}"
             exit 1
@@ -162,7 +168,7 @@ jobs:
       inputs.run_functional_tests &&
       needs.checkout_and_config.result == 'success' &&
       needs.lint.result == 'success' &&
-      (inputs.run_unit_tests == false || needs.unit_tests_complete.result == 'success')
+      needs.unit_tests_complete.result == 'success'
     needs:
       - checkout_and_config
       - lint
