@@ -45,6 +45,10 @@ from megatron.core.utils import (
 
 from megatron.core.transformer.module import param_is_not_shared
 
+from megatron.plugin.platform import get_platform  # isort: skip
+
+cur_platform = get_platform()
+
 
 def calc_params_l2_norm(model, force_create_fp32_copy=False):
     """Calculate l2 norm of parameters"""
@@ -115,14 +119,14 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
                         params_data.append(param.data)
 
     # Calculate norm.
-    dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+    dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
     if len(params_data) > 0:
         norm, _ = multi_tensor_applier(
             multi_tensor_l2norm, dummy_overflow_buf, [params_data], False  # no per-parameter norm.
         )
         norm_2 = norm * norm
     else:
-        norm_2 = torch.zeros((1,), dtype=torch.float32, device='cuda')
+        norm_2 = torch.zeros((1,), dtype=torch.float32, device=cur_platform.device_name())
 
     if data_parallel_group is not None:
         torch.distributed.all_reduce(
@@ -133,7 +137,7 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
     # accumulated across the DP group since the main parameters are sharded because
     # of distributed optimizer.
     if len(sharded_params_data) > 0:
-        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device='cuda')
+        dummy_overflow_buf = torch.tensor([0], dtype=torch.int, device=cur_platform.device_name())
         sharded_norm, _ = multi_tensor_applier(
             multi_tensor_l2norm,
             dummy_overflow_buf,
@@ -142,7 +146,7 @@ def calc_params_l2_norm(model, force_create_fp32_copy=False):
         )
         sharded_norm_2 = sharded_norm * sharded_norm
     else:
-        sharded_norm_2 = torch.zeros((1,), dtype=torch.float32, device='cuda')
+        sharded_norm_2 = torch.zeros((1,), dtype=torch.float32, device=cur_platform.device_name())
     # Sum over all DP groups, including CP since distributed optimizer state is
     # sharded jointly over DP+CP.
     torch.distributed.all_reduce(
@@ -201,12 +205,12 @@ def calc_dtensor_params_l2_norm(params):
     for param in params:
         params_data[param._spec].append(param._local_tensor)
 
-    total_norm_2 = torch.zeros((1,), dtype=torch.float32, device='cuda')
-    dummy_overflow_buf = torch.zeros((1,), dtype=torch.int, device='cuda')
+    total_norm_2 = torch.zeros((1,), dtype=torch.float32, device=cur_platform.device_name())
+    dummy_overflow_buf = torch.zeros((1,), dtype=torch.int, device=cur_platform.device_name())
     for dtensor_spec, local_tensors in params_data.items():
         local_tensors = [t for t in local_tensors if t.numel() > 0]
         if len(local_tensors) == 0:
-            norm = torch.zeros((1,), dtype=torch.float32, device='cuda')
+            norm = torch.zeros((1,), dtype=torch.float32, device=cur_platform.device_name())
         else:
             norm, _ = multi_tensor_applier(
                 multi_tensor_l2norm, dummy_overflow_buf, [local_tensors], False  # no per-parameter norm.
@@ -251,7 +255,7 @@ def reduce_max_stat_across_model_parallel_group(stat: float) -> float | None:
     """
     if stat is None:
         stat = -1.0
-    stat = torch.tensor([stat], dtype=torch.float32, device=torch.cuda.current_device())
+    stat = torch.tensor([stat], dtype=torch.float32, device=cur_platform.current_device())
     torch.distributed.all_reduce(
         stat, op=torch.distributed.ReduceOp.MAX, group=mpu.get_model_parallel_group()
     )
@@ -270,7 +274,7 @@ def logical_and_across_model_parallel_group(input: bool) -> bool:
         input = 1
     else:
         input = 0
-    input = torch.tensor([input], dtype=torch.int, device=torch.cuda.current_device())
+    input = torch.tensor([input], dtype=torch.int, device=cur_platform.current_device())
     torch.distributed.all_reduce(
         input, op=torch.distributed.ReduceOp.MIN, group=mpu.get_model_parallel_group()
     )
@@ -282,11 +286,11 @@ def report_memory(name):
     args = get_args()
     mega_bytes = 1024.0 * 1024.0
     string = name + ' memory (MB)'
-    string += f" | allocated: {torch.cuda.memory_allocated() / mega_bytes:.2f}"
-    string += f" | max allocated: {torch.cuda.max_memory_allocated() / mega_bytes:.2f}"
-    string += f" | reserved: {torch.cuda.memory_reserved() / mega_bytes:.2f}"
-    string += f" | max reserved: {torch.cuda.max_memory_reserved() / mega_bytes:.2f}"
-    if args.log_device_memory_used:
+    string += f" | allocated: {cur_platform.memory_allocated() / mega_bytes:.2f}"
+    string += f" | max allocated: {cur_platform.max_memory_allocated() / mega_bytes:.2f}"
+    string += f" | reserved: {cur_platform.memory_reserved() / mega_bytes:.2f}"
+    string += f" | max reserved: {cur_platform.max_memory_reserved() / mega_bytes:.2f}"
+    if args.log_device_memory_used and cur_platform.device_name() == 'cuda':
         string += f" | total device memory used: {torch.cuda.device_memory_used() / mega_bytes:.2f}"
     if mpu.get_data_parallel_rank() == 0:
         print("[Rank {}] {}".format(torch.distributed.get_rank(), string), flush=True)
@@ -451,7 +455,7 @@ def is_first_or_last_pipeline_stage(vp_stage):
 
 def get_device_arch_version():
     """Returns GPU arch version (8: Ampere, 9: Hopper, 10: Blackwell, ...)"""
-    return torch.cuda.get_device_properties(torch.device("cuda:0")).major
+    return cur_platform.get_device_properties(0).major
 
 
 def append_to_progress_log(string, barrier=True):
@@ -537,34 +541,34 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         assert data_iterator is not None
         data = next(data_iterator)
         batch = {
-            'tokens': data["tokens"].cuda(non_blocking=True),
-            'labels': data["labels"].cuda(non_blocking=True),
-            'loss_mask': data["loss_mask"].cuda(non_blocking=True),
+            'tokens': data["tokens"].to(cur_platform.device(), non_blocking=True),
+            'labels': data["labels"].to(cur_platform.device(), non_blocking=True),
+            'loss_mask': data["loss_mask"].to(cur_platform.device(), non_blocking=True),
             'attention_mask': (
                 None
                 if "attention_mask" not in data
-                else data["attention_mask"].cuda(non_blocking=True)
+                else data["attention_mask"].to(cur_platform.device(), non_blocking=True)
             ),
-            'position_ids': data["position_ids"].cuda(non_blocking=True),
+            'position_ids': data["position_ids"].to(cur_platform.device(), non_blocking=True),
             'cu_seqlens': (
                 None
                 if "cu_seqlens" not in data
-                else data["cu_seqlens"].cuda(non_blocking=True)
+                else data["cu_seqlens"].to(cur_platform.device(), non_blocking=True)
             ),
             'max_seqlen': (
                 None
                 if "max_seqlen" not in data
-                else data["max_seqlen"].cuda(non_blocking=True)
+                else data["max_seqlen"].to(cur_platform.device(), non_blocking=True)
             ),
             'local_cp_size': (
                 None
                 if "local_cp_size" not in data
-                else data["local_cp_size"].cuda(non_blocking=True)
+                else data["local_cp_size"].to(cur_platform.device(), non_blocking=True)
             ),
         }
 
         def _broadcast_cu_seqlens(cu_seqlens):
-            dev = torch.cuda.current_device()
+            dev = cur_platform.current_device()
             n = 0 if cu_seqlens is None else int(cu_seqlens.numel())
             n_tensor = torch.tensor(n, dtype=torch.int64, device=dev)
             _broadcast(n_tensor)
@@ -579,7 +583,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
             _broadcast(buf)
 
         if args.hybrid_context_parallel:
-            seq_len = torch.tensor(batch['tokens'].shape[0], dtype=torch.int32, device=torch.cuda.current_device())
+            seq_len = torch.tensor(batch['tokens'].shape[0], dtype=torch.int32, device=cur_platform.current_device())
             _broadcast(seq_len)
             
         if args.pipeline_model_parallel_size == 1 or mtp_on_this_rank:
@@ -609,7 +613,7 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
 
     else:
         if args.hybrid_context_parallel:
-            seq_len = torch.tensor(0, dtype=torch.int32, device=torch.cuda.current_device())
+            seq_len = torch.tensor(0, dtype=torch.int32, device=cur_platform.current_device())
             _broadcast(seq_len)
             shape = (seq_len.item())
         else:
@@ -618,38 +622,38 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         tokens = torch.empty(
             shape,
             dtype=torch.int64,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
         labels = torch.empty(
             shape,
             dtype=torch.int64,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
         loss_mask = torch.empty(
             shape,
             dtype=torch.float32,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
         if args.create_attention_mask_in_dataloader:
             shape_attention_mask = (args.micro_batch_size, 1, args.seq_length, args.seq_length) if not args.hybrid_context_parallel else (1, 1, shape[0], shape[0])
             attention_mask = torch.empty(
                 shape_attention_mask,
                 dtype=torch.bool,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
         else:
             attention_mask = None
         position_ids = torch.empty(
             shape,
             dtype=torch.int64,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         )
         cu_seqlens = None
         if args.hybrid_context_parallel or args.sft:
             max_seqlen = torch.empty(
                 1,
                 dtype=torch.int32,
-                device=torch.cuda.current_device(),
+                device=cur_platform.current_device(),
             )
         else:
             max_seqlen = None
@@ -657,11 +661,11 @@ def get_batch_on_this_tp_rank(data_iterator, mtp_on_this_rank: bool = False):
         local_cp_size = torch.empty(
             1,
             dtype=torch.int32,
-            device=torch.cuda.current_device(),
+            device=cur_platform.current_device(),
         ) if args.hybrid_context_parallel else None
 
         def _broadcast_cu_seqlens():
-            dev = torch.cuda.current_device()
+            dev = cur_platform.current_device()
 
             n = torch.empty((), dtype=torch.int64, device=dev)
             _broadcast(n)

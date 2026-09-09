@@ -203,6 +203,7 @@ from megatron.core.parallel_state import (
 from megatron.core.inference.symmetric_memory import SymmetricMemoryManager
 from megatron.core.inference.unified_memory import create_unified_mempool
 from megatron.core.resharding.refit import swap_model_weights
+from megatron.plugin.platform import get_platform  # isort: skip
 
 try:
     from torch_memory_saver import torch_memory_saver
@@ -1039,13 +1040,13 @@ def pretrain(
     # Initialize program_start_global with a fallback value in case set_startup_timestamps() wasn't called
     program_start_global = _TRAIN_START_TIME
     if _STARTUP_TIMESTAMPS['program_start'] is not None:
-        program_start_global = torch.tensor([_STARTUP_TIMESTAMPS['program_start']], dtype=torch.double, device='cuda')
+        program_start_global = torch.tensor([_STARTUP_TIMESTAMPS['program_start']], dtype=torch.double, device=get_platform().device_name())
         torch.distributed.all_reduce(program_start_global, op=torch.distributed.ReduceOp.MIN)
         program_start_global = program_start_global.item()
     set_startup_timestamps(program_start=program_start_global)
 
     global _LEGACY_TRAIN_START_TIME
-    start_time_tensor = torch.tensor([_LEGACY_TRAIN_START_TIME], dtype=torch.double, device='cuda')
+    start_time_tensor = torch.tensor([_LEGACY_TRAIN_START_TIME], dtype=torch.double, device=get_platform().device_name())
     torch.distributed.all_reduce(start_time_tensor, op=torch.distributed.ReduceOp.MIN)
     _LEGACY_TRAIN_START_TIME = start_time_tensor.item()
 
@@ -1209,7 +1210,7 @@ def pretrain(
                     tag="rl_inference_model", enable_cpu_backup=True
                 )
             elif uvm_mempool is not None:
-                model_alloc_ctx = torch.cuda.use_mem_pool(uvm_mempool)
+                model_alloc_ctx = get_platform().use_mem_pool(uvm_mempool)
             else:
                 model_alloc_ctx = nullcontext()
 
@@ -1521,7 +1522,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         and not args.init_model_with_meta_device
     ):
         for model_module in model:
-            model_module.cuda(torch.cuda.current_device())
+            model_module.to(get_platform().device(get_platform().current_device()))
 
     # Fp16 conversion.
     if args.fp16 or args.bf16:
@@ -1530,7 +1531,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
-        model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
+        model = [to_empty_if_meta_device(model_module, device=get_platform().device()) for model_module in model]
 
     # Before TE2.x: The model_module.bfloat16()/model_module.half() above will call the inplace
     #               copy of TE's Float8Tensor, which will write an unwanted value (amax calculated
@@ -1598,11 +1599,11 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
         # Setup stream for ddp initialization. The side-stream may be necessary for cuda graph
         #  capture support with DDP, but we sync it with the current stream to avoid races.
-        ddp_stream = torch.cuda.Stream()
+        ddp_stream = get_platform().Stream()
         # Wait for the default stream to complete before starting ddp_stream
-        ddp_stream.wait_stream(torch.cuda.current_stream())
+        ddp_stream.wait_stream(get_platform().current_stream())
         # Make ddp_stream start after whatever the default stream already queued
-        with torch.cuda.stream(ddp_stream):
+        with get_platform().stream(ddp_stream):
             model = [
                 DP(
                     config=config,
@@ -1616,7 +1617,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             ]
         # End of setup_stream
         # Critical: ensure side-stream work completes before touching params on default stream
-        torch.cuda.current_stream().wait_stream(ddp_stream)
+        get_platform().current_stream().wait_stream(ddp_stream)
 
         # Broadcast params from data parallel src rank to other data parallel ranks.
         if args.data_parallel_random_init:
@@ -1984,7 +1985,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 
     # Empty unused memory.
     if args.empty_unused_memory_level >= 1:
-        torch.cuda.empty_cache()
+        get_platform().empty_cache()
 
     # Vision gradients.
     if args.vision_pretraining and args.vision_pretraining_type == "dino":
@@ -2028,7 +2029,7 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
 
     # Empty unused memory.
     if args.empty_unused_memory_level >= 2:
-        torch.cuda.empty_cache()
+        get_platform().empty_cache()
 
     if mpu.is_pipeline_last_stage(ignore_virtual=True):
         # Average loss across microbatches.
@@ -2107,7 +2108,7 @@ def training_log(
     for key in loss_dict:
         if not skipped_iter:
             total_loss_dict[key] = (
-                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device='cuda'))
+                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device=get_platform().device_name()))
                 + loss_dict[key]
             )
         else:
@@ -2224,7 +2225,7 @@ def training_log(
             if wandb_writer:
                 wandb_writer.log({'grpo_collection_iteration': grpo_collection_iteration}, iteration)
         if args.log_memory_to_tensorboard:
-            mem_stats = torch.cuda.memory_stats()
+            mem_stats = get_platform().memory_stats()
             writer.add_scalar(
                 "mem-reserved-bytes", mem_stats["reserved_bytes.all.current"], iteration
             )
@@ -2300,7 +2301,11 @@ def training_log(
 
     # Dump memory snapshot and print metrics to stdout.
     if iteration % args.log_interval == 0 or is_first_iteration:
-        if args.record_memory_history and (is_last_rank() or torch.distributed.get_backend() == 'fake'):
+        if (
+            args.record_memory_history
+            and get_platform().device_name() == 'cuda'
+            and (is_last_rank() or torch.distributed.get_backend() == 'fake')
+        ):
             snapshot = torch.cuda.memory._snapshot()
             from pickle import dump
 
@@ -2364,7 +2369,7 @@ def training_log(
                 if avg >= 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
                 if should_reset:
-                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
+                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device=get_platform().device_name())
         log_string += f' loss scale: {loss_scale:.1f} |'
         if grad_norm is not None:
             log_string += f' grad norm: {grad_norm:.3f} |'
@@ -2495,7 +2500,7 @@ def save_checkpoint_and_time(
     for model_chunk in model:
         if hasattr(model_chunk, 'free_overlap_buffers'):
             model_chunk.free_overlap_buffers()
-    torch.cuda.empty_cache()
+    get_platform().empty_cache()
 
     global num_checkpoints_memory_reported, MAX_NUM_CHECKPOINTS_MEMORY_REPORTED
     should_report_memory = num_checkpoints_memory_reported < MAX_NUM_CHECKPOINTS_MEMORY_REPORTED
@@ -2558,7 +2563,7 @@ def post_training_step_callbacks(
 
     # Bring CPU and GPU back in sync if on right iteration.
     if args.train_sync_interval and iteration % args.train_sync_interval == 0:
-        torch.cuda.synchronize()
+        get_platform().synchronize()
 
     # Straggler detector.
     if iteration % args.log_interval == 0 and args.log_straggler:
@@ -2598,7 +2603,8 @@ def post_training_step_callbacks(
             if prof.execution_trace_observer is not None:
                 prof.execution_trace_observer.unregister_callback()
         else:
-            torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStop())
+            if get_platform().device_name() == 'cuda':
+                torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStop())
             if nsys_nvtx_context is not None:
                 nsys_nvtx_context.__exit__(None, None, None)
 
@@ -2679,7 +2685,7 @@ def checkpoint_and_decide_exit(
     if args.exit_duration_in_mins:
         train_time = (time.time() - _TRAIN_START_TIME) / 60.0
         done_cuda = torch.tensor(
-            [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+            [train_time > args.exit_duration_in_mins], dtype=torch.int, device=get_platform().device_name()
         )
         torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
         done = done_cuda.item()
@@ -3018,7 +3024,8 @@ def train(
             if args.use_pytorch_profiler:
                 prof.step()
             elif iteration == args.profile_step_start:
-                torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStart())
+                if get_platform().device_name() == 'cuda':
+                    torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStart())
                 nsys_nvtx_context = torch.autograd.profiler.emit_nvtx(record_shapes=True)
                 nsys_nvtx_context.__enter__()
 
@@ -3101,7 +3108,7 @@ def train(
         if args.perform_rl_step:
             if optimizer is None:
                 # Release stale CUDA cached memory before inference.
-                torch.cuda.empty_cache()
+                get_platform().empty_cache()
             with torch.no_grad():
                 train_data_iterator = rl_utils.get_grpo_data_iterator(
                     model, inference_model, optimizer, iteration, ref_state_dict,
@@ -3470,13 +3477,13 @@ def evaluate(
 
             # Empty unused memory
             if args.empty_unused_memory_level >= 1:
-                torch.cuda.empty_cache()
+                get_platform().empty_cache()
 
             if mpu.is_pipeline_last_stage(ignore_virtual=True):
                 # Reduce across processes.
                 for key in loss_dicts[0].keys():
                     if key not in total_loss_dict:
-                        total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float, device='cuda')
+                        total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float, device=get_platform().device_name())
                     val = [x[key].view(-1) for x in loss_dicts]
 
                     if val[0].numel() == 2:
@@ -3513,7 +3520,7 @@ def evaluate(
             if args.exit_duration_in_mins:
                 train_time = (time.time() - _TRAIN_START_TIME) / 60.0
                 done_cuda = torch.tensor(
-                    [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+                    [train_time > args.exit_duration_in_mins], dtype=torch.int, device=get_platform().device_name()
                 )
                 torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
                 done = done_cuda.item()
@@ -3587,9 +3594,9 @@ def evaluate_and_print_results(
 
         # with full validation we need to distribute eval_iters to all ranks
         if mpu.get_tensor_model_parallel_rank() == 0:
-            eval_iters = torch.tensor(args.eval_iters, dtype=torch.long, device='cuda')
+            eval_iters = torch.tensor(args.eval_iters, dtype=torch.long, device=get_platform().device_name())
         else:
-            eval_iters = torch.tensor([0] * len(eval_iters), dtype=torch.long, device='cuda')
+            eval_iters = torch.tensor([0] * len(eval_iters), dtype=torch.long, device=get_platform().device_name())
         torch.distributed.broadcast(eval_iters, 0)
         eval_iters = eval_iters.tolist()
         args.eval_iters = eval_iters[0] if not args.multiple_validation_sets else eval_iters
@@ -3768,10 +3775,10 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             do_test = test_dataloader is not None and (args.full_validation or args.eval_iters > 0)
 
         flags = torch.tensor(
-            [int(do_train), int(do_valid), int(do_test)], dtype=torch.long, device='cuda'
+            [int(do_train), int(do_valid), int(do_test)], dtype=torch.long, device=get_platform().device_name()
         )
     else:
-        flags = torch.tensor([0, 0, 0], dtype=torch.long, device='cuda')
+        flags = torch.tensor([0, 0, 0], dtype=torch.long, device=get_platform().device_name())
 
     torch.distributed.broadcast(flags, 0)
 
