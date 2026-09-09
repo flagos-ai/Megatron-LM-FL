@@ -7,11 +7,11 @@ import sys
 import types
 import unittest
 from contextlib import ExitStack
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+from megatron.plugin.platform import platform_manager, platform_register
 from megatron.plugin.platform.platform_base import PlatformBase
 from megatron.plugin.platform.platform_cpu import PlatformCPU
-from megatron.plugin.platform import platform_register, platform_manager
 
 
 def _reset_platform_manager():
@@ -128,6 +128,14 @@ class TestPlatformManager(unittest.TestCase):
         platform_manager.set_platform(mock_platform)
         self.assertIs(platform_manager.get_platform(), mock_platform)
 
+    def test_is_current_platform_supported_uses_registered_platform(self):
+        """Support checks use platform identity, not differing device and registry names."""
+        enflame = _create_mock_platform("enflame")
+        platform_register.PLATFORMS["enflame"] = enflame
+        platform_manager.set_platform(enflame)
+
+        self.assertTrue(platform_manager.is_current_platform_supported())
+
     def test_set_platform_then_get(self):
         """After set_platform, get_platform returns the set value."""
         cpu = PlatformCPU()
@@ -164,18 +172,33 @@ class TestPlatformManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             platform_manager.get_platform()
 
-    def test_platform_selection_priority(self):
-        """Platforms are selected in priority order: cuda > musa > txda > npu > enflame > cpu."""
-        # Register mock platforms for musa and cpu only
+    def test_native_vendor_wins_over_cuda_compatibility_api(self):
+        """A native vendor backend wins when its runtime also exposes CUDA APIs."""
         platform_register.PLATFORMS.clear()
-        mock_musa = _create_mock_platform("musa")
-        mock_musa.is_available = lambda: True
-        platform_register.PLATFORMS["musa"] = mock_musa
+        platform_register.PLATFORMS["cuda"] = _create_mock_platform("cuda")
+        platform_register.PLATFORMS["enflame"] = _create_mock_platform("enflame")
         platform_register.PLATFORMS["cpu"] = PlatformCPU()
 
-        _reset_platform_manager()
+        platform = platform_manager.get_platform()
+        self.assertEqual(platform._name, "enflame")
+
+    def test_single_native_vendor_wins_over_cpu(self):
+        """A native vendor backend is selected without explicit configuration."""
+        platform_register.PLATFORMS.clear()
+        platform_register.PLATFORMS["musa"] = _create_mock_platform("musa")
+        platform_register.PLATFORMS["cpu"] = PlatformCPU()
+
         platform = platform_manager.get_platform()
         self.assertEqual(platform._name, "musa")
+
+    def test_multiple_native_vendors_are_rejected(self):
+        """Automatic selection refuses to guess between native vendor backends."""
+        platform_register.PLATFORMS.clear()
+        platform_register.PLATFORMS["enflame"] = _create_mock_platform("enflame")
+        platform_register.PLATFORMS["musa"] = _create_mock_platform("musa")
+
+        with self.assertRaisesRegex(RuntimeError, "enflame, musa"):
+            platform_manager.get_platform()
 
 
 class TestPlatformCPU(unittest.TestCase):
@@ -313,6 +336,7 @@ class TestPlatformCPU(unittest.TestCase):
         """get/set compile_backend round-trips."""
         try:
             import torch
+
             # inductor is typically available
             self.cpu.set_compile_backend("inductor")
             self.assertEqual(self.cpu.get_compile_backend(), "inductor")

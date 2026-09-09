@@ -23,7 +23,7 @@ def register_platforms() -> None:
     if platform_cuda.is_available():
         PLATFORMS["cuda"] = platform_cuda # use lower keys: cuda
         print(f"Megatron-LM-FL Platform: cuda Registered")
-    
+
     # Register MUSA Platform
     from .platform_musa import PlatformMUSA
     platform_musa = PlatformMUSA()
