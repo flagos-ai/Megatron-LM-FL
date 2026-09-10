@@ -514,8 +514,6 @@ def triton_csa_fwd_flash_mla(
     * ``indexer_topk`` must be 0: the partial indexer LSE is not part of the
       current fused loss (full-denominator semantics).
     """
-    if q.ndim != 3 or kv.ndim != 2 or topk_idxs.ndim != 2:
-        raise ValueError("Triton CSA requires THD query, flat KV and 2-D global indices.")
     if indexer_topk != 0:
         raise ValueError(
             "triton_csa_fwd_flash_mla does not support indexer_topk > 0; "
@@ -523,15 +521,22 @@ def triton_csa_fwd_flash_mla(
         )
     D = q.shape[-1]
     total_Sq, H = q.shape[:2]
+    TopK = topk_idxs.shape[-1]
+
     # All heads share the same per-query TopK indices (MLA). A 2-D input is
     # inherently shared; materialise a stride-0 head dim so downstream shared
     # checks (``stride(1) == 0``) and legacy kernels see the same view.
-    topk_3d = torch.as_strided(
-        topk_idxs,
-        (total_Sq, 1, topk_idxs.shape[1]),
-        (topk_idxs.stride(0), 0, topk_idxs.stride(1)),
-    )
-    hp_eligible = H >= 16 and (H % 16 == 0) and (D % 16 == 0) and (d_v % 16 == 0)
+    if topk_idxs.ndim == 2:
+        topk_3d = torch.as_strided(
+            topk_idxs,
+            (topk_idxs.shape[0], 1, topk_idxs.shape[1]),
+            (topk_idxs.stride(0), 0, topk_idxs.stride(1)),
+        )
+        shared = True
+    else:
+        topk_3d = topk_idxs
+        shared = topk_3d.stride(1) == 0
+    hp_eligible = shared and H >= 16 and (H % 16 == 0) and (D % 16 == 0) and (d_v % 16 == 0)
     if hp_eligible:
         return _triton_sparse_attn_fwd_hp(
             q, kv, topk_3d, softmax_scale, d_v, attn_sink, indexer_topk

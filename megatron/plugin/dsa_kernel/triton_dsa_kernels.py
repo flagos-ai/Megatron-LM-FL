@@ -152,8 +152,6 @@ def triton_csa_sparse_attn_backward(
     (excludes the sink), so the full softmax denominator is rebuilt here via
     ``logaddexp`` — the forward kernel's probabilities included the sink bias.
     """
-    if q_flat.ndim != 3 or kv_flat.ndim != 2 or global_idxs.ndim != 2:
-        raise ValueError("Triton CSA backward requires THD query, flat KV and 2-D global indices.")
     if attn_sink is not None:
         lse_full = torch.logaddexp(lse.float(), attn_sink.float().view(1, -1))
     else:

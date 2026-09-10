@@ -10,8 +10,6 @@ package, but built on top of
   cuDNN Frontend.
 * :mod:`flash_mla` — production sparse-attention forward kernel, expected to
   be available as a separate PyPI package.
-* :mod:`megatron.plugin.dsa_kernel` — optional THD Triton attention and
-  PyTorch indexer provider, selected by ``force_triton_dsa_backend``.
 
 Public API (same shape as the old ``dsa_kernels`` package):
 
@@ -42,25 +40,45 @@ from .csa_teacher_lse import can_use_fused_csa_teacher_lse, fused_csa_teacher_ls
 
 _flash_mla_sparse_fwd = None
 _DSA = None
+
+# When True, the fused Path-B kernels use the Triton implementations from
+# ``megatron.plugin.dsa_kernel`` instead of lazily preferring cuDNN DSA and
+# FlashMLA. Set by the explicit ``dsa_kernel_backend='triton'`` selection.
 _DSA_FORCE_TRITON = False
+_TRITON_FWD_ACTIVE = False
 
 _CSA_TEACHER_LSE_CHUNK_MAX_BYTES = 1024 * 1024 * 1024
 
 
 def force_triton_dsa_backend() -> None:
-    """Select the THD Triton provider for the shared CSA kernel chain."""
-    global _DSA_FORCE_TRITON, _DSA, _flash_mla_sparse_fwd
+    """Route the fused Path-B kernel calls to the Triton implementations."""
+    global _DSA_FORCE_TRITON, _TRITON_FWD_ACTIVE, _DSA, _flash_mla_sparse_fwd
     _DSA_FORCE_TRITON = True
+    _TRITON_FWD_ACTIVE = True
     _DSA = None
     _flash_mla_sparse_fwd = None
 
 
 def reset_triton_dsa_backend() -> None:
-    """Reset lazy cuDNN/FlashMLA handles between backend configurations."""
-    global _DSA_FORCE_TRITON, _DSA, _flash_mla_sparse_fwd
+    """Clear a stale Triton force so a non-triton config does not cross-talk.
+
+    Symmetric counterpart to :func:`force_triton_dsa_backend`: drops the
+    force flag and clears cached cuDNN/FlashMLA namespaces so they get
+    re-resolved under the active (non-triton) policy when a different
+    backend/model is loaded afterwards in the same process.
+    """
+    global _DSA_FORCE_TRITON, _TRITON_FWD_ACTIVE, _DSA, _flash_mla_sparse_fwd
     _DSA_FORCE_TRITON = False
+    _TRITON_FWD_ACTIVE = False
     _DSA = None
     _flash_mla_sparse_fwd = None
+
+
+def _triton_dsa_namespace():
+    """Lazily build the Triton ``_DSA``-compatible namespace."""
+    from megatron.plugin.dsa_kernel import build_triton_dsa_namespace
+
+    return build_triton_dsa_namespace()
 
 
 class _DeferredReduceScatterState:
@@ -111,8 +129,11 @@ def _ensure_flash_mla():
     DSA-shape inputs and pads ``TopK`` to the alignment expected by
     FlashMLA's SM90 / SM100 kernels.
     """
-    global _flash_mla_sparse_fwd
+    global _flash_mla_sparse_fwd, _TRITON_FWD_ACTIVE
     if _flash_mla_sparse_fwd is not None:
+        return
+    if _DSA_FORCE_TRITON:
+        _TRITON_FWD_ACTIVE = True
         return
 
     try:
@@ -159,7 +180,8 @@ def _csa_fwd_flash_mla(
     assert not (
         indexer_topk > 0 and topk_length is not None
     ), "indexer_topk > 0 requires non-compact mode (topk_length must be None)"
-    if _DSA_FORCE_TRITON:
+    _ensure_flash_mla()
+    if _TRITON_FWD_ACTIVE:
         from megatron.plugin.dsa_kernel import triton_csa_fwd_flash_mla
 
         return triton_csa_fwd_flash_mla(
@@ -172,7 +194,6 @@ def _csa_fwd_flash_mla(
             topk_length=topk_length,
             indexer_topk=indexer_topk,
         )
-    _ensure_flash_mla()
 
     _total_S_q, _H, _D = q.shape
     TopK = topk_idxs.shape[-1]
@@ -212,14 +233,12 @@ def _csa_fwd_flash_mla(
 
 
 def _ensure_dsa_namespace():
-    """Lazily import the selected CSA compute namespace."""
+    """Lazily import the cudnn-frontend DSA namespace."""
     global _DSA
     if _DSA is not None:
         return
     if _DSA_FORCE_TRITON:
-        from megatron.plugin.dsa_kernel import build_triton_dsa_namespace
-
-        _DSA = build_triton_dsa_namespace()
+        _DSA = _triton_dsa_namespace()
         return
     try:
         from cudnn import DSA as _ns
@@ -1726,7 +1745,7 @@ class FusedCSAIndexerSparseAttnFunc(torch.autograd.Function):
 
             if loss_coeff > 0:
                 indexer_loss = _kl_loss_from_target_predict(
-                    target, predict, topk_indices_cmp, loss_coeff, calculate_per_token_loss=True
+                    target, predict, topk_indices_cmp, loss_coeff, calculate_per_token_loss
                 )
             else:
                 indexer_loss = torch.zeros((), device=query.device, dtype=torch.float32)
@@ -1779,7 +1798,7 @@ class FusedCSAIndexerSparseAttnFunc(torch.autograd.Function):
                     index_score,
                     index_lse,
                     loss_coeff,
-                    calculate_per_token_loss=True,
+                    calculate_per_token_loss,
                 )
             else:
                 indexer_loss = torch.zeros((), device=query.device, dtype=torch.float32)
@@ -1787,17 +1806,16 @@ class FusedCSAIndexerSparseAttnFunc(torch.autograd.Function):
         # ---- 6. Eagerly compute indexer backward (grad_loss=1). ------------
         # The actual grad_loss scaling is deferred to backward (when
         # DSAIndexerLossAutoScaler provides the correct scale).
-        # cuDNN divides by the physical row count. Cancel that division, then
-        # apply the same real-row divisor to the reported loss and gradients.
-        # Keep a tensor divisor in grad_loss, not the kernel's scalar loss_coeff,
-        # so packed lengths do not require a host sync during CUDA graph capture.
-        physical_rows = total_q if is_thd else b * sq
-        loss_divisor = 1 if calculate_per_token_loss else physical_rows
-        if not calculate_per_token_loss and is_thd and cu_seqlens_q_unpadded is not None:
-            loss_divisor = cu_seqlens_q_unpadded[-1].clamp_min(1)
-        indexer_loss = indexer_loss / loss_divisor
-        indexer_loss_coeff = loss_coeff * physical_rows
-        unit_grad_loss = torch.ones((), device=query.device, dtype=torch.float32) / loss_divisor
+        # Use total_q (not real token count) for the loss coefficient even
+        # when padding rows are masked.  The cuDNN kernel divides by total_q
+        # internally; since masked rows contribute 0, multiplying back by
+        # total_q still yields the correct real-token sum — and avoids a
+        # GPU→CPU sync that would break CUDA graph capture.
+        indexer_loss_coeff = loss_coeff
+        if calculate_per_token_loss:
+            indexer_loss_coeff = loss_coeff * (total_q if is_thd else b * sq)
+
+        unit_grad_loss = torch.ones((), device=query.device, dtype=torch.float32)
 
         if loss_coeff > 0:
             if sparse_loss:
@@ -2041,7 +2059,7 @@ class FusedCSAIndexerSparseAttnFromTopkFunc(torch.autograd.Function):
         softmax_scale: float,
         indexer_softmax_scale: float,
         loss_coeff: float,
-        loss_divisor: float | Tensor,
+        loss_divisor: float,
         sparse_loss: bool,
         ratio: int,
         max_seqlen_q: int,
@@ -2087,11 +2105,8 @@ class FusedCSAIndexerSparseAttnFromTopkFunc(torch.autograd.Function):
             # Backward masks their dO and LSE before using this placeholder.
             topk_length.masked_fill_(q_padding_mask, 1)
 
-        # loss_divisor can be a device scalar for padded packed sequences.
-        # cuDNN expects loss_coeff to be a host scalar; grad_loss is its tensor
-        # input and carries the normalization without synchronizing to the host.
-        bwd_loss_coeff = loss_coeff * total_q
-        unit_grad_loss = torch.ones((), device=query.device, dtype=torch.float32) / loss_divisor
+        bwd_loss_coeff = loss_coeff * total_q / loss_divisor
+        unit_grad_loss = torch.ones((), device=query.device, dtype=torch.float32)
 
         if sparse_loss:
             indexer_topk_idxs_for_loss = indexer_topk_idxs

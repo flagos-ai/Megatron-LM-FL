@@ -298,7 +298,7 @@ class TransformerConfig(ModelParallelConfig):
     """Number of residual branches for hyper connections.
     Only used when enable_hyper_connections is True."""
 
-    mhc_sinkhorn_iterations: int = 10
+    mhc_sinkhorn_iterations: int = 20
     """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
 
     mhc_init_gating_factor: float = 0.01
@@ -436,7 +436,8 @@ class TransformerConfig(ModelParallelConfig):
 
     dsa_kernel_backend: Optional[Literal["none", "cudnn", "triton"]] = None
     """Explicit DSv4 backend; None preserves apply_dsa_kernel_fusion selection.
-    Triton uses THD kernels; SBHD inputs are packed into THD before CSA computation.
+    Triton indexer training preserves SBHD computation order to match the DSv4 reference.
+    Non-indexer SBHD layers retain their THD compatibility path.
     """
 
     cp_partition_mode: Literal["zigzag", "contiguous"] = "zigzag"

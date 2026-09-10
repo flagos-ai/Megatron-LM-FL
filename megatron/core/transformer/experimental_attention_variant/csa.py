@@ -2178,9 +2178,16 @@ class CompressedSparseAttention(MegatronModule):
 
             sq, b, np, hn = query.size()
 
-            if self.config.dsa_kernel_backend == "triton":
+            # The target's non-indexer Triton SBHD backward passes no
+            # topk_length and is unsupported. Retain the existing THD fallback
+            # for W/H and short sequences, which require explicit valid lengths.
+            if self.config.dsa_kernel_backend == "triton" and (
+                self.indexer is None or sq < self.compress_ratio
+            ):
                 return self._forward_triton_sbhd_as_thd(query, key, x, qr)
 
+            # Keep the target DSv4 SBHD computation order. Repacking this path
+            # into THD changes GEMM/reduction order and is not bitwise equivalent.
             kv = key.squeeze(-2)  # [sq, b, 1, v_head_dim] -> [sq, b, v_head_dim]
             kv_full, compressed_kv, n_compressed = self._build_kv_full(kv, x)
             offset = sq  # compressed indices start after original positions
@@ -2919,10 +2926,14 @@ class CompressedSparseAttention(MegatronModule):
                 positions = global_rows - cu_seqlens[batch_ids]
                 q_padding_mask = positions >= real_seqlens[batch_ids]
             loss_divisor = 1 if self.config.calculate_per_token_loss else l_local * cp_size
-            if not self.config.calculate_per_token_loss and cu_seqlens_q_unpadded is not None:
+            if (
+                not self.use_fused_kernels
+                and not self.config.calculate_per_token_loss
+                and cu_seqlens_q_unpadded is not None
+            ):
                 # Match the reference DSA mean over real query rows. Keep the
                 # scalar on device so padded THD remains CUDA-graph safe.
-                loss_divisor = cu_seqlens_q_unpadded[-1].clamp_min(1)
+                loss_divisor = cu_seqlens_q_unpadded[-1]
             indexer_loss_args = (
                 query,
                 kv_full_thd,
