@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Runtime Feature Integrator"
+  short_description: "Preserve invasive runtime feature semantics"
+  default_prompt: "Use $mg-integrate-runtime-features to build and review semantic feature chains for Megatron fork runtime changes against a pinned NVIDIA target."

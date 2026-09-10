@@ -1,0 +1,114 @@
+{
+  "domains": {
+    "build-packaging": {
+      "blocking": true,
+      "evidence": [
+        "mg-integrate-build-packaging/SKILL.md",
+        "scripts/audit_build_packaging.py",
+        "scripts/apply_build_decisions.py",
+        "scripts/validate_build_audit.py",
+        "tests/test_tools.py"
+      ],
+      "handler_skill": "mg-integrate-build-packaging",
+      "status": "covered"
+    },
+    "cicd": {
+      "blocking": true,
+      "evidence": [
+        "mg-audit-cicd/SKILL.md",
+        "scripts/audit_cicd.py",
+        "scripts/apply_cicd_decisions.py",
+        "scripts/validate_cicd_audit.py",
+        "tests/test_audit_cicd.py"
+      ],
+      "handler_skill": "mg-audit-cicd",
+      "status": "covered"
+    },
+    "platform": {
+      "blocking": true,
+      "evidence": [
+        "mg-preserve-platform-patches/SKILL.md",
+        "scripts/audit_platform_contract.py",
+        "scripts/apply_platform_decisions.py",
+        "scripts/validate_platform_audit.py",
+        "scripts/test_platform_audit.py"
+      ],
+      "handler_skill": "mg-preserve-platform-patches",
+      "status": "covered"
+    },
+    "plugin-override": {
+      "blocking": true,
+      "evidence": [
+        "mg-audit-plugin-overrides/SKILL.md",
+        "scripts/audit_plugin_overrides.py",
+        "scripts/apply_override_decisions.py",
+        "scripts/validate_override_audit.py",
+        "scripts/test_override_audit.py"
+      ],
+      "handler_skill": "mg-audit-plugin-overrides",
+      "status": "covered"
+    },
+    "repository-support": {
+      "blocking": false,
+      "evidence": [
+        "mg-fl-upstream-sync/SKILL.md",
+        "references/repository-support.md",
+        "scripts/audit_repository_support.py",
+        "scripts/validate_repository_support.py",
+        "tests/test_repository_support.py"
+      ],
+      "handler_skill": "mg-fl-upstream-sync",
+      "status": "covered"
+    },
+    "runtime-feature": {
+      "blocking": true,
+      "evidence": [
+        "mg-integrate-runtime-features/SKILL.md",
+        "scripts/build_runtime_feature_ledger.py",
+        "scripts/apply_feature_decisions.py",
+        "scripts/validate_runtime_features.py",
+        "scripts/test_runtime_features.py"
+      ],
+      "handler_skill": "mg-integrate-runtime-features",
+      "status": "covered"
+    },
+    "test-hardware": {
+      "blocking": true,
+      "evidence": [
+        "mg-run-upgrade-test-matrix/SKILL.md",
+        "scripts/build_test_matrix.py",
+        "scripts/apply_test_decisions.py",
+        "scripts/validate_test_matrix.py",
+        "tests/test_tools.py"
+      ],
+      "handler_skill": "mg-run-upgrade-test-matrix",
+      "status": "covered"
+    },
+    "training-integration": {
+      "blocking": true,
+      "evidence": [
+        "mg-audit-training-integration/SKILL.md",
+        "scripts/audit_training_integration.py",
+        "scripts/apply_training_decisions.py",
+        "scripts/validate_training_audit.py",
+        "tests/test_tools.py"
+      ],
+      "handler_skill": "mg-audit-training-integration",
+      "status": "covered"
+    },
+    "upstream-conflict": {
+      "blocking": true,
+      "evidence": [
+        "mg-integrate-upstream-conflicts/SKILL.md",
+        "scripts/build_conflict_ledger.py",
+        "scripts/apply_conflict_resolutions.py",
+        "scripts/validate_conflict_ledger.py",
+        "scripts/test_conflict_tools.py"
+      ],
+      "handler_skill": "mg-integrate-upstream-conflicts",
+      "status": "covered"
+    }
+  },
+  "schema_version": "1.0",
+  "skill_set_version": "mg-skills-v1.1"
+}

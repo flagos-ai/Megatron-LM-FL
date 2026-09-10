@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Build Packaging Integrator"
+  short_description: "Audit packaging, images, dependencies, and install gates"
+  default_prompt: "Use $mg-integrate-build-packaging to audit build and packaging changes before integration."
