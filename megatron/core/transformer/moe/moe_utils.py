@@ -58,6 +58,47 @@ else:
         te_general_gemm,
     ) = (None, None, None, None, None, None, None, None, None, None)
 
+########## FlagScale Begin ##########
+def _use_tefl_moe_permutation(tensor: torch.Tensor) -> bool:
+    """Whether the fused MoE rearrangement is served by the TE-FL plugin.
+
+    On NPU the CUDA/Triton kernels behind ``fused_permute``,
+    ``fused_sort_chunks_by_index`` and ``fused_unpermute`` are unusable, so the
+    fused path (``moe_permute_fusion=True``) is routed through the TE-FL plugin
+    (``OpManager``) instead. CUDA keeps the original TE kernels. The plugin picks
+    its implementation -- vendor NPU, reference, or FlagOS -- by policy, so no
+    backend is hard-coded here.
+    """
+    return tensor.device.type == "npu"
+
+
+class _TEFLChunkSort(torch.autograd.Function):
+    """Autograd bridge for the TE-FL chunk-sort plugin operators."""
+
+    @staticmethod
+    def forward(ctx, input, probs, split_sizes, sorted_idxs):
+        from transformer_engine.plugin import tefl
+
+        output, output_probs, inverse_row_map = tefl.moe_sort_chunks_fwd(
+            input, split_sizes, sorted_idxs, probs
+        )
+        ctx.save_for_backward(inverse_row_map)
+        ctx.has_probs = probs is not None
+        return output, output_probs
+
+    @staticmethod
+    def backward(ctx, grad_output, grad_probs):
+        from transformer_engine.plugin import tefl
+
+        (inverse_row_map,) = ctx.saved_tensors
+        if grad_probs is not None and not grad_probs.numel():
+            grad_probs = None
+        grad_input, grad_probs_input = tefl.moe_sort_chunks_bwd(
+            grad_output, grad_probs, inverse_row_map
+        )
+        return grad_input, grad_probs_input if ctx.has_probs else None, None, None
+########## FlagScale End ##########
+
 
 def switch_load_balancing_loss_func(
     probs: torch.Tensor,
@@ -355,6 +396,19 @@ def permute(
             The permuted tokens, (optional) permuted probs, sorted indices,
             (optional) pad_offsets, (optional) padded_tokens_per_expert.
     """
+    if fused and _use_tefl_moe_permutation(tokens):
+        # TE-FL plugin path (NPU): dropless, fixed top-k, FP32 router probabilities.
+        if drop_and_pad or tokens_per_expert is not None:
+            raise ValueError("TE-FL MoE permutation does not support capacity dropping/padding")
+        if num_out_tokens is None:
+            raise ValueError("TE-FL MoE permutation requires an explicit num_out_tokens")
+        from transformer_engine.plugin import tefl
+
+        output, permuted_probs, mapping = tefl.moe_permute_with_routing_map(
+            tokens, routing_map, probs, num_out_tokens, False
+        )
+        return output, permuted_probs, mapping, None, tokens_per_expert
+
     if fused and probs is None:
         if not HAVE_TE or fused_permute is None:
             raise ValueError("fused_permute is not available. Please install TE >= 2.1.0.")
@@ -473,6 +527,19 @@ def unpermute(
     Returns:
         torch.Tensor: The tokens restored to their original order.
     """
+    if fused and _use_tefl_moe_permutation(permuted_tokens):
+        # TE-FL plugin path (NPU): dropless unweighted combine. Router probabilities
+        # were already applied by the experts, so ``probs`` stays None.
+        if drop_and_pad or probs is not None or routing_map is None:
+            raise ValueError(
+                "TE-FL MoE unpermute requires drop_and_pad=False, probs=None and routing_map"
+            )
+        from transformer_engine.plugin import tefl
+
+        return tefl.moe_unpermute_with_routing_map(
+            permuted_tokens, sorted_indices, restore_shape, None, routing_map, False
+        )
+
     if fused:
         if not HAVE_TE or fused_unpermute is None:
             raise ValueError("fused_unpermute is not available. Please install TE >= 2.1.0.")
@@ -557,6 +624,10 @@ def sort_chunks_by_idxs(
     Returns:
         Tuple[torch.Tensor, Optional[torch.Tensor]]: The sorted output tensor and permuted probs.
     """
+    if fused and _use_tefl_moe_permutation(input):
+        # TE-FL plugin path (NPU): row-index chunk reorder, forward and inverse.
+        return _TEFLChunkSort.apply(input, probs, split_sizes, sorted_idxs)
+
     if fused and probs is None:
         if not HAVE_TE or fused_sort_chunks_by_index is None:
             raise ValueError(
