@@ -772,11 +772,69 @@ class TestAllRegisteredPlatformsContract(unittest.TestCase):
             self.assertGreater(len(result), 0)
         self._for_each_platform(check)
 
+    def test_device_name_is_accepted_by_torch(self):
+        """device_name() must be a device string torch can parse.
+
+        megatron/core passes this value straight into torch.tensor(device=...)
+        and torch.device(...). A vendor-branded name torch has no backend for
+        raises "Expected one of cpu, cuda, ... at start of device string".
+        """
+        import torch
+
+        def check(name, p):
+            for value in (p.device_name(), p.device_name(0)):
+                try:
+                    torch.device(value)
+                except RuntimeError as exc:
+                    self.fail(
+                        f"{name}.device_name() returned {value!r}, which torch "
+                        f"rejects: {exc}. Return the torch device type this "
+                        f"platform actually runs on and expose the vendor name "
+                        f"via platform_name() instead."
+                    )
+        self._for_each_platform(check)
+
+    def test_device_name_matches_device_type(self):
+        """device_name() must agree with the type of the device() it hands out."""
+        def check(name, p):
+            device = p.device(0)
+            if device is None:  # cpu platform returns None by design
+                return
+            self.assertEqual(
+                device.type,
+                p.device_name(),
+                f"{name}: device_name() is {p.device_name()!r} but device(0) is "
+                f"{device.type!r}. The `param.device.type == device_name()` "
+                f"checks in the optimizers silently go false when these differ.",
+            )
+        self._for_each_platform(check)
+
     def test_current_device_name_returns_string(self):
         """current_device_name() must return a string."""
         def check(name, p):
             result = p.current_device_name()
             self.assertIsInstance(result, str)
+        self._for_each_platform(check)
+
+    def test_current_device_name_is_accepted_by_torch(self):
+        """current_device_name() feeds torch.device() in nccl_allocator/FSDP."""
+        import torch
+
+        def check(name, p):
+            value = p.current_device_name()
+            try:
+                torch.device(value)
+            except RuntimeError as exc:
+                self.fail(
+                    f"{name}.current_device_name() returned {value!r}, which "
+                    f"torch rejects: {exc}"
+                )
+        self._for_each_platform(check)
+
+    def test_platform_name_matches_registry_key(self):
+        """platform_name() must return the identity the platform is keyed by."""
+        def check(name, p):
+            self.assertEqual(p.platform_name(), name)
         self._for_each_platform(check)
 
     def test_device_count_returns_int(self):
@@ -1149,6 +1207,53 @@ def _create_mock_platform(name):
             return -1
 
     return MockPlatform()
+
+
+class TestKunLunXinDeviceContract(unittest.TestCase):
+    """Pin the kunlunxin identity/device-string split.
+
+    KunLunXin drives XPU through torch_xmlir, which exposes the hardware via the
+    torch CUDA API. Its torch device type is therefore 'cuda' while its vendor
+    identity is 'kunlunxin'. These assertions run on any host, unlike the
+    registry-driven tests above which skip kunlunxin on a CUDA box.
+    """
+
+    def setUp(self):
+        from megatron.plugin.platform.platform_kunlunxin import PlatformKunLunXin
+
+        self.platform = PlatformKunLunXin()
+
+    def test_platform_name_is_vendor_identity(self):
+        """platform_name() is the registry and override-registry key."""
+        self.assertEqual(self.platform.platform_name(), "kunlunxin")
+        self.assertEqual(self.platform._name, "kunlunxin")
+
+    def test_device_name_is_cuda(self):
+        """device_name() must be the torch device type, not the vendor name."""
+        self.assertEqual(self.platform.device_name(), "cuda")
+        self.assertEqual(self.platform.device_name(3), "cuda:3")
+
+    def test_device_name_is_parseable_by_torch(self):
+        """Regression: torch rejected 'kunlunxin' at every device= call site."""
+        import torch
+
+        self.assertEqual(torch.device(self.platform.device_name()).type, "cuda")
+        self.assertEqual(torch.device(self.platform.device_name(2)).index, 2)
+
+    def test_device_name_matches_inherited_device_namespace(self):
+        """device_name() must match the namespace device() actually returns."""
+        self.assertEqual(self.platform.device(1).type, self.platform.device_name())
+
+    def test_override_vendor_resolves_to_kunlunxin(self):
+        """The override registry must still select kunlunxin implementations."""
+        from megatron.plugin import decorators
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MG_FL_PREFER", None)
+            with patch.object(
+                platform_manager, "cur_platform", self.platform
+            ):
+                self.assertEqual(decorators._get_preferred_vendor(), "kunlunxin")
 
 
 if __name__ == "__main__":

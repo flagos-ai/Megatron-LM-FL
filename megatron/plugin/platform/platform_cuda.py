@@ -338,7 +338,7 @@ class PlatformCUDA(PlatformBase):
             self._compile_backend = backend
         else:
             raise ValueError(
-                f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")
+                f"{backend} not supported by {self.platform_name()}. Supported Backends are {supported_backends}")
 
     def temperature(self):
         return torch.cuda.temperature()

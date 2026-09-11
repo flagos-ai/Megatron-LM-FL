@@ -271,11 +271,15 @@ class TestGetPreferredVendor(unittest.TestCase):
         from megatron.plugin.platform import platform_manager
 
         class KunlunxinPlatform:
-            """Stub platform returning kunlunxin device name."""
+            """Stub platform mirroring the real kunlunxin identity/device split."""
+
+            def platform_name(self):
+                """Return the vendor identity used to select overrides."""
+                return "kunlunxin"
 
             def device_name(self):
-                """Return the kunlunxin device name."""
-                return "kunlunxin"
+                """Return the torch device type: torch_xmlir exposes XPU as CUDA."""
+                return "cuda"
 
         original_platform = platform_manager.cur_platform
         platform_manager.cur_platform = KunlunxinPlatform()

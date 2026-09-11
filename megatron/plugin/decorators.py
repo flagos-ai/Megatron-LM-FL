@@ -82,7 +82,10 @@ def _get_preferred_vendor() -> Optional[str]:
 
         platform = platform_manager.cur_platform
         if platform is not None:
-            return platform.device_name()
+            # platform_name(), not device_name(): override_registry entries are
+            # keyed by vendor ('kunlunxin'), while device_name() is the torch
+            # device type ('cuda' under torch_xmlir).
+            return platform.platform_name()
     except Exception as e:
         logger.debug(f"Failed to infer override vendor from platform: {e}")
 

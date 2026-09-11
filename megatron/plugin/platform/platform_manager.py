@@ -7,7 +7,10 @@ cur_platform = None
 
 
 def is_current_platform_supported():
-    return get_platform().device_name() in PLATFORMS.keys()
+    # platform_name(), not device_name(): PLATFORMS is keyed by platform
+    # identity, which differs from the torch device type on platforms that
+    # borrow another vendor's backend (kunlunxin -> 'cuda').
+    return get_platform().platform_name() in PLATFORMS.keys()
 
 
 def get_platform():

@@ -54,10 +54,12 @@ class PlatformKunLunXin(PlatformCUDA):
         except Exception:
             pass
 
-    def device_name(self, device_index=None):
-        if device_index is None:
-            return "kunlunxin"
-        return f"kunlunxin:{device_index}"
-
-    def current_device_name(self):
-        return f"kunlunxin:{super().current_device()}"
+    # device_name() / current_device_name() / device() are deliberately NOT
+    # overridden here. torch_xmlir exposes XPU through the torch CUDA API, so
+    # 'cuda' is the only device type torch accepts on this platform, and it is
+    # what tensors actually report as `.device.type`. Overriding these with a
+    # vendor name broke two things at once: torch raised "Expected one of cpu,
+    # cuda, ... at start of device string: kunlunxin" at every
+    # torch.tensor(device=...) call site, and the `param.device.type ==
+    # device_name()` checks in the optimizers went silently false.
+    # The vendor identity stays available via platform_name() -> 'kunlunxin'.

@@ -37,9 +37,36 @@ class PlatformBase(ABC):
     def handles_memory_backpressure(self):
         ...
 
+    def platform_name(self):
+        """Return the ME-FL platform identity, e.g. 'cuda', 'npu', 'kunlunxin'.
+
+        This is the key the platform is registered under in ``PLATFORMS`` and the
+        vendor key the override registry matches against. It is NOT necessarily a
+        torch device type: a platform may drive its hardware through another
+        vendor's torch backend. KunLunXin runs XPU through torch_xmlir, which
+        exposes it via the torch CUDA API, so its ``platform_name()`` is
+        'kunlunxin' while its ``device_name()`` is 'cuda'.
+
+        Use this for identity decisions (platform lookup, vendor override
+        selection, user-facing messages). Never pass it to torch.
+        """
+        return self._name
+
     # Device APIs
     @abc.abstractmethod
     def device_name(self, device_index):
+        """Return a torch-valid device string, e.g. 'cuda' or 'cuda:0'.
+
+        Callers across megatron/core pass this straight into
+        ``torch.tensor(device=...)`` / ``torch.device(...)`` and compare it
+        against ``tensor.device.type``. It MUST therefore be a device type this
+        torch build actually recognises, and it must match the namespace the
+        rest of this class drives (``device()``, ``current_device()``, RNG,
+        streams). Returning a vendor-branded name that torch has no backend for
+        breaks both: torch raises on the tensor-creation sites, and the
+        ``device.type ==`` comparisons silently go false. Use
+        ``platform_name()`` when you want the vendor identity.
+        """
         ...
 
     @abc.abstractmethod
