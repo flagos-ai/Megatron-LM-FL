@@ -18,7 +18,17 @@ def enable_jit_fuser():
     global jit_fuser
     try:
         if is_torch_min_version("2.2.0a0"):
-            jit_fuser = torch.compile
+            from megatron.plugin.platform.platform_manager import get_platform
+
+            # JIT fusion (bias+gelu / bias+dropout+add / fused cross-entropy)
+            # is a CUDA-only optimization. On non-CUDA platforms torch.compile
+            # routes through the inductor, whose autotuner needs a platform
+            # triton backend (triton.backends.mtgpu for MUSA) that isn't
+            # guaranteed importable — keep the plain eager functions.
+            if get_platform().device_name() == "cuda":
+                jit_fuser = torch.compile
+            else:
+                jit_fuser = noop_decorator
     except ImportError:
 
         jit_fuser = noop_decorator

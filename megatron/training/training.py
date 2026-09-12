@@ -146,6 +146,9 @@ from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
     is_linear_attention_variant,
 )
+from megatron.plugin.platform.platform_manager import get_platform
+
+cur_platform = get_platform()
 from megatron.core.optimizer import get_mup_config_overrides, get_standard_config_overrides
 from megatron.core.optimizer.optimizer import param_group_identifier_keys
 from megatron.core.optimizer.optimizer_cuda_graph import OptimizerCudaGraphWrapper
@@ -1129,15 +1132,19 @@ def pretrain(
     pretrain_entry = _STARTUP_TIMESTAMPS.get('pretrain_entry')
 
     # Initialize program_start_global with a fallback value in case set_startup_timestamps() wasn't called
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    platform = get_platform()
+    timestamp_device = platform.device(args.local_rank)
     program_start_global = _TRAIN_START_TIME
     if _STARTUP_TIMESTAMPS['program_start'] is not None:
-        program_start_global = torch.tensor([_STARTUP_TIMESTAMPS['program_start']], dtype=torch.double, device='cuda')
+        program_start_global = torch.tensor([_STARTUP_TIMESTAMPS['program_start']], dtype=torch.double, device=timestamp_device)
         torch.distributed.all_reduce(program_start_global, op=torch.distributed.ReduceOp.MIN)
         program_start_global = program_start_global.item()
     set_startup_timestamps(program_start=program_start_global)
 
     global _LEGACY_TRAIN_START_TIME
-    start_time_tensor = torch.tensor([_LEGACY_TRAIN_START_TIME], dtype=torch.double, device='cuda')
+    start_time_tensor = torch.tensor([_LEGACY_TRAIN_START_TIME], dtype=torch.double, device=timestamp_device)
     torch.distributed.all_reduce(start_time_tensor, op=torch.distributed.ReduceOp.MIN)
     _LEGACY_TRAIN_START_TIME = start_time_tensor.item()
 
@@ -1621,6 +1628,9 @@ def wrap_model_chunks_with_ddp(
 
 def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap_with_ddp=True, config=None, pg_collection=None):
     """Build the model."""
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    platform = get_platform()
     args = get_args()
     args.model_type = model_type
     if pg_collection is None:
@@ -1730,7 +1740,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
         and not args.init_model_with_meta_device
     ):
         for model_module in model:
-            model_module.cuda(torch.cuda.current_device())
+            model_module.to(platform.device(args.local_rank))
 
     # Fp16 conversion.
     if args.fp16 or args.bf16:
@@ -1739,7 +1749,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
     # Materialize tensors on meta device (GPU allocation) if not using FSDP2 and not using Megatron FSDP.
     if args.init_model_with_meta_device and not args.use_torch_fsdp2 and not args.use_megatron_fsdp:
-        model = [to_empty_if_meta_device(model_module, device=torch.device("cuda")) for model_module in model]
+        model = [to_empty_if_meta_device(model_module, device=platform.device(args.local_rank)) for model_module in model]
 
     # Before TE2.x: The model_module.bfloat16()/model_module.half() above will call the inplace
     #               copy of TE's Float8Tensor, which will write an unwanted value (amax calculated
@@ -1792,11 +1802,12 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
 
         # Setup stream for ddp initialization. The side-stream may be necessary for cuda graph
         #  capture support with DDP, but we sync it with the current stream to avoid races.
-        ddp_stream = torch.cuda.Stream()
+        stream_mod = platform
+        ddp_stream = stream_mod.Stream()
         # Wait for the default stream to complete before starting ddp_stream
-        ddp_stream.wait_stream(torch.cuda.current_stream())
+        ddp_stream.wait_stream(stream_mod.current_stream())
         # Make ddp_stream start after whatever the default stream already queued
-        with torch.cuda.stream(ddp_stream):
+        with stream_mod.stream(ddp_stream):
             model = wrap_model_chunks_with_ddp(
                 model,
                 config,
@@ -1814,7 +1825,7 @@ def get_model(model_provider_func, model_type=ModelType.encoder_or_decoder, wrap
             )
         # End of setup_stream
         # Critical: ensure side-stream work completes before touching params on default stream
-        torch.cuda.current_stream().wait_stream(ddp_stream)
+        stream_mod.current_stream().wait_stream(ddp_stream)
 
         # Broadcast params from data parallel src rank to other data parallel ranks.
         if args.data_parallel_random_init:
@@ -2134,7 +2145,7 @@ def dummy_train_step(data_iterator):
             if tp_rank == 0:
                 batch = next(data_iterator)
                 for key in BATCH_KEYS:
-                    batch[key] = batch[key].cuda(non_blocking=True) if key in batch and batch[key] is not None else None
+                    batch[key] = batch[key].to(cur_platform.current_device(), non_blocking=True) if key in batch and batch[key] is not None else None
             batch = get_batch_on_this_tp_rank(
                 batch,
                 broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(),
@@ -2403,7 +2414,7 @@ def training_log(
     for key in loss_dict:
         if not skipped_iter:
             total_loss_dict[key] = (
-                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device='cuda'))
+                total_loss_dict.get(key, torch.tensor([0.0], dtype=torch.float, device=cur_platform.device(cur_platform.current_device())))
                 + loss_dict[key]
             )
         else:
@@ -2664,7 +2675,7 @@ def training_log(
                 if avg >= 0.0:
                     log_string += ' {}: {:.6E} |'.format(key, avg)
                 if should_reset:
-                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device='cuda')
+                    total_loss_dict[key] = torch.tensor([0.0], dtype=torch.float, device=cur_platform.device(cur_platform.current_device()))
         if args.num_experts is not None and moe_log_string:
             log_string += moe_log_string
         log_string += f' loss scale: {loss_scale:.1f} |'
@@ -2887,7 +2898,7 @@ def post_training_step_callbacks(
 
     # Bring CPU and GPU back in sync if on right iteration.
     if args.train_sync_interval and iteration % args.train_sync_interval == 0:
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
 
     # Straggler detector.
     if iteration % args.log_interval == 0 and args.log_straggler:
@@ -3018,7 +3029,7 @@ def checkpoint_and_decide_exit(
     if args.exit_duration_in_mins:
         train_time = (time.time() - _TRAIN_START_TIME) / 60.0
         done_cuda = torch.tensor(
-            [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+            [train_time > args.exit_duration_in_mins], dtype=torch.int, device=cur_platform.device(cur_platform.current_device())
         )
         torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
         done = done_cuda.item()
@@ -3920,7 +3931,7 @@ def evaluate(
                 # Reduce across processes.
                 for key in loss_dicts[0].keys():
                     if key not in total_loss_dict:
-                        total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float, device='cuda')
+                        total_loss_dict[key] = torch.tensor([0.0, 0.0], dtype=torch.float, device=cur_platform.device(cur_platform.current_device()))
                     val = [x[key].view(-1) for x in loss_dicts]
 
                     if val[0].numel() == 2:
@@ -3957,7 +3968,7 @@ def evaluate(
             if args.exit_duration_in_mins:
                 train_time = (time.time() - _TRAIN_START_TIME) / 60.0
                 done_cuda = torch.tensor(
-                    [train_time > args.exit_duration_in_mins], dtype=torch.int, device='cuda'
+                    [train_time > args.exit_duration_in_mins], dtype=torch.int, device=cur_platform.device(cur_platform.current_device())
                 )
                 torch.distributed.all_reduce(done_cuda, op=torch.distributed.ReduceOp.MAX)
                 done = done_cuda.item()
@@ -4031,9 +4042,9 @@ def evaluate_and_print_results(
 
         # with full validation we need to distribute eval_iters to all ranks
         if mpu.get_tensor_model_parallel_rank() == 0:
-            eval_iters = torch.tensor(args.eval_iters, dtype=torch.long, device='cuda')
+            eval_iters = torch.tensor(args.eval_iters, dtype=torch.long, device=cur_platform.device(cur_platform.current_device()))
         else:
-            eval_iters = torch.tensor([0] * len(eval_iters), dtype=torch.long, device='cuda')
+            eval_iters = torch.tensor([0] * len(eval_iters), dtype=torch.long, device=cur_platform.device(cur_platform.current_device()))
         torch.distributed.broadcast(eval_iters, 0)
         eval_iters = eval_iters.tolist()
         args.eval_iters = eval_iters[0] if not args.multiple_validation_sets else eval_iters
@@ -4170,6 +4181,10 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
 
     args = get_args()
 
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    timestamp_device = get_platform().device(args.local_rank)
+
     (train_dataloader, valid_dataloaders, test_dataloader) = (None, None, None)
 
     print_rank_0('> building train, validation, and test datasets ...')
@@ -4240,10 +4255,10 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             do_test = test_dataloader is not None and (args.full_validation or args.eval_iters > 0)
 
         flags = torch.tensor(
-            [int(do_train), int(do_valid), int(do_test)], dtype=torch.long, device='cuda'
+            [int(do_train), int(do_valid), int(do_test)], dtype=torch.long, device=timestamp_device
         )
     else:
-        flags = torch.tensor([0, 0, 0], dtype=torch.long, device='cuda')
+        flags = torch.tensor([0, 0, 0], dtype=torch.long, device=timestamp_device)
 
     torch.distributed.broadcast(flags, 0)
 
@@ -4296,7 +4311,7 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
                     args.eval_iters = [None] * len(valid_dataloaders)
                 else:
                     local_eval_iters = [len(dl) for dl in valid_dataloaders]
-                    eval_iters_tensor = torch.tensor(local_eval_iters, dtype=torch.long, device='cuda')
+                    eval_iters_tensor = torch.tensor(local_eval_iters, dtype=torch.long, device=cur_platform.device(cur_platform.current_device()))
                     torch.distributed.all_reduce(
                         eval_iters_tensor,
                         op=torch.distributed.ReduceOp.MAX,
@@ -4305,7 +4320,7 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
                     args.eval_iters = eval_iters_tensor.tolist()
             else:
                 local_eval_iters = len(valid_dataloaders[0])
-                eval_iters_tensor = torch.tensor([local_eval_iters], dtype=torch.long, device='cuda')
+                eval_iters_tensor = torch.tensor([local_eval_iters], dtype=torch.long, device=cur_platform.device(cur_platform.current_device()))
                 torch.distributed.all_reduce(
                     eval_iters_tensor,
                     op=torch.distributed.ReduceOp.MAX,

@@ -54,8 +54,11 @@ def initialize_megatron(
     (optionally, only when args.lazy_mpu_init == True)
     """
     if not allow_no_cuda:
-        # Make sure cuda is available.
-        assert torch.cuda.is_available(), "Megatron requires CUDA."
+        # Make sure a supported accelerator platform is available.
+        # (fork: CUDA assert generalized to registered FlagOS platforms -- musa/npu/etc.)
+        from megatron.plugin.platform.platform_manager import is_current_platform_supported
+
+        assert is_current_platform_supported(), "Megatron requires CUDA or a supported FlagOS platform."
 
     args = get_args()
 
@@ -247,7 +250,10 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
     """Initialize torch.distributed and core model parallel."""
     args = get_args()
 
-    device_count = torch.cuda.device_count()
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    platform = get_platform()
+    device_count = platform.device_count()
     if torch.distributed.is_initialized():
 
         print_rank_0("torch distributed is already initialized, skipping initialization ...")
@@ -259,14 +265,14 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
         print_rank_0("> initializing torch distributed ...")
         # Manually set the device ids.
         if device_count > 0:
-            torch.cuda.set_device(args.local_rank)
-            device_id = torch.device(f'cuda:{args.local_rank}')
+            platform.set_device(args.local_rank)
+            device_id = platform.device(args.local_rank)
         else:
             device_id = None
 
         # Set to non-default stream for cudagraph capturing.
         if args.cuda_graph_impl == "transformer_engine":
-            torch.cuda.set_stream(torch.cuda.Stream())
+            platform.set_stream(platform.Stream())
 
         # Set flight recorder env vars if specified.
         # Priority: pre-existing environment variable > MLM argument.
@@ -395,7 +401,9 @@ def _set_random_seed(
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.device_count() > 0:
+        from megatron.plugin.platform.platform_manager import get_platform
+
+        if get_platform().device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(
                 seed, te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
             )
@@ -438,6 +446,14 @@ def set_jit_fusion_options():
 
 def _warmup_jit_function():
     """Compilie JIT functions before the main training steps"""
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    # JIT fusion warmup is CUDA-only (nvfuser / legacy JIT fuser). On other
+    # platforms the fused ops don't exist and torch.rand(..., device="cuda")
+    # can't even allocate — --disable-jit-fuser doesn't help because
+    # set_jit_fusion_options() calls this unconditionally.
+    if get_platform().device_name() != "cuda":
+        return
     args = get_args()
     if args.bf16:
         dtype = torch.bfloat16
