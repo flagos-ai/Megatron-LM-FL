@@ -10,7 +10,7 @@ setup_script: .github/scripts/set_env_metax.sh
 # ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
 
 # CI image for online env
-ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:manual-20260827-metax-dev
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:manual-20260827-metax-dev-rdma-aligned
 
 # Runner labels for Metax node
 runner_labels:
@@ -98,6 +98,10 @@ test_matrix:
       - tests/unit_tests/test_utils.py::test_straggler_detector
       # Metax C500 CPU optimizer offload overlap has larger numeric drift than CUDA tolerance.
       - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
+      # core group
+      # torch.distributed.checkpoint.load() dropped the `no_dist` kwarg in torch 2.6;
+      # torch.py (new in 0.18.2) still passes no_dist=True -> TypeError on Metax.
+      - tests/unit_tests/test_checkpointing.py::test_dist_checkpoint_versioning
 
       # 2.models
       # ZeroDivisionError: integer modulo by zero

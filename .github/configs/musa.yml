@@ -323,6 +323,27 @@ test_matrix:
       # test_preprocess_mmdata uses the locally mounted GPT-2 tokenizer and
       # generates all dataset inputs in a temporary directory.
 
+      # data 
+      # SFT + context-parallel (cp>1) path (new in 0.18.2) calls TE
+      # thd_get_partitioned_indices, unimplemented in vendor.musa; teardown barrier
+      # then deadlocks in MCCL ALLREDUCE and SIGABRTs the whole data session.
+      - tests/unit_tests/data/test_get_batch.py::test_sft_batch
+
+      # distributed 
+      # Uneven-shard DTensor tests fall back to cpu/gloo on MUSA (torch.cuda
+      # unavailable) and gather incorrectly; test_large_tensor hangs ~59min and
+      # trips the 60-min step timeout, killing the whole distributed job.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_uneven_dtensor.py
+
+      # models 
+      # MoE routing permute calls argsort which dispatches to MUDNN Sort; the
+      # Sort kernel fails on MUSA (SortCall MUDNN failed).
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py
+      # MIMO colocated suites hard-code backend="nccl" (init_process_group /
+      # HyperCommGrid), which is not compiled into the MUSA torch build.
+      - tests/unit_tests/models/test_mimo_colocated_communicator.py
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py
+
   functional:
     train:
       - model: gpt

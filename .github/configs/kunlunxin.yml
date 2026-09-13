@@ -129,6 +129,11 @@ test_matrix:
       # mamba-ssm CUDA extension not installed in kunlunxin image.
       # ascend and metax also ignore this case.
       - tests/unit_tests/models/test_mamba_moe_model.py
+      # MIMO colocated correctness + dynamic-res CP tests (new in 0.18.2) fail on
+      # XPU with 'CUDA error: invalid resource handle' / rank-divergent assert.
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py::TestColocatedGradientScalingCorrectness::test_dist_matches_dp1_reference_post_step_weights
+      - tests/unit_tests/models/test_multimodal_context_parallel.py::TestDynamicResCPDistributed::test_split_dynamic_res_temporal_aware_tubelets
+      - tests/unit_tests/models/test_multimodal_context_parallel.py::TestDynamicResCPDistributed::test_gather_from_context_parallel_ranks_autograd_backward
 
       #distributed
       # FSDP tests are incompatible with XPU; ascend ignores most tests in
@@ -193,6 +198,9 @@ test_matrix:
       # FlagCX gather() fails with "flagcxComm not fully initialized" during
       # T5 encoder/decoder parallel reconfiguration; same root cause as above.
       - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5ModelReconfiguration::test_parallel_reconfiguration_e2e
+      # Legacy common.pt holds args.exit_signal=signal.SIGTERM (only Signals class
+      # is allowlisted) -> weights_only load UnpicklingError under torch 2.6+.
+      - tests/unit_tests/dist_checkpointing/test_nonpersistent.py::TestLegacySaveAndLoad::test_basic_save_load_scenario
 
       # pipeline_parallel
       # All bridge_communicator tests with complex topologies (multi-grid, 2D
@@ -266,6 +274,9 @@ test_matrix:
       # both ignore the entire file for these reasons.
       - tests/unit_tests/data/test_preprocess_data.py::test_preprocess_data_gpt_optimal_workers
       - tests/unit_tests/data/test_preprocess_data.py::test_preprocess_data_bert
+      # SFT + context-parallel (cp>1) path (new in 0.18.2) deadlocks in XCCL
+      # ALLREDUCE during teardown barrier, aborting the whole data session.
+      - tests/unit_tests/data/test_get_batch.py::test_sft_batch
 
       # fusions
       # MLA YaRN RoPE fused kernel is CUDA/Triton-only; on XPU the fused
