@@ -134,6 +134,8 @@ test_matrix:
       - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_get_pg_success
       - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_get_pg_multiple_dims
       - tests/unit_tests/test_hyper_comm_grid.py::TestHyperCommGrid::test_end_to_end_workflow
+      # ECCL ALLREDUCE watchdog timeout (30min) in teardown; TP dedup test only, DP variant passes
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorDistributed::test_pure_tp_deduplicates
       
       
       # models
@@ -179,6 +181,8 @@ test_matrix:
       # already skipped via @pytest.mark.skipif(not HAVE_KITCHEN), but TE quantization tests
       # have no such guard and run on Enflame where HAVE_TE=True.
       - tests/unit_tests/models/test_gpt_model_quantization.py::TestGPTModelTEQuantizationConfig
+      # ECCL watchdog abort in teardown destroy_model_parallel barrier (all tp,pp params)
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAGPTMambaEquivalence::test_dsa_logprobs_match
 
 
 
@@ -246,10 +250,14 @@ test_matrix:
       # triggers ECCL communicator setup timeout (rank 0 fails broadcastUniqueECCLID, ranks 2-7 wait
       # 60s for ecclUniqueId); GCU device type is "gcu" not "cuda"; Enflame-specific
       - tests/unit_tests/dist_checkpointing/test_msc.py
+      # ECCL new_group hangs in init_model_parallel fixture (whole TestIntegrity class)
+      - tests/unit_tests/dist_checkpointing/test_integrity.py
 
       # tensor_parallel
       # ECCL allreduce SIGSEGV in cross_entropy
       - tests/unit_tests/tensor_parallel/test_cross_entropy.py::test_vocab_parallel_cross_entropy
+      # ECCL allreduce SIGSEGV in vocab_parallel_cross_entropy (chunked variant); same as test_cross_entropy.py
+      - tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py::test_chunked_cross_entropy_correctness
       # ECCL broadcast hang: rank 2 launch counter mismatch, all ranks stuck in init_process_group
       - tests/unit_tests/tensor_parallel/test_data.py::test_broadcast_data
       # torch_gcu RNG manual_seed broken → RowParallelLinear weight init mismatch on GCU (assert torch.equal fails)
@@ -313,6 +321,8 @@ test_matrix:
       # non-rank-0 ranks hit FileNotFoundError (file_0.idx) after the ECCL barrier; cross-rank
       # file visibility race on GCU (192 distributed cases, 144 fail). musa ignores it too.
       - tests/unit_tests/data/test_builder.py::test_fast_builder
+      # ECCL barrier deadlock in destroy_model_parallel teardown; all tp/pp/cp/seq params affected
+      - tests/unit_tests/data/test_get_batch.py::test_sft_batch
 
 
       # fusions

@@ -335,6 +335,20 @@ test_matrix:
       # The Ascend unit runner does not mount the tokenizer fixture directory.
       - tests/unit_tests/tokenizers/test_tokenizer.py
 
+
+       ## 16. megatron-test branch (upstream sync 2026-09-08) newly-failing cases
+      # te_general_grouped_gemm (MoE grouped GEMM) has no Ascend implementation:
+      # TE_FL_PREFER=flagos routes to default.flagos, which needs libcuda.so
+      # (CUDA). No reference.torch fallback exists for this op → hard error.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match
+      # NPU task-scheduler error 507001 → HCCL watchdog SIGABRT (same as section 13b).
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator::test_send_forward_recv_forward
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator::test_send_backward_recv_backward
+      - tests/unit_tests/data/test_get_batch.py::test_sft_batch
+      # test_fully_shard parametrizations exhaust NPU coprocessor streams (section 12);
+      # only the non-parametrized custom_dtype/ez/te_quantized were previously excluded.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard
+
   functional:
     train:
       - model: gpt
