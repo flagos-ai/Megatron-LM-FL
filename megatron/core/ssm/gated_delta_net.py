@@ -39,6 +39,7 @@ from megatron.core.transformer.utils import (
     sharded_state_dict_default,
 )
 from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+from megatron.plugin.decorators import overridable
 
 try:
     from fla.modules.convolution import causal_conv1d
@@ -436,7 +437,7 @@ class GatedDeltaNet(MegatronModule):
             qkv = qkv.transpose(1, 2)  # b, d, s -> b, s, d
         else:
             assert self.activation in ["silu", "swish"]
-            qkv, _ = causal_conv1d(
+            qkv, _ = self._causal_conv1d(
                 x=qkv,  # FLA conv1d accepts [b, s, d] format input
                 weight=conv1d_weight.squeeze(1),  # d, 1, w -> d, w
                 bias=conv1d_bias,
@@ -464,7 +465,7 @@ class GatedDeltaNet(MegatronModule):
         nvtx_range_pop(suffix="g_and_beta")
 
         nvtx_range_push(suffix="gated_delta_rule")
-        core_attn_out, last_recurrent_state = self.gated_delta_rule(
+        core_attn_out, last_recurrent_state = self._gated_delta_rule(
             query,
             key,
             value,
@@ -521,6 +522,18 @@ class GatedDeltaNet(MegatronModule):
         y = y.to(x_dtype)
         return y
 
+    @overridable
+    def _normalize_qk(self, x):
+        return l2norm(x)
+
+    @overridable
+    def _gated_delta_rule(self, q, k, v, **kwargs):
+        return self.gated_delta_rule(q, k, v, **kwargs)
+
+    @overridable
+    def _causal_conv1d(self, **kwargs):
+        return causal_conv1d(**kwargs)
+
     @jit_fuser
     def _prepare_qkv_for_gated_delta_rule(self, qkv, gate, beta, alpha, batch, seq_len):
         """
@@ -540,7 +553,7 @@ class GatedDeltaNet(MegatronModule):
 
         # Apply L2 norm to query and key
         if self.use_qk_l2norm:
-            query_key = l2norm(query_key.contiguous())
+            query_key = self._normalize_qk(query_key.contiguous())
 
         # Split query and key
         split_size = self.qk_dim_local_tp // self.key_head_dim // self.cp_size
