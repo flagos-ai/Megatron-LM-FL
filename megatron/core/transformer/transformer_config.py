@@ -425,6 +425,17 @@ class TransformerConfig(ModelParallelConfig):
     forward + cuDNN DSA backward (requires ``flash_mla`` and ``nvidia-cudnn-frontend``).
     On SM90 (Hopper), uses Triton-based fused kernels (requires ``triton>=3.0``).
     When False, falls back to unfused PyTorch implementations."""
+
+    apply_dsa_indexer_loss_fusion: bool = True
+    """If True (default), compute the DSA indexer KL loss with fused Triton kernels that reduce over
+    the attention/indexer head dimension inside the kernel, so the ``[b, np, sq, sk]`` and
+    ``[sq, b, index_n_heads, sk]`` fp32 intermediates are never materialized (~3GB per 'full'
+    DSA layer at seq=4096). The maths is unchanged, so loss curves stay comparable.
+
+    Independent of ``apply_dsa_kernel_fusion``: that flag fuses sparse attention and requires the
+    absorbed MLA layout, whereas this one applies to plain ``dsa`` as well. Needs SM90+,
+    ``triton>=3.0`` and the dense indexer loss; on any other setup it automatically falls back to
+    the unfused path (disable explicitly with ``--no-dsa-indexer-loss-fusion``)."""
     ##### FlagScale End #####
 
     ####################
@@ -1324,6 +1335,11 @@ class TransformerConfig(ModelParallelConfig):
             )
         ##### FlagScale Begin #####
         elif self.experimental_attention_variant == "dsa":
+            ##### FlagScale Begin #####
+            # The indexer is identical across DSA variants, so this applies to plain "dsa".
+            if self.apply_dsa_indexer_loss_fusion:
+                self._validate_dsa_indexer_loss_fusion()
+
             # Expand indexer_type_rule into indexer_types list
             if self.indexer_type_rule is not None and self.indexer_types is None:
                 self.indexer_types = self._parse_indexer_type_rule(
@@ -1339,7 +1355,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"indexer_types must only contain {valid_types}, "
                     f"got {set(self.indexer_types) - valid_types}"
                 )
-        ##### FlagScale End #####
+            ##### FlagScale End #####
         elif self.experimental_attention_variant == "dsv4_hybrid":
             assert self.multi_latent_attention, "DSv4 Hybrid requires multi_latent_attention."
             assert self.csa_compress_ratios is not None, "csa_compress_ratios must be set"
@@ -2651,6 +2667,45 @@ class TransformerConfig(ModelParallelConfig):
             ), "Batch invariant mode only supports FlashAttention"
 
     ##### FlagScale Begin #####
+    def _validate_dsa_indexer_loss_fusion(self) -> None:
+        """Downgrade to the unfused indexer loss when this setup can't run the fusion.
+
+        The fused Triton kernels are an optimisation with an exact unfused fallback, so an
+        unsupported environment (no CUDA / pre-SM90 / no Triton) or the unimplemented sparse-loss
+        variant disables the fusion with a warning rather than failing the run. Pass
+        ``--no-dsa-indexer-loss-fusion`` to opt out explicitly.
+        """
+        import warnings
+
+        reason = None
+        if not torch.cuda.is_available():
+            reason = "no CUDA device is available"
+        elif torch.cuda.get_device_capability()[0] < 9:
+            sm = torch.cuda.get_device_capability()
+            reason = f"device compute capability {sm[0]}.{sm[1]} is below SM90"
+        elif self.dsa_indexer_use_sparse_loss:
+            reason = "it implements only the dense indexer loss (dsa_indexer_use_sparse_loss=True)"
+        else:
+            try:
+                import triton
+
+                from packaging.version import Version as _Version
+
+                if _Version(triton.__version__) < _Version("3.0.0"):
+                    reason = (
+                        f"the installed Triton {triton.__version__} is below the "
+                        "required triton>=3.0"
+                    )
+            except ImportError:
+                reason = "Triton is not installed (needs triton>=3.0)"
+
+        if reason is not None:
+            warnings.warn(
+                f"Disabling apply_dsa_indexer_loss_fusion because {reason}; "
+                "falling back to the unfused DSA indexer loss."
+            )
+            self.apply_dsa_indexer_loss_fusion = False
+
     @staticmethod
     def _parse_indexer_type_rule(rule: str, num_layers: int) -> List[str]:
         """Parse a compact indexer_type_rule string into a list of indexer types.
