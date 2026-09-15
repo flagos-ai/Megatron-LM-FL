@@ -352,9 +352,13 @@ def is_te_min_version(version, check_equality=True):
             "packaging is not installed. Please install it with `pip install packaging`."
         )
 
+    te_ver = get_te_version()
+    if te_ver is None:
+        return False
+
     if check_equality:
-        return get_te_version() >= PkgVersion(version)
-    return get_te_version() > PkgVersion(version)
+        return te_ver >= PkgVersion(version)
+    return te_ver > PkgVersion(version)
 
 
 def get_torch_version():
