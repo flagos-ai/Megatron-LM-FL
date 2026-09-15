@@ -1,8 +1,14 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
+import ast
+import inspect
+import textwrap
+
 import pytest
 
+from megatron.plugin.dualpipev import dualpipev_schedules
 from megatron.plugin.dualpipev.dualpipev_schedules import generate_dualpipev_schedule
+from megatron.plugin.dualpipev.fb_overlap.overlap_funcs import fwdbwd
 
 
 # ============================= Schedule Generation Tests =============================
@@ -199,3 +205,106 @@ class TestDualpipevSchedule:
             )
         except (AssertionError, ValueError):
             pass  # Expected behavior
+
+
+def test_dualpipev_routes_all_p2p_waits_through_helper():
+    source = textwrap.dedent(
+        inspect.getsource(
+            dualpipev_schedules.forward_backward_pipelining_with_dualpipev
+        )
+    )
+    tree = ast.parse(source)
+    routed_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "wait_p2p_request"
+    ]
+    direct_wait_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "wait"
+    ]
+
+    assert len(routed_calls) == 44
+    assert direct_wait_calls == []
+    assert all(
+        len(call.args) == 2
+        and isinstance(call.args[0], ast.Name)
+        and call.args[0].id == "p2p_communicator"
+        and not call.keywords
+        for call in routed_calls
+    )
+
+
+def _shared_backward_guard_actions(function):
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    initializers = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "has_backward_shared_experts"
+            for target in node.targets
+        )
+    ]
+    assert len(initializers) == 1
+    assert ast.unparse(initializers[0].value) == (
+        "bwd_layer_graph.shared_experts_graph[0] is not None"
+    )
+    guards = sorted(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and isinstance(node.test, ast.Name)
+            and node.test.id == "has_backward_shared_experts"
+        ),
+        key=lambda node: node.lineno,
+    )
+    assert len(guards) == 3
+    assignments = [
+        node
+        for node in ast.walk(guards[0])
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "backward_shared"
+            for target in node.targets
+        )
+    ]
+    assert len(assignments) == 1
+    calls = [
+        tuple(
+            node.func.id
+            for node in sorted(
+                (
+                    node
+                    for node in ast.walk(guard)
+                    if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+                ),
+                key=lambda node: node.lineno,
+            )
+        )
+        for guard in guards[1:]
+    ]
+    return ast.unparse(assignments[0].value), calls
+
+
+@pytest.mark.parametrize(
+    "function",
+    (
+        fwdbwd.transformer_layer_forward_dense_backward_moe_overlapping,
+        fwdbwd.transformer_layer_forward_moe_backward_moe_overlapping,
+    ),
+)
+def test_dualpipev_combined_backward_guards_optional_shared_experts(function) -> None:
+    assert _shared_backward_guard_actions(function) == (
+        "bwd_layer_graph.shared_experts_graph[1].grad",
+        [
+            ("turn_shared_experts_delay_wgrad_compute", "run_graph_backward"),
+            ("call_shared_experts_backward_dw", "turn_shared_experts_delay_wgrad_compute"),
+        ],
+    )

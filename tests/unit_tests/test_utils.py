@@ -198,6 +198,93 @@ def test_nvtx_decorator(monkeypatch):
     assert all(execution_tracker.values())
 
 
+def test_get_batch_on_this_tp_rank_skips_dense_source_metadata(monkeypatch):
+    calls = []
+    args = SimpleNamespace(
+        hybrid_context_parallel=False,
+        pipeline_model_parallel_size=1,
+        sft=False,
+    )
+
+    class FakeCudaTensor:
+        def __init__(self, tensor):
+            self.tensor = tensor
+
+        def cuda(self, non_blocking=False):
+            return self.tensor
+
+    batch = {
+        "tokens": FakeCudaTensor(torch.ones((2, 3), dtype=torch.long)),
+        "labels": FakeCudaTensor(torch.ones((2, 3), dtype=torch.long)),
+        "loss_mask": FakeCudaTensor(torch.ones((2, 3), dtype=torch.float32)),
+        "position_ids": FakeCudaTensor(torch.ones((2, 3), dtype=torch.long)),
+    }
+
+    monkeypatch.setattr(training_util, "get_args", lambda: args)
+    monkeypatch.setattr(training_util.mpu, "get_tensor_model_parallel_rank", lambda: 0)
+    monkeypatch.setattr(training_util.mpu, "get_tensor_model_parallel_src_rank", lambda: 0)
+    monkeypatch.setattr(
+        training_util.mpu, "get_tensor_model_parallel_group", lambda: "tp-group"
+    )
+    monkeypatch.setattr(training_util.torch.cuda, "current_device", lambda: "cpu")
+
+    def fake_broadcast(item, src, group=None):
+        calls.append((tuple(item.shape), item.dtype))
+        if item.dim() == 0 and item.dtype == torch.int64:
+            item.fill_(0)
+
+    monkeypatch.setattr(training_util.torch.distributed, "broadcast", fake_broadcast)
+
+    result = training_util.get_batch_on_this_tp_rank(iter([batch]))
+
+    assert result["cu_seqlens"] is None
+    assert result["max_seqlen"] is None
+    assert calls == [
+        ((2, 3), torch.int64),
+        ((2, 3), torch.int64),
+        ((2, 3), torch.float32),
+        ((2, 3), torch.int64),
+    ]
+
+
+def test_get_batch_on_this_tp_rank_skips_dense_receiver_metadata(monkeypatch):
+    calls = []
+    args = SimpleNamespace(
+        hybrid_context_parallel=False,
+        pipeline_model_parallel_size=1,
+        micro_batch_size=2,
+        seq_length=3,
+        create_attention_mask_in_dataloader=False,
+        sft=False,
+    )
+
+    monkeypatch.setattr(training_util, "get_args", lambda: args)
+    monkeypatch.setattr(training_util.mpu, "get_tensor_model_parallel_rank", lambda: 1)
+    monkeypatch.setattr(training_util.mpu, "get_tensor_model_parallel_src_rank", lambda: 0)
+    monkeypatch.setattr(
+        training_util.mpu, "get_tensor_model_parallel_group", lambda: "tp-group"
+    )
+    monkeypatch.setattr(training_util.torch.cuda, "current_device", lambda: "cpu")
+
+    def fake_broadcast(item, src, group=None):
+        calls.append((tuple(item.shape), item.dtype))
+        if item.dim() == 0 and item.dtype == torch.int64:
+            item.fill_(0)
+
+    monkeypatch.setattr(training_util.torch.distributed, "broadcast", fake_broadcast)
+
+    result = training_util.get_batch_on_this_tp_rank(iter([]))
+
+    assert result["cu_seqlens"] is None
+    assert result["max_seqlen"] is None
+    assert calls == [
+        ((2, 3), torch.int64),
+        ((2, 3), torch.int64),
+        ((2, 3), torch.float32),
+        ((2, 3), torch.int64),
+    ]
+
+
 @pytest.mark.flaky
 @pytest.mark.flaky_in_dev
 def test_check_param_hashes_across_dp_replicas():

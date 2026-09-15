@@ -8,6 +8,7 @@ import torch
 
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
+from megatron.core.observability import scoped_forward
 from megatron.core.pipeline_parallel.utils import (
     AbstractSchedulePlan,
     ScheduleNode,
@@ -18,6 +19,101 @@ from megatron.core.utils import get_attr_wrapped_model
 
 # Types
 Shape = Union[List[int], torch.Size]
+
+
+def _combined_operation_id(microbatch, vp_stage):
+    if microbatch is None:
+        return None
+    vp_identity = "none" if vp_stage is None else vp_stage
+    return f"pp:microbatch={microbatch}:vp={vp_identity}"
+
+
+def _build_combined_step_context(
+    *, f_model, b_model, current_microbatch, backward_microbatch, f_vp_stage, b_vp_stage
+):
+    forward_active = f_model is not None
+    backward_active = b_model is not None
+    forward_operation_id = (
+        _combined_operation_id(current_microbatch, f_vp_stage) if forward_active else None
+    )
+    backward_operation_id = (
+        _combined_operation_id(backward_microbatch, b_vp_stage) if backward_active else None
+    )
+    if forward_active and backward_active:
+        execution_mode = "combined"
+    elif forward_active:
+        execution_mode = "forward"
+    else:
+        execution_mode = "backward"
+    return {
+        "operation_id": (
+            f"pp-combined:forward={forward_operation_id}:backward={backward_operation_id}"
+        ),
+        "forward_operation_id": forward_operation_id,
+        "backward_operation_id": backward_operation_id,
+        "forward_microbatch": current_microbatch if forward_active else None,
+        "backward_microbatch": backward_microbatch if backward_active else None,
+        "forward_vp_stage": f_vp_stage if forward_active else None,
+        "backward_vp_stage": b_vp_stage if backward_active else None,
+        "execution_mode": execution_mode,
+        "overlap_active": execution_mode == "combined",
+        "schedule": "combined-1f1b",
+        "timing_phase": "framework_phase",
+    }
+
+
+def _combined_step_context(
+    forward_step_func,
+    data_iterator,
+    f_model,
+    num_microbatches,
+    input_tensor,
+    forward_data_store,
+    b_model,
+    b_input_tensor,
+    b_output_tensor,
+    b_output_tensor_grad,
+    config,
+    f_model_chunk_id=None,
+    pre_forward=None,
+    pre_backward=None,
+    post_forward=None,
+    post_backward=None,
+    collect_non_loss_data=False,
+    checkpoint_activations_microbatch=None,
+    is_first_microbatch=False,
+    current_microbatch=None,
+    encoder_decoder_xattn=False,
+    backward_microbatch=None,
+    b_model_chunk_id=None,
+):
+    del (
+        forward_step_func,
+        data_iterator,
+        num_microbatches,
+        input_tensor,
+        forward_data_store,
+        b_input_tensor,
+        b_output_tensor,
+        b_output_tensor_grad,
+        config,
+        pre_forward,
+        pre_backward,
+        post_forward,
+        post_backward,
+        collect_non_loss_data,
+        checkpoint_activations_microbatch,
+        is_first_microbatch,
+        encoder_decoder_xattn,
+    )
+    return _build_combined_step_context(
+        f_model=f_model,
+        b_model=b_model,
+        current_microbatch=current_microbatch,
+        backward_microbatch=backward_microbatch,
+        f_vp_stage=f_model_chunk_id,
+        b_vp_stage=b_model_chunk_id,
+    )
 
 
 def combined_1f1b_schedule_for_no_pipelining(
@@ -93,6 +189,7 @@ def combined_1f1b_schedule_for_no_pipelining(
                 checkpoint_activations_microbatch=None,
                 is_first_microbatch=check_first_val_step((i + 1) == 0),
                 current_microbatch=(i + 1),
+                backward_microbatch=i,
             )
     total_num_tokens += num_tokens
     # The backward step for the last microbatch is executed alone, no a2a overlapping
@@ -109,6 +206,7 @@ def combined_1f1b_schedule_for_no_pipelining(
         output_tensor,  # b_output_tensor
         output_tensor_grad,  # b_output_tensor_grad
         config,
+        backward_microbatch=num_microbatches - 1,
     )
     return forward_data_store, total_num_tokens
 
@@ -192,10 +290,12 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
         )
     # backward prepare
     b_model_chunk_id = None
+    b_microbatch_id = None
     b_input_tensor = None
     b_output_tensor = None
     b_output_tensor_grad = None
     if b_virtual_microbatch_id is not None:
+        b_microbatch_id = get_microbatch_id_in_model_chunk(b_virtual_microbatch_id, forward=False)
         b_model_chunk_id = get_model_chunk_id(b_virtual_microbatch_id, forward=False)
         b_input_tensor, b_output_tensor, b_output_tensor_grad = backward_step_helper_preprocess(
             b_virtual_microbatch_id, b_model_chunk_id
@@ -226,6 +326,8 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
             else None
         ),
         current_microbatch=f_microbatch_id,
+        backward_microbatch=b_microbatch_id,
+        b_model_chunk_id=b_model_chunk_id,
     )
     # forward post process
     if f_model_chunk_id is not None:
@@ -239,7 +341,7 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
     return output_tensor, input_tensor_grad
 
 
-def combined_forward_backward_step(
+def _combined_forward_backward_step_impl(
     forward_step_func,
     data_iterator,
     f_model,
@@ -447,3 +549,56 @@ def combined_forward_backward_step(
             input_tensor_grad = input_tensor_grad[0]
 
     return output_tensor, num_tokens, input_tensor_grad
+
+
+@scoped_forward("combined-forward-backward-step", ctx_factory=_combined_step_context)
+def combined_forward_backward_step(
+    forward_step_func,
+    data_iterator,
+    f_model,
+    num_microbatches,
+    input_tensor,
+    forward_data_store,
+    b_model,
+    b_input_tensor,
+    b_output_tensor,
+    b_output_tensor_grad,
+    config,
+    f_model_chunk_id=None,
+    pre_forward=None,
+    pre_backward=None,
+    post_forward=None,
+    post_backward=None,
+    collect_non_loss_data=False,
+    checkpoint_activations_microbatch=None,
+    is_first_microbatch=False,
+    current_microbatch=None,
+    encoder_decoder_xattn=False,
+    backward_microbatch=None,
+    b_model_chunk_id=None,
+):
+    """Run one fused schedule span without double-counting overlapping forward/backward work."""
+    del backward_microbatch, b_model_chunk_id
+    return _combined_forward_backward_step_impl(
+        forward_step_func,
+        data_iterator,
+        f_model,
+        num_microbatches,
+        input_tensor,
+        forward_data_store,
+        b_model,
+        b_input_tensor,
+        b_output_tensor,
+        b_output_tensor_grad,
+        config,
+        f_model_chunk_id=f_model_chunk_id,
+        pre_forward=pre_forward,
+        pre_backward=pre_backward,
+        post_forward=post_forward,
+        post_backward=post_backward,
+        collect_non_loss_data=collect_non_loss_data,
+        checkpoint_activations_microbatch=checkpoint_activations_microbatch,
+        is_first_microbatch=is_first_microbatch,
+        current_microbatch=current_microbatch,
+        encoder_decoder_xattn=encoder_decoder_xattn,
+    )

@@ -1,0 +1,36 @@
+diff --git a/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py b/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py
+index f5c8575..2cb62a1 100644
+--- a/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py
++++ b/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py
+@@ -579,6 +579,15 @@ class CUDABackend(TEFLBackendBase):
+         zero_centered_gamma: bool,
+     ) -> List[Any]:
+         tex = self._get_tex()
++        # Normalize quantizer.dtype to this backend's native DType before
++        # forwarding the quantizer through the pybind boundary.
++        try:
++            if quantizer is not None and hasattr(quantizer, "dtype") and hasattr(tex, "DType"):
++                qdtype = quantizer.dtype
++                if qdtype is not None:
++                    quantizer.dtype = tex.DType(int(qdtype))
++        except Exception:
++            pass
+         otype = tex.DType(int(otype)) if otype is not None else None
+         return tex.layernorm_fwd(
+             input,
+@@ -617,6 +626,15 @@ class CUDABackend(TEFLBackendBase):
+         zero_centered_gamma: bool,
+     ) -> List[Any]:
+         tex = self._get_tex()
++        # Normalize quantizer.dtype to this backend's native DType before
++        # forwarding the quantizer through the pybind boundary.
++        try:
++            if quantizer is not None and hasattr(quantizer, "dtype") and hasattr(tex, "DType"):
++                qdtype = quantizer.dtype
++                if qdtype is not None:
++                    quantizer.dtype = tex.DType(int(qdtype))
++        except Exception:
++            pass
+         otype = tex.DType(int(otype)) if otype is not None else None
+         return tex.rmsnorm_fwd(
+             input, weight, eps, ln_out, quantizer, otype, sm_margin, zero_centered_gamma

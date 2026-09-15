@@ -25,6 +25,7 @@ from megatron.core.fusions.fused_bias_geglu import (
 )
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl
+from megatron.core.observability import scoped_forward
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module, not_none
@@ -249,6 +250,7 @@ class MLP(MegatronModule):
             tp_group=tp_group,
         )
 
+    @scoped_forward("MLP.forward")
     def forward(
         self, hidden_states: torch.Tensor, per_token_scale: torch.Tensor | None = None, **kwargs
     ):

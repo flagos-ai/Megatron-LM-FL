@@ -8,7 +8,17 @@ build-backend = "setuptools.build_meta"
 include-package-data = true
 
 [tool.setuptools.packages.find]
-include = ["megatron.core", "megatron.core.*", "megatron.plugin", "megatron.plugin.*"]
+include = [
+    "megatron.core",
+    "megatron.core.*",
+    "megatron.megalens",
+    "megatron.megalens.*",
+    "megatron.plugin",
+    "megatron.plugin.*",
+]
+
+[tool.setuptools.exclude-package-data]
+"megatron.megalens" = ["docs/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "megatron.core.package_info.__version__" }
@@ -70,6 +80,16 @@ training = [
     "wandb",
     "transformers",
     "accelerate",
+]
+
+megalens = [
+    "matplotlib",
+    "pandas",
+]
+
+megalens-monitor = [
+    "nvidia-ml-py",
+    "psutil",
 ]
 
 ### 'mlm' group is deprecated. please use 'training' instead ###

@@ -13,7 +13,7 @@ from megatron.core import ModelParallelConfig, parallel_state
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
 from megatron.core.models.gpt.gpt_model import GPTModel
-from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator
+from megatron.core.pipeline_parallel.p2p_communication import P2PCommunicator, wait_p2p_request
 from megatron.core.pipeline_parallel.utils import (
     is_pp_first_stage,
     is_pp_last_stage,
@@ -1247,9 +1247,9 @@ def forward_backward_pipelining_with_dualpipev(
         if fwd_wait_handles is not None:
             for req in fwd_wait_handles:
                 if type(req) is str:
-                    fwd_wait_handles[req].wait()
+                    wait_p2p_request(p2p_communicator, fwd_wait_handles[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             fwd_wait_handles = None
 
         is_first_microbatch = parallel_state.is_pipeline_last_stage() and (i == 0)
@@ -1290,9 +1290,9 @@ def forward_backward_pipelining_with_dualpipev(
         if not parallel_state.is_pipeline_last_stage() and fwd_wait_handles_send is not None:
             for req in fwd_wait_handles_send:
                 if type(req) is str:
-                    fwd_wait_handles_send[req].wait()
+                    wait_p2p_request(p2p_communicator, fwd_wait_handles_send[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             deallocate_output_tensor(output_tensor_send, config.deallocate_pipeline_outputs)
             fwd_wait_handles_send = None
 
@@ -1312,18 +1312,18 @@ def forward_backward_pipelining_with_dualpipev(
         if fwd_wait_handles_warmup is not None:
             for req in fwd_wait_handles_warmup:
                 if type(req) is str:
-                    fwd_wait_handles_warmup[req].wait()
+                    wait_p2p_request(p2p_communicator, fwd_wait_handles_warmup[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             deallocate_output_tensor(output_tensor_warmup, config.deallocate_pipeline_outputs)
             fwd_wait_handles_warmup = None
 
         if fwd_wait_handles_slave_chunk is not None:
             for req in fwd_wait_handles_slave_chunk:
                 if type(req) is str:
-                    fwd_wait_handles_slave_chunk[req].wait()
+                    wait_p2p_request(p2p_communicator, fwd_wait_handles_slave_chunk[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             deallocate_output_tensor(output_tensor_slave_chunk, config.deallocate_pipeline_outputs)
             fwd_wait_handles_slave_chunk = None
 
@@ -1384,9 +1384,9 @@ def forward_backward_pipelining_with_dualpipev(
     if fwd_wait_handles is not None:
         for req in fwd_wait_handles:
             if type(req) is str:
-                fwd_wait_handles[req].wait()
+                wait_p2p_request(p2p_communicator, fwd_wait_handles[req])
             else:
-                req.wait()
+                wait_p2p_request(p2p_communicator, req)
         fwd_wait_handles = None
 
     ### Run 1b1w1f stages for slave chunk
@@ -1430,18 +1430,18 @@ def forward_backward_pipelining_with_dualpipev(
         if fwd_wait_handles_slave_chunk is not None:
             for req in fwd_wait_handles_slave_chunk:
                 if type(req) is str:
-                    fwd_wait_handles_slave_chunk[req].wait()
+                    wait_p2p_request(p2p_communicator, fwd_wait_handles_slave_chunk[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             deallocate_output_tensor(output_tensor_slave_chunk, config.deallocate_pipeline_outputs)
             fwd_wait_handles_slave_chunk = None
 
         if fwd_wait_handles_send is not None:
             for req in fwd_wait_handles_send:
                 if type(req) is str:
-                    fwd_wait_handles_send[req].wait()
+                    wait_p2p_request(p2p_communicator, fwd_wait_handles_send[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
             fwd_wait_handles_send = None
 
@@ -1453,9 +1453,9 @@ def forward_backward_pipelining_with_dualpipev(
         if recv_forward_handle is not None:
             for req in recv_forward_handle:
                 if type(req) is str:
-                    recv_forward_handle[req].wait()
+                    wait_p2p_request(p2p_communicator, recv_forward_handle[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             recv_forward_handle = None
 
         # 1F: Forward pass
@@ -1516,23 +1516,23 @@ def forward_backward_pipelining_with_dualpipev(
                 if fwd_wait_handles is not None:
                     for req in fwd_wait_handles:
                         if type(req) is str:
-                            fwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, fwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     fwd_wait_handles = None
                 if fwd_wait_handles_recv is not None:
                     for req in fwd_wait_handles_recv:
                         if type(req) is str:
-                            fwd_wait_handles_recv[req].wait()
+                            wait_p2p_request(p2p_communicator, fwd_wait_handles_recv[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     fwd_wait_handles_recv = None
                 if bwd_wait_handles is not None:
                     for req in bwd_wait_handles:
                         if type(req) is str:
-                            bwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, bwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     bwd_wait_handles = None
 
                 if (
@@ -1622,9 +1622,9 @@ def forward_backward_pipelining_with_dualpipev(
                     if fwd_wait_handles_slave_chunk is not None:
                         for req in fwd_wait_handles_slave_chunk:
                             if type(req) is str:
-                                fwd_wait_handles_slave_chunk[req].wait()
+                                wait_p2p_request(p2p_communicator, fwd_wait_handles_slave_chunk[req])
                             else:
-                                req.wait()
+                                wait_p2p_request(p2p_communicator, req)
                         deallocate_output_tensor(
                             output_tensor_slave_chunk, config.deallocate_pipeline_outputs
                         )
@@ -1633,16 +1633,16 @@ def forward_backward_pipelining_with_dualpipev(
                 if fwd_wait_handles is not None:
                     for req in fwd_wait_handles:
                         if type(req) is str:
-                            fwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, fwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     fwd_wait_handles = None
                 if bwd_wait_handles is not None:
                     for req in bwd_wait_handles:
                         if type(req) is str:
-                            bwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, bwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     bwd_wait_handles = None
                 deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
@@ -1748,17 +1748,17 @@ def forward_backward_pipelining_with_dualpipev(
                 if firstFB_no_overlap_handle is not None:
                     for req in firstFB_no_overlap_handle:
                         if type(req) is str:
-                            firstFB_no_overlap_handle[req].wait()
+                            wait_p2p_request(p2p_communicator, firstFB_no_overlap_handle[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     firstFB_no_overlap_handle = None
 
                 if bwd_wait_handles is not None:
                     for req in bwd_wait_handles:
                         if type(req) is str:
-                            bwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, bwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     bwd_wait_handles = None
 
                 if config.moe_fb_overlap:
@@ -1802,9 +1802,9 @@ def forward_backward_pipelining_with_dualpipev(
                 if fwd_wait_handles is not None:
                     for req in fwd_wait_handles:
                         if type(req) is str:
-                            fwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, fwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     fwd_wait_handles = None
                     deallocate_output_tensor(output_tensor, config.deallocate_pipeline_outputs)
 
@@ -1826,9 +1826,9 @@ def forward_backward_pipelining_with_dualpipev(
                 if fwd_wait_handles_slave_chunk is not None:
                     for req in fwd_wait_handles_slave_chunk:
                         if type(req) is str:
-                            fwd_wait_handles_slave_chunk[req].wait()
+                            wait_p2p_request(p2p_communicator, fwd_wait_handles_slave_chunk[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     deallocate_output_tensor(
                         output_tensor_slave_chunk, config.deallocate_pipeline_outputs
                     )
@@ -1845,9 +1845,9 @@ def forward_backward_pipelining_with_dualpipev(
                 if bwd_wait_handles is not None:
                     for req in bwd_wait_handles:
                         if type(req) is str:
-                            bwd_wait_handles[req].wait()
+                            wait_p2p_request(p2p_communicator, bwd_wait_handles[req])
                         else:
-                            req.wait()
+                            wait_p2p_request(p2p_communicator, req)
                     bwd_wait_handles = None
 
                 if config.moe_fb_overlap:
@@ -1918,16 +1918,16 @@ def forward_backward_pipelining_with_dualpipev(
         if bwd_wait_handles is not None:
             for req in bwd_wait_handles:
                 if type(req) is str:
-                    bwd_wait_handles[req].wait()
+                    wait_p2p_request(p2p_communicator, bwd_wait_handles[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             bwd_wait_handles = None
         if bwd_wait_handles_recv is not None:
             for req in bwd_wait_handles_recv:
                 if type(req) is str:
-                    bwd_wait_handles_recv[req].wait()
+                    wait_p2p_request(p2p_communicator, bwd_wait_handles_recv[req])
                 else:
-                    req.wait()
+                    wait_p2p_request(p2p_communicator, req)
             bwd_wait_handles_recv = None
 
         input_tensor_bwd = merged_input_tensors.pop(0)[1]
@@ -1973,9 +1973,9 @@ def forward_backward_pipelining_with_dualpipev(
     if bwd_wait_handles is not None:
         for req in bwd_wait_handles:
             if type(req) is str:
-                bwd_wait_handles[req].wait()
+                wait_p2p_request(p2p_communicator, bwd_wait_handles[req])
             else:
-                req.wait()
+                wait_p2p_request(p2p_communicator, req)
         bwd_wait_handles = None
 
     enable_grad_sync()

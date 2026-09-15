@@ -18,6 +18,8 @@ BASE_REF=${BASE_REF:-main}
 git remote add autoformatter-remote "https://github.com/flagos-ai/Megatron-LM-FL.git" || true
 git fetch autoformatter-remote ${BASE_REF}
 CHANGED_FILES=$(git diff --name-only --diff-filter=d --merge-base autoformatter-remote/${BASE_REF} megatron/core tests/ | grep '\.py$' || true)
+MEGALENS_CHANGED_FILES=$(git diff --name-only --diff-filter=d --merge-base autoformatter-remote/${BASE_REF} megatron/megalens/ | grep '\.py$' || true)
+FORMAT_FILES="$CHANGED_FILES $MEGALENS_CHANGED_FILES"
 ADDITIONAL_ARGS=""
 ADDITIONAL_BLACK_ARGS=""
 ADDITIONAL_PYLINT_ARGS=""
@@ -35,12 +37,14 @@ if [[ $SKIP_DOCS == true ]]; then
     ADDITIONAL_PYLINT_ARGS="--disable=C0115,C0116"
 fi
 
-if [[ -n "$CHANGED_FILES" ]]; then
-    black --skip-magic-trailing-comma --skip-string-normalization $ADDITIONAL_ARGS $ADDITIONAL_BLACK_ARGS --verbose $CHANGED_FILES
-    isort $ADDITIONAL_ARGS $CHANGED_FILES
-    pylint $ADDITIONAL_PYLINT_ARGS $CHANGED_FILES
-    ruff check $ADDITIONAL_RUFF_ARGS $CHANGED_FILES
-    mypy --explicit-package-bases --follow-imports=skip $CHANGED_FILES || true
+if [[ -n "$FORMAT_FILES" ]]; then
+    black --skip-magic-trailing-comma --skip-string-normalization $ADDITIONAL_ARGS $ADDITIONAL_BLACK_ARGS --verbose $FORMAT_FILES
+    isort $ADDITIONAL_ARGS $FORMAT_FILES
+    ruff check $ADDITIONAL_RUFF_ARGS $FORMAT_FILES
+    if [[ -n "$CHANGED_FILES" ]]; then
+        pylint $ADDITIONAL_PYLINT_ARGS $CHANGED_FILES
+        mypy --explicit-package-bases --follow-imports=skip $CHANGED_FILES || true
+    fi
 else
     echo Changeset is empty, all good.
 fi

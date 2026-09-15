@@ -1,0 +1,436 @@
+# syntax=docker/dockerfile:1
+#
+# Reusable CUDA 12.8 work image for Megatron-LM-FL plus FlagScale.
+#
+# The build context is a deterministic staging directory containing two clean
+# git archives and pinned external wheels. This works with the target node's
+# Docker 24 legacy builder and does not require GitHub access or a buildx plugin:
+#
+#   MEGATRON_ROOT=/path/to/Megatron-LM-FL
+#   FLAGSCALE_ROOT=/path/to/FlagScale
+#   REVISION="$(git -C "${MEGATRON_ROOT}" rev-parse HEAD)"
+#   SOURCE_TREE="$(git -C "${MEGATRON_ROOT}" rev-parse HEAD^{tree})"
+#   CONTEXT="$(mktemp -d /tmp/flagos-work-context.XXXXXXXX)"
+#   FLAGSCALE_REVISION=6d775cd01d5c822f9413b9952a81652c917d273e
+#   FLAGSCALE_TREE=198de8867fee8bce6e140d100910c7899ab84690
+#   test "$(git -C "${FLAGSCALE_ROOT}" rev-parse \
+#     "${FLAGSCALE_REVISION}^{tree}")" = "${FLAGSCALE_TREE}"
+#   EMERGING_OPTIMIZERS_REVISION=d5363b4a418128cd8111983b191c4b8869a9766b
+#   EMERGING_OPTIMIZERS_WHEEL_SHA256=03c111935f484bb89ca6e1954448130d926b0d3568832fd7181547680837640a
+#   EMERGING_OPTIMIZERS_WHEEL=/path/to/emerging_optimizers-0.1.0-py3-none-any.whl
+#   mkdir -p "${CONTEXT}/wheels"
+#   cp "${EMERGING_OPTIMIZERS_WHEEL}" "${CONTEXT}/wheels/"
+#   printf '%s  %s\n' \
+#     "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
+#     "${CONTEXT}/wheels/emerging_optimizers-0.1.0-py3-none-any.whl" \
+#     | sha256sum -c -
+#   FLAGCX_SOURCE_ARCHIVE=/path/to/flagcx-v0.13.0-0beba7aa-src.tar.gz
+#   printf '%s  %s\n' \
+#     9186f5fcfcbaceac834812e35423072ea45a8579c362c7e0cb51c3ae645000aa \
+#     "${FLAGCX_SOURCE_ARCHIVE}" | sha256sum -c -
+#   cp /path/to/deep_ep-1.2.1-cp312-cp312-linux_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/pynvml-13.0.1-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/absl_py-2.4.0-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/nvidia_ml_py-13.595.45-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/packaging-26.0-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/sqlalchemy-2.0.48-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/greenlet-3.5.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/grpcio-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/markdown-3.10.3-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/tensorboard-2.20.0-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/flag_gems-5.0.2-py3-none-any.whl "${CONTEXT}/wheels/"
+#   cp /path/to/flagcx-0.13.0-cp312-cp312-linux_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/libflagcx.so "${CONTEXT}/wheels/"
+#   cp /path/to/transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl \
+#     "${CONTEXT}/wheels/"
+#   cp /path/to/nvdlfw_inspect-0.2.2-py3-none-any.whl "${CONTEXT}/wheels/"
+#   git -C "${MEGATRON_ROOT}" archive --format=tar \
+#     --prefix=Megatron-LM-FL/ "${REVISION}" | tar -xf - -C "${CONTEXT}"
+#   git -C "${FLAGSCALE_ROOT}" archive --format=tar \
+#     --prefix=FlagScale/ "${FLAGSCALE_REVISION}" | tar -xf - -C "${CONTEXT}"
+#   BASE_IMAGE=harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856@sha256:69ca25569b0479a99020b2af801db89851f3417e75b4d81b6c9ad535bfa2eacb
+#   docker image inspect "${BASE_IMAGE}" >/dev/null
+#   DOCKER_BUILDKIT=0 docker build --network=none \
+#     -f "${CONTEXT}/Megatron-LM-FL/docker/Dockerfile.work" \
+#     --build-arg BASE_IMAGE="${BASE_IMAGE}" \
+#     --build-arg SOURCE_REVISION="${REVISION}" \
+#     --build-arg SOURCE_TREE="${SOURCE_TREE}" \
+#     --build-arg FLAGSCALE_REVISION="${FLAGSCALE_REVISION}" \
+#     --build-arg FLAGSCALE_TREE="${FLAGSCALE_TREE}" \
+#     --build-arg EMERGING_OPTIMIZERS_REVISION="${EMERGING_OPTIMIZERS_REVISION}" \
+#     --build-arg EMERGING_OPTIMIZERS_WHEEL_SHA256="${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
+#     -t "caohongliang-flagos:cu128-${REVISION:0:12}" "${CONTEXT}"
+#
+# The target node currently requires privileged NVIDIA runtime injection:
+#   docker run -d --name caohongliang-flagos \
+#     --init \
+#     --privileged --runtime=nvidia --gpus all \
+#     --network host --ipc host --shm-size=64g \
+#     --ulimit memlock=-1:-1 --ulimit nofile=65535:65535 \
+#     "caohongliang-flagos:cu128-${REVISION:0:12}" sleep infinity
+#
+# Follow the FlagScale workflow inside the running container:
+#   source /root/miniconda3/etc/profile.d/conda.sh
+#   conda activate flagscale-train
+# DeepEP works without an additional environment setting. For HybridEP, source
+# the scoped CUDA 12.8 compatibility environment before launching training:
+#   source /opt/flagos/env/hybridep-cu128-env.sh
+
+ARG BASE_IMAGE=harbor.baai.ac.cn/flagscale/flagscale-train:dev-cu128-py3.12-20260319182856@sha256:69ca25569b0479a99020b2af801db89851f3417e75b4d81b6c9ad535bfa2eacb
+FROM ${BASE_IMAGE}
+
+ARG BASE_IMAGE
+ARG SOURCE_REVISION=unknown
+ARG SOURCE_TREE=unknown
+ARG MEGATRON_CODE_PARENT=c47fc24f8f13d992c1b77477ae3b18919a36a737
+ARG FLAGSCALE_REVISION=6d775cd01d5c822f9413b9952a81652c917d273e
+ARG FLAGSCALE_TREE=198de8867fee8bce6e140d100910c7899ab84690
+ARG EMERGING_OPTIMIZERS_REVISION=d5363b4a418128cd8111983b191c4b8869a9766b
+ARG EMERGING_OPTIMIZERS_WHEEL_SHA256=03c111935f484bb89ca6e1954448130d926b0d3568832fd7181547680837640a
+ARG DEEP_EP_REVISION=34152ae28f80bcc3ee38d7a12cb2ad87cfd4ea72
+ARG DEEP_EP_SETUP_SHA256=333961266ffe6af758effeb25ecb8bcf436cb7a7d9387a15426df76a618ae7d2
+ARG DEEP_EP_PATCH_SHA256=475c0ce5927d341966a4065f6789c0bb1fb52146314f9d1ed649cb0130da6fda
+ARG DEEP_EP_WHEEL_SHA256=5051a7e711c15b672a604828a7896b53fb993d07e1a93243c7ac7ba40e551109
+ARG PYNVML_WHEEL_SHA256=e2b20e0a501eeec951e2455b7ab444759cf048e0e13a57b08049fa2775266aa8
+ARG CUDA_CCCL_WHEEL_SHA256=37869e17ce2e1ecec6eddf1927cca0f8c34e64fd848d40453df559091e2d7117
+ARG FLAG_GEMS_WHEEL_SHA256=d7c5a6121bf2d3f7daddde43bfa7cae739de6cb5b294dcfe7ae6173045c35552
+ARG FLAGCX_SOURCE_TAG=v0.13.0
+ARG FLAGCX_SOURCE_REVISION=0beba7aa7e76cc0885a9929f1975857bcd310d5e
+ARG FLAGCX_SOURCE_ARCHIVE_SHA256=9186f5fcfcbaceac834812e35423072ea45a8579c362c7e0cb51c3ae645000aa
+ARG FLAGCX_WHEEL_SHA256=f5fd0323f39073def3529401977b25a638af8c149f60f6b494a59158084cde37
+ARG FLAGCX_LIBRARY_SHA256=faaba1eeafcdcaae76243a060073fc337f4b4339bd8a7052f93f9bfa715898e2
+ARG TE_FL_SOURCE_TAG=v0.2.0
+ARG TE_FL_SOURCE_REVISION=311c281e99cd684f39d24aaa74618f7cd95c9ff5
+ARG TE_FL_SOURCE_ARCHIVE_SHA256=bbb53fff4ce756e466e1a2e406368d593ee1bfd0d709d2e6b35dea7fbb2100f9
+ARG TE_FL_CUDNN_FRONTEND_REVISION=7b9b711c22b6823e87150213ecd8449260db8610
+ARG TE_FL_CUDNN_FRONTEND_ARCHIVE_SHA256=82db57d9e7339cc171c89f0de62849c09b1a7c799764827ffbdbbe6575803de3
+ARG TE_FL_CUTLASS_REVISION=57e3cfb47a2d9e0d46eb6335c3dc411498efa198
+ARG TE_FL_CUTLASS_ARCHIVE_SHA256=09237099a70f80bff1dc8bb80c843a674bb4fdcb46e43cc6993e711c5ca89bb5
+ARG TE_FL_GOOGLETEST_REVISION=f8d7d77c06936315286eb55f8de22cd23c188571
+ARG TE_FL_GOOGLETEST_ARCHIVE_SHA256=7ff5db23de232a39cbb5c9f5143c355885e30ac596161a6b9fc50c4538bfbf01
+ARG TE_FL_PATCH_SHA256=570c70520b93c1350273a95c79be29fabed72fc32b894e89b24c0dc452da8e87
+ARG TE_FL_USERBUFFER_PATCH_SHA256=4aed8c3c55e49349b65636cecc7560514f368af4b1a7b9577cce02eb8fcd4a3e
+ARG TE_FL_WHEEL_SHA256=312568e0f1311082bae2f2fde59a50ca239ea978749d55362ba8e0ab79c8610b
+ARG NVDLFW_INSPECT_WHEEL_SHA256=8a4dc2814c5a4cd19ae304170b9bfa514538ef3c3eb243a45a82404ec3cb279d
+
+LABEL org.opencontainers.image.title="caohongliang-flagos"
+LABEL org.opencontainers.image.description="Megatron-LM-FL and FlagScale CUDA 12.8 work environment"
+LABEL org.opencontainers.image.revision="${SOURCE_REVISION}"
+LABEL org.opencontainers.image.base.name="${BASE_IMAGE}"
+LABEL org.flagos.megatron.tree="${SOURCE_TREE}"
+LABEL org.flagos.megatron.code-parent="${MEGATRON_CODE_PARENT}"
+LABEL org.flagos.flagscale.revision="${FLAGSCALE_REVISION}"
+LABEL org.flagos.flagscale.tree="${FLAGSCALE_TREE}"
+LABEL org.flagos.emerging-optimizers.revision="${EMERGING_OPTIMIZERS_REVISION}"
+LABEL org.flagos.emerging-optimizers.wheel.sha256="${EMERGING_OPTIMIZERS_WHEEL_SHA256}"
+LABEL org.flagos.deep-ep.revision="${DEEP_EP_REVISION}"
+LABEL org.flagos.deep-ep.setup.sha256="${DEEP_EP_SETUP_SHA256}"
+LABEL org.flagos.deep-ep.patch.sha256="${DEEP_EP_PATCH_SHA256}"
+LABEL org.flagos.deep-ep.wheel.sha256="${DEEP_EP_WHEEL_SHA256}"
+LABEL org.flagos.pynvml.wheel.sha256="${PYNVML_WHEEL_SHA256}"
+LABEL org.flagos.cuda-cccl.wheel.sha256="${CUDA_CCCL_WHEEL_SHA256}"
+LABEL org.flagos.flag-gems.wheel.sha256="${FLAG_GEMS_WHEEL_SHA256}"
+LABEL org.flagos.flagcx.source.tag="${FLAGCX_SOURCE_TAG}"
+LABEL org.flagos.flagcx.source.revision="${FLAGCX_SOURCE_REVISION}"
+LABEL org.flagos.flagcx.source.archive.sha256="${FLAGCX_SOURCE_ARCHIVE_SHA256}"
+LABEL org.flagos.flagcx.wheel.sha256="${FLAGCX_WHEEL_SHA256}"
+LABEL org.flagos.flagcx.library.sha256="${FLAGCX_LIBRARY_SHA256}"
+LABEL org.flagos.transformer-engine-fl.source.tag="${TE_FL_SOURCE_TAG}"
+LABEL org.flagos.transformer-engine-fl.source.revision="${TE_FL_SOURCE_REVISION}"
+LABEL org.flagos.transformer-engine-fl.source.archive.sha256="${TE_FL_SOURCE_ARCHIVE_SHA256}"
+LABEL org.flagos.transformer-engine-fl.cudnn-frontend.revision="${TE_FL_CUDNN_FRONTEND_REVISION}"
+LABEL org.flagos.transformer-engine-fl.cudnn-frontend.archive.sha256="${TE_FL_CUDNN_FRONTEND_ARCHIVE_SHA256}"
+LABEL org.flagos.transformer-engine-fl.cutlass.revision="${TE_FL_CUTLASS_REVISION}"
+LABEL org.flagos.transformer-engine-fl.cutlass.archive.sha256="${TE_FL_CUTLASS_ARCHIVE_SHA256}"
+LABEL org.flagos.transformer-engine-fl.googletest.revision="${TE_FL_GOOGLETEST_REVISION}"
+LABEL org.flagos.transformer-engine-fl.googletest.archive.sha256="${TE_FL_GOOGLETEST_ARCHIVE_SHA256}"
+LABEL org.flagos.transformer-engine-fl.patch.sha256="${TE_FL_PATCH_SHA256}"
+LABEL org.flagos.transformer-engine-fl.userbuffer.patch.sha256="${TE_FL_USERBUFFER_PATCH_SHA256}"
+LABEL org.flagos.transformer-engine-fl.wheel.sha256="${TE_FL_WHEEL_SHA256}"
+LABEL org.flagos.nvdlfw-inspect.wheel.sha256="${NVDLFW_INSPECT_WHEEL_SHA256}"
+
+ENV FLAGOS_ENV=/root/miniconda3/envs/flagscale-train
+ENV PROJECT_ROOT=/workspace/Megatron-LM-FL
+ENV FLAGSCALE_ROOT=/workspace/FlagScale
+ENV PATH="/root/miniconda3/envs/flagscale-train/bin:${PATH}"
+ENV PYTHONPATH="/workspace/Megatron-LM-FL"
+ENV PIP_CONSTRAINT=""
+ENV PIP_DISABLE_PIP_VERSION_CHECK=1
+ENV PIP_NO_INDEX=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV TE_FL_PREFER=vendor
+ENV TE_FL_STRICT=0
+
+COPY Megatron-LM-FL/ /workspace/Megatron-LM-FL
+COPY FlagScale/ /workspace/FlagScale
+COPY wheels/emerging_optimizers-0.1.0-py3-none-any.whl /tmp/emerging_optimizers-0.1.0-py3-none-any.whl
+COPY wheels/deep_ep-1.2.1-cp312-cp312-linux_x86_64.whl /tmp/flagos-wheels/deep_ep-1.2.1-cp312-cp312-linux_x86_64.whl
+COPY wheels/pynvml-13.0.1-py3-none-any.whl /tmp/flagos-wheels/pynvml-13.0.1-py3-none-any.whl
+COPY wheels/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl /tmp/flagos-wheels/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+COPY wheels/absl_py-2.4.0-py3-none-any.whl /tmp/flagos-wheels/absl_py-2.4.0-py3-none-any.whl
+COPY wheels/nvidia_ml_py-13.595.45-py3-none-any.whl /tmp/flagos-wheels/nvidia_ml_py-13.595.45-py3-none-any.whl
+COPY wheels/packaging-26.0-py3-none-any.whl /tmp/flagos-wheels/packaging-26.0-py3-none-any.whl
+COPY wheels/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl /tmp/flagos-wheels/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+COPY wheels/sqlalchemy-2.0.48-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl /tmp/flagos-wheels/sqlalchemy-2.0.48-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl
+COPY wheels/greenlet-3.5.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl /tmp/flagos-wheels/greenlet-3.5.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl
+COPY wheels/grpcio-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl /tmp/flagos-wheels/grpcio-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl
+COPY wheels/markdown-3.10.3-py3-none-any.whl /tmp/flagos-wheels/markdown-3.10.3-py3-none-any.whl
+COPY wheels/tensorboard-2.20.0-py3-none-any.whl /tmp/flagos-wheels/tensorboard-2.20.0-py3-none-any.whl
+COPY wheels/tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl /tmp/flagos-wheels/tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl
+COPY wheels/flag_gems-5.0.2-py3-none-any.whl /tmp/flagos-wheels/flag_gems-5.0.2-py3-none-any.whl
+COPY wheels/flagcx-0.13.0-cp312-cp312-linux_x86_64.whl /tmp/flagos-wheels/flagcx-0.13.0-cp312-cp312-linux_x86_64.whl
+COPY wheels/libflagcx.so /tmp/flagos-wheels/libflagcx.so
+COPY wheels/transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl /tmp/flagos-wheels/transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl
+COPY wheels/nvdlfw_inspect-0.2.2-py3-none-any.whl /tmp/flagos-wheels/nvdlfw_inspect-0.2.2-py3-none-any.whl
+COPY Megatron-LM-FL/docker/work-wheels.sha256 /tmp/flagos-work-wheels.sha256
+COPY Megatron-LM-FL/docker/common/hybridep-cu128-env.sh /opt/flagos/env/hybridep-cu128-env.sh
+COPY Megatron-LM-FL/docker/patches/flagscale-megalens.patch /tmp/flagscale-megalens.patch
+WORKDIR /workspace/Megatron-LM-FL
+
+SHELL ["/bin/bash", "-lc"]
+
+# Preserve the base image's CUDA 12.8, PyTorch, TE, FlashAttention, and NCCL
+# packages. Add the missing NVML and layerwise optimizer dependencies, then
+# replace megatron-core with the source snapshot. Installing the project extras
+# or running uv sync here would resolve the repository's CUDA 13 development
+# dependencies.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && printf '%s  %s\n' \
+        "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" "/tmp/emerging_optimizers-0.1.0-py3-none-any.whl" \
+        | sha256sum -c - \
+    && cd /tmp/flagos-wheels \
+    && sha256sum -c /tmp/flagos-work-wheels.sha256 \
+    && python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        --no-index \
+        /tmp/flagos-wheels/nvidia_ml_py-13.595.45-py3-none-any.whl \
+        /tmp/flagos-wheels/absl_py-2.4.0-py3-none-any.whl \
+        /tmp/emerging_optimizers-0.1.0-py3-none-any.whl \
+    && python -c \
+        'import importlib.metadata as md; from emerging_optimizers.orthogonalized_optimizers import OrthogonalizedOptimizer, get_muon_scale_factor; from emerging_optimizers.orthogonalized_optimizers.muon_utils import newton_schulz_tp; expected = {"absl-py": "2.4.0", "emerging-optimizers": "0.1.0", "nvidia-ml-py": "13.595.45"}; assert {name: md.version(name) for name in expected} == expected' \
+    && python -c \
+        'import packaging, pybind11, setuptools; from packaging.version import Version; assert Version(setuptools.__version__) < Version("80"); assert Version(packaging.__version__) >= Version("24.2"); print("build-tools", setuptools.__version__, pybind11.__version__, packaging.__version__)' \
+    && python -m pip uninstall -y megatron-core \
+    && MAX_JOBS=4 python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        --no-build-isolation \
+        --no-index \
+        -e "${PROJECT_ROOT}" \
+    && python -m pip check \
+    && printf '%s\n' "${SOURCE_REVISION}" > /etc/flagos-source-revision \
+    && printf '%s\n' "${EMERGING_OPTIMIZERS_REVISION}" \
+        > /etc/flagos-emerging-optimizers-revision
+
+# Install the manually validated DeepEP wheel and its two staged runtime
+# dependencies without resolving packages from an index. The DeepEP wheel was
+# built from DEEP_EP_REVISION after applying the reviewable CUDA 12.8 diff at
+# docker/patches/deepep-cu128.patch; DEEP_EP_SETUP_SHA256 records its result.
+# HybridEP's newer CCCL headers are activated only by explicitly sourcing
+# /opt/flagos/env/hybridep-cu128-env.sh.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && printf '%s  %s\n' \
+        "${DEEP_EP_PATCH_SHA256}" "${PROJECT_ROOT}/docker/patches/deepep-cu128.patch" \
+        "${DEEP_EP_WHEEL_SHA256}" "/tmp/flagos-wheels/deep_ep-1.2.1-cp312-cp312-linux_x86_64.whl" \
+        "${PYNVML_WHEEL_SHA256}" "/tmp/flagos-wheels/pynvml-13.0.1-py3-none-any.whl" \
+        "${CUDA_CCCL_WHEEL_SHA256}" "/tmp/flagos-wheels/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl" \
+        | sha256sum -c - \
+    && python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        --no-index \
+        /tmp/flagos-wheels/nvidia_cuda_cccl_cu12-12.9.27-py3-none-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+        /tmp/flagos-wheels/pynvml-13.0.1-py3-none-any.whl \
+        /tmp/flagos-wheels/deep_ep-1.2.1-cp312-cp312-linux_x86_64.whl \
+    && python -c \
+        'import importlib.metadata as md, importlib.util; expected = {"deep-ep": "1.2.1", "pynvml": "13.0.1", "nvidia-cuda-cccl-cu12": "12.9.27"}; assert {name: md.version(name) for name in expected} == expected; modules = ("deep_ep", "deep_ep_cpp", "hybrid_ep_cpp"); assert all(importlib.util.find_spec(name) is not None for name in modules), modules' \
+    && test -f "${FLAGOS_ENV}/lib/python3.12/site-packages/nvidia/cuda_cccl/include/cuda/ptx" \
+    && test -f "${FLAGOS_ENV}/lib/python3.12/site-packages/nvidia/cuda_cccl/include/cuda/__ptx/instructions/cp_async_bulk.h" \
+    && bash -n /opt/flagos/env/hybridep-cu128-env.sh \
+    && python -m pip check \
+    && printf '%s\n' "${DEEP_EP_REVISION}" > /etc/flagos-deepep-revision \
+    && printf '%s\n' "${DEEP_EP_SETUP_SHA256}" > /etc/flagos-deepep-setup-sha256
+
+# Replace the base image's incompatible TE-FL snapshot with the manually
+# validated v0.2.0 source build. The wheel contains the independently
+# reviewable LayerNorm/RMSNorm quantizer dtype and UserBuffer CUDA adapter
+# compatibility diffs recorded under docker/patches. TE_FL_STRICT=0 pins the
+# selected vendor implementation in v0.2.0, so unsupported operations fail at
+# their original call site instead of silently falling back to another
+# registered implementation.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && printf '%s  %s\n' \
+        "${TE_FL_PATCH_SHA256}" "${PROJECT_ROOT}/docker/patches/transformer-engine-fl-v0.2.0-layernorm-quantizer-dtype.patch" \
+        "${TE_FL_USERBUFFER_PATCH_SHA256}" "${PROJECT_ROOT}/docker/patches/transformer-engine-fl-v0.2.0-userbuffer-ops.patch" \
+        "${TE_FL_WHEEL_SHA256}" "/tmp/flagos-wheels/transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl" \
+        "${NVDLFW_INSPECT_WHEEL_SHA256}" "/tmp/flagos-wheels/nvdlfw_inspect-0.2.2-py3-none-any.whl" \
+        | sha256sum -c - \
+    && python -m pip install \
+        --force-reinstall \
+        --no-cache-dir \
+        --no-deps \
+        --no-index \
+        /tmp/flagos-wheels/nvdlfw_inspect-0.2.2-py3-none-any.whl \
+        /tmp/flagos-wheels/transformer_engine-2.14.0-cp312-cp312-linux_x86_64.whl \
+    && python -c \
+        'import importlib.metadata as md, importlib.util; expected = {"transformer-engine": "2.14.0", "nvdlfw-inspect": "0.2.2"}; assert {name: md.version(name) for name in expected} == expected; assert importlib.util.find_spec("transformer_engine") is not None' \
+    && python "${PROJECT_ROOT}/docker/verify_transformer_engine_userbuffer.py" \
+    && python -m pip check \
+    && printf '%s\n' "${TE_FL_SOURCE_REVISION}" > /etc/flagos-transformer-engine-fl-revision \
+    && printf '%s\n' "${TE_FL_USERBUFFER_PATCH_SHA256}" \
+        > /etc/flagos-transformer-engine-fl-userbuffer-patch-sha256 \
+    && printf '%s\n' "${TE_FL_WHEEL_SHA256}" > /etc/flagos-transformer-engine-fl-wheel-sha256
+
+# Install the validated FlagGems and FlagCX runtime artifacts without changing
+# the base image's PyTorch, CUDA, TE, or NCCL packages. The FlagCX source
+# revision and archive hash record the provenance of the prebuilt plugin and
+# library; source code is not rebuilt in this image.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && printf '%s  %s\n' \
+        "${FLAG_GEMS_WHEEL_SHA256}" "/tmp/flagos-wheels/flag_gems-5.0.2-py3-none-any.whl" \
+        "${FLAGCX_WHEEL_SHA256}" "/tmp/flagos-wheels/flagcx-0.13.0-cp312-cp312-linux_x86_64.whl" \
+        "${FLAGCX_LIBRARY_SHA256}" "/tmp/flagos-wheels/libflagcx.so" \
+        | sha256sum -c - \
+    && install -m 0755 /tmp/flagos-wheels/libflagcx.so "${FLAGOS_ENV}/lib/libflagcx.so" \
+    && python -m pip install \
+        --force-reinstall \
+        --no-cache-dir \
+        --no-deps \
+        --no-index \
+        /tmp/flagos-wheels/packaging-26.0-py3-none-any.whl \
+        /tmp/flagos-wheels/pyyaml-6.0.3-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl \
+        /tmp/flagos-wheels/sqlalchemy-2.0.48-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl \
+        /tmp/flagos-wheels/greenlet-3.5.4-cp312-cp312-manylinux_2_24_x86_64.manylinux_2_28_x86_64.whl \
+        /tmp/flagos-wheels/grpcio-1.83.0-cp312-cp312-manylinux2014_x86_64.manylinux_2_17_x86_64.whl \
+        /tmp/flagos-wheels/markdown-3.10.3-py3-none-any.whl \
+        /tmp/flagos-wheels/tensorboard-2.20.0-py3-none-any.whl \
+        /tmp/flagos-wheels/tensorboard_data_server-0.7.2-py3-none-manylinux_2_31_x86_64.whl \
+        /tmp/flagos-wheels/flag_gems-5.0.2-py3-none-any.whl \
+        /tmp/flagos-wheels/flagcx-0.13.0-cp312-cp312-linux_x86_64.whl \
+    && python -c \
+        'import importlib.metadata as md, importlib.util; expected = {"flag-gems": "5.0.2", "flagcx": "0.13.0", "greenlet": "3.5.4", "grpcio": "1.83.0", "Markdown": "3.10.3", "packaging": "26.0", "PyYAML": "6.0.3", "SQLAlchemy": "2.0.48", "tensorboard": "2.20.0", "tensorboard-data-server": "0.7.2", "nvidia-nccl-cu12": "2.27.5"}; assert {name: md.version(name) for name in expected} == expected; assert all(importlib.util.find_spec(name) is not None for name in ("flag_gems", "flagcx"))' \
+    && flagcx_extension=("${FLAGOS_ENV}"/lib/python3.12/site-packages/flagcx/_C*.so) \
+    && test "${#flagcx_extension[@]}" -eq 1 \
+    && ldd "${flagcx_extension[0]}" \
+        | grep -F "libflagcx.so => ${FLAGOS_ENV}/lib/libflagcx.so" \
+    && ldd "${FLAGOS_ENV}/lib/libflagcx.so" \
+        | grep -F "libnccl.so.2 => ${FLAGOS_ENV}/lib/python3.12/site-packages/nvidia/nccl/lib/libnccl.so.2" \
+    && python -m pip check \
+    && printf '%s\n' "${FLAGCX_SOURCE_REVISION}" > /etc/flagos-flagcx-revision
+
+# FlagScale's runner prepends its vendored megatron.training package to
+# PYTHONPATH. Apply the reviewable compatibility diff that mirrors the
+# Megatron-LM-FL MegaLens arguments, runtime lifecycle, iteration scope,
+# optimizer probes, and dense-batch Graph compatibility.
+# Revision and tree are checked when Git metadata is present. Archive builds
+# record them as provenance metadata; the patch and pre/post hashes pin the
+# four reviewed vendored files. FlagScale is installed without cuda-train
+# extras so its MCore 0.16 pin cannot replace the validated MCore 0.17.1 source.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && if git -C "${FLAGSCALE_ROOT}" rev-parse --verify HEAD >/dev/null 2>&1; then \
+        test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD)" = "${FLAGSCALE_REVISION}" \
+        && test "$(git -C "${FLAGSCALE_ROOT}" rev-parse HEAD^{tree})" = "${FLAGSCALE_TREE}"; \
+    fi \
+    && printf '%s  %s\n' \
+        "6ef640f93df17c9553fd44f2a008a2ef8c5b7b4eecf3fb494822d1a906005c51" "/tmp/flagscale-megalens.patch" \
+        "913b47495a8e58ed4aac8d4c72cede063afbbaa79ed61ee900e90979e9441667" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "d7c73b0764c4b192cd2e5e3cc46fc2cffbdca3dc3beeef703139e8b3f9b9914e" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
+        "d3eace40ed2bbc2e24e51f801201aaaa406a3d68cbde8614981c0643169a36a2" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        "f4a31581bd93b6e53500e520a72312adf2f069e23634d176c97d707a0558c45c" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
+        | sha256sum -c - \
+    && git -C "${FLAGSCALE_ROOT}" apply --check /tmp/flagscale-megalens.patch \
+    && git -C "${FLAGSCALE_ROOT}" apply /tmp/flagscale-megalens.patch \
+    && printf '%s  %s\n' \
+        "8ae41c3a9397d48b056c7dd4373561c64e82ef7e43ba92a70377dd61d39a63b9" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "b1e4ee2eff25440bc1265438c082d53e39061c61d6e979af9828a4e7e7f5ee81" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
+        "23ab0aa9c33b6c56972bc7299c51634fc3826d499bf4cd66695404d962bec883" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        "e5e6166aca7a7ac7db62e261217cc5e8eb6bdc829d5637c4f5f8cf2094968cf9" "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
+        | sha256sum -c - \
+    && python -m py_compile \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/arguments.py" \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/global_vars.py" \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/training.py" \
+        "${FLAGSCALE_ROOT}/flagscale/train/megatron/training/utils.py" \
+    && python -m pip install \
+        --no-cache-dir \
+        --no-deps \
+        --no-build-isolation \
+        --no-index \
+        -e "${FLAGSCALE_ROOT}" \
+    && python -m pip check \
+    && printf '%s\n' "${FLAGSCALE_REVISION}" > /etc/flagscale-source-revision \
+    && printf '{\n  "base_image": "%s",\n  "megatron_integration_revision": "%s",\n  "megatron_tree": "%s",\n  "megatron_code_parent": "%s",\n  "flagscale_revision": "%s",\n  "flagscale_tree": "%s",\n  "flagscale_patch_sha256": "%s",\n  "emerging_optimizers_revision": "%s",\n  "emerging_optimizers_wheel_sha256": "%s",\n  "deep_ep_revision": "%s",\n  "deep_ep_setup_sha256": "%s",\n  "deep_ep_patch_sha256": "%s",\n  "deep_ep_wheel_sha256": "%s",\n  "pynvml_wheel_sha256": "%s",\n  "cuda_cccl_wheel_sha256": "%s",\n  "flag_gems_wheel_sha256": "%s",\n  "flagcx_source_tag": "%s",\n  "flagcx_source_revision": "%s",\n  "flagcx_source_archive_sha256": "%s",\n  "flagcx_wheel_sha256": "%s",\n  "flagcx_library_sha256": "%s",\n  "transformer_engine_fl_source_tag": "%s",\n  "transformer_engine_fl_source_revision": "%s",\n  "transformer_engine_fl_source_archive_sha256": "%s",\n  "transformer_engine_fl_cudnn_frontend_revision": "%s",\n  "transformer_engine_fl_cudnn_frontend_archive_sha256": "%s",\n  "transformer_engine_fl_cutlass_revision": "%s",\n  "transformer_engine_fl_cutlass_archive_sha256": "%s",\n  "transformer_engine_fl_googletest_revision": "%s",\n  "transformer_engine_fl_googletest_archive_sha256": "%s",\n  "transformer_engine_fl_patch_sha256": "%s",\n  "transformer_engine_fl_userbuffer_patch_sha256": "%s",\n  "transformer_engine_fl_wheel_sha256": "%s",\n  "nvdlfw_inspect_wheel_sha256": "%s"\n}\n' \
+        "${BASE_IMAGE}" \
+        "${SOURCE_REVISION}" \
+        "${SOURCE_TREE}" \
+        "${MEGATRON_CODE_PARENT}" \
+        "${FLAGSCALE_REVISION}" \
+        "${FLAGSCALE_TREE}" \
+        "6ef640f93df17c9553fd44f2a008a2ef8c5b7b4eecf3fb494822d1a906005c51" \
+        "${EMERGING_OPTIMIZERS_REVISION}" \
+        "${EMERGING_OPTIMIZERS_WHEEL_SHA256}" \
+        "${DEEP_EP_REVISION}" \
+        "${DEEP_EP_SETUP_SHA256}" \
+        "${DEEP_EP_PATCH_SHA256}" \
+        "${DEEP_EP_WHEEL_SHA256}" \
+        "${PYNVML_WHEEL_SHA256}" \
+        "${CUDA_CCCL_WHEEL_SHA256}" \
+        "${FLAG_GEMS_WHEEL_SHA256}" \
+        "${FLAGCX_SOURCE_TAG}" \
+        "${FLAGCX_SOURCE_REVISION}" \
+        "${FLAGCX_SOURCE_ARCHIVE_SHA256}" \
+        "${FLAGCX_WHEEL_SHA256}" \
+        "${FLAGCX_LIBRARY_SHA256}" \
+        "${TE_FL_SOURCE_TAG}" \
+        "${TE_FL_SOURCE_REVISION}" \
+        "${TE_FL_SOURCE_ARCHIVE_SHA256}" \
+        "${TE_FL_CUDNN_FRONTEND_REVISION}" \
+        "${TE_FL_CUDNN_FRONTEND_ARCHIVE_SHA256}" \
+        "${TE_FL_CUTLASS_REVISION}" \
+        "${TE_FL_CUTLASS_ARCHIVE_SHA256}" \
+        "${TE_FL_GOOGLETEST_REVISION}" \
+        "${TE_FL_GOOGLETEST_ARCHIVE_SHA256}" \
+        "${TE_FL_PATCH_SHA256}" \
+        "${TE_FL_USERBUFFER_PATCH_SHA256}" \
+        "${TE_FL_WHEEL_SHA256}" \
+        "${NVDLFW_INSPECT_WHEEL_SHA256}" \
+        > /etc/flagos-sources.json
+
+# Build stages do not receive GPUs on the target Docker daemon. Validate
+# metadata and source mapping here; validate imports that initialize TE after
+# the container starts with the NVIDIA runtime.
+RUN source /root/miniconda3/etc/profile.d/conda.sh \
+    && conda activate flagscale-train \
+    && test "${CONDA_DEFAULT_ENV}" = "flagscale-train" \
+    && export TORCH_DEVICE_BACKEND_AUTOLOAD=0 \
+    && python -c \
+    'import importlib.metadata as md, importlib.util, pathlib, runpy, sys; root = pathlib.Path("/workspace/Megatron-LM-FL").resolve(); modules = ("megatron.core", "megatron.megalens", "megatron.training"); origins = [pathlib.Path(importlib.util.find_spec(name).origin).resolve() for name in modules]; source_version = runpy.run_path(root / "megatron/core/package_info.py")["__version__"]; helpers = list((root / "megatron/core/datasets").glob("helpers_cpp*.so")); assert sys.executable == "/root/miniconda3/envs/flagscale-train/bin/python"; assert all(path.is_relative_to(root) for path in origins), origins; assert source_version == md.version("megatron-core"); assert len(list(md.distributions(name="megatron-core"))) == 1; assert len(helpers) == 1, helpers' \
+    && python -c \
+    'import ast, importlib.metadata as md, importlib.util, pathlib, pynvml, torch; fs = pathlib.Path("/workspace/FlagScale"); flagscale_origin = pathlib.Path(importlib.util.find_spec("flagscale").origin).resolve(); expected = {"arguments.py": {"_add_megalens_args", "_validate_megalens_args"}, "global_vars.py": {"get_megalens_runtime", "shutdown_megalens_runtime"}, "training.py": {"_owns_megalens_runtime"}}; assert flagscale_origin.is_relative_to(fs), flagscale_origin; assert md.version("flagscale") == "1.0.0"; [(_ for _ in ()).throw(AssertionError((name, required, found))) if not required <= (found := {node.name for node in ast.parse((fs / "flagscale/train/megatron/training" / name).read_text()).body if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))}) else None for name, required in expected.items()]; assert torch.__version__ == "2.9.0+cu128"; assert torch.version.cuda == "12.8"; print("torch", torch.__version__, "cuda", torch.version.cuda, "te", md.version("transformer-engine"), "flash-attn", md.version("flash_attn"), "flagscale", md.version("flagscale"))' \
+    && python -c \
+    'import ast, pathlib; path = pathlib.Path("/workspace/FlagScale/flagscale/train/megatron/training/training.py"); tree = ast.parse(path.read_text()); imports = [node for node in tree.body if isinstance(node, ast.ImportFrom) and node.module == "megatron.core.observability" and any(alias.name == "trace_scope" for alias in node.names)]; train_step = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "train_step"); scope_nodes = [node for node in ast.walk(train_step) if isinstance(node, ast.With) and len(node.items) == 1 and isinstance((context := node.items[0].context_expr), ast.Call) and isinstance(context.func, ast.Name) and context.func.id == "trace_scope" and len(context.args) == 1 and isinstance(context.args[0], ast.Constant)]; scopes = {name: [node for node in scope_nodes if node.items[0].context_expr.args[0].value == name] for name in ("optimizer", "optimizer-postprocess")}; assert len(imports) == 1 and all(len(nodes) == 1 for nodes in scopes.values()); optimizer_body = scopes["optimizer"][0].body; assert len(optimizer_body) == 1 and isinstance(optimizer_body[0], ast.Assign); optimizer_call = optimizer_body[0].value; assert isinstance(optimizer_call, ast.Call) and isinstance(optimizer_call.func, ast.Attribute) and optimizer_call.func.attr == "step" and isinstance(optimizer_call.func.value, ast.Name) and optimizer_call.func.value.id == "optimizer" and not optimizer_call.args and not optimizer_call.keywords; postprocess = scopes["optimizer-postprocess"][0]; first = postprocess.body[0]; assert isinstance(first, ast.Assign) and isinstance(first.value, ast.Call) and isinstance(first.value.func, ast.Name) and first.value.func.id == "logical_and_across_model_parallel_group"; assert len([node for node in ast.walk(postprocess) if isinstance(node, ast.Return)]) == 2; calls = [node for node in ast.walk(train_step) if isinstance(node, ast.Call)]; timer_stop = next(call for call in calls if isinstance(call.func, ast.Attribute) and call.func.attr == "stop" and isinstance(call.func.value, ast.Call) and isinstance(call.func.value.func, ast.Name) and call.func.value.func.id == "timers" and isinstance(call.func.value.args[0], ast.Constant) and call.func.value.args[0].value == "optimizer"); clip_qk = next(call for call in calls if isinstance(call.func, ast.Name) and call.func.id == "clip_qk"); assert clip_qk.lineno < timer_stop.lineno < postprocess.lineno'
+
+CMD ["/bin/bash"]
