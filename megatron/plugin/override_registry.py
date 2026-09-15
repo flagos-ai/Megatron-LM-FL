@@ -178,3 +178,16 @@ register(
     impl="megatron.plugin.Ascend.transformer.transformer_config.NPUTransformerConfig",
     vendor="npu",
 )
+
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._normalize_qk",
+    impl="megatron.plugin.Ascend.ssm.gated_delta_net.normalize_qk",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._gated_delta_rule",
+    impl="megatron.plugin.Ascend.ssm.gated_delta_net.gated_delta_rule",
+    vendor="npu",
+)
