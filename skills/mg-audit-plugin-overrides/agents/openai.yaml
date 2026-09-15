@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Plugin Override Auditor"
+  short_description: "Audit override registries and API compatibility"
+  default_prompt: "Use $mg-audit-plugin-overrides to audit Megatron plugin override targets, implementations, vendors, signatures, and registrations across pinned refs."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Upstream Conflict Integrator"
+  short_description: "Resolve fork/upstream semantic conflicts safely"
+  default_prompt: "Use $mg-integrate-upstream-conflicts to inventory and plan every both-changed Megatron path against an approved NVIDIA target."

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Platform Patch Auditor"
+  short_description: "Audit device abstractions and vendor capabilities"
+  default_prompt: "Use $mg-preserve-platform-patches to audit Megatron platform contracts, implementations, CUDA assumptions, and vendor gates across pinned upgrade refs."
