@@ -309,13 +309,10 @@ class MultiLatentAttention(Attention):
             if inference_context is None or inference_context.is_static_batching():
                 extra_kwargs = {}
                 if self.config.experimental_attention_variant == "dsa":
-                    # For dsa we need to pass in the original hidden states and the compressed
-                    # query representation.
+                    # dsa needs the original hidden states and compressed query. Cross-layer
+                    # top-k sharing is handled inside DSAttention via a per-forward holder.
                     extra_kwargs["x"] = hidden_states
                     extra_kwargs["qr"] = q_compressed
-                    extra_kwargs["prev_topk_indices"] = getattr(
-                        self.core_attention, "current_topk_indices", None
-                    )  # FlagScale Add
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:

@@ -1339,6 +1339,14 @@ class TransformerConfig(ModelParallelConfig):
                     f"indexer_types must only contain {valid_types}, "
                     f"got {set(self.indexer_types) - valid_types}"
                 )
+                # MTP layers don't thread the DSA top-k holder, so IndexShare + MTP is
+                # unsupported for now; fail loudly.
+                if any(t == "shared" for t in self.indexer_types) and (self.mtp_num_layers or 0) > 0:
+                    raise NotImplementedError(
+                        "DSA IndexShare (indexer_types with 'shared') is not yet supported "
+                        "with MTP (mtp_num_layers > 0). Set mtp_num_layers=0 or use all-'full' "
+                        "indexer_types (indexer_type_rule=None)."
+                    )
         ##### FlagScale End #####
         elif self.experimental_attention_variant == "dsv4_hybrid":
             assert self.multi_latent_attention, "DSv4 Hybrid requires multi_latent_attention."
@@ -2662,9 +2670,9 @@ class TransformerConfig(ModelParallelConfig):
           - Segments before repeat() are prefix, segments after are suffix.
 
         Examples:
-          "2*full + repeat(full, share, share, share)"
+          "2*full + repeat(full, shared, shared, shared)"
             → 2 full prefix, then cyclic pattern fills all remaining layers
-          "2*full + repeat(full, share, share, share) + 1*full"
+          "2*full + repeat(full, shared, shared, shared) + 1*full"
             → 2 full prefix, cyclic pattern in the middle, 1 full suffix
         """
         import re
