@@ -26,12 +26,16 @@ class PlatformCUDA(PlatformBase):
     def is_available(self):
         try:
             import torch
-            # Determine if we are on a GPU or x86 CPU with torch.
-            if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
-                return True
-            else:
+
+            if not (torch.cuda.device_count() > 0 and torch.cuda.is_available()):  #ignore-cuda
                 return False
-        except Exception as e:
+
+            # Some accelerator compatibility layers expose a torch.cuda facade even
+            # though ``torch.device("cuda")`` resolves to their native device type.
+            # Registering PlatformCUDA in that case makes device_name() disagree with
+            # tensors created by device(), which breaks device-specific optimizer paths.
+            return torch.device('cuda', 0).type == self.device_name()
+        except Exception:
             return False
 
     def get_device_properties(self, device_index=None):
