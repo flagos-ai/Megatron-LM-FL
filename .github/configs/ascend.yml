@@ -242,6 +242,11 @@ test_matrix:
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_ez
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
+      # The general fully_shard matrix also uses DTensor collectives that are
+      # not stable on the current torch_npu/HCCL stack. Many combinations fail
+      # on all ranks; others leave ranks in different all_gather_object calls
+      # until the HCCL watchdog aborts the job.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard
       # HCCL all-reduce / reduce-scatter exhaust NPU coprocessor streams
       # (rtStreamCreateWithFlags resource alloc fail), same root cause as
       # the MoE and optimizer resharding stream ceiling in dist_checkpointing.
@@ -296,6 +301,10 @@ test_matrix:
       - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_constructor
       # Needs CUDA/TE-specific features; metax also ignores
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      # The MoE PP=2 case leaves the first and last pipeline stages in
+      # different HCCL operations after TE-FL's grouped-GEMM fallback. PP=1
+      # variants and the dense PP=2 variant remain enabled.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match[1-2]
       # TE-FL misses get_fused_attn_backend
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward_fsdp
@@ -317,6 +326,11 @@ test_matrix:
       # causing rank divergence and a 30-minute HCCL 507001/SIGABRT cascade.
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+      # BridgeCommunicator repeatedly creates and destroys overlapping HCCL
+      # groups and uses cross-grid send/recv. On 910C, ranks diverge between
+      # consecutive methods and eventually abort with runtime error 507001.
+      # Keep the metadata-only BridgeCommunicator tests enabled.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator
 
       ## 14. fusions - CUDA/Triton-only kernels
       # Fused MLA YaRN RoPE is implemented with Triton CUDA kernels. The test

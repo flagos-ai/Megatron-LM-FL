@@ -65,16 +65,22 @@ def initialize_test_environment(
     return args
 
 
-def create_sft_data_iterator(max_seq_length: int = 1024):
+def create_sft_data_iterator(max_seq_length: int = 1024, cp_size: int = 1):
     """Create a mock SFT data iterator matching the old SFTDataset output after DataLoader collation.
 
     The old SFTDataset (megatron/training/datasets/sft_dataset.py) returns per-sample dicts with
     keys: tokens, labels, loss_mask, position_ids, cu_seqlens, max_seqlen — all padded to
     seq_length.  After PyTorch DataLoader default_collate, tensors get a leading batch dim of 1.
     """
-    min_len = max(1, int(0.1 * max_seq_length))
-    max_len = max(2, int(0.4 * max_seq_length))
-    candidate_lengths = [torch.randint(min_len, max_len + 1, (1,)).item() for _ in range(10)]
+    # TE's THD context-parallel partitioning splits every packed sequence into
+    # 2 * cp_size chunks. Match that production constraint in the fixture.
+    alignment = 2 * cp_size
+    min_chunks = max(1, (int(0.1 * max_seq_length) + alignment - 1) // alignment)
+    max_chunks = max(min_chunks, int(0.4 * max_seq_length) // alignment)
+    candidate_lengths = [
+        torch.randint(min_chunks, max_chunks + 1, (1,)).item() * alignment
+        for _ in range(10)
+    ]
 
     lengths = []
     total = 0
@@ -172,7 +178,7 @@ def test_sft_batch(tp_size, pp_size, cp_size, seq_length):
     data_iterator = None
     num_real_tokens = 0
     if mpu.get_tensor_model_parallel_rank() == 0:
-        data_iterator, num_real_tokens = create_sft_data_iterator(seq_length)
+        data_iterator, num_real_tokens = create_sft_data_iterator(seq_length, cp_size)
 
     (
         attention_mask,
