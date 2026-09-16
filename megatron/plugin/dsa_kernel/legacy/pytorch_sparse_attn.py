@@ -22,7 +22,6 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
-
 # ---------------------------------------------------------------------------
 # Forward: PyTorch BMM sparse attention
 # ---------------------------------------------------------------------------
@@ -53,7 +52,7 @@ def pytorch_sparse_attn_fwd(
         topk_idxs: ``(total_S_q, H, TopK)`` int32.
         softmax_scale: attention scale factor.
         d_v: value dimension.
-        attn_sink: ``(H,)`` f32 — per-head bias-only sink.
+        attn_sink: ``(H,)`` f32 鈥?per-head bias-only sink.
         indexer_topk: if > 0, compute separate LSE for first positions.
 
     Returns:
@@ -67,13 +66,13 @@ def pytorch_sparse_attn_fwd(
 
     # Detect shared indices (MLA mode): stride=0 on head dim means all heads
     # share the same TopK indices. Gather once, broadcast to all heads.
-    shared_indices = (topk_idxs.stride(1) == 0)
+    shared_indices = topk_idxs.stride(1) == 0
 
     if shared_indices:
         # Gather KV once with shape (total_Sq, TopK, d_kv), then use einsum for scores.
         # This avoids materializing (total_Sq, H, TopK, d_kv) which is H times larger.
-        idxs_1h = topk_idxs[:, 0, :]  # (total_Sq, TopK) — single head slice
-        valid_mask_1h = idxs_1h >= 0   # (total_Sq, TopK)
+        idxs_1h = topk_idxs[:, 0, :]  # (total_Sq, TopK) 鈥?single head slice
+        valid_mask_1h = idxs_1h >= 0  # (total_Sq, TopK)
         safe_idxs_1h = idxs_1h.clamp(min=0).long()
         flat_idxs = safe_idxs_1h.reshape(-1)  # (total_Sq * TopK)
         kv_gathered_1h = kv[flat_idxs].reshape(total_Sq, TopK, d_kv)  # bf16, (S, T, D)
@@ -85,16 +84,19 @@ def pytorch_sparse_attn_fwd(
         valid_mask = valid_mask_1h.unsqueeze(1).expand(-1, H, -1)
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
-        # LSE with optional sink
+        # Full denominator INCLUDES the sink (bias-only logit); the RETURNED
+        # LSE excludes it (FlashMLA convention) so the fused loss can build
+        # the full teacher denominator via logaddexp(lse, sink).
         if attn_sink is not None:
             sink_expanded = attn_sink.unsqueeze(0).unsqueeze(-1).expand(total_Sq, -1, -1)
             scores_with_sink = torch.cat([scores, sink_expanded], dim=-1)
-            lse = torch.logsumexp(scores_with_sink, dim=-1)
+            lse_full = torch.logsumexp(scores_with_sink, dim=-1)
         else:
-            lse = torch.logsumexp(scores, dim=-1)
+            lse_full = torch.logsumexp(scores, dim=-1)
+        lse = torch.logsumexp(scores, dim=-1)
 
         # Attention weights (f32)
-        P = torch.exp(scores - lse.unsqueeze(-1))
+        P = torch.exp(scores - lse_full.unsqueeze(-1))
         P = P.masked_fill(~valid_mask, 0.0)
 
         # Output via BMM in bf16: P(S,H,T) @ V(S,T,Dv) -> (S,H,Dv)
@@ -126,16 +128,17 @@ def pytorch_sparse_attn_fwd(
         del q_r, k_r
         scores = scores.masked_fill(~valid_mask, float("-inf"))
 
-        # LSE with optional sink
+        # Full denominator INCLUDES the sink; the RETURNED LSE excludes it.
         if attn_sink is not None:
             sink_expanded = attn_sink.unsqueeze(0).unsqueeze(-1).expand(total_Sq, -1, -1)
             scores_with_sink = torch.cat([scores, sink_expanded], dim=-1)
-            lse = torch.logsumexp(scores_with_sink, dim=-1)
+            lse_full = torch.logsumexp(scores_with_sink, dim=-1)
         else:
-            lse = torch.logsumexp(scores, dim=-1)
+            lse_full = torch.logsumexp(scores, dim=-1)
+        lse = torch.logsumexp(scores, dim=-1)
 
         # Attention weights (f32 for precision)
-        P = torch.exp(scores - lse.unsqueeze(-1))
+        P = torch.exp(scores - lse_full.unsqueeze(-1))
         P = P.masked_fill(~valid_mask, 0.0)
 
         # Output via bmm in bf16
@@ -161,12 +164,12 @@ def pytorch_sparse_attn_fwd(
 
 
 def pytorch_sparse_attn_bwd(
-    grad_out: Tensor,   # (total_Sq, H, d_v) bf16
-    query: Tensor,      # (total_Sq, H, D) bf16
-    kv: Tensor,         # (total_Skv, D_full) bf16
+    grad_out: Tensor,  # (total_Sq, H, d_v) bf16
+    query: Tensor,  # (total_Sq, H, D) bf16
+    kv: Tensor,  # (total_Skv, D_full) bf16
     topk_idxs: Tensor,  # (total_Sq, H, TopK) int32, shared (stride(1)==0)
-    out: Tensor,        # (total_Sq, H, d_v) bf16
-    lse: Tensor,        # (total_Sq, H) f32
+    out: Tensor,  # (total_Sq, H, d_v) bf16
+    lse: Tensor,  # (total_Sq, H) f32
     attn_sink: Optional[Tensor],  # (H,) f32 or None
     softmax_scale: float,
     d_v: int,
@@ -186,19 +189,19 @@ def pytorch_sparse_attn_bwd(
 
     # Shared indices: use head 0
     idxs_shared = topk_idxs[:, 0, :]  # (total_Sq, TopK)
-    valid_shared = idxs_shared >= 0    # (total_Sq, TopK)
+    valid_shared = idxs_shared >= 0  # (total_Sq, TopK)
     safe_shared = idxs_shared.clamp(min=0).long()
 
     # Gather KV
     flat_idxs = safe_shared.reshape(-1)
     kv_gathered = kv[flat_idxs].reshape(total_Sq, TopK, D_full).float()
 
-    kv_is_shared = (D == d_v == D_full)
+    kv_is_shared = D == d_v == D_full
 
     # Di = sum(dO * O) per (query, head)
     Di = (grad_out.float() * out.float()).sum(dim=-1)  # (total_Sq, H)
 
-    # Recompute scores (f32 × f32 → f32)
+    # Recompute scores (f32 脳 f32 鈫?f32)
     q_f32 = query.float()
     scores = torch.bmm(q_f32, kv_gathered[:, :, :D].transpose(1, 2)) * softmax_scale
 
@@ -226,9 +229,7 @@ def pytorch_sparse_attn_bwd(
         torch.baddbmm(dkv_gathered, P.transpose(1, 2), dO_f32, out=dkv_gathered)
     else:
         dv = torch.bmm(P.transpose(1, 2), dO_f32)
-        dkv_tmp = torch.zeros(
-            total_Sq, TopK, D_full, dtype=torch.float32, device=query.device
-        )
+        dkv_tmp = torch.zeros(total_Sq, TopK, D_full, dtype=torch.float32, device=query.device)
         dkv_tmp[:, :, :D] = dkv_gathered
         dkv_tmp[:, :, :d_v] += dv
         dkv_gathered = dkv_tmp
@@ -238,9 +239,7 @@ def pytorch_sparse_attn_bwd(
     dkv_gathered.masked_fill_(~valid_shared.unsqueeze(-1), 0.0)
     dkv = torch.zeros(total_Skv, D_full, dtype=torch.float32, device=query.device)
     dkv.scatter_add_(
-        0,
-        flat_idxs.unsqueeze(-1).expand(-1, D_full),
-        dkv_gathered.reshape(-1, D_full),
+        0, flat_idxs.unsqueeze(-1).expand(-1, D_full), dkv_gathered.reshape(-1, D_full)
     )
 
     dq_out = dq.to(query.dtype)
@@ -263,11 +262,11 @@ def pytorch_sparse_attn_bwd(
 
 def pytorch_fused_bwd(
     grad_output: Tensor,  # (sq, b, np * d_v) or flat
-    q_flat: Tensor,       # (total_Sq, np, d) bf16
-    kv_flat: Tensor,      # (skv * b, d_kv) bf16
+    q_flat: Tensor,  # (total_Sq, np, d) bf16
+    kv_flat: Tensor,  # (skv * b, d_kv) bf16
     global_idxs: Tensor,  # (total_Sq, 1, TopK) int32
-    out_flat: Tensor,     # (total_Sq, np, d_v) bf16
-    lse: Tensor,          # (total_Sq, np) f32
+    out_flat: Tensor,  # (total_Sq, np, d_v) bf16
+    lse: Tensor,  # (total_Sq, np) f32
     attn_sink: Optional[Tensor],  # (np,) f32 or None
     softmax_scale: float,
     total_Sq: int,
@@ -296,14 +295,14 @@ def pytorch_fused_bwd(
 
     # Shared indices: (total_Sq, 1, TopK) -> squeeze to (total_Sq, TopK)
     idxs_shared = global_idxs.squeeze(1)  # (total_Sq, TopK)
-    valid_shared = idxs_shared >= 0       # (total_Sq, TopK)
+    valid_shared = idxs_shared >= 0  # (total_Sq, TopK)
     safe_shared = idxs_shared.clamp(min=0).long()
 
     # Gather KV once: (total_Sq * TopK) -> (total_Sq, TopK, d_kv)
     flat_idxs = safe_shared.reshape(-1)
     kv_gathered = kv_flat[flat_idxs].reshape(total_Sq, TopK, d_kv)
 
-    kv_is_shared = (d == d_v == d_kv)
+    kv_is_shared = d == d_v == d_kv
 
     # Upcast kv_gathered to f32 for the full backward.
     kv_f = kv_gathered.float()
@@ -336,11 +335,7 @@ def pytorch_fused_bwd(
 
     dkv_gathered.masked_fill_(~valid_shared.unsqueeze(-1), 0.0)
     dkv = torch.zeros(skv_b, d_kv, dtype=torch.float32, device=q_flat.device)
-    dkv.scatter_add_(
-        0,
-        flat_idxs.unsqueeze(-1).expand(-1, d_kv),
-        dkv_gathered.reshape(-1, d_kv),
-    )
+    dkv.scatter_add_(0, flat_idxs.unsqueeze(-1).expand(-1, d_kv), dkv_gathered.reshape(-1, d_kv))
 
     dq_out = dq.to(q_flat.dtype)
     dkv_out = dkv.to(kv_flat.dtype)
@@ -355,8 +350,4 @@ def pytorch_fused_bwd(
     return dq_out, dkv_out, d_sink
 
 
-__all__ = [
-    "pytorch_sparse_attn_fwd",
-    "pytorch_sparse_attn_bwd",
-    "pytorch_fused_bwd",
-]
+__all__ = ["pytorch_sparse_attn_fwd", "pytorch_sparse_attn_bwd", "pytorch_fused_bwd"]

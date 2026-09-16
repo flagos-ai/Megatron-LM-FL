@@ -66,6 +66,9 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     data parallel size * context parallel size * sequence parallel size * 2.
     """
 
+    preserve_packed_sequence_lengths: bool = False
+    """Emit separate real and physical packed offsets for DSv4 SFT attention."""
+
     sequences_per_dataset: Optional[Dict[str, int]] = None
     """If provided, the sequence and document counts for each dataset. 
        Check --per-dataset-sequences-path

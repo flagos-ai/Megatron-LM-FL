@@ -316,6 +316,7 @@ def apply_rotary_pos_emb(
     mla_rotary_interleaved: bool = False,
     inverse: bool = False,
     mla_output_remove_interleaving: bool = False,
+    max_seqlen: Optional[int] = None,
 ):
     """
     Reroute to the appropriate apply_rotary_pos_emb function depending on
@@ -381,7 +382,11 @@ def apply_rotary_pos_emb(
             mla_output_remove_interleaving=mla_output_remove_interleaving,
         )
     else:
-        return _apply_rotary_pos_emb_thd(
+        thd_impl = (
+            _apply_rotary_pos_emb_thd_vectorized
+            if max_seqlen is not None else _apply_rotary_pos_emb_thd
+        )
+        return thd_impl(
             t,
             cu_seqlens,
             freqs,
@@ -389,6 +394,7 @@ def apply_rotary_pos_emb(
             mla_rotary_interleaved=mla_rotary_interleaved,
             mscale=mscale,
             cp_group=cp_group,
+            **({"max_seqlen": max_seqlen} if max_seqlen is not None else {}),
             inverse=inverse,
             mla_output_remove_interleaving=mla_output_remove_interleaving,
         )
@@ -429,3 +435,109 @@ def apply_rotary_pos_emb_with_cos_sin(
         y = y.permute(1, 0, 2, 3)
 
     return y
+
+
+def _apply_rotary_pos_emb_thd_vectorized(
+    t: Tensor,
+    cu_seqlens: Tensor,
+    freqs: Tensor,
+    rotary_interleaved: bool = False,
+    mla_rotary_interleaved: bool = False,
+    mscale: float = 1.0,
+    inverse: bool = False,
+    mla_output_remove_interleaving: bool = False,
+    cp_group: torch.distributed.ProcessGroup = None,
+    multi_latent_attention: Optional[bool] = None,
+    max_seqlen: Optional[int] = None,
+) -> Tensor:
+    """Apply RoPE for `thd` format using pure CUDA ops (CUDA Graph compatible).
+
+    Replaces the original Python-loop + .tolist() implementation with vectorized
+    CUDA operations. No GPU->CPU syncs, compatible with CUDA Graph capture.
+
+    Args:
+        t (Tensor): Input tensor of shape [total_tokens, h, d]
+        cu_seqlens (Tensor): Cumulative sequence lengths, shape [num_seqs + 1], int32.
+        freqs (Tensor): RoPE frequencies, shape [max_s, 1, 1, d] or [total_tokens, 1, 1, d]
+        cp_group: Context parallel group
+        max_seqlen: Global max sequence length for this packed batch when known.
+
+    Returns:
+        Tensor: Shape [total_tokens, h, d]. Input with RoPE applied.
+    """
+    if multi_latent_attention is not None:
+        warnings.warn(
+            "multi_latent_attention is deprecated. Please use mla_rotary_interleaved instead.",
+            DeprecationWarning,
+        )
+        mla_rotary_interleaved = multi_latent_attention
+
+    if cp_group is None:
+        raise ValueError("cp_group must be provided for THD format RoPE")
+    cp_size = cp_group.size()
+    cp_rank = cp_group.rank()
+
+    total_tokens = t.shape[0]
+    device = t.device
+
+    token_pos = torch.arange(total_tokens, device=device, dtype=torch.int64)
+
+    # `cu_seqlens` describes the global packed sequence. With CP, `t` is already
+    # CP-partitioned, so build a local cumulative-length view before assigning
+    # local tokens to packed sequences.
+    cu_seqlens_i64 = cu_seqlens.to(torch.int64)
+    global_seq_lens = cu_seqlens_i64[1:] - cu_seqlens_i64[:-1]
+    local_seq_lens = global_seq_lens // cp_size if cp_size > 1 else global_seq_lens
+    local_cu_seqlens = torch.zeros_like(cu_seqlens_i64)
+    local_cu_seqlens[1:] = torch.cumsum(local_seq_lens, dim=0)
+
+    # `searchsorted(..., right=True) - 1` returns the local sequence index. The
+    # clamp guards padded tokens that sit beyond the final real local token; they
+    # get a harmless frequency and are later masked out.
+    seq_idx = torch.searchsorted(local_cu_seqlens, token_pos, right=True) - 1
+    seq_idx = seq_idx.clamp(min=0, max=cu_seqlens.shape[0] - 2)
+
+    local_seq_start = local_cu_seqlens[seq_idx]
+    local_pos = token_pos - local_seq_start
+    local_seq_len = local_seq_lens[seq_idx]
+    global_seq_start = cu_seqlens_i64[seq_idx]
+
+    if cp_size > 1:
+        first_cp_seg = (local_seq_len + 1) // 2
+        second_cp_seg = local_seq_len // 2
+        full_seqlen = local_seq_len * cp_size
+        is_first_half = local_pos < first_cp_seg
+        freq_pos = torch.where(
+            is_first_half,
+            cp_rank * first_cp_seg + local_pos,
+            full_seqlen - (cp_rank + 1) * second_cp_seg + (local_pos - first_cp_seg),
+        )
+    else:
+        freq_pos = local_pos.to(torch.int64)
+
+    assert max_seqlen is not None, (
+        "max_seqlen must be provided for THD RoPE so packed-frequency offset "
+        "detection does not silently depend on tensor shape heuristics."
+    )
+    exact_packed_freqs = freqs.dim() >= 1 and freqs.size(0) > max_seqlen
+    if exact_packed_freqs:
+        # `freqs` covers all positions across all sequences (used for non-1D
+        # RoPE / VLMs); shift by the per-sequence start offset so each token
+        # samples its absolute position. When `freqs` only spans one max-len
+        # sequence, no shift is needed.
+        freq_pos = freq_pos + global_seq_start
+
+    # Padded positions can sit outside the frequency table. Clamp them into
+    # range; downstream padding masks exclude those positions from the result.
+    freq_pos = freq_pos.clamp(min=0, max=freqs.shape[0] - 1)
+    freqs_packed = freqs[freq_pos]
+
+    return _apply_rotary_pos_emb_bshd(
+        t.unsqueeze(1),
+        freqs_packed,
+        rotary_interleaved=rotary_interleaved,
+        mla_rotary_interleaved=mla_rotary_interleaved,
+        mscale=mscale,
+        inverse=inverse,
+        mla_output_remove_interleaving=mla_output_remove_interleaving,
+    ).squeeze(1)

@@ -356,6 +356,14 @@ class GPTModel(LanguageModule):
             # intermediate stage of pipeline
             # decoder will get hidden_states from encoder.input_tensor
             decoder_input = None
+            if (
+                padding_mask is not None
+                and self.config.sequence_parallel
+                and self.config.experimental_attention_variant == "dsv4_hybrid"
+            ):
+                padding_mask = tensor_parallel.scatter_to_sequence_parallel_region(
+                    padding_mask.transpose(0, 1).contiguous()
+                ).transpose(0, 1).contiguous()
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None

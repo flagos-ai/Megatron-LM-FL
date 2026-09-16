@@ -807,3 +807,16 @@ else:
             "prepare_model_for_fp8_inference requires Transformer Engine to be installed. "
             "Please install transformer-engine to use FP8 inference."
         )
+
+
+def get_fp8_disabled_context(config: TransformerConfig, is_init: bool = False):
+    """Keep DSv4 compressor and indexer operations outside an enclosing FP8 context."""
+    if not HAVE_TE:
+        return nullcontext()
+    if is_init:
+        if not (config.fp8_param or config.fp4_param):
+            return nullcontext()
+        return transformer_engine.pytorch.fp8_model_init(enabled=False)
+    if not (config.fp8 or config.fp4):
+        return nullcontext()
+    return transformer_engine.pytorch.fp8_autocast(enabled=False)

@@ -87,11 +87,12 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     cp_size = args.context_parallel_size
     tp_rank = mpu.get_tensor_model_parallel_rank()
     is_sft = args.sft
+    is_dsv4 = config.experimental_attention_variant == "dsv4_hybrid"
     create_attention_mask_in_dataloader = args.create_attention_mask_in_dataloader
     mtp_on_this_rank = mtp_on_this_rank_func(layout=config.pipeline_model_parallel_layout, mtp_num_layers=config.mtp_num_layers, ignore_virtual=False, vp_stage=vp_stage)
     is_hybrid_cp = args.hybrid_context_parallel
 
-    if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank and not is_sft:
+    if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank and not is_sft and not is_dsv4:
         return [None for _ in BATCH_KEYS]
 
     batch = {}
@@ -100,13 +101,13 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
         for key in BATCH_KEYS:
             batch[key] = batch[key].to(device, non_blocking=True) if key in batch and batch[key] is not None else None
 
-    batch = get_batch_on_this_tp_rank(batch, broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(), broadcast_group=mpu.get_tensor_model_parallel_group(), is_sft=is_sft, is_hybrid_cp=is_hybrid_cp, create_attention_mask_in_dataloader=create_attention_mask_in_dataloader, cp_size=cp_size, tp_rank=tp_rank, micro_batch_size=args.micro_batch_size, seq_length=args.seq_length, mtp_on_this_rank=mtp_on_this_rank, pipeline_model_parallel_size=args.pipeline_model_parallel_size, is_pipeline_first_stage=mpu.is_pipeline_first_stage(), is_pipeline_last_stage=mpu.is_pipeline_last_stage())
+    batch = get_batch_on_this_tp_rank(batch, broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(), broadcast_group=mpu.get_tensor_model_parallel_group(), is_sft=is_sft, is_hybrid_cp=is_hybrid_cp, create_attention_mask_in_dataloader=create_attention_mask_in_dataloader, cp_size=cp_size, tp_rank=tp_rank, micro_batch_size=args.micro_batch_size, seq_length=args.seq_length, mtp_on_this_rank=mtp_on_this_rank, pipeline_model_parallel_size=args.pipeline_model_parallel_size, is_pipeline_first_stage=mpu.is_pipeline_first_stage(), is_pipeline_last_stage=mpu.is_pipeline_last_stage(), broadcast_all_pipeline_stages=is_dsv4, preserve_packed_sequence_lengths=is_dsv4)
     
-    if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank:
+    if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank and not is_dsv4:
         assert is_sft
         return None, batch['cu_seqlens'], batch['cu_seqlens_padded'], None, None, None, None, batch['max_seqlen'], None, None
     
-    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=is_hybrid_cp, cp_group=get_context_parallel_group(), hybrid_cp_group_func=get_hybrid_data_context_parallel_groups)
+    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=is_hybrid_cp, cp_group=get_context_parallel_group(), hybrid_cp_group_func=get_hybrid_data_context_parallel_groups, cp_partition_mode=config.cp_partition_mode if is_dsv4 else "zigzag")
 
     # Return values in BATCH_KEYS order so callers can unpack into the fixed
     # names regardless of any provenance fields wrappers like BlendedDataset
@@ -213,6 +214,8 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
         ) = get_batch(data_iterator, vp_stage)
 
     packed_seq_params = None
+    padding_mask = None
+    is_dsv4 = args.experimental_attention_variant == "dsv4_hybrid"
     if cu_seqlens is not None:
         # cu_seqlens / cu_seqlens_padded carry the dataloader's batch dim (1, n).
         # PackedSeqParams (and TE attention) expect 1-D, so squeeze before use.
@@ -223,6 +226,8 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
         # attention only computes work for real tokens within each chunk.
         update_seqlen_stats_from_cu_seqlens(cu_seqlens)
         cu_seqlens_for_params = cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens # TODO(asolergi-nv): Currently there is a bug forcing cu_seqlens to be cu_seqlens_padded
+        if is_dsv4:
+            cu_seqlens_for_params = cu_seqlens
         packed_seq_params = PackedSeqParams(
             qkv_format="thd",
             cu_seqlens_q=cu_seqlens_for_params,
@@ -233,7 +238,22 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
             max_seqlen_kv=int(max_seqlen.item()),
             local_cp_size=int(local_cp_size.item()) if local_cp_size is not None else None,
             cp_group=hybrid_cp_group,
+            cp_partition_mode="contiguous" if is_dsv4 else "zigzag",
+            pad_between_seqs=is_dsv4 and cu_seqlens_padded is not None,
         )
+
+    if is_dsv4 and packed_seq_params is not None and cu_seqlens_padded is not None:
+        # Real lengths count valid tokens; padded offsets describe physical storage.
+        # Loss masks also mask prompts, so they cannot identify attention padding.
+        cp_group = hybrid_cp_group or get_context_parallel_group()
+        local_rows = tokens.shape[1]
+        rows = torch.arange(local_rows, device=tokens.device) + cp_group.rank() * local_rows
+        physical = cu_seqlens_padded.to(torch.int64)
+        seq = (torch.searchsorted(physical, rows, right=True) - 1).clamp(
+            min=0, max=physical.numel() - 2
+        )
+        lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        padding_mask = ((rows - physical[seq]) >= lengths[seq]).unsqueeze(0)
 
     timers('batch-generator').stop()
 
@@ -242,12 +262,13 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
             assert args.overlap_moe_expert_parallel_comm, \
                 "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
             schedule_plan = model.build_schedule_plan(
-                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask,
+                packed_seq_params=packed_seq_params, padding_mask=padding_mask
             )
             return schedule_plan, partial(loss_func, loss_mask, model=model)
         else:
             output_tensor = model(
-                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask, packed_seq_params=packed_seq_params
+                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask, packed_seq_params=packed_seq_params, padding_mask=padding_mask
             )
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
@@ -259,7 +280,7 @@ def is_dataset_built_on_rank(vp_stage=None, is_packed_sequence=False):
     config = core_transformer_config_from_args(args)
     if mpu.get_tensor_model_parallel_rank() != 0:
         return False
-    elif is_packed_sequence:
+    elif is_packed_sequence or config.experimental_attention_variant == "dsv4_hybrid":
         return True
     return (
         is_first_or_last_pipeline_stage(vp_stage)
@@ -281,6 +302,7 @@ def core_gpt_dataset_config_from_args(args: Any) -> GPTDatasetConfig:
             sequences_per_dataset = json.load(f)
 
     data_args = {
+        "preserve_packed_sequence_lengths": args.experimental_attention_variant == "dsv4_hybrid",
         "random_seed": args.seed,
         "sequence_length": args.seq_length,
         "blend": blend,

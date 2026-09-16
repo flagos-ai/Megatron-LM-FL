@@ -1746,6 +1746,10 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         self.kept_packed_seq_params = set(
             field.name for field in dataclasses.fields(PackedSeqParams)
         )
+        # Megatron-owned layout metadata is not part of TE's attention interface.
+        self.kept_packed_seq_params.difference_update(
+            {"cp_partition_mode", "pad_between_seqs", "tokens_per_sample"}
+        )
 
         if get_te_version() < PkgVersion("1.3.0"):
             # TE 1.3.0 introduces precomputing max_seqlen to remove unnecessary kernels and D2H

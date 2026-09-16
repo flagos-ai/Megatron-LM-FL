@@ -348,7 +348,11 @@ def forward_step_calc_loss(
         if config.calculate_per_token_loss:
             DSAIndexerLossAutoScaler.set_loss_scale(loss_scale)
         else:
-            DSAIndexerLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+            cp_scale = (
+                (cp_group_size or 1)
+                if config.experimental_attention_variant == "dsv4_hybrid" else 1
+            )
+            DSAIndexerLossAutoScaler.set_loss_scale(loss_scale * cp_scale / num_microbatches)
 
     return output_tensor, num_tokens
 

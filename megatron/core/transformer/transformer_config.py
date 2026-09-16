@@ -298,7 +298,7 @@ class TransformerConfig(ModelParallelConfig):
     """Number of residual branches for hyper connections.
     Only used when enable_hyper_connections is True."""
 
-    mhc_sinkhorn_iterations: int = 10
+    mhc_sinkhorn_iterations: int = 20
     """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
 
     mhc_init_gating_factor: float = 0.01
@@ -433,6 +433,15 @@ class TransformerConfig(ModelParallelConfig):
     forward + cuDNN DSA backward (requires ``flash_mla`` and ``nvidia-cudnn-frontend``).
     On SM90 (Hopper), uses Triton-based fused kernels (requires ``triton>=3.0``).
     When False, falls back to unfused PyTorch implementations."""
+
+    dsa_kernel_backend: Optional[Literal["none", "cudnn", "triton"]] = None
+    """Explicit DSv4 backend; None preserves apply_dsa_kernel_fusion selection.
+    Triton indexer training preserves SBHD computation order to match the DSv4 reference.
+    Non-indexer SBHD layers retain their THD compatibility path.
+    """
+
+    cp_partition_mode: Literal["zigzag", "contiguous"] = "zigzag"
+    """CP token partition. DSv4 requires contiguous packed THD partitions for CP>1."""
     ######## FlagScale End ########
     ####################
     # linear attention
@@ -1474,62 +1483,33 @@ class TransformerConfig(ModelParallelConfig):
             assert all(
                 ratio in [0, 4, 128] for ratio in self.csa_compress_ratios
             ), "csa_compress_ratios must be 0, 4, or 128"
-            assert (
-                self.tensor_model_parallel_size == 1
-            ), "DSv4 Hybrid Attention only supports TP size 1."
+            assert self.num_attention_heads % self.tensor_model_parallel_size == 0
+            assert self.o_groups % self.tensor_model_parallel_size == 0, (
+                "DSv4 o_groups must be divisible by tensor_model_parallel_size."
+            )
+            assert self.num_attention_heads % self.o_groups == 0
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
             self.hetereogenous_dist_checkpoint = True
-
-            if self.apply_dsa_kernel_fusion:
-                assert (
-                    torch.cuda.is_available()
-                ), "apply_dsa_kernel_fusion requires a CUDA device, but none is available."
-                sm = torch.cuda.get_device_capability()
-                assert sm[0] >= 9, (
-                    f"apply_dsa_kernel_fusion requires SM90+ (Hopper or later), "
-                    f"but current device has compute capability {sm[0]}.{sm[1]}."
-                )
-
-                if sm[0] >= 10:
-                    # SM100+ (Blackwell): require FlashMLA + cuDNN DSA
-                    _flash_mla_available = True
-                    try:
-                        from flash_mla import flash_mla_sparse_fwd  # noqa: F401
-                    except ImportError:
-                        _flash_mla_available = False
-
-                    _cudnn_dsa_available = True
-                    try:
-                        from cudnn import DSA  # noqa: F401
-                    except ImportError:
-                        _cudnn_dsa_available = False
-
-                    if not _flash_mla_available or not _cudnn_dsa_available:
-                        missing = []
-                        if not _flash_mla_available:
-                            missing.append(
-                                "flash_mla (install from "
-                                "https://github.com/deepseek-ai/FlashMLA/tree/nv_dev)"
-                            )
-                        if not _cudnn_dsa_available:
-                            missing.append("cudnn-frontend DSA (nvidia-cudnn-frontend[cutedsl])")
-                        raise ValueError(
-                            f"apply_dsa_kernel_fusion on SM100+ requires fused DSA kernels, "
-                            f"but the following packages are not available: "
-                            f"{', '.join(missing)}. "
-                            f"Install them or pass --no-dsa-kernel-fusion to use the unfused "
-                            f"PyTorch fallback."
-                        )
-                else:
-                    # SM90 (Hopper): require Triton-based fused kernels
-                    try:
-                        import triton  # noqa: F401
-                    except ImportError as e:
-                        raise ImportError(
-                            "apply_dsa_kernel_fusion on SM90 requires Triton for the "
-                            "fused sparse-attention kernels. Install triton>=3.0 or "
-                            "pass --no-dsa-kernel-fusion to use the unfused PyTorch fallback."
-                        ) from e
+            if self.context_parallel_size > 1 or self.hybrid_context_parallel:
+                self.cp_partition_mode = "contiguous"
+            if mtp_layers and (
+                self.tensor_model_parallel_size > 1
+                or self.sequence_parallel
+                or self.context_parallel_size > 1
+                or self.hybrid_context_parallel
+            ):
+                raise ValueError("DSv4 MTP with TP/SP/CP is outside the initial adaptation scope.")
+            if self.dsa_kernel_backend is None:
+                self.dsa_kernel_backend = "none"
+                if self.apply_dsa_kernel_fusion:
+                    if not torch.cuda.is_available():
+                        raise ValueError("apply_dsa_kernel_fusion requires CUDA.")
+                    sm = torch.cuda.get_device_capability()[0]
+                    if sm < 9:
+                        raise ValueError("apply_dsa_kernel_fusion requires SM90 or newer.")
+                    self.dsa_kernel_backend = "cudnn" if sm >= 10 else "triton"
+            if self.dsa_kernel_backend not in ("none", "cudnn", "triton"):
+                raise ValueError("DSv4 dsa_kernel_backend must be none, cudnn, or triton.")
         ######## FlagScale End ########
         if self.fp8:
             # cannot support first last layer bf16 with delayed scaling

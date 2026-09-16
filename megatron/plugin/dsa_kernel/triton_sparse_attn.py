@@ -22,11 +22,9 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 import torch
-from torch import Tensor
-
 import triton
 import triton.language as tl
-
+from torch import Tensor
 
 # ---------------------------------------------------------------------------
 # Head-Parallel Forward kernel (WGMMA, shared indices)
@@ -46,28 +44,39 @@ def _hp_fwd_configs():
     configs = []
     for block_k in [16, 32, 64]:
         for nw in [4, 8]:
-            configs.append(
-                triton.Config({"BLOCK_K": block_k}, num_warps=nw, num_stages=2)
-            )
+            configs.append(triton.Config({"BLOCK_K": block_k}, num_warps=nw, num_stages=2))
     return configs
 
 
-@triton.autotune(
-    configs=_hp_fwd_configs(),
-    key=["TopK", "D", "DV", "H"],
-)
+@triton.autotune(configs=_hp_fwd_configs(), key=["TopK", "D", "DV", "H"])
 @triton.jit
 def _sparse_attn_fwd_hp_kernel(
-    Q_ptr, KV_ptr, IDX_ptr, OUT_ptr, LSE_ptr,
-    SINK_ptr, LSE_IDX_ptr,
+    Q_ptr,
+    KV_ptr,
+    IDX_ptr,
+    OUT_ptr,
+    LSE_ptr,
+    SINK_ptr,
+    LSE_IDX_ptr,
     softmax_scale,
-    total_Sq, total_Skv, TopK: tl.constexpr, D: tl.constexpr, DV: tl.constexpr,
+    total_Sq,
+    total_Skv,
+    TopK: tl.constexpr,
+    D: tl.constexpr,
+    DV: tl.constexpr,
     H: tl.constexpr,
-    stride_q_s, stride_q_h, stride_q_d,
-    stride_kv_s, stride_kv_d,
-    stride_idx_s, stride_idx_k,
-    stride_out_s, stride_out_h, stride_out_d,
-    stride_lse_s, stride_lse_h,
+    stride_q_s,
+    stride_q_h,
+    stride_q_d,
+    stride_kv_s,
+    stride_kv_d,
+    stride_idx_s,
+    stride_idx_k,
+    stride_out_s,
+    stride_out_h,
+    stride_out_d,
+    stride_lse_s,
+    stride_lse_h,
     HAS_SINK: tl.constexpr,
     HAS_LSE_IDX: tl.constexpr,
     INDEXER_TOPK: tl.constexpr,
@@ -85,10 +94,10 @@ def _sparse_attn_fwd_hp_kernel(
     pid_hb selects the head block [pid_hb * BLOCK_H : (pid_hb+1) * BLOCK_H].
 
     GEMM dimensions:
-      Score:  Q_tile(BLOCK_H, D) @ K_tile^T(D, BLOCK_K) → (BLOCK_H, BLOCK_K)
-      Output: P_tile(BLOCK_H, BLOCK_K) @ V_tile(BLOCK_K, DV) → (BLOCK_H, DV)
+      Score:  Q_tile(BLOCK_H, D) @ K_tile^T(D, BLOCK_K) 鈫?(BLOCK_H, BLOCK_K)
+      Output: P_tile(BLOCK_H, BLOCK_K) @ V_tile(BLOCK_K, DV) 鈫?(BLOCK_H, DV)
 
-    Both satisfy WGMMA alignment: M=BLOCK_H≥16, K=D or BLOCK_K≥16, N≥16.
+    Both satisfy WGMMA alignment: M=BLOCK_H鈮?6, K=D or BLOCK_K鈮?6, N鈮?6.
     """
     pid_q = tl.program_id(0)
     pid_hb = tl.program_id(1)
@@ -98,28 +107,30 @@ def _sparse_attn_fwd_hp_kernel(
 
     h_start = pid_hb * BLOCK_H
     h_range = h_start + tl.arange(0, BLOCK_H)  # (BLOCK_H,)
-    d_range = tl.arange(0, D)                   # (D,)
-    dv_range = tl.arange(0, DV)                 # (DV,)
+    d_range = tl.arange(0, D)  # (D,)
+    dv_range = tl.arange(0, DV)  # (DV,)
 
     # =========================================================================
-    # Load Q tile: (BLOCK_H, D) — loaded once, reused across all TopK tiles
+    # Load Q tile: (BLOCK_H, D) 鈥?loaded once, reused across all TopK tiles
     # =========================================================================
-    # Q layout: (total_Sq, H, D) — load BLOCK_H heads for this query
+    # Q layout: (total_Sq, H, D) 鈥?load BLOCK_H heads for this query
     q_base = pid_q * stride_q_s
     Q_tile = tl.load(
         Q_ptr + q_base + h_range[:, None] * stride_q_h + d_range[None, :] * stride_q_d,
         mask=(h_range[:, None] < H) & (d_range[None, :] < D),
         other=0.0,
-    ).to(tl.bfloat16)  # (BLOCK_H, D) bf16 for tl.dot
+    ).to(
+        tl.bfloat16
+    )  # (BLOCK_H, D) bf16 for tl.dot
 
     # =========================================================================
     # Online softmax state: per-head running max and sum
     # =========================================================================
     m_i = tl.full([BLOCK_H], float("-inf"), dtype=tl.float32)  # running max
-    l_i = tl.zeros([BLOCK_H], dtype=tl.float32)                # running sum(exp)
-    acc = tl.zeros([BLOCK_H, DV], dtype=tl.float32)            # output accumulator
+    l_i = tl.zeros([BLOCK_H], dtype=tl.float32)  # running sum(exp)
+    acc = tl.zeros([BLOCK_H, DV], dtype=tl.float32)  # output accumulator
 
-    # Handle attention sink FIRST — initializes running max from sink bias.
+    # Handle attention sink FIRST - initializes running max from sink bias.
     # Processing sink before TopK ensures the running max starts from a meaningful
     # baseline, reducing accumulator rescale magnitude during the TopK loop.
     if HAS_SINK:
@@ -128,6 +139,12 @@ def _sparse_attn_fwd_hp_kernel(
         p_sink = tl.exp(sink_vals - m_i)
         l_i = l_i + p_sink
         # Sink contributes no value (bias-only), so acc stays zero
+
+    # TopK-only LSE state: the returned LSE must EXCLUDE the sink (FlashMLA
+    # convention) so callers can build the full teacher denominator with
+    # ``logaddexp(lse, attn_sink)``.
+    m_lse = tl.full([BLOCK_H], float("-inf"), dtype=tl.float32)
+    l_lse = tl.zeros([BLOCK_H], dtype=tl.float32)
 
     # Indexer LSE tracking (optional)
     if HAS_LSE_IDX:
@@ -147,9 +164,7 @@ def _sparse_attn_fwd_hp_kernel(
 
         # --- Load BLOCK_K indices (shared across heads) ---
         kv_indices = tl.load(
-            IDX_ptr + idx_base + k_range * stride_idx_k,
-            mask=k_valid,
-            other=-1,
+            IDX_ptr + idx_base + k_range * stride_idx_k, mask=k_valid, other=-1
         )  # (BLOCK_K,) int32
         valid_mask = (kv_indices >= 0) & k_valid  # (BLOCK_K,)
         safe_indices = tl.where(valid_mask, kv_indices, 0)  # clamp for safe load
@@ -160,9 +175,11 @@ def _sparse_attn_fwd_hp_kernel(
             KV_ptr + kv_bases[:, None] + d_range[None, :] * stride_kv_d,
             mask=valid_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.bfloat16)  # (BLOCK_K, D) bf16
+        ).to(
+            tl.bfloat16
+        )  # (BLOCK_K, D) bf16
 
-        # --- Score GEMM: (BLOCK_H, D) @ (D, BLOCK_K) → (BLOCK_H, BLOCK_K) ---
+        # --- Score GEMM: (BLOCK_H, D) @ (D, BLOCK_K) 鈫?(BLOCK_H, BLOCK_K) ---
         # tl.dot uses bf16 inputs with f32 accumulator (WGMMA on Hopper)
         scores = tl.dot(Q_tile, tl.trans(K_tile))  # (BLOCK_H, BLOCK_K) f32
         scores = scores * softmax_scale
@@ -190,14 +207,28 @@ def _sparse_attn_fwd_hp_kernel(
         l_i = l_i + tile_sum
         m_i = m_new
 
+        # Track the topk-only logsumexp (no sink). The rescale guard keeps
+        # rows whose running max is still -inf (no valid key seen yet) from
+        # producing NaN in ``exp(m_lse - m_lse_new)``.
+        tile_max_lse = tl.max(scores, axis=1)  # (BLOCK_H,)
+        m_lse_new = tl.maximum(m_lse, tile_max_lse)
+        rescale_lse = tl.where(m_lse_new == float("-inf"), 1.0, tl.exp(m_lse - m_lse_new))
+        l_lse = l_lse * rescale_lse
+        P_lse = tl.exp(scores - m_lse_new[:, None])
+        P_lse = tl.where(valid_mask[None, :], P_lse, 0.0)
+        l_lse = l_lse + tl.sum(P_lse, axis=1)
+        m_lse = m_lse_new
+
         # --- Gather V tile: (BLOCK_K, DV) ---
         V_tile = tl.load(
             KV_ptr + kv_bases[:, None] + dv_range[None, :] * stride_kv_d,
             mask=valid_mask[:, None] & (dv_range[None, :] < DV),
             other=0.0,
-        ).to(tl.bfloat16)  # (BLOCK_K, DV) bf16
+        ).to(
+            tl.bfloat16
+        )  # (BLOCK_K, DV) bf16
 
-        # --- Output GEMM: (BLOCK_H, BLOCK_K) @ (BLOCK_K, DV) → (BLOCK_H, DV) ---
+        # --- Output GEMM: (BLOCK_H, BLOCK_K) @ (BLOCK_K, DV) 鈫?(BLOCK_H, DV) ---
         acc += tl.dot(P_tile.to(tl.bfloat16), V_tile)  # WGMMA, f32 accumulator
 
         # --- Indexer LSE tracking (first INDEXER_TOPK positions) ---
@@ -206,9 +237,7 @@ def _sparse_attn_fwd_hp_kernel(
                 # Only count k-positions within [0, INDEXER_TOPK)
                 idx_valid = valid_mask & (k_range < INDEXER_TOPK)  # (BLOCK_K,)
                 idx_scores = tl.where(
-                    idx_valid[None, :],
-                    scores,
-                    float("-inf"),
+                    idx_valid[None, :], scores, float("-inf")
                 )  # (BLOCK_H, BLOCK_K)
                 idx_tile_max = tl.max(idx_scores, axis=1)  # (BLOCK_H,)
                 m_idx_new = tl.maximum(m_idx, idx_tile_max)
@@ -227,9 +256,10 @@ def _sparse_attn_fwd_hp_kernel(
     safe_l = tl.where(l_i > 0.0, l_i, 1.0)
     out_tile = acc / safe_l[:, None]  # (BLOCK_H, DV) f32
 
-    # LSE = m_i + log(l_i)
-    safe_l_for_log = tl.where(l_i > 0.0, l_i, 1.0)
-    lse_vals = m_i + tl.log(safe_l_for_log)  # (BLOCK_H,)
+    # Returned LSE = topk-only logsumexp (sink excluded, FlashMLA convention).
+    # Rows with no valid key keep m_lse == -inf -> LSE == -inf.
+    safe_l_for_log = tl.where(l_lse > 0.0, l_lse, 1.0)
+    lse_vals = m_lse + tl.log(safe_l_for_log)  # (BLOCK_H,)
 
     # =========================================================================
     # Store outputs
@@ -243,22 +273,13 @@ def _sparse_attn_fwd_hp_kernel(
 
     # Store LSE
     lse_base = pid_q * stride_lse_s
-    tl.store(
-        LSE_ptr + lse_base + h_range * stride_lse_h,
-        lse_vals,
-        mask=h_range < H,
-    )
+    tl.store(LSE_ptr + lse_base + h_range * stride_lse_h, lse_vals, mask=h_range < H)
 
     # Store indexer LSE
     if HAS_LSE_IDX:
         safe_l_idx = tl.where(l_idx > 0.0, l_idx, 1.0)
         lse_idx_vals = m_idx + tl.log(safe_l_idx)
-        tl.store(
-            LSE_IDX_ptr + lse_base + h_range * stride_lse_h,
-            lse_idx_vals,
-            mask=h_range < H,
-        )
-
+        tl.store(LSE_IDX_ptr + lse_base + h_range * stride_lse_h, lse_idx_vals, mask=h_range < H)
 
 
 # ---------------------------------------------------------------------------
@@ -279,7 +300,7 @@ def _triton_sparse_attn_fwd_hp(
 
     Exploits MLA shared-index structure: all H heads share the same TopK
     indices per query position. The KV gather is amortized across heads,
-    and both score and output accumulation use tl.dot() → WGMMA on Hopper.
+    and both score and output accumulation use tl.dot() 鈫?WGMMA on Hopper.
 
     This kernel is faster than cuBLAS BMM for all TopK values because:
     - Zero intermediate GMEM allocation (scores/P never materialize)
@@ -312,17 +333,32 @@ def _triton_sparse_attn_fwd_hp(
 
     # BLOCK_K, num_warps, num_stages chosen by @triton.autotune
     _sparse_attn_fwd_hp_kernel[grid](
-        q, kv, topk_idxs, out, lse,
+        q,
+        kv,
+        topk_idxs,
+        out,
+        lse,
         attn_sink if attn_sink is not None else torch.empty(0, device=q.device),
         lse_indexer if lse_indexer is not None else torch.empty(0, device=q.device),
         softmax_scale,
-        total_Sq, total_Skv, TopK, D, d_v,
+        total_Sq,
+        total_Skv,
+        TopK,
+        D,
+        d_v,
         H,
-        q.stride(0), q.stride(1), q.stride(2),
-        kv.stride(0), kv.stride(-1) if kv.dim() > 1 else 1,
-        topk_idxs.stride(0), topk_idxs.stride(2),
-        out.stride(0), out.stride(1), out.stride(2),
-        lse.stride(0), lse.stride(1),
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        kv.stride(0),
+        kv.stride(-1) if kv.dim() > 1 else 1,
+        topk_idxs.stride(0),
+        topk_idxs.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        lse.stride(0),
+        lse.stride(1),
         HAS_SINK=(attn_sink is not None),
         HAS_LSE_IDX=(indexer_topk > 0),
         INDEXER_TOPK=indexer_topk if indexer_topk > 0 else 0,
@@ -334,7 +370,6 @@ def _triton_sparse_attn_fwd_hp(
         lse_indexer = lse.clone()
 
     return out, lse, lse_indexer
-
 
 
 # ---------------------------------------------------------------------------
@@ -352,7 +387,7 @@ def triton_sparse_attn_fwd(
     topk_length: Optional[Tensor] = None,
     indexer_topk: int = 0,
 ) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
-    """Sparse attention forward — HP WGMMA kernel for training.
+    """Sparse attention forward 鈥?HP WGMMA kernel for training.
 
     Training always uses the head-parallel WGMMA kernel (shared indices,
     H>=16, dims aligned to 16). For non-HP scenarios (decoding, testing),
@@ -361,10 +396,10 @@ def triton_sparse_attn_fwd(
     Args:
         q: Query tensor ``(total_S_q, H, D)`` bf16.
         kv: KV tensor ``(total_S_kv, D_full)`` bf16 where D_full >= D.
-        topk_idxs: ``(total_S_q, H, TopK)`` int32 — global KV indices, -1 for invalid.
+        topk_idxs: ``(total_S_q, H, TopK)`` int32 鈥?global KV indices, -1 for invalid.
         softmax_scale: attention scale factor.
         d_v: value dimension (may differ from D for MLA).
-        attn_sink: ``(H,)`` f32 — per-head bias-only sink.
+        attn_sink: ``(H,)`` f32 鈥?per-head bias-only sink.
         topk_length: unused (kept for API compatibility).
         indexer_topk: if > 0, compute separate LSE for first positions.
 
@@ -375,13 +410,10 @@ def triton_sparse_attn_fwd(
     """
     D = q.shape[-1]
     H = topk_idxs.shape[1]
-    shared = (topk_idxs.stride(1) == 0)
+    shared = topk_idxs.stride(1) == 0
 
     # HP kernel conditions (always true in training)
-    hp_eligible = (
-        shared and H >= 16 and (H % 16 == 0)
-        and (D % 16 == 0) and (d_v % 16 == 0)
-    )
+    hp_eligible = shared and H >= 16 and (H % 16 == 0) and (D % 16 == 0) and (d_v % 16 == 0)
 
     if hp_eligible:
         return _triton_sparse_attn_fwd_hp(
@@ -390,6 +422,7 @@ def triton_sparse_attn_fwd(
 
     # Fallback to legacy (should not happen in training)
     import warnings
+
     warnings.warn(
         "triton_sparse_attn_fwd: HP kernel conditions not met "
         f"(shared={shared}, H={H}, D={D}, d_v={d_v}). "
@@ -397,16 +430,13 @@ def triton_sparse_attn_fwd(
         RuntimeWarning,
         stacklevel=2,
     )
-    from megatron.plugin.dsa_kernel.legacy.pytorch_sparse_attn import (
-        pytorch_sparse_attn_fwd,
-    )
-    return pytorch_sparse_attn_fwd(
-        q, kv, topk_idxs, softmax_scale, d_v, attn_sink, indexer_topk
-    )
+    from megatron.plugin.dsa_kernel.legacy.pytorch_sparse_attn import pytorch_sparse_attn_fwd
+
+    return pytorch_sparse_attn_fwd(q, kv, topk_idxs, softmax_scale, d_v, attn_sink, indexer_topk)
 
 
 # ---------------------------------------------------------------------------
-# Backward (delegated to legacy or BMM — training uses _hp_bmm_backward)
+# Backward (delegated to legacy or BMM 鈥?training uses _hp_bmm_backward)
 # ---------------------------------------------------------------------------
 
 
@@ -421,7 +451,7 @@ def triton_sparse_attn_bwd(
     d_v: int = 512,
     attn_sink: Optional[Tensor] = None,
 ) -> dict:
-    """Sparse attention backward — PyTorch BMM fallback.
+    """Sparse attention backward 鈥?PyTorch BMM fallback.
 
     In training, the HP forward path uses _hp_bmm_backward (cuBLAS bf16 BMM)
     instead of this function. This entry point exists for API compatibility
@@ -430,9 +460,8 @@ def triton_sparse_attn_bwd(
     Returns:
         dict with keys: ``dq``, ``dkv``, ``d_sink``.
     """
-    from megatron.plugin.dsa_kernel.legacy.pytorch_sparse_attn import (
-        pytorch_sparse_attn_bwd,
-    )
+    from megatron.plugin.dsa_kernel.legacy.pytorch_sparse_attn import pytorch_sparse_attn_bwd
+
     dq, dkv, d_sink = pytorch_sparse_attn_bwd(
         dO, q, kv, topk_idxs, out, lse, attn_sink, softmax_scale, d_v
     )
@@ -444,14 +473,13 @@ def triton_sparse_attn_bwd(
 # ---------------------------------------------------------------------------
 
 from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
-    fused_mask_scatter_add,
-    fused_exp_mask,
-    fused_dq,
     fused_dkv,
-    sorted_scatter_add,
+    fused_dq,
+    fused_exp_mask,
+    fused_mask_scatter_add,
     should_use_triton_bwd,
+    sorted_scatter_add,
 )
-
 
 # ---------------------------------------------------------------------------
 # Aliases for backward-compatible import names
@@ -459,3 +487,66 @@ from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
 
 triton_sparse_attn_forward = triton_sparse_attn_fwd
 triton_sparse_attn_backward = triton_sparse_attn_bwd
+
+
+def triton_csa_fwd_flash_mla(
+    q: Tensor,
+    kv: Tensor,
+    topk_idxs: Tensor,
+    softmax_scale: float,
+    d_v: int = 512,
+    attn_sink: Optional[Tensor] = None,
+    topk_length: Optional[Tensor] = None,
+    indexer_topk: int = 0,
+) -> Tuple[Tensor, Tensor, Optional[Tensor]]:
+    """FlashMLA-compatible sparse-attention forward backed by Triton.
+
+    Mirrors the ``_csa_fwd_flash_mla`` adapter contract in
+    ``csa_utils.fused_sparse_attention``:
+
+    * ``q (total_Sq, H, D)`` bf16, ``kv (total_Skv, D)`` bf16, 2-D
+      ``topk_idxs (total_Sq, TopK)`` with ``-1`` for invalid suffix slots
+      (compact mode; ``topk_length`` is accepted for API parity and ignored
+      because the ``-1`` suffix already encodes validity).
+    * Returns ``(out, lse, None)`` with ``out (total_Sq, H, d_v)`` bf16 and
+      ``lse (total_Sq, H)`` f32 **excluding** the sink (FlashMLA convention);
+      callers build the full teacher denominator via ``logaddexp(lse, sink)``.
+    * ``indexer_topk`` must be 0: the partial indexer LSE is not part of the
+      current fused loss (full-denominator semantics).
+    """
+    if indexer_topk != 0:
+        raise ValueError(
+            "triton_csa_fwd_flash_mla does not support indexer_topk > 0; "
+            "the fused loss uses the full-denominator teacher LSE."
+        )
+    D = q.shape[-1]
+    total_Sq, H = q.shape[:2]
+    TopK = topk_idxs.shape[-1]
+
+    # All heads share the same per-query TopK indices (MLA). A 2-D input is
+    # inherently shared; materialise a stride-0 head dim so downstream shared
+    # checks (``stride(1) == 0``) and legacy kernels see the same view.
+    if topk_idxs.ndim == 2:
+        topk_3d = torch.as_strided(
+            topk_idxs,
+            (topk_idxs.shape[0], 1, topk_idxs.shape[1]),
+            (topk_idxs.stride(0), 0, topk_idxs.stride(1)),
+        )
+        shared = True
+    else:
+        topk_3d = topk_idxs
+        shared = topk_3d.stride(1) == 0
+    hp_eligible = shared and H >= 16 and (H % 16 == 0) and (D % 16 == 0) and (d_v % 16 == 0)
+    if hp_eligible:
+        return _triton_sparse_attn_fwd_hp(
+            q, kv, topk_3d, softmax_scale, d_v, attn_sink, indexer_topk
+        )
+
+    from megatron.plugin.dsa_kernel.legacy.pytorch_sparse_attn import pytorch_sparse_attn_fwd
+
+    out, lse, lse_indexer = pytorch_sparse_attn_fwd(
+        q, kv, topk_3d, softmax_scale, d_v, attn_sink, indexer_topk
+    )
+    if lse_indexer is not None:
+        raise ValueError("legacy sparse-attn forward returned a partial indexer LSE")
+    return out, lse, None

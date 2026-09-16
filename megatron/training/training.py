@@ -2602,6 +2602,12 @@ def training_log(
             writer=writer,
             wandb_writer=wandb_writer,
             total_loss_dict=total_loss_dict,
+            num_layers=args.num_layers + (args.mtp_num_layers or 0),
+            num_indexer_layers=(
+                sum(ratio == 4 for ratio in args.csa_compress_ratios)
+                if args.experimental_attention_variant == "dsv4_hybrid" and not args.csa_dense_mode
+                else None
+            ),
         )
 
     # Dump memory snapshot and print metrics to stdout.

@@ -2026,6 +2026,8 @@ def get_batch_on_this_tp_rank(
     is_pipeline_first_stage: bool = False,
     is_pipeline_last_stage: bool = False,
     is_dualpipev: bool = False,  # FlagScale Modify
+    broadcast_all_pipeline_stages: bool = False,
+    preserve_packed_sequence_lengths: bool = False,
 ):
     """Broadcast batch tensors from TP rank 0 to all other ranks in the TP group.
 
@@ -2103,7 +2105,7 @@ def get_batch_on_this_tp_rank(
             )
             _broadcast(hybrid_cp_seq_length)
 
-        if pipeline_model_parallel_size == 1 or mtp_on_this_rank:
+        if pipeline_model_parallel_size == 1 or mtp_on_this_rank or broadcast_all_pipeline_stages:
             _broadcast(batch['tokens'])
             _broadcast(batch['labels'])
             _broadcast(batch['loss_mask'])
@@ -2111,7 +2113,7 @@ def get_batch_on_this_tp_rank(
             if is_sft or is_hybrid_cp:
                 _broadcast_cu_seqlens(batch['cu_seqlens'])
                 _broadcast(batch['max_seqlen'])
-                if cp_size > 1:
+                if cp_size > 1 or preserve_packed_sequence_lengths:
                     _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
             if create_attention_mask_in_dataloader:
                 _broadcast(batch['attention_mask'])
@@ -2133,7 +2135,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 _broadcast_cu_seqlens(batch['cu_seqlens'])
                 _broadcast(batch['max_seqlen'])
-                if cp_size > 1:
+                if cp_size > 1 or preserve_packed_sequence_lengths:
                     _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
             if create_attention_mask_in_dataloader:
                 _broadcast(batch['attention_mask'])
@@ -2147,7 +2149,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 _broadcast_cu_seqlens(batch['cu_seqlens'])
                 _broadcast(batch['max_seqlen'])
-                if cp_size > 1:
+                if cp_size > 1 or preserve_packed_sequence_lengths:
                     _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
             if create_attention_mask_in_dataloader:
                 _broadcast(batch['attention_mask'])
@@ -2162,7 +2164,7 @@ def get_batch_on_this_tp_rank(
 
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
-            if cp_size > 1:
+            if cp_size > 1 or preserve_packed_sequence_lengths:
                 _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
 
     else:
@@ -2220,7 +2222,7 @@ def get_batch_on_this_tp_rank(
             ), f"Expected cu_seqlens to be of type torch.int32, got {cu_seqlens.dtype}"
             return cu_seqlens
 
-        if pipeline_model_parallel_size == 1 or mtp_on_this_rank:
+        if pipeline_model_parallel_size == 1 or mtp_on_this_rank or broadcast_all_pipeline_stages:
             _broadcast(tokens)
             _broadcast(labels)
             _broadcast(loss_mask)
@@ -2228,7 +2230,7 @@ def get_batch_on_this_tp_rank(
             if is_sft or is_hybrid_cp:
                 cu_seqlens = _broadcast_cu_seqlens()
                 _broadcast(max_seqlen)
-                if cp_size > 1:
+                if cp_size > 1 or preserve_packed_sequence_lengths:
                     cu_seqlens_padded = _broadcast_cu_seqlens()
             if create_attention_mask_in_dataloader:
                 _broadcast(attention_mask)
@@ -2250,7 +2252,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 cu_seqlens = _broadcast_cu_seqlens()
                 _broadcast(max_seqlen)
-                if cp_size > 1:
+                if cp_size > 1 or preserve_packed_sequence_lengths:
                     cu_seqlens_padded = _broadcast_cu_seqlens()
             if create_attention_mask_in_dataloader:
                 _broadcast(attention_mask)
@@ -2264,7 +2266,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 cu_seqlens = _broadcast_cu_seqlens()
                 _broadcast(max_seqlen)
-                if cp_size > 1:
+                if cp_size > 1 or preserve_packed_sequence_lengths:
                     cu_seqlens_padded = _broadcast_cu_seqlens()
             if create_attention_mask_in_dataloader:
                 _broadcast(attention_mask)
@@ -2278,7 +2280,7 @@ def get_batch_on_this_tp_rank(
 
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
-            if cp_size > 1:
+            if cp_size > 1 or preserve_packed_sequence_lengths:
                 cu_seqlens_padded = _broadcast_cu_seqlens()
 
         batch = {
@@ -2420,6 +2422,7 @@ def get_batch_on_this_cp_rank(
     is_hybrid_cp: bool,
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     hybrid_cp_group_func: Optional[Callable[[int], torch.distributed.ProcessGroup]] = None,
+    cp_partition_mode: str = "zigzag",
 ):
     """Dispatch batch partitioning across context-parallel ranks.
 
@@ -2449,6 +2452,42 @@ def get_batch_on_this_cp_rank(
         Dict[str, Any]: The batch with sequence-dimension tensors partitioned
         to this CP rank.
     """
+
+    if cp_partition_mode == "contiguous":
+        actual_group = cp_group
+        if is_hybrid_cp:
+            if batch.get("local_cp_size") is None:
+                raise ValueError("local_cp_size is required for hybrid context parallel.")
+            local_size = int(batch["local_cp_size"].item())
+            if local_size == 1:
+                if cp_group is None or cp_group.size() != 1:
+                    raise ValueError(
+                        "Hybrid CP=1 currently requires a singleton static CP group."
+                    )
+            else:
+                actual_group = hybrid_cp_group_func(group_size=local_size)
+            batch["hybrid_cp_group"] = actual_group
+        cp_size = actual_group.size() if actual_group is not None else 1
+        if cp_size == 1:
+            return batch
+        if batch.get("cu_seqlens") is None:
+            raise ValueError("Contiguous DSv4 CP requires packed THD input (cu_seqlens).")
+        if batch.get("attention_mask") is not None:
+            raise ValueError("DSv4 packed CP builds its causal mask; omit the dense attention mask.")
+        cp_rank = actual_group.rank()
+        for key in ("tokens", "labels", "loss_mask", "position_ids"):
+            tensor = batch.get(key)
+            if tensor is None:
+                continue
+            if tensor.ndim != 2 or tensor.shape[0] != 1 or tensor.shape[1] % cp_size:
+                raise ValueError(
+                    f"DSv4 packed {key} must have shape [1, T] with T divisible by CP={cp_size}."
+                )
+            local_rows = tensor.shape[1] // cp_size
+            batch[key] = tensor.narrow(1, cp_rank * local_rows, local_rows).contiguous()
+        return batch
+    if cp_partition_mode != "zigzag":
+        raise ValueError(f"Unknown CP partition mode: {cp_partition_mode}")
 
     if batch.get("cu_seqlens") is not None:  # NOTE(asolergi-nv): SFT & HybridCP case
         if is_hybrid_cp:

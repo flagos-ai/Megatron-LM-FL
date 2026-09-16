@@ -30,7 +30,6 @@ from torch import Tensor
 import triton
 import triton.language as tl
 
-
 # ---------------------------------------------------------------------------
 # Triton Kernel: Fused mask + scatter_add
 # ---------------------------------------------------------------------------
@@ -38,24 +37,29 @@ import triton.language as tl
 
 @triton.jit
 def _fused_mask_scatter_kernel(
-    SRC_ptr, DST_ptr, IDX_ptr, VALID_ptr,
+    SRC_ptr,
+    DST_ptr,
+    IDX_ptr,
+    VALID_ptr,
     total_elements,
     d_kv: tl.constexpr,
-    stride_src_row, stride_src_d,
-    stride_dst_row, stride_dst_d,
+    stride_src_row,
+    stride_src_d,
+    stride_dst_row,
+    stride_dst_d,
     BLOCK_D: tl.constexpr,
 ):
     """One-pass fused masked_fill + scatter_add.
 
     For each element in flattened (total_Sq * TopK):
       - If valid: atomic_add src[element, :] to dst[idx[element], :]
-      - If invalid: skip (no need to zero — we never read it again)
+      - If invalid: skip (no need to zero 鈥?we never read it again)
 
     This eliminates the separate masked_fill_ pass (384MB read+write)
     and the separate scatter_add_ pass (384MB read + random write).
     Combined: single 384MB sequential read + small random writes to L2-resident dst.
 
-    Grid: (total_elements,) — one program per (query, topk_pos) pair.
+    Grid: (total_elements,) 鈥?one program per (query, topk_pos) pair.
     Each program handles one d_kv-dimensional row.
     """
     pid = tl.program_id(0)
@@ -74,30 +78,36 @@ def _fused_mask_scatter_kernel(
     d_range = tl.arange(0, BLOCK_D)
     mask = d_range < d_kv
 
-    src_row = tl.load(
-        SRC_ptr + pid * stride_src_row + d_range * stride_src_d,
-        mask=mask, other=0.0
-    )
+    src_row = tl.load(SRC_ptr + pid * stride_src_row + d_range * stride_src_d, mask=mask, other=0.0)
     tl.atomic_add(
-        DST_ptr + target_idx * stride_dst_row + d_range * stride_dst_d,
-        src_row,
-        mask=mask
+        DST_ptr + target_idx * stride_dst_row + d_range * stride_dst_d, src_row, mask=mask
     )
 
 
 # ---------------------------------------------------------------------------
-# Triton Kernel: Fused exp + mask (scores → P)
+# Triton Kernel: Fused exp + mask (scores 鈫?P)
 # ---------------------------------------------------------------------------
 
 
 @triton.jit
 def _fused_exp_mask_kernel(
-    SCORES_ptr, LSE_ptr, VALID_ptr, P_ptr,
-    total_Sq, np_, TopK,
-    stride_scores_s, stride_scores_h, stride_scores_k,
-    stride_lse_s, stride_lse_h,
-    stride_valid_s, stride_valid_k,
-    stride_p_s, stride_p_h, stride_p_k,
+    SCORES_ptr,
+    LSE_ptr,
+    VALID_ptr,
+    P_ptr,
+    total_Sq,
+    np_,
+    TopK,
+    stride_scores_s,
+    stride_scores_h,
+    stride_scores_k,
+    stride_lse_s,
+    stride_lse_h,
+    stride_valid_s,
+    stride_valid_k,
+    stride_p_s,
+    stride_p_h,
+    stride_p_k,
     BLOCK_K: tl.constexpr,
 ):
     """Fused: P = exp(scores - lse) * valid_mask.
@@ -107,7 +117,7 @@ def _fused_exp_mask_kernel(
       2. exp(...)
       3. masked_fill_(~valid, 0.0)
 
-    Grid: (total_Sq, np_) — one program per (query, head) pair.
+    Grid: (total_Sq, np_) 鈥?one program per (query, head) pair.
     Each program processes TopK values in tiles of BLOCK_K.
     """
     pid_s = tl.program_id(0)  # query index
@@ -125,7 +135,12 @@ def _fused_exp_mask_kernel(
         k_mask = k_offs < TopK
 
         # Load scores
-        score_ptrs = SCORES_ptr + pid_s * stride_scores_s + pid_h * stride_scores_h + k_offs * stride_scores_k
+        score_ptrs = (
+            SCORES_ptr
+            + pid_s * stride_scores_s
+            + pid_h * stride_scores_h
+            + k_offs * stride_scores_k
+        )
         scores = tl.load(score_ptrs, mask=k_mask, other=0.0)
 
         # Load validity
@@ -147,10 +162,7 @@ def _fused_exp_mask_kernel(
 
 
 def fused_mask_scatter_add(
-    dkv_gathered: Tensor,
-    flat_idxs: Tensor,
-    valid_flat: Tensor,
-    dkv_out: Tensor,
+    dkv_gathered: Tensor, flat_idxs: Tensor, valid_flat: Tensor, dkv_out: Tensor
 ) -> None:
     """Fused masked_fill + scatter_add in one pass.
 
@@ -161,10 +173,10 @@ def fused_mask_scatter_add(
     This does a single pass: read each row, skip if invalid, atomic_add if valid.
 
     Args:
-        dkv_gathered: (total_Sq, TopK, d_kv) f32 — gradient w.r.t. gathered KV.
-        flat_idxs: (total_Sq * TopK,) int64 — scatter target indices.
-        valid_flat: (total_Sq * TopK,) bool — validity mask.
-        dkv_out: (total_Skv, d_kv) f32 — output buffer (modified in-place).
+        dkv_gathered: (total_Sq, TopK, d_kv) f32 鈥?gradient w.r.t. gathered KV.
+        flat_idxs: (total_Sq * TopK,) int64 鈥?scatter target indices.
+        valid_flat: (total_Sq * TopK,) bool 鈥?validity mask.
+        dkv_out: (total_Skv, d_kv) f32 鈥?output buffer (modified in-place).
     """
     total_elements = flat_idxs.shape[0]
     d_kv = dkv_out.shape[-1]
@@ -177,11 +189,16 @@ def fused_mask_scatter_add(
 
     grid = (total_elements,)
     _fused_mask_scatter_kernel[grid](
-        src_flat, dkv_out, flat_idxs, valid_flat,
+        src_flat,
+        dkv_out,
+        flat_idxs,
+        valid_flat,
         total_elements,
         d_kv,
-        src_flat.stride(0), src_flat.stride(1),
-        dkv_out.stride(0), dkv_out.stride(1),
+        src_flat.stride(0),
+        src_flat.stride(1),
+        dkv_out.stride(0),
+        dkv_out.stride(1),
         BLOCK_D=BLOCK_D,
     )
 
@@ -191,38 +208,44 @@ def fused_mask_scatter_add(
 # ---------------------------------------------------------------------------
 
 
-def fused_exp_mask(
-    scores: Tensor,
-    lse: Tensor,
-    valid_shared: Tensor,
-    np_: int,
-) -> Tensor:
+def fused_exp_mask(scores: Tensor, lse: Tensor, valid_shared: Tensor, np_: int) -> Tensor:
     """Fused P = exp(scores - lse) * valid, replacing 3 separate ops.
 
     Args:
-        scores: (total_Sq, np_, TopK) f32 — raw attention scores (already scaled).
-        lse: (total_Sq, np_) f32 — log-sum-exp from forward.
-        valid_shared: (total_Sq, TopK) bool — validity mask (shared across heads).
+        scores: (total_Sq, np_, TopK) f32 鈥?raw attention scores (already scaled).
+        lse: (total_Sq, np_) f32 鈥?log-sum-exp from forward.
+        valid_shared: (total_Sq, TopK) bool 鈥?validity mask (shared across heads).
         np_: number of heads.
 
     Returns:
-        P: (total_Sq, np_, TopK) f32 — attention probabilities.
+        P: (total_Sq, np_, TopK) f32 鈥?attention probabilities.
     """
     total_Sq, _, TopK = scores.shape
 
     P = torch.empty_like(scores)
 
-    # valid_shared is (total_Sq, TopK) — shared across heads
+    # valid_shared is (total_Sq, TopK) 鈥?shared across heads
     BLOCK_K = triton.next_power_of_2(TopK) if TopK <= 1024 else 1024
 
     grid = (total_Sq, np_)
     _fused_exp_mask_kernel[grid](
-        scores, lse, valid_shared, P,
-        total_Sq, np_, TopK,
-        scores.stride(0), scores.stride(1), scores.stride(2),
-        lse.stride(0), lse.stride(1),
-        valid_shared.stride(0), valid_shared.stride(1),
-        P.stride(0), P.stride(1), P.stride(2),
+        scores,
+        lse,
+        valid_shared,
+        P,
+        total_Sq,
+        np_,
+        TopK,
+        scores.stride(0),
+        scores.stride(1),
+        scores.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        valid_shared.stride(0),
+        valid_shared.stride(1),
+        P.stride(0),
+        P.stride(1),
+        P.stride(2),
         BLOCK_K=BLOCK_K,
     )
     return P
@@ -238,25 +261,43 @@ def _fused_dq_configs():
     configs = []
     for block_k in [16, 32, 64]:
         for nw in [4, 8]:
-            configs.append(
-                triton.Config({"BLOCK_K": block_k}, num_warps=nw, num_stages=2)
-            )
+            configs.append(triton.Config({"BLOCK_K": block_k}, num_warps=nw, num_stages=2))
     return configs
 
 
 @triton.autotune(configs=_fused_dq_configs(), key=["TopK", "D", "H"])
 @triton.jit
 def _fused_dq_kernel(
-    SCORES_ptr, LSE_ptr, DI_ptr, DO_ptr, KV_GATHERED_ptr, VALID_ptr, DQ_ptr,
+    SCORES_ptr,
+    LSE_ptr,
+    DI_ptr,
+    DO_ptr,
+    KV_GATHERED_ptr,
+    VALID_ptr,
+    DQ_ptr,
     softmax_scale,
-    total_Sq, H: tl.constexpr, TopK: tl.constexpr, D: tl.constexpr,
-    stride_scores_s, stride_scores_h, stride_scores_k,
-    stride_lse_s, stride_lse_h,
-    stride_di_s, stride_di_h,
-    stride_do_s, stride_do_h, stride_do_d,
-    stride_kv_s, stride_kv_k, stride_kv_d,
-    stride_valid_s, stride_valid_k,
-    stride_dq_s, stride_dq_h, stride_dq_d,
+    total_Sq,
+    H: tl.constexpr,
+    TopK: tl.constexpr,
+    D: tl.constexpr,
+    stride_scores_s,
+    stride_scores_h,
+    stride_scores_k,
+    stride_lse_s,
+    stride_lse_h,
+    stride_di_s,
+    stride_di_h,
+    stride_do_s,
+    stride_do_h,
+    stride_do_d,
+    stride_kv_s,
+    stride_kv_k,
+    stride_kv_d,
+    stride_valid_s,
+    stride_valid_k,
+    stride_dq_s,
+    stride_dq_h,
+    stride_dq_d,
     BLOCK_H: tl.constexpr,
     BLOCK_K: tl.constexpr,
 ):
@@ -281,20 +322,23 @@ def _fused_dq_kernel(
 
     # Load LSE and Di for this query's head-block
     lse_vals = tl.load(
-        LSE_ptr + pid_q * stride_lse_s + h_range * stride_lse_h,
-        mask=h_range < H, other=0.0,
+        LSE_ptr + pid_q * stride_lse_s + h_range * stride_lse_h, mask=h_range < H, other=0.0
     )  # (BLOCK_H,) f32
     di_vals = tl.load(
-        DI_ptr + pid_q * stride_di_s + h_range * stride_di_h,
-        mask=h_range < H, other=0.0,
+        DI_ptr + pid_q * stride_di_s + h_range * stride_di_h, mask=h_range < H, other=0.0
     )  # (BLOCK_H,) f32
 
-    # Load dO tile: (BLOCK_H, D) — loaded once, reused across all TopK tiles
+    # Load dO tile: (BLOCK_H, D) 鈥?loaded once, reused across all TopK tiles
     dO_tile = tl.load(
-        DO_ptr + pid_q * stride_do_s + h_range[:, None] * stride_do_h + d_range[None, :] * stride_do_d,
+        DO_ptr
+        + pid_q * stride_do_s
+        + h_range[:, None] * stride_do_h
+        + d_range[None, :] * stride_do_d,
         mask=(h_range[:, None] < H) & (d_range[None, :] < D),
         other=0.0,
-    ).to(tl.bfloat16)  # (BLOCK_H, D) bf16 for tl.dot
+    ).to(
+        tl.bfloat16
+    )  # (BLOCK_H, D) bf16 for tl.dot
 
     # Accumulator for dQ
     dQ_acc = tl.zeros([BLOCK_H, D], dtype=tl.float32)
@@ -307,42 +351,53 @@ def _fused_dq_kernel(
         # Load validity (shared across heads)
         valid_tile = tl.load(
             VALID_ptr + pid_q * stride_valid_s + k_range * stride_valid_k,
-            mask=k_valid_mask, other=0,
-        ).to(tl.int1)  # (BLOCK_K,)
+            mask=k_valid_mask,
+            other=0,
+        ).to(
+            tl.int1
+        )  # (BLOCK_K,)
 
         # Load scores tile: (BLOCK_H, BLOCK_K)
         scores_tile = tl.load(
-            SCORES_ptr + pid_q * stride_scores_s + h_range[:, None] * stride_scores_h + k_range[None, :] * stride_scores_k,
+            SCORES_ptr
+            + pid_q * stride_scores_s
+            + h_range[:, None] * stride_scores_h
+            + k_range[None, :] * stride_scores_k,
             mask=(h_range[:, None] < H) & k_valid_mask[None, :],
             other=float("-inf"),
         )  # (BLOCK_H, BLOCK_K) f32
 
         # Load K tile (K==V): (BLOCK_K, D)
         K_tile = tl.load(
-            KV_GATHERED_ptr + pid_q * stride_kv_s + k_range[:, None] * stride_kv_k + d_range[None, :] * stride_kv_d,
+            KV_GATHERED_ptr
+            + pid_q * stride_kv_s
+            + k_range[:, None] * stride_kv_k
+            + d_range[None, :] * stride_kv_d,
             mask=k_valid_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.bfloat16)  # (BLOCK_K, D) bf16
+        ).to(
+            tl.bfloat16
+        )  # (BLOCK_K, D) bf16
 
-        # P = exp(scores - lse) * valid — in-register, never written to GMEM
+        # P = exp(scores - lse) * valid 鈥?in-register, never written to GMEM
         P_tile = tl.exp(scores_tile - lse_vals[:, None])  # (BLOCK_H, BLOCK_K)
-        P_tile = tl.where(
-            valid_tile[None, :] & k_valid_mask[None, :],
-            P_tile, 0.0,
-        )
+        P_tile = tl.where(valid_tile[None, :] & k_valid_mask[None, :], P_tile, 0.0)
 
-        # dov = dO @ K^T — WGMMA (since K==V)
+        # dov = dO @ K^T 鈥?WGMMA (since K==V)
         dov_tile = tl.dot(dO_tile, tl.trans(K_tile))  # (BLOCK_H, BLOCK_K) f32
 
-        # dS = P * (dov - Di) * scale — in-register
+        # dS = P * (dov - Di) * scale 鈥?in-register
         dS_tile = P_tile * (dov_tile - di_vals[:, None]) * softmax_scale
 
-        # dQ += dS @ K — WGMMA accumulation
+        # dQ += dS @ K 鈥?WGMMA accumulation
         dQ_acc += tl.dot(dS_tile.to(tl.bfloat16), K_tile)  # (BLOCK_H, D) f32
 
     # Store dQ
     tl.store(
-        DQ_ptr + pid_q * stride_dq_s + h_range[:, None] * stride_dq_h + d_range[None, :] * stride_dq_d,
+        DQ_ptr
+        + pid_q * stride_dq_s
+        + h_range[:, None] * stride_dq_h
+        + d_range[None, :] * stride_dq_d,
         dQ_acc,
         mask=(h_range[:, None] < H) & (d_range[None, :] < D),
     )
@@ -358,26 +413,47 @@ def _fused_dkv_configs():
     configs = []
     for block_h in [16, 32]:
         for nw in [4, 8]:
-            configs.append(
-                triton.Config({"BLOCK_H": block_h}, num_warps=nw, num_stages=2)
-            )
+            configs.append(triton.Config({"BLOCK_H": block_h}, num_warps=nw, num_stages=2))
     return configs
 
 
 @triton.autotune(configs=_fused_dkv_configs(), key=["TopK", "D", "H"])
 @triton.jit
 def _fused_dkv_kernel(
-    SCORES_ptr, LSE_ptr, DI_ptr, DO_ptr, Q_ptr, KV_GATHERED_ptr, VALID_ptr, DKV_ptr,
+    SCORES_ptr,
+    LSE_ptr,
+    DI_ptr,
+    DO_ptr,
+    Q_ptr,
+    KV_GATHERED_ptr,
+    VALID_ptr,
+    DKV_ptr,
     softmax_scale,
-    total_Sq, H: tl.constexpr, TopK: tl.constexpr, D: tl.constexpr,
-    stride_scores_s, stride_scores_h, stride_scores_k,
-    stride_lse_s, stride_lse_h,
-    stride_di_s, stride_di_h,
-    stride_do_s, stride_do_h, stride_do_d,
-    stride_q_s, stride_q_h, stride_q_d,
-    stride_kv_s, stride_kv_k, stride_kv_d,
-    stride_valid_s, stride_valid_k,
-    stride_dkv_s, stride_dkv_k, stride_dkv_d,
+    total_Sq,
+    H: tl.constexpr,
+    TopK: tl.constexpr,
+    D: tl.constexpr,
+    stride_scores_s,
+    stride_scores_h,
+    stride_scores_k,
+    stride_lse_s,
+    stride_lse_h,
+    stride_di_s,
+    stride_di_h,
+    stride_do_s,
+    stride_do_h,
+    stride_do_d,
+    stride_q_s,
+    stride_q_h,
+    stride_q_d,
+    stride_kv_s,
+    stride_kv_k,
+    stride_kv_d,
+    stride_valid_s,
+    stride_valid_k,
+    stride_dkv_s,
+    stride_dkv_k,
+    stride_dkv_d,
     BLOCK_K: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
@@ -402,16 +478,22 @@ def _fused_dkv_kernel(
 
     # Load validity (shared across heads)
     valid_tile = tl.load(
-        VALID_ptr + pid_q * stride_valid_s + k_range * stride_valid_k,
-        mask=k_valid_mask, other=0,
-    ).to(tl.int1)  # (BLOCK_K,)
+        VALID_ptr + pid_q * stride_valid_s + k_range * stride_valid_k, mask=k_valid_mask, other=0
+    ).to(
+        tl.int1
+    )  # (BLOCK_K,)
 
     # Load K tile once (K==V, reused across all head tiles)
     K_tile = tl.load(
-        KV_GATHERED_ptr + pid_q * stride_kv_s + k_range[:, None] * stride_kv_k + d_range[None, :] * stride_kv_d,
+        KV_GATHERED_ptr
+        + pid_q * stride_kv_s
+        + k_range[:, None] * stride_kv_k
+        + d_range[None, :] * stride_kv_d,
         mask=k_valid_mask[:, None] & (d_range[None, :] < D),
         other=0.0,
-    ).to(tl.bfloat16)  # (BLOCK_K, D) bf16
+    ).to(
+        tl.bfloat16
+    )  # (BLOCK_K, D) bf16
 
     # Accumulator for dKV: (BLOCK_K, D) f32
     dKV_acc = tl.zeros([BLOCK_K, D], dtype=tl.float32)
@@ -423,54 +505,67 @@ def _fused_dkv_kernel(
 
         # Load scores tile: (BLOCK_H, BLOCK_K) f32
         scores_tile = tl.load(
-            SCORES_ptr + pid_q * stride_scores_s + h_range[:, None] * stride_scores_h + k_range[None, :] * stride_scores_k,
+            SCORES_ptr
+            + pid_q * stride_scores_s
+            + h_range[:, None] * stride_scores_h
+            + k_range[None, :] * stride_scores_k,
             mask=h_mask[:, None] & k_valid_mask[None, :],
             other=float("-inf"),
         )
 
         # Load per-head scalars
         lse_tile = tl.load(
-            LSE_ptr + pid_q * stride_lse_s + h_range * stride_lse_h,
-            mask=h_mask, other=0.0,
+            LSE_ptr + pid_q * stride_lse_s + h_range * stride_lse_h, mask=h_mask, other=0.0
         )  # (BLOCK_H,)
         di_tile = tl.load(
-            DI_ptr + pid_q * stride_di_s + h_range * stride_di_h,
-            mask=h_mask, other=0.0,
+            DI_ptr + pid_q * stride_di_s + h_range * stride_di_h, mask=h_mask, other=0.0
         )  # (BLOCK_H,)
 
         # Load Q and dO tiles: (BLOCK_H, D)
         Q_tile = tl.load(
-            Q_ptr + pid_q * stride_q_s + h_range[:, None] * stride_q_h + d_range[None, :] * stride_q_d,
+            Q_ptr
+            + pid_q * stride_q_s
+            + h_range[:, None] * stride_q_h
+            + d_range[None, :] * stride_q_d,
             mask=h_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.bfloat16)  # (BLOCK_H, D) bf16
+        ).to(
+            tl.bfloat16
+        )  # (BLOCK_H, D) bf16
 
         dO_tile = tl.load(
-            DO_ptr + pid_q * stride_do_s + h_range[:, None] * stride_do_h + d_range[None, :] * stride_do_d,
+            DO_ptr
+            + pid_q * stride_do_s
+            + h_range[:, None] * stride_do_h
+            + d_range[None, :] * stride_do_d,
             mask=h_mask[:, None] & (d_range[None, :] < D),
             other=0.0,
-        ).to(tl.bfloat16)  # (BLOCK_H, D) bf16
+        ).to(
+            tl.bfloat16
+        )  # (BLOCK_H, D) bf16
 
-        # P = exp(scores - lse) * valid — in-register
+        # P = exp(scores - lse) * valid 鈥?in-register
         P_tile = tl.exp(scores_tile - lse_tile[:, None])  # (BLOCK_H, BLOCK_K)
         P_tile = tl.where(
-            valid_tile[None, :] & k_valid_mask[None, :] & h_mask[:, None],
-            P_tile, 0.0,
+            valid_tile[None, :] & k_valid_mask[None, :] & h_mask[:, None], P_tile, 0.0
         )
 
-        # dov = dO @ K^T — WGMMA (K==V)
+        # dov = dO @ K^T 鈥?WGMMA (K==V)
         dov_tile = tl.dot(dO_tile, tl.trans(K_tile))  # (BLOCK_H, BLOCK_K)
 
-        # dS = P * (dov - Di) * scale — in-register
+        # dS = P * (dov - Di) * scale 鈥?in-register
         dS_tile = P_tile * (dov_tile - di_tile[:, None]) * softmax_scale
 
         # dKV += dS^T @ Q + P^T @ dO (combined dK + dV for shared latent)
-        dKV_acc += tl.dot(tl.trans(dS_tile.to(tl.bfloat16)), Q_tile)   # (BLOCK_K, D)
-        dKV_acc += tl.dot(tl.trans(P_tile.to(tl.bfloat16)), dO_tile)   # (BLOCK_K, D)
+        dKV_acc += tl.dot(tl.trans(dS_tile.to(tl.bfloat16)), Q_tile)  # (BLOCK_K, D)
+        dKV_acc += tl.dot(tl.trans(P_tile.to(tl.bfloat16)), dO_tile)  # (BLOCK_K, D)
 
     # Store dKV_gathered
     tl.store(
-        DKV_ptr + pid_q * stride_dkv_s + k_range[:, None] * stride_dkv_k + d_range[None, :] * stride_dkv_d,
+        DKV_ptr
+        + pid_q * stride_dkv_s
+        + k_range[:, None] * stride_dkv_k
+        + d_range[None, :] * stride_dkv_d,
         dKV_acc,
         mask=k_valid_mask[:, None] & (d_range[None, :] < D),
     )
@@ -490,7 +585,7 @@ def fused_dq(
     valid_shared: Tensor,
     softmax_scale: float,
 ) -> Tensor:
-    """Fused dQ computation — eliminates P, dov, dS materialization.
+    """Fused dQ computation 鈥?eliminates P, dov, dS materialization.
 
     Replaces:
         P = exp(scores - lse) * valid          # (S, H, TopK) f32
@@ -502,12 +597,12 @@ def fused_dq(
     Saves ~768MB intermediate memory for typical training configs.
 
     Args:
-        scores: (total_Sq, H, TopK) f32 — pre-computed by cuBLAS BMM.
-        lse: (total_Sq, H) f32 — from forward pass.
-        Di: (total_Sq, H) f32 — sum(dO * O, dim=-1).
-        dO: (total_Sq, H, D) bf16 — upstream gradient.
-        kv_gathered: (total_Sq, TopK, D) bf16 — gathered KV (K==V).
-        valid_shared: (total_Sq, TopK) bool — validity mask.
+        scores: (total_Sq, H, TopK) f32 鈥?pre-computed by cuBLAS BMM.
+        lse: (total_Sq, H) f32 鈥?from forward pass.
+        Di: (total_Sq, H) f32 鈥?sum(dO * O, dim=-1).
+        dO: (total_Sq, H, D) bf16 鈥?upstream gradient.
+        kv_gathered: (total_Sq, TopK, D) bf16 鈥?gathered KV (K==V).
+        valid_shared: (total_Sq, TopK) bool 鈥?validity mask.
         softmax_scale: float.
 
     Returns:
@@ -522,16 +617,36 @@ def fused_dq(
     grid = (total_Sq, triton.cdiv(H, BLOCK_H))
 
     _fused_dq_kernel[grid](
-        scores, lse, Di, dO, kv_gathered, valid_shared, dQ,
+        scores,
+        lse,
+        Di,
+        dO,
+        kv_gathered,
+        valid_shared,
+        dQ,
         softmax_scale,
-        total_Sq, H, TopK, D,
-        scores.stride(0), scores.stride(1), scores.stride(2),
-        lse.stride(0), lse.stride(1),
-        Di.stride(0), Di.stride(1),
-        dO.stride(0), dO.stride(1), dO.stride(2),
-        kv_gathered.stride(0), kv_gathered.stride(1), kv_gathered.stride(2),
-        valid_shared.stride(0), valid_shared.stride(1),
-        dQ.stride(0), dQ.stride(1), dQ.stride(2),
+        total_Sq,
+        H,
+        TopK,
+        D,
+        scores.stride(0),
+        scores.stride(1),
+        scores.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        Di.stride(0),
+        Di.stride(1),
+        dO.stride(0),
+        dO.stride(1),
+        dO.stride(2),
+        kv_gathered.stride(0),
+        kv_gathered.stride(1),
+        kv_gathered.stride(2),
+        valid_shared.stride(0),
+        valid_shared.stride(1),
+        dQ.stride(0),
+        dQ.stride(1),
+        dQ.stride(2),
         BLOCK_H=BLOCK_H,
     )
     return dQ
@@ -563,13 +678,13 @@ def fused_dkv(
     With a single Triton kernel that keeps P, dov, dS in registers.
 
     Args:
-        scores: (total_Sq, H, TopK) f32 — pre-computed by cuBLAS BMM.
-        lse: (total_Sq, H) f32 — from forward pass.
-        Di: (total_Sq, H) f32 — sum(dO * O, dim=-1).
-        dO: (total_Sq, H, D) bf16 — upstream gradient.
-        query: (total_Sq, H, D) bf16 — original query.
-        kv_gathered: (total_Sq, TopK, D) bf16 — gathered KV (K==V).
-        valid_shared: (total_Sq, TopK) bool — validity mask.
+        scores: (total_Sq, H, TopK) f32 鈥?pre-computed by cuBLAS BMM.
+        lse: (total_Sq, H) f32 鈥?from forward pass.
+        Di: (total_Sq, H) f32 鈥?sum(dO * O, dim=-1).
+        dO: (total_Sq, H, D) bf16 鈥?upstream gradient.
+        query: (total_Sq, H, D) bf16 鈥?original query.
+        kv_gathered: (total_Sq, TopK, D) bf16 鈥?gathered KV (K==V).
+        valid_shared: (total_Sq, TopK) bool 鈥?validity mask.
         softmax_scale: float.
 
     Returns:
@@ -584,17 +699,40 @@ def fused_dkv(
     grid = (total_Sq, triton.cdiv(TopK, BLOCK_K))
 
     _fused_dkv_kernel[grid](
-        scores, lse, Di, dO, query, kv_gathered, valid_shared, dKV,
+        scores,
+        lse,
+        Di,
+        dO,
+        query,
+        kv_gathered,
+        valid_shared,
+        dKV,
         softmax_scale,
-        total_Sq, H, TopK, D,
-        scores.stride(0), scores.stride(1), scores.stride(2),
-        lse.stride(0), lse.stride(1),
-        Di.stride(0), Di.stride(1),
-        dO.stride(0), dO.stride(1), dO.stride(2),
-        query.stride(0), query.stride(1), query.stride(2),
-        kv_gathered.stride(0), kv_gathered.stride(1), kv_gathered.stride(2),
-        valid_shared.stride(0), valid_shared.stride(1),
-        dKV.stride(0), dKV.stride(1), dKV.stride(2),
+        total_Sq,
+        H,
+        TopK,
+        D,
+        scores.stride(0),
+        scores.stride(1),
+        scores.stride(2),
+        lse.stride(0),
+        lse.stride(1),
+        Di.stride(0),
+        Di.stride(1),
+        dO.stride(0),
+        dO.stride(1),
+        dO.stride(2),
+        query.stride(0),
+        query.stride(1),
+        query.stride(2),
+        kv_gathered.stride(0),
+        kv_gathered.stride(1),
+        kv_gathered.stride(2),
+        valid_shared.stride(0),
+        valid_shared.stride(1),
+        dKV.stride(0),
+        dKV.stride(1),
+        dKV.stride(2),
         BLOCK_K=BLOCK_K,
     )
     return dKV
@@ -607,12 +745,18 @@ def fused_dkv(
 
 @triton.jit
 def _sorted_scatter_add_kernel(
-    SRC_ptr, DST_ptr,
-    SORTED_TARGETS_ptr, SORT_PERM_ptr, RUN_STARTS_ptr, RUN_LENGTHS_ptr,
+    SRC_ptr,
+    DST_ptr,
+    SORTED_TARGETS_ptr,
+    SORT_PERM_ptr,
+    RUN_STARTS_ptr,
+    RUN_LENGTHS_ptr,
     num_runs,
     d_kv: tl.constexpr,
-    stride_src_row, stride_src_d,
-    stride_dst_row, stride_dst_d,
+    stride_src_row,
+    stride_src_d,
+    stride_dst_row,
+    stride_dst_d,
     BLOCK_D: tl.constexpr,
     MAX_RUN: tl.constexpr,
 ):
@@ -625,7 +769,7 @@ def _sorted_scatter_add_kernel(
 
     This reduces atomic contention by factor of avg_run_length.
 
-    Grid: (num_runs,) — one program per contiguous run of same target.
+    Grid: (num_runs,) 鈥?one program per contiguous run of same target.
     """
     pid = tl.program_id(0)
     if pid >= num_runs:
@@ -638,7 +782,7 @@ def _sorted_scatter_add_kernel(
     d_range = tl.arange(0, BLOCK_D)
     d_mask = d_range < d_kv
 
-    # Local accumulator — reduces all rows in this run
+    # Local accumulator 鈥?reduces all rows in this run
     acc = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     for i in range(MAX_RUN):
@@ -649,17 +793,12 @@ def _sorted_scatter_add_kernel(
         # Load source row; mask gates whether it contributes to accumulator
         load_mask = d_mask & (i < run_len)
         row = tl.load(
-            SRC_ptr + src_idx * stride_src_row + d_range * stride_src_d,
-            mask=load_mask, other=0.0,
+            SRC_ptr + src_idx * stride_src_row + d_range * stride_src_d, mask=load_mask, other=0.0
         )
         acc += row
 
     # Single atomic_add to destination
-    tl.atomic_add(
-        DST_ptr + target_idx * stride_dst_row + d_range * stride_dst_d,
-        acc,
-        mask=d_mask,
-    )
+    tl.atomic_add(DST_ptr + target_idx * stride_dst_row + d_range * stride_dst_d, acc, mask=d_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -668,11 +807,7 @@ def _sorted_scatter_add_kernel(
 
 
 def sorted_scatter_add(
-    dkv_gathered: Tensor,
-    flat_idxs: Tensor,
-    valid_flat: Tensor,
-    dkv_out: Tensor,
-    max_run: int = 64,
+    dkv_gathered: Tensor, flat_idxs: Tensor, valid_flat: Tensor, dkv_out: Tensor, max_run: int = 64
 ) -> None:
     """Scatter_add with sorted local reduction to minimize atomic contention.
 
@@ -684,11 +819,11 @@ def sorted_scatter_add(
     (small total_elements or low contention scenarios).
 
     Args:
-        dkv_gathered: (total_Sq, TopK, D) f32 — gradient w.r.t. gathered KV.
-        flat_idxs: (total_Sq * TopK,) int64 — scatter target indices.
-        valid_flat: (total_Sq * TopK,) bool — validity mask.
-        dkv_out: (total_Skv, D) f32 — output buffer (modified in-place).
-        max_run: int — max run length per program (compile-time bound).
+        dkv_gathered: (total_Sq, TopK, D) f32 鈥?gradient w.r.t. gathered KV.
+        flat_idxs: (total_Sq * TopK,) int64 鈥?scatter target indices.
+        valid_flat: (total_Sq * TopK,) bool 鈥?validity mask.
+        dkv_out: (total_Skv, D) f32 鈥?output buffer (modified in-place).
+        max_run: int 鈥?max run length per program (compile-time bound).
     """
     total_elements = flat_idxs.shape[0]
     d_kv = dkv_out.shape[-1]
@@ -702,32 +837,30 @@ def sorted_scatter_add(
 
     # Sort by target to group writes to same KV position
     sorted_targets, sort_order = valid_targets.sort(stable=True)
-    sort_perm = valid_indices[sort_order]  # maps sorted position → original flat index
+    sort_perm = valid_indices[sort_order]  # maps sorted position 鈫?original flat index
 
     # Find run boundaries (where target changes)
     n_valid = sorted_targets.shape[0]
     if n_valid <= 1:
-        # Single element — just use direct scatter
+        # Single element 鈥?just use direct scatter
         fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv_out)
         return
 
     changes = sorted_targets[1:] != sorted_targets[:-1]  # (n_valid-1,) bool
     run_boundary_indices = torch.where(changes)[0] + 1  # positions where new run starts
-    run_starts = torch.cat([
-        torch.zeros(1, dtype=torch.int64, device=flat_idxs.device),
-        run_boundary_indices,
-    ])
-    run_ends = torch.cat([
-        run_boundary_indices,
-        torch.tensor([n_valid], dtype=torch.int64, device=flat_idxs.device),
-    ])
+    run_starts = torch.cat(
+        [torch.zeros(1, dtype=torch.int64, device=flat_idxs.device), run_boundary_indices]
+    )
+    run_ends = torch.cat(
+        [run_boundary_indices, torch.tensor([n_valid], dtype=torch.int64, device=flat_idxs.device)]
+    )
     run_lengths = (run_ends - run_starts).to(torch.int32)
     num_runs = run_starts.shape[0]
 
     # Determine if sorting is beneficial (avg run > 1.5)
     avg_run = n_valid / num_runs
     if avg_run < 1.5:
-        # Low contention — sorting overhead not worth it, use direct scatter
+        # Low contention 鈥?sorting overhead not worth it, use direct scatter
         fused_mask_scatter_add(dkv_gathered, flat_idxs, valid_flat, dkv_out)
         return
 
@@ -735,7 +868,7 @@ def sorted_scatter_add(
     src_flat = dkv_gathered.reshape(-1, d_kv).contiguous()
     BLOCK_D = triton.next_power_of_2(d_kv)
 
-    # Check if any run exceeds max_run — if so, fall back to direct scatter
+    # Check if any run exceeds max_run 鈥?if so, fall back to direct scatter
     # (the kernel loop is bounded by MAX_RUN and would silently drop elements)
     actual_max_run = int(run_lengths.max().item())
     if actual_max_run > max_run:
@@ -748,12 +881,18 @@ def sorted_scatter_add(
 
     grid = (num_runs,)
     _sorted_scatter_add_kernel[grid](
-        src_flat, dkv_out,
-        sorted_targets, sort_perm, run_starts, run_lengths.to(torch.int64),
+        src_flat,
+        dkv_out,
+        sorted_targets,
+        sort_perm,
+        run_starts,
+        run_lengths.to(torch.int64),
         num_runs,
         d_kv,
-        src_flat.stride(0), src_flat.stride(1),
-        dkv_out.stride(0), dkv_out.stride(1),
+        src_flat.stride(0),
+        src_flat.stride(1),
+        dkv_out.stride(0),
+        dkv_out.stride(1),
         BLOCK_D=BLOCK_D,
         MAX_RUN=effective_max_run,
     )
@@ -766,7 +905,9 @@ def sorted_scatter_add(
 _TRITON_BWD_MEMORY_THRESHOLD = 64 * 1024 * 1024  # 64 MB
 
 
-def should_use_triton_bwd(total_Sq: int, TopK: int, d_kv: int, H: int, shared_indices: bool) -> bool:
+def should_use_triton_bwd(
+    total_Sq: int, TopK: int, d_kv: int, H: int, shared_indices: bool
+) -> bool:
     """Determine whether to use optimized backward path.
 
     The optimized path uses bf16 BMM + Triton fused epilogues.
