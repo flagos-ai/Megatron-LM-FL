@@ -725,6 +725,18 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             # self attention module.
             hidden_states = attention_output_with_bias[0]
         else:
+            # Apply loop residual scale to attention output before residual add
+            if getattr(self, '_loop_residual_scale', None) is not None:
+                if attention_output_with_bias[1] is not None:
+                    warnings.warn(
+                        "loop_residual_scale only scales the attention output, not the bias. "
+                        "This may cause incorrect scaling when bias is present.",
+                        stacklevel=2,
+                    )
+                attention_output_with_bias = (
+                    attention_output_with_bias[0] * self._loop_residual_scale,
+                    attention_output_with_bias[1],
+                )
             with self.bias_dropout_add_exec_handler():
                 hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                     attention_output_with_bias, residual, self.hidden_dropout
@@ -783,6 +795,10 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
+        # Extract loop_residual_scale before passing to sub-methods.
+        # Store on self temporarily so _forward_attention and _forward_mlp can read it.
+        loop_residual_scale = kwargs.pop("loop_residual_scale", None)
+        self._loop_residual_scale = loop_residual_scale
         hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,
@@ -790,6 +806,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             padding_mask=kwargs.get("padding_mask", None),
             input_ids=kwargs.get("input_ids", None),
         )
+        self._loop_residual_scale = None
         return output, context
 
     def _forward_pre_mlp_layernorm(self, hidden_states: Tensor):
@@ -968,6 +985,18 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             # MLP module.
             hidden_states = mlp_output_with_bias[0]
         else:
+            # Apply loop residual scale to MLP output before residual add
+            if getattr(self, '_loop_residual_scale', None) is not None:
+                if mlp_output_with_bias[1] is not None:
+                    warnings.warn(
+                        "loop_residual_scale only scales the MLP output, not the bias. "
+                        "This may cause incorrect scaling when bias is present.",
+                        stacklevel=2,
+                    )
+                mlp_output_with_bias = (
+                    mlp_output_with_bias[0] * self._loop_residual_scale,
+                    mlp_output_with_bias[1],
+                )
             with self.bias_dropout_add_exec_handler():
                 hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
                     mlp_output_with_bias, residual, self.hidden_dropout
@@ -1531,6 +1560,9 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         """Forward pass with MHC recompute manager support."""
         kwargs.pop("dynamic_inference_decode_only", None)
         mhc_recompute_manager = kwargs.pop("mhc_recompute_manager", None)
+        # Pop loop_residual_scale to prevent it leaking into _forward_attention kwargs.
+        # HyperConnectionTransformerLayer does not use loop residual scaling.
+        kwargs.pop("loop_residual_scale", None)
 
         hidden_states, context = self._forward_attention(
             *args, mhc_recompute_manager=mhc_recompute_manager, **kwargs

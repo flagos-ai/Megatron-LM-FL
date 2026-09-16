@@ -90,6 +90,26 @@ class TransformerConfig(ModelParallelConfig):
     """Number of transformer layers on last pipeline stage.
     None implies equal layer division across PP ranks."""
 
+    # Loop Transformer (SMELT-style) configuration
+    loop_start_layer: Optional[int] = None
+    """Global layer index (0-based) where the loop span begins (inclusive).
+    None means looping is disabled. When set, loop_end_layer must also be set.
+    The looped span [loop_start_layer, loop_end_layer) will be executed
+    num_loop_iterations times during forward, while only storing one copy of weights."""
+
+    loop_end_layer: Optional[int] = None
+    """Global layer index (0-based) where the loop span ends (exclusive).
+    The number of physical layers in the loop = loop_end_layer - loop_start_layer."""
+
+    num_loop_iterations: int = 2
+    """Number of times the looped layers are executed per forward pass.
+    Effective depth = prelude + loop_span * num_loop_iterations + coda.
+    Only used when loop_start_layer is not None."""
+
+    loop_residual_scale: Optional[float] = None
+    """Scale factor applied to sublayer outputs (attention & MLP) within the looped span.
+    SMELT uses 1/num_loop_iterations for all iterations. None means no scaling."""
+
     pipeline_model_parallel_layout: Optional[Union[str, list, PipelineParallelLayerLayout]] = None
     """Custom definition of the pipeline parallel partitioning.
     Support type:
@@ -1262,6 +1282,29 @@ class TransformerConfig(ModelParallelConfig):
         details.
         """
         super().__post_init__()
+
+        # Validate Loop Transformer configuration
+        if (self.loop_start_layer is None) != (self.loop_end_layer is None):
+            raise ValueError(
+                "loop_start_layer and loop_end_layer must both be None or both be set. "
+                f"Got loop_start_layer={self.loop_start_layer}, "
+                f"loop_end_layer={self.loop_end_layer}."
+            )
+        if self.loop_start_layer is not None:
+            if not (0 <= self.loop_start_layer < self.loop_end_layer <= self.num_layers):
+                raise ValueError(
+                    f"Loop range must satisfy 0 <= loop_start_layer < loop_end_layer <= num_layers. "
+                    f"Got loop_start_layer={self.loop_start_layer}, "
+                    f"loop_end_layer={self.loop_end_layer}, num_layers={self.num_layers}."
+                )
+            if self.num_loop_iterations < 2:
+                raise ValueError(
+                    f"num_loop_iterations must be >= 2, got {self.num_loop_iterations}."
+                )
+            if self.loop_residual_scale is not None and self.loop_residual_scale <= 0:
+                raise ValueError(
+                    f"loop_residual_scale must be positive, got {self.loop_residual_scale}."
+                )
 
         # When fp32 residual connections are enabled, pipeline parallel communication must
         # use fp32 to match the dtype of the residual stream between pipeline stages.
