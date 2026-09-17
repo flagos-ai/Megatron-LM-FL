@@ -140,6 +140,20 @@ class Router(ABC, MegatronModule):
         """Set the layer number for the router."""
         self.layer_number = layer_number
 
+    def _is_in_loop_range(self) -> bool:
+        """Check if this router's layer falls within the loop transformer range.
+
+        layer_number is 1-based; loop_start_layer / loop_end_layer are 0-based
+        with [start, end) semantics.  Convert to 0-based for a straightforward
+        comparison.
+        """
+        if self.config.loop_start_layer is None:
+            return False
+        layer_idx_0based = self.layer_number - 1
+        return (
+            self.config.loop_start_layer <= layer_idx_0based < self.config.loop_end_layer
+        )
+
 
 class TopKRouter(Router):
     """Route each token to the top-k experts.
@@ -507,9 +521,16 @@ class TopKRouter(Router):
         else:
             layer_number = self.layer_number
 
+        # For loop transformer: each looped MoE layer is executed num_loop_iterations
+        # times per forward pass, each writing aux_loss to the same tracker slot via +=.
+        # Pre-divide by num_loop_iterations so the accumulated value equals the average.
+        tracker_loss = aux_loss / aux_loss_coeff
+        if self._is_in_loop_range():
+            tracker_loss = tracker_loss / self.config.num_loop_iterations
+
         save_to_aux_losses_tracker(
             aux_loss_name,
-            aux_loss / aux_loss_coeff,
+            tracker_loss,
             layer_number,
             num_layers,
             reduce_group=reduce_group,
@@ -580,8 +601,12 @@ class TopKRouter(Router):
             else:
                 layer_number = self.layer_number
 
+            tracker_z_loss = z_loss / moe_z_loss_coeff
+            if self._is_in_loop_range():
+                tracker_z_loss = tracker_z_loss / self.config.num_loop_iterations
+
             save_to_aux_losses_tracker(
-                "z_loss", z_loss / moe_z_loss_coeff, layer_number, num_layers
+                "z_loss", tracker_z_loss, layer_number, num_layers
             )
         return logits
 

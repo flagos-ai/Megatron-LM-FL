@@ -637,19 +637,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         else None
                     )
 
-                    # Update MoE layer_number for loop iterations
-                    if (
-                        self._loop_enabled
-                        and loop_iter > 0
-                        and getattr(layer, 'is_moe_layer', False)
-                    ):
-                        loop_span = (
-                            self.config.loop_end_layer - self.config.loop_start_layer
-                        )
-                        layer.mlp.set_layer_number(
-                            layer.layer_number + loop_span * loop_iter
-                        )
-
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
                         if self.config.fp8:
@@ -680,14 +667,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             input_ids=input_ids,
                             loop_residual_scale=loop_residual_scale,
                         )
-
-                    # Restore original MoE layer_number
-                    if (
-                        self._loop_enabled
-                        and loop_iter > 0
-                        and getattr(layer, 'is_moe_layer', False)
-                    ):
-                        layer.mlp.set_layer_number(layer.layer_number)
 
                 return hidden_states, context
 
@@ -1077,21 +1056,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         else None
                     )
 
-                    # Update MoE layer_number for different loop iterations so that
-                    # hash routing and load-balancing see distinct "logical" layers.
-                    if (
-                        self._loop_enabled
-                        and loop_iter > 0
-                        and getattr(layer, 'is_moe_layer', False)
-                    ):
-                        loop_span = (
-                            self.config.loop_end_layer - self.config.loop_start_layer
-                        )
-                        effective_layer_number = (
-                            layer.layer_number + loop_span * loop_iter
-                        )
-                        layer.mlp.set_layer_number(effective_layer_number)
-
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
                         if self.config.fp8:
@@ -1140,14 +1104,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             input_ids=input_ids,
                             loop_residual_scale=loop_residual_scale,
                         )
-
-                    # Restore original MoE layer_number after loop iteration
-                    if (
-                        self._loop_enabled
-                        and loop_iter > 0
-                        and getattr(layer, 'is_moe_layer', False)
-                    ):
-                        layer.mlp.set_layer_number(layer.layer_number)
 
                     self._finalize_mhc_recompute_layer(
                         mhc_manager=mhc_manager,
