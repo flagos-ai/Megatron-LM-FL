@@ -41,9 +41,48 @@ from megatron.core.transformer.utils import (
 from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
 
 try:
-    from fla.modules.convolution import causal_conv1d
     from fla.modules.l2norm import l2norm
     from fla.ops.gated_delta_rule import chunk_gated_delta_rule
+
+    # NOTE(metax): upstream fla exposes causal_conv1d via fla.modules.convolution.
+    # The MetaX fla port (0.1+metax) names it causal_conv1d_fn there, with an
+    # older positional signature returning a single tensor (no initial_state /
+    # output_final_state / cu_seqlens keyword support). Adapt with a wrapper.
+    try:
+        from fla.modules.convolution import causal_conv1d
+    except ImportError:
+        from fla.modules.convolution import causal_conv1d_fn as _causal_conv1d_fn
+
+        def causal_conv1d(
+            x,
+            weight,
+            bias=None,
+            activation=None,
+            initial_state=None,
+            output_final_state=False,
+            cu_seqlens=None,
+        ):
+            if initial_state is not None or output_final_state:
+                raise NotImplementedError(
+                    "MetaX fla causal_conv1d_fn does not support initial/final state"
+                )
+            if cu_seqlens is not None:
+                b, s, d = x.shape
+                seg_lens = (cu_seqlens[1:] - cu_seqlens[:-1]).to(torch.int32)
+                seq_idx = torch.repeat_interleave(
+                    torch.arange(seg_lens.numel(), device=x.device, dtype=torch.int32),
+                    seg_lens,
+                ).unsqueeze(0)
+                x = x.reshape(1, -1, d).transpose(1, 2)
+                out = _causal_conv1d_fn(
+                    x=x, weight=weight, bias=bias, seq_idx=seq_idx, activation=activation
+                )
+                out = out.transpose(1, 2).reshape(b, s, d)
+            else:
+                out = _causal_conv1d_fn(
+                    x=x.transpose(1, 2), weight=weight, bias=bias, activation=activation
+                ).transpose(1, 2)
+            return out, None
 
     HAVE_FLA = True
 except ImportError:

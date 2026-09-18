@@ -59,3 +59,10 @@ def register_platforms() -> None:
     if platform_kunlunxin.is_available():
         PLATFORMS["kunlunxin"] = platform_kunlunxin
         print(f"Megatron-LM-FL Platform: kunlunxin Registered")
+
+    # Register Metax Platform
+    from .platform_metax import PlatformMetax
+    platform_metax = PlatformMetax()
+    if platform_metax.is_available():
+        PLATFORMS["metax"] = platform_metax
+        print(f"Megatron-LM-FL Platform: metax Registered")
