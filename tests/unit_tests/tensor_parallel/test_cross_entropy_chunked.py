@@ -9,11 +9,13 @@
 #   pytest -xvs tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py
 
 
-import sys
 import os
+import sys
 import time
+import weakref
 from typing import Tuple
 
+import pytest
 import torch
 
 # Add project root to path so 'tests' package is importable
@@ -21,15 +23,20 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
 from megatron.core import parallel_state
 from megatron.core.tensor_parallel.cross_entropy import (
+    _VocabParallelCrossEntropyChunked,
     vocab_parallel_cross_entropy,
     vocab_parallel_cross_entropy_chunked,
 )
-from tests.unit_tests.test_utilities import Utils
+from megatron.plugin.platform import get_platform
+from tests.unit_tests.test_utilities import Utils, get_current_device
+
+cur_platform = get_platform()
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _generate_inputs(
     seq_len: int,
@@ -45,26 +52,22 @@ def _generate_inputs(
         logits: [seq_len, batch_size, vocab_size / tp_size], dtype
         target: [seq_len, batch_size], int64
     """
-    device = torch.cuda.current_device()
-    # Use TP rank (not global rank) to slice vocab correctly when DP > 1
+    # Use TP rank so data-parallel replicas generate the same vocab shard.
     tp_rank = parallel_state.get_tensor_model_parallel_rank()
-
-    # Use same seed on all ranks to generate consistent full logits,
-    # then slice by TP rank to simulate TP partition.
-    gen = torch.Generator(device="cpu").manual_seed(seed)
-    full_logits = torch.randn(
-        seq_len, batch_size, vocab_size, generator=gen, dtype=dtype
-    )
-    target = torch.randint(
-        0, vocab_size, (seq_len, batch_size), generator=gen
-    )
-
-    # Slice vocab dimension for this TP rank
     partition_size = vocab_size // tp_size
-    start = tp_rank * partition_size
-    end = start + partition_size
-    logits = full_logits[:, :, start:end].contiguous().cuda()
-    target = target.cuda()
+
+    # Both implementations consume this same shard. Generating only the local
+    # partition avoids replicating the full vocabulary tensor on every CPU rank.
+    logits_gen = torch.Generator(device="cpu").manual_seed(seed + tp_rank)
+    logits = torch.randn(
+        seq_len, batch_size, partition_size, generator=logits_gen, dtype=dtype
+    ).to(get_current_device())
+
+    # Targets must match across TP ranks regardless of their logits RNG state.
+    target_gen = torch.Generator(device="cpu").manual_seed(seed)
+    target = torch.randint(0, vocab_size, (seq_len, batch_size), generator=target_gen).to(
+        get_current_device()
+    )
 
     return logits, target
 
@@ -88,9 +91,9 @@ def _measure_peak_memory(
             result.sum().backward()
 
     # Reset peak stats
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
-    mem_before = torch.cuda.memory_allocated()
+    cur_platform.synchronize()
+    cur_platform.reset_peak_memory_stats()
+    mem_before = cur_platform.memory_allocated()
 
     # Forward
     result = fn(*args, **kwargs)
@@ -98,8 +101,8 @@ def _measure_peak_memory(
     if result.requires_grad:
         result.sum().backward()
 
-    torch.cuda.synchronize()
-    peak_memory = torch.cuda.max_memory_allocated() - mem_before
+    cur_platform.synchronize()
+    peak_memory = cur_platform.max_memory_allocated() - mem_before
 
     return result, peak_memory / (1024 * 1024)  # Convert to MiB
 
@@ -123,14 +126,14 @@ def _measure_time(
         if result.requires_grad:
             result.sum().backward()
 
-    torch.cuda.synchronize()
+    cur_platform.synchronize()
     times = []
     for _ in range(repeats):
         start = time.perf_counter()
         result = fn(*args, **kwargs)
         if result.requires_grad:
             result.sum().backward()
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         times.append((time.perf_counter() - start) * 1000)
 
     avg_time_ms = sum(times) / len(times)
@@ -141,6 +144,43 @@ def _measure_time(
 # Test 1: Correctness — chunked output matches baseline
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("label_smoothing", [0.0, 0.1])
+def test_chunked_backward_releases_previous_chunk(monkeypatch, label_smoothing):
+    """Backward must release each fp32 chunk before recomputing the next one."""
+    Utils.initialize_model_parallel(tensor_model_parallel_size=4)
+    try:
+        logits, target = _generate_inputs(5, 1, 32, 4)
+        logits.requires_grad_(True)
+        loss = vocab_parallel_cross_entropy_chunked(
+            logits, target, label_smoothing=label_smoothing, chunk_size=2
+        )
+        run_chunk = _VocabParallelCrossEntropyChunked._run_chunk_forward
+        softmax_refs = []
+
+        def checked_run_chunk(*args, **kwargs):
+            assert all(ref() is None for ref in softmax_refs), (
+                "Previous backward chunk is still alive during recomputation"
+            )
+            result = run_chunk(*args, **kwargs)
+            softmax_refs.append(weakref.ref(result[0]))
+            return result
+
+        # Only instrument backward recomputation, not the original forward.
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                _VocabParallelCrossEntropyChunked,
+                "_run_chunk_forward",
+                staticmethod(checked_run_chunk),
+            )
+            loss.sum().backward()
+
+        assert len(softmax_refs) == 3
+        assert all(ref() is None for ref in softmax_refs)
+        assert logits.grad is not None
+    finally:
+        Utils.destroy_model_parallel()
+
+
 def test_chunked_cross_entropy_correctness():
     """Verify chunked cross entropy produces identical results to baseline."""
     tp_size = 4
@@ -148,7 +188,7 @@ def test_chunked_cross_entropy_correctness():
 
     seq_len = 8192
     batch_size = 1
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
 
     logits, target = _generate_inputs(seq_len, batch_size, vocab_size, tp_size)
 
@@ -203,7 +243,7 @@ def test_chunked_cross_entropy_label_smoothing():
 
     seq_len = 4096
     batch_size = 2
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
     label_smoothing = 0.1
 
     logits, target = _generate_inputs(seq_len, batch_size, vocab_size, tp_size)
@@ -255,7 +295,7 @@ def test_chunked_cross_entropy_various_chunk_sizes():
 
     seq_len = 8192
     batch_size = 1
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
     chunk_sizes = [1024, 2048, 4096, 8192]  # Including chunk == seq_len
 
     logits, target = _generate_inputs(seq_len, batch_size, vocab_size, tp_size)
@@ -433,7 +473,7 @@ def test_chunked_cross_entropy_edge_cases():
         (1, 4096, "seq_len == 1"),
     ]
 
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
     batch_size = 1
 
     rank = torch.distributed.get_rank()

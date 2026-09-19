@@ -2080,12 +2080,13 @@ def get_batch_on_this_tp_rank(
         if item is not None:
             torch.distributed.broadcast(item, broadcast_src_rank, group=broadcast_group)
 
+    device = cur_platform.device(cur_platform.current_device())
+
     if tp_rank == 0:
 
         def _broadcast_cu_seqlens(cu_seqlens):
-            dev = torch.cuda.current_device()
             n = 0 if cu_seqlens is None else int(cu_seqlens.numel())
-            n_tensor = torch.tensor(n, dtype=torch.int64, device=dev)
+            n_tensor = torch.tensor(n, dtype=torch.int64, device=device)
             _broadcast(n_tensor)
 
             if n > 0:
@@ -2099,7 +2100,7 @@ def get_batch_on_this_tp_rank(
 
         if is_hybrid_cp:
             hybrid_cp_seq_length = torch.tensor(
-                batch['tokens'].shape[1], dtype=torch.int32, device=torch.cuda.current_device()
+                batch['tokens'].shape[1], dtype=torch.int32, device=device
             )
             _broadcast(hybrid_cp_seq_length)
 
@@ -2168,17 +2169,17 @@ def get_batch_on_this_tp_rank(
     else:
         if is_hybrid_cp:
             hybrid_cp_seq_length = torch.tensor(
-                0, dtype=torch.int32, device=torch.cuda.current_device()
+                0, dtype=torch.int32, device=device
             )
             _broadcast(hybrid_cp_seq_length)
             shape = (micro_batch_size, hybrid_cp_seq_length.item())
         else:
             shape = (micro_batch_size, seq_length)
 
-        tokens = torch.empty(shape, dtype=torch.int64, device=torch.cuda.current_device())
-        labels = torch.empty(shape, dtype=torch.int64, device=torch.cuda.current_device())
-        loss_mask = torch.empty(shape, dtype=torch.float32, device=torch.cuda.current_device())
-        position_ids = torch.empty(shape, dtype=torch.int64, device=torch.cuda.current_device())
+        tokens = torch.empty(shape, dtype=torch.int64, device=device)
+        labels = torch.empty(shape, dtype=torch.int64, device=device)
+        loss_mask = torch.empty(shape, dtype=torch.float32, device=device)
+        position_ids = torch.empty(shape, dtype=torch.int64, device=device)
         cu_seqlens = None
         cu_seqlens_padded = None
         max_seqlen = None
@@ -2186,21 +2187,19 @@ def get_batch_on_this_tp_rank(
         local_cp_size = None
 
         if is_sft or is_hybrid_cp:
-            max_seqlen = torch.empty(1, dtype=torch.int32, device=torch.cuda.current_device())
+            max_seqlen = torch.empty(1, dtype=torch.int32, device=device)
         if create_attention_mask_in_dataloader:
             attention_mask = torch.empty(
                 (micro_batch_size, 1, seq_length, seq_length),
                 dtype=torch.bool,
-                device=torch.cuda.current_device(),
+                device=device,
             )
 
         if is_hybrid_cp:
-            local_cp_size = torch.empty(1, dtype=torch.int32, device=torch.cuda.current_device())
+            local_cp_size = torch.empty(1, dtype=torch.int32, device=device)
 
         def _broadcast_cu_seqlens():
-            dev = torch.cuda.current_device()
-
-            n = torch.empty((), dtype=torch.int64, device=dev)
+            n = torch.empty((), dtype=torch.int64, device=device)
             _broadcast(n)
             n = int(n.item())
 
@@ -2210,7 +2209,7 @@ def get_batch_on_this_tp_rank(
             # cu_seqlens / cu_seqlens_padded carry the dataloader's batch dim
             # throughout (mbs=1 for packed sequences). Allocate (1, n) so the
             # shape on receiving ranks matches the (1, n) tensor TP rank 0 sent.
-            cu_seqlens = torch.empty((1, n), dtype=torch.int32, device=dev)
+            cu_seqlens = torch.empty((1, n), dtype=torch.int32, device=device)
             _broadcast(cu_seqlens)
             assert (
                 cu_seqlens.dim() == 2 and cu_seqlens.shape[0] == 1

@@ -25,6 +25,8 @@ from torch.distributed.checkpoint.metadata import (
 from torch.distributed.checkpoint.planner import TensorWriteData, WriteItem, WriteItemType
 from torch.distributed.tensor.placement_types import Replicate, Shard, _StridedShard
 
+from megatron.plugin.decorators import overridable
+
 
 def gather_and_compute_chunk_metadata(dtensor: DTensor) -> ChunkStorageMetadata:
     """
@@ -253,6 +255,7 @@ def preprocess_state_dict_for_uneven_dtensor(state_dict: dict) -> dict:
     return state_dict
 
 
+@overridable
 def uneven_dtensor_to_full_tensor(dtensor: DTensor) -> torch.Tensor:
     """
     Gather a DTensor with potentially uneven sharding across ranks into a full tensor.

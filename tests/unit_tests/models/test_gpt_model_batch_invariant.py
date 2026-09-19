@@ -24,7 +24,7 @@ from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_te_min_version
 from megatron.rl.rl_utils import selective_log_softmax
-from tests.unit_tests.test_utilities import Utils
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 try:
     from flash_attn_3.flash_attn_interface import _flash_attn_forward
@@ -100,7 +100,7 @@ def _build_flash_attn_bik_model(seq_len: int, vocab_size: int, hidden_size: int 
         vocab_size=vocab_size,
         max_sequence_length=seq_len,
     )
-    return model.cuda().eval()
+    return model.to(get_current_device()).eval()
 
 
 def _train_forward_logprobs(model: torch.nn.Module, tokens: torch.Tensor) -> torch.Tensor:
@@ -181,7 +181,7 @@ class TestGPTModelBatchInvariant:
         seq_len = 48
         vocab_size = 96
         base_model = _build_flash_attn_bik_model(seq_len, vocab_size)
-        inference_model = Float16Module(base_model.config, base_model).cuda().eval()
+        inference_model = Float16Module(base_model.config, base_model).to(get_current_device()).eval()
 
         ctx = DynamicInferenceContext(
             model_config=base_model.config,
@@ -258,7 +258,7 @@ class TestGPTModelBatchInvariant:
         seq_len = 48
         vocab_size = 96
         base_model = _build_flash_attn_bik_model(seq_len, vocab_size)
-        inference_model = Float16Module(base_model.config, base_model).cuda().eval()
+        inference_model = Float16Module(base_model.config, base_model).to(get_current_device()).eval()
 
         def _run_engine_with_order(order):
             ctx = DynamicInferenceContext(

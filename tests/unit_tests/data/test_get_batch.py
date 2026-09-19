@@ -8,10 +8,14 @@ import torch
 
 from megatron.core import mpu
 from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.global_vars import destroy_global_vars, set_global_variables
 from pretrain_hybrid import get_batch
 from tests.unit_tests.test_utilities import Utils
+
+
+cur_platform = get_platform()
 
 
 def initialize_test_environment(
@@ -65,13 +69,16 @@ def initialize_test_environment(
     return args
 
 
-def create_sft_data_iterator(max_seq_length: int = 1024):
+def create_sft_data_iterator(max_seq_length: int = 1024, cp_size: int = 1):
     """Create a mock SFT data iterator matching the old SFTDataset output after DataLoader collation.
 
     The old SFTDataset (megatron/training/datasets/sft_dataset.py) returns per-sample dicts with
     keys: tokens, labels, loss_mask, position_ids, cu_seqlens, max_seqlen — all padded to
     seq_length.  After PyTorch DataLoader default_collate, tensors get a leading batch dim of 1.
+    For CP, every packed segment must be divisible by 2 * cp_size for THD partitioning.
     """
+    alignment = 2 * cp_size if cp_size > 1 else 1
+    assert max_seq_length % alignment == 0
     min_len = max(1, int(0.1 * max_seq_length))
     max_len = max(2, int(0.4 * max_seq_length))
     candidate_lengths = [torch.randint(min_len, max_len + 1, (1,)).item() for _ in range(10)]
@@ -79,6 +86,7 @@ def create_sft_data_iterator(max_seq_length: int = 1024):
     lengths = []
     total = 0
     for l in candidate_lengths:
+        l = (l + alignment - 1) // alignment * alignment
         if total + l >= max_seq_length:
             break
         lengths.append(l)
@@ -150,12 +158,12 @@ def create_sft_data_iterator(max_seq_length: int = 1024):
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4])
 @pytest.mark.parametrize("pp_size", [1, 2, 4])
-@pytest.mark.parametrize("cp_size", [1, 2, 4])
+@pytest.mark.parametrize("cp_size", [1, 2, 4, 8])
 @pytest.mark.parametrize("seq_length", [1024, 4096])
 def test_sft_batch(tp_size, pp_size, cp_size, seq_length):
-    if tp_size * pp_size * cp_size > torch.cuda.device_count():
+    if tp_size * pp_size * cp_size > cur_platform.device_count():
         pytest.skip(
-            f"Skipping test because tp_size * pp_size * cp_size > torch.cuda.device_count() ({tp_size * pp_size * cp_size} > {torch.cuda.device_count()})"
+            f"Skipping test because tp_size * pp_size * cp_size > cur_platform.device_count() ({tp_size * pp_size * cp_size} > {cur_platform.device_count()})"
         )
 
     global_batch_size = int(os.environ.get("WORLD_SIZE", 1)) // (tp_size * pp_size * cp_size)
@@ -172,7 +180,7 @@ def test_sft_batch(tp_size, pp_size, cp_size, seq_length):
     data_iterator = None
     num_real_tokens = 0
     if mpu.get_tensor_model_parallel_rank() == 0:
-        data_iterator, num_real_tokens = create_sft_data_iterator(seq_length)
+        data_iterator, num_real_tokens = create_sft_data_iterator(seq_length, cp_size)
 
     (
         attention_mask,
@@ -338,6 +346,12 @@ def test_sft_batch(tp_size, pp_size, cp_size, seq_length):
         assert max_seqlen.dtype == torch.int32
         assert 0 < max_seqlen.item() <= seq_length
 
+    segment_lengths = cu_seqlens[:, 1:] - cu_seqlens[:, :-1]
+    assert (segment_lengths > 0).all()
+    assert max_seqlen.item() == segment_lengths.max().item()
+    if cp_size > 1:
+        assert (segment_lengths % (2 * cp_size) == 0).all()
+
     Utils.destroy_model_parallel()
 
 
@@ -379,9 +393,9 @@ def create_pretrain_data_iterator(
 def test_pretrain_batch(
     tp_size, pp_size, cp_size, seq_length, create_attention_mask, micro_batch_size
 ):
-    if tp_size * pp_size * cp_size > torch.cuda.device_count():
+    if tp_size * pp_size * cp_size > cur_platform.device_count():
         pytest.skip(
-            f"Skipping test because tp_size * pp_size * cp_size > torch.cuda.device_count() ({tp_size * pp_size * cp_size} > {torch.cuda.device_count()})"
+            f"Skipping test because tp_size * pp_size * cp_size > cur_platform.device_count() ({tp_size * pp_size * cp_size} > {cur_platform.device_count()})"
         )
     dp_size = int(os.environ.get("WORLD_SIZE", 1)) // (tp_size * pp_size * cp_size)
     global_batch_size = micro_batch_size * dp_size
@@ -612,9 +626,9 @@ def create_hybrid_cp_data_iterator(seq_length: int = 1024, cp_size: int = 1):
 @pytest.mark.parametrize("seq_length", [1024])
 @pytest.mark.parametrize("create_attention_mask", [False])
 def test_hybrid_cp_batch(tp_size, cp_size, seq_length, create_attention_mask):
-    if tp_size * cp_size > torch.cuda.device_count():
+    if tp_size * cp_size > cur_platform.device_count():
         pytest.skip(
-            f"Skipping test because tp_size * cp_size > torch.cuda.device_count() ({tp_size * cp_size} > {torch.cuda.device_count()})"
+            f"Skipping test because tp_size * cp_size > cur_platform.device_count() ({tp_size * cp_size} > {cur_platform.device_count()})"
         )
 
     initialize_test_environment(

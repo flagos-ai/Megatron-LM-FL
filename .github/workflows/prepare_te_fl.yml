@@ -21,6 +21,7 @@ jobs:
       setup_script: ${{ steps.config.outputs.setup_script }}
       nproc_per_node: ${{ steps.config.outputs.nproc_per_node }}
       build_environment: ${{ steps.config.outputs.build_environment }}
+      skip_prepare: ${{ steps.config.outputs.skip_prepare }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -71,8 +72,18 @@ jobs:
             exit 1
           fi
           if [ "$prepare" != true ]; then
-            echo "::error::TE-FL preparation must be enabled in $config_file" >&2
-            exit 1
+            echo "TE-FL preparation is disabled in $config_file, skipping"
+            {
+              echo "image=$image"
+              echo "runs_on=$runs_on"
+              echo "container_volumes=$volumes"
+              echo "container_options=$options"
+              echo "setup_script=$setup_script"
+              echo "nproc_per_node=$nproc_per_node"
+              echo "build_environment=$build_environment"
+              echo "skip_prepare=true"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           case "$build_mode" in
             cuda|python) ;;
@@ -108,6 +119,7 @@ jobs:
   prepare:
     name: te-fl-${{ inputs.platform }}
     needs: resolve
+    if: needs.resolve.outputs.skip_prepare != 'true'
     defaults:
       run:
         shell: bash

@@ -1378,7 +1378,8 @@ def _load_base_checkpoint(
         else:
             checkpoint_name = get_checkpoint_name(load_dir, iteration, release, return_base_dir=False)
         try:
-            state_dict = torch.load(checkpoint_name, map_location='cpu')
+            # Legacy checkpoints are trusted Megatron-generated pickle files.
+            state_dict = torch.load(checkpoint_name, map_location='cpu', weights_only=False)
         except Exception as e:
             print('could not load the checkpoint')
             print(e)
@@ -2121,7 +2122,7 @@ def load_biencoder_checkpoint(model, only_query_model=False,
         print('global rank {} is loading checkpoint {}'.format(
             torch.distributed.get_rank(), checkpoint_name))
 
-    state_dict = torch.load(checkpoint_name, map_location='cpu')
+    state_dict = torch.load(checkpoint_name, map_location='cpu', weights_only=False)
     ret_state_dict = state_dict['model']
 
     if only_query_model:

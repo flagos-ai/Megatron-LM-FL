@@ -421,7 +421,8 @@ class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
                 )
 
             grad_input[start:end] = chunk_grad_input
-            # softmax and intermediate tensors freed here
+            # Drop all aliases before the next chunk allocates its fp32 logits.
+            del softmax, grad_2d, chunk_grad_input
 
         # Return gradients for (vocab_parallel_logits, target, label_smoothing, chunk_size)
         return grad_input, None, None, None

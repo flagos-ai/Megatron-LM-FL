@@ -9,6 +9,19 @@ from typing import Callable, List, Literal, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 
+######## FlagScale Begin ########
+# Import triton at module level after torch to avoid PyTorch 2.7+ namespace conflict.
+# PyTorch 2.7+ registers a 'triton' TORCH_LIBRARY internally. If triton is imported
+# before torch, it registers the same namespace first, causing:
+# "RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace triton"
+try:
+    import triton  # noqa: F401
+
+    HAVE_TRITON = True
+except ImportError:
+    HAVE_TRITON = False
+######## FlagScale End ########
+
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
 from megatron.core.inference.moe import InferenceGroupedGemmBackend
 from megatron.core.quantization.quant_config import RecipeConfig
@@ -1521,15 +1534,15 @@ class TransformerConfig(ModelParallelConfig):
                             f"PyTorch fallback."
                         )
                 else:
+                    ######## FlagScale Begin ########
                     # SM90 (Hopper): require Triton-based fused kernels
-                    try:
-                        import triton  # noqa: F401
-                    except ImportError as e:
+                    if not HAVE_TRITON:
                         raise ImportError(
                             "apply_dsa_kernel_fusion on SM90 requires Triton for the "
                             "fused sparse-attention kernels. Install triton>=3.0 or "
                             "pass --no-dsa-kernel-fusion to use the unfused PyTorch fallback."
-                        ) from e
+                        )
+                    ######## FlagScale End ########
         ######## FlagScale End ########
         if self.fp8:
             # cannot support first last layer bf16 with delayed scaling

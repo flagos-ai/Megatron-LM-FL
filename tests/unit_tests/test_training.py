@@ -1,6 +1,7 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from collections import defaultdict
+import os
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -39,6 +40,7 @@ def mock_multi_valid_full_datasets_provider(train_val_test_num_samples):
 def create_test_args():
     # Set dummy values for the args.
     args = SimpleNamespace()
+    args.local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     args.iteration = 0
     args.train_samples = 1
     args.train_iters = 1

@@ -5,7 +5,7 @@ import pickle
 from argparse import Namespace
 from io import BytesIO
 from pathlib import PosixPath
-from signal import Signals
+from signal import SIGTERM, Signals
 from types import SimpleNamespace
 
 import torch
@@ -42,6 +42,7 @@ SAFE_GLOBALS = [
     RerunState,
     BytesIO,
     Signals,
+    (SIGTERM, "signal.SIGTERM"),
     torch._C.Generator,  # Needed for torch ckpt format loading after weights_only default change
 ]
 

@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from megatron.core.hyper_comm_grid import HyperCommGrid
 from megatron.core.models.mimo.comm.colocated_communicator import ColocatedBridgeCommunicator
+from tests.unit_tests.test_utilities import Utils
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
 
@@ -21,7 +22,7 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
         shape=[tp, cp, pp, dp],
         dim_names=["tp", "cp", "pp", "dp"],
         rank_offset=offset,
-        backend="nccl",
+        backend=Utils.get_backend(),
     )
     grid.create_pg(["tp"])
     grid.create_pg(["cp"])
@@ -57,7 +58,7 @@ class TestRankMappings:
     @classmethod
     def setup_class(cls):
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend=Utils.get_backend())
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 
@@ -155,7 +156,7 @@ class TestAllGatherGroups:
     @classmethod
     def setup_class(cls):
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend=Utils.get_backend())
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 
@@ -198,7 +199,7 @@ class TestValidateGrids:
     @classmethod
     def setup_class(cls):
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend=Utils.get_backend())
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 
@@ -207,7 +208,7 @@ class TestValidateGrids:
 
     def _grid_missing_tp(self, offset=0, dp=1):
         # Build a grid without a 'tp' dim to exercise the "missing 'tp'" raise.
-        grid = HyperCommGrid(shape=[dp], dim_names=["dp"], rank_offset=offset, backend="nccl")
+        grid = HyperCommGrid(shape=[dp], dim_names=["dp"], rank_offset=offset, backend=Utils.get_backend())
         grid.create_pg(["dp"])
         _active_grids.append(grid)
         return grid
@@ -256,10 +257,10 @@ class TestValidateGrids:
         if dist.get_world_size() < 6:
             pytest.skip("requires at least 6 ranks")
         src_grid = HyperCommGrid(
-            shape=[2, 1, 1, 3], dim_names=["tp", "cp", "pp", "dp"], backend="nccl"
+            shape=[2, 1, 1, 3], dim_names=["tp", "cp", "pp", "dp"], backend=Utils.get_backend()
         )
         dest_grid = HyperCommGrid(
-            shape=[3, 1, 1, 2], dim_names=["tp", "cp", "pp", "dp"], backend="nccl"
+            shape=[3, 1, 1, 2], dim_names=["tp", "cp", "pp", "dp"], backend=Utils.get_backend()
         )
         for g in (src_grid, dest_grid):
             _active_grids.append(g)
@@ -276,7 +277,7 @@ class TestCommunicatePreconditions:
     @classmethod
     def setup_class(cls):
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend=Utils.get_backend())
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 
@@ -314,7 +315,7 @@ class TestDestroy:
     @classmethod
     def setup_class(cls):
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend=Utils.get_backend())
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 
@@ -395,7 +396,7 @@ class TestBridgeGradients:
     @classmethod
     def setup_class(cls):
         if not dist.is_initialized():
-            dist.init_process_group(backend="nccl")
+            dist.init_process_group(backend=Utils.get_backend())
         if torch.cuda.is_available():
             torch.cuda.set_device(int(os.environ.get("LOCAL_RANK", 0)))
 

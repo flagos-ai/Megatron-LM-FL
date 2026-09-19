@@ -163,6 +163,7 @@ jobs:
     name: unit_tests
     if: >-
       always() &&
+      !cancelled() &&
       inputs.run_unit_tests &&
       needs.checkout_and_config.result == 'success' &&
       needs.lint.result == 'success'
@@ -197,6 +198,7 @@ jobs:
     name: functional_tests
     if: >-
       always() &&
+      !cancelled() &&
       inputs.run_functional_tests &&
       needs.checkout_and_config.result == 'success' &&
       needs.lint.result == 'success' &&
@@ -227,7 +229,7 @@ jobs:
 
   all_tests_complete:
     name: all_tests_complete
-    if: always()
+    if: always() && !cancelled()
     needs:
       - checkout_and_config
       - lint

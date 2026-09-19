@@ -26,12 +26,17 @@ class PlatformCUDA(PlatformBase):
     def is_available(self):
         try:
             import torch
+
             # Determine if we are on a GPU or x86 CPU with torch.
-            if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
-                return True
-            else:
+            if not (torch.cuda.device_count() > 0 and torch.cuda.is_available()):  #ignore-cuda
                 return False
-        except Exception as e:
+
+            # Some accelerator compatibility layers expose a torch.cuda facade even
+            # though `torch.device("cuda")` resolves to their native device type.
+            # Registering PlatformCUDA in that case makes device_name() disagree with
+            # tensors created by device(), which breaks device-specific optimizer paths.
+            return torch.device('cuda', 0).type == self.device_name()
+        except Exception:
             return False
 
     def get_device_properties(self, device_index=None):
@@ -258,11 +263,16 @@ class PlatformCUDA(PlatformBase):
             return False
 
     # Graph operations
+    def graph_pool_handle(self):
+        return torch.cuda.graph_pool_handle()
+
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
-    def capture_to_graph(self, graph, pool=None, stream=None):
-        return torch.cuda.graph(graph, pool, stream)
+    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
+        if capture_error_mode is None:
+            return torch.cuda.graph(graph, pool, stream)
+        return torch.cuda.graph(graph, pool, stream, capture_error_mode=capture_error_mode)
 
     def replay_graph(self, graph):
         graph.replay()

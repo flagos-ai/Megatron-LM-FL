@@ -8,7 +8,7 @@ on:
   workflow_dispatch: # Allows manual triggering
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
   all_tests:
     needs: run_tests
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Verify workflow status
         run: |

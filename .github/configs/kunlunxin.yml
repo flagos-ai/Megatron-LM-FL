@@ -6,7 +6,7 @@ display_name: 'KunLunXin Tests'
 setup_script: .github/scripts/set_env_kunlunxin.sh
 
 # CI image for KunLunXin P800 environment
-ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260828-kunlunxin-dev
+ci_image: harbor.baai.ac.cn/flagscale/flagscale-train:dev-kunlun-py3.10-20260915
 
 # Runner labels for the KunLunXin node
 runner_labels:
@@ -107,6 +107,12 @@ test_matrix:
       # metax and ascend are not affected as their communication libraries
       # handle teardown without memory corruption.
       - tests/unit_tests/test_parallel_state.py::test_get_tensor_model_parallel_src_rank
+      # SIGSEGV during reset_env_vars fixture teardown after FLOP accumulator tests.
+      # Root cause: FlagCX communicator teardown corrupts heap memory; when pytest
+      # calls os.environ.update() in conftest.py:170, it segfaults on the corrupted
+      # string storage. The tests themselves pass, but the fixture cleanup crashes
+      # the entire session (exitcode -11).
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorDistributed
       #models
       # Hangs during DDP initialization allocating 1.3B params per rank on XPU.
       - tests/unit_tests/models/test_heterogeneous_gpt_model.py
@@ -119,6 +125,15 @@ test_matrix:
       # (FlagCx) on XPU. ascend and metax also ignore these.
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py
       - tests/unit_tests/models/test_mimo_checkpoint.py
+      # torch_xmlir CUDA compatibility layer returns invalid resource handles when
+      # tests use hardcoded device='cuda' instead of platform abstraction. Tests
+      # fail with "CUDA error: invalid resource handle" on XPU-only systems.
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py::TestColocatedGradientScalingCorrectness::test_dist_matches_dp1_reference_post_step_weights
+      - tests/unit_tests/models/test_multimodal_context_parallel.py::TestDynamicResCPDistributed::test_split_dynamic_res_temporal_aware_tubelets
+      # RADIO ViT forward pass triggers invalid resource handle during XPU tensor
+      # operations; likely related to model.to(device) or intermediate buffers.
+      # Enflame/Hygon/MUSA also ignore this test for platform-specific reasons.
+      - tests/unit_tests/models/test_radio_model.py::TestRADIOViTModel::test_forward
       # Fails token-parallel embedding processing on XPU.
       # ascend and metax also ignore this case.
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModelTokenParallel::test_process_embedding_token_parallel
@@ -134,6 +149,9 @@ test_matrix:
       # FSDP tests are incompatible with XPU; ascend ignores most tests in
       # this directory and metax ignores a subset.
       - tests/unit_tests/distributed/megatron_fsdp/
+      # torch_xmlir CUDA compatibility layer causes Segmentation fault during
+      # multi-rank teardown when tests use hardcoded device='cuda'.
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_grad_sync
       # bucket_group_cpu_sync produces different numerical results on XPU.
       - tests/unit_tests/distributed/test_param_and_grad_buffer.py::test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers
       # Hangs during expert-parallel gradient sync on XPU; ascend and metax

@@ -26,6 +26,7 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import deprecated, internal_api, is_te_min_version
 
 ######## FlagScale Begin ########
+from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -302,6 +303,7 @@ class MoEAuxLossAutoScaler(torch.autograd.Function):
             MoEAuxLossAutoScaler.main_loss_backward_scale.copy_(scale)
 
 
+@overridable
 def permute(
     tokens: torch.Tensor,
     routing_map: torch.Tensor,
