@@ -343,3 +343,16 @@ test_matrix:
 
   functional:
     train: []
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: flagos
+    install_pip_args: [--break-system-packages]
+    pip_packages: [flag-gems, sqlalchemy]

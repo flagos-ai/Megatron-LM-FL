@@ -9,7 +9,7 @@ setup_script: .github/scripts/set_env_musa.sh
 runner_labels:
   - mt-8g-cicd-megatron
 # CI image for online env
-ci_image: registry.mthreads.com/presale/devtech/flagsclae:0206
+ci_image: harbor.baai.ac.cn/flagos-dev/flagscale-train:f147682-musa-dev
 
 # Dataset/tokenizer volumes for local runner assets under /data
 container_volumes:
@@ -340,3 +340,16 @@ test_matrix:
         enable_lightweight_mode: false
         data_path: /opt/data/datasets
         gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: flagos
+    install_pip_args: [--ignore-requires-python]
+    pip_packages: [flag-gems, sqlalchemy]

@@ -90,15 +90,12 @@ EOF
   echo "Hygon unit-test hard timeout: ${timeout_seconds}s"
 }
 
-# Catch a stale or mis-tagged image before the tests start.
+# Catch a stale or mis-tagged vendor image before TE-FL is installed.
 verify_hygon_software_stack() {
   python3 - <<'PY'
 import flag_gems
-import transformer_engine
-import transformer_engine.pytorch
 
 print(f"FlagGems import passed: {flag_gems.__file__}")
-print(f"TransformerEngine-FL import passed: {transformer_engine.__file__}")
 PY
 }
 

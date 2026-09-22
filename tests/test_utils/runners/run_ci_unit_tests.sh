@@ -27,16 +27,22 @@ if ! [[ "$CI_NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
-python3 -c \
+PYTHON_BIN="${CI_PYTHON_BIN:-$(command -v python3)}"
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "::error::python3 executable not found: $PYTHON_BIN"
+  exit 1
+fi
+
+"$PYTHON_BIN" -c \
   "import json, os; value = json.loads(os.environ['CI_IGNORED_TESTS']); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
-python3 -c \
+"$PYTHON_BIN" -c \
   "import json, os; value = json.loads(os.environ['CI_PYTEST_EXTRA_ARGS']); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
 
 TEST_PATHS=()
 while IFS= read -r item; do
   [ -n "$item" ] && TEST_PATHS+=("$item")
 done < <(
-  python3 -c '
+  "$PYTHON_BIN" -c '
 import glob
 import json
 import os
@@ -56,7 +62,7 @@ IGNORE_OPTS=()
 while IFS= read -r item; do
   [ -n "$item" ] && IGNORE_OPTS+=("$item")
 done < <(
-  python3 -c '
+  "$PYTHON_BIN" -c '
 import json
 import os
 
@@ -71,7 +77,7 @@ EXTRA_ARGS=()
 while IFS= read -r item; do
   [ -n "$item" ] && EXTRA_ARGS+=("$item")
 done < <(
-  python3 -c '
+  "$PYTHON_BIN" -c '
 import json
 import os
 
@@ -84,12 +90,7 @@ if [ "${#TEST_PATHS[@]}" -eq 0 ]; then
   exit 1
 fi
 
-PYTHON_BIN="${CI_PYTHON_BIN:-$(command -v python3)}"
 PYTEST_BIN="${CI_PYTEST_BIN:-$(command -v pytest)}"
-if [ ! -x "$PYTHON_BIN" ]; then
-  echo "::error::python3 executable not found: $PYTHON_BIN"
-  exit 1
-fi
 if [ ! -x "$PYTEST_BIN" ]; then
   echo "::error::pytest executable not found: $PYTEST_BIN"
   exit 1
@@ -149,10 +150,10 @@ set +e
 test_exit_code=$?
 set -e
 
-python3 -m coverage combine \
+"$PYTHON_BIN" -m coverage combine \
   --rcfile="$COVERAGE_DIR/.coveragerc" \
   "$COVERAGE_DIR" 2>/dev/null || true
-python3 -m coverage json \
+"$PYTHON_BIN" -m coverage json \
   --rcfile="$COVERAGE_DIR/.coveragerc" \
   --show-contexts \
   -o "$COVERAGE_JSON" \

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import math
+import inspect
 
 import torch
 import torch.distributed as dist
@@ -19,6 +20,28 @@ from .utils import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Probed lazily: torch_npu (Ascend) replaces dist.gather_object at import time
+# with an older-signature implementation that predates the `group_dst` kwarg.
+_SUPPORTS_GROUP_DST = None
+
+
+def _gather_object_to_local_rank0(obj, object_gather_list, group):
+    """Gather `obj` to local rank 0 of `group`.
+
+    Upstream megatron-core passes ``group_dst=0`` (local rank on the group),
+    but torch_npu's dist.gather_object override only accepts the global-rank
+    ``dst`` kwarg. Probe the runtime signature once and fall back to the
+    equivalent global-rank form; mainline torch handles both kwargs.
+    """
+    global _SUPPORTS_GROUP_DST
+    if _SUPPORTS_GROUP_DST is None:
+        _SUPPORTS_GROUP_DST = "group_dst" in inspect.signature(dist.gather_object).parameters
+    if _SUPPORTS_GROUP_DST:
+        dist.gather_object(obj, object_gather_list, group_dst=0, group=group)
+    else:
+        dst_global = 0 if group is None else dist.get_global_rank(group, 0)
+        dist.gather_object(obj, object_gather_list, dst=dst_global, group=group)
 
 
 def _build_descriptors_for_param(
@@ -434,8 +457,8 @@ def build_centralized_reshard_plan(
     # Other ranks don't need the full metadata — they only need their own plan.
     all_src_metadata_by_rank = [None] * world_size if my_global_rank == 0 else None
     all_dst_metadata_by_rank = [None] * world_size if my_global_rank == 0 else None
-    dist.gather_object(my_src_metadata, all_src_metadata_by_rank, group_dst=0, group=group)
-    dist.gather_object(my_dst_metadata, all_dst_metadata_by_rank, group_dst=0, group=group)
+    _gather_object_to_local_rank0(my_src_metadata, all_src_metadata_by_rank, group)
+    _gather_object_to_local_rank0(my_dst_metadata, all_dst_metadata_by_rank, group)
 
     # Free local metadata — no longer needed after gather.
     del my_src_metadata, my_dst_metadata

@@ -4,7 +4,7 @@ setup_script: .github/scripts/set_env_hygon.sh
 
 # Built from the documented DTK image with FlagGems, TransformerEngine-FL, and
 # the test dependencies preinstalled, so CI setup only installs this project.
-ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260728-hygon-dev
+ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260828-hygon-dev
 
 runner_labels:
   - hg-8g-cicd-megatron
@@ -443,3 +443,16 @@ test_matrix:
         data_path: /opt/data/datasets
         # This baseline is recorded with TP2/PP2 on four devices (DP=1).
         gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: flagos
+    install_pip_args: [--ignore-requires-python]
+    pip_packages: [flag-gems, sqlalchemy]

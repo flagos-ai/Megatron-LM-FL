@@ -10,7 +10,7 @@ setup_script: .github/scripts/set_env_metax.sh
 # ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
 
 # CI image for online env
-ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-with-te:202603231839
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:manual-20260827-metax-dev
 
 # Runner labels for Metax node
 runner_labels:
@@ -297,3 +297,18 @@ test_matrix:
         enable_lightweight_mode: false
         data_path: /home/gitlab-runner/data
         gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: python
+  build_environment:
+    TE_FL_SKIP_CUDA: "1"
+  runtime:
+    environment:
+      TE_FL_SKIP_CUDA: "1"
+      TE_FL_PREFER: flagos
+    install_pip_args: []
+    # MetaX Triton is supplied by the image; no public triton-metax package is
+    # available from the runtime Python index.
+    pip_packages: [flag-gems, sqlalchemy]
