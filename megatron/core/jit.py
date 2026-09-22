@@ -5,6 +5,7 @@ import functools
 import torch
 
 from megatron.core.utils import is_torch_min_version
+from megatron.plugin.platform import get_platform
 
 # ``jit_fuser`` is a lazy decorator: it wraps the decorated function and
 # resolves the active fuser (torch.compile / torch.jit.script / no-op) at the
@@ -59,4 +60,9 @@ def disable_jit_fuser():
     _fuser = noop_decorator
 
 
+# torch.compile jit fusion is only available on CUDA. On non-CUDA backends
+# (e.g. MUSA) inductor autotuning requires a Triton backend that is not
+# shipped, so fall back to the no-op decorator.
 enable_jit_fuser()
+if get_platform().device_name() != "cuda":
+    disable_jit_fuser()
