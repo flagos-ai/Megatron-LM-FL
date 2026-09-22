@@ -569,8 +569,9 @@ def test_expert_all_gather_group():
     expt_dp_ranks = torch.distributed.get_process_group_ranks(expt_dp_group)
 
     # Create AG groups for both regular and expert parameters
-    dp_cp_ag_group = torch.distributed.new_group(ranks=dp_cp_ranks, backend='nccl')
-    expt_dp_ag_group = torch.distributed.new_group(ranks=expt_dp_ranks, backend='nccl')
+    backend = torch.distributed.get_backend()
+    dp_cp_ag_group = torch.distributed.new_group(ranks=dp_cp_ranks, backend=backend)
+    expt_dp_ag_group = torch.distributed.new_group(ranks=expt_dp_ranks, backend=backend)
 
     # Create ProcessGroupCollection with AG groups
     pg_collection = ProcessGroupCollection.use_mpu_process_groups()

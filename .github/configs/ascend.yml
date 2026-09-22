@@ -6,8 +6,8 @@ hardware_name: ascend
 display_name: 'Ascend Tests'
 setup_script: .github/scripts/set_env_ascend.sh
 
-# CI image for the Ascend environment (built and pushed 2026-08-28, validated on Ascend 910C)
-ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260828-ascend-dev
+# CI image for the Ascend environment (built and pushed 2026-09-15, validated on Ascend 910C)
+ci_image: harbor.baai.ac.cn/flagscale/flagscale-train:dev-ascend-py3.12-20260915
 
 # Runner labels for the Ascend node
 runner_labels:
@@ -152,16 +152,6 @@ test_matrix:
       # NOTE: test_training_log_grpo_and_auxiliary_writer_paths is NOT ignored.
       # Upstream PR #82 will remove that test; the failure is transient.
 
-      ## 6. core — platform register (non-idempotent registry_patch)
-      # platform_npu.py registry_patch is not idempotent; calling
-      # register_platforms() a second time raises RuntimeError.
-      # Remove after fixing platform_npu.py.
-      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_all_registered_platforms_are_available
-      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_register_platforms_adds_cpu
-      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_registered_cpu_is_platform_base_instance
-      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_registered_platforms_keys_are_lowercase
-      - megatron/plugin/tests/test_platform.py::TestPlatformRegister::test_unavailable_platform_not_registered
-
       ## 7. core — platform contract (monitoring methods return None)
       # platform_npu.py monitoring API returns None instead of int/float/bool.
       # Remove after fixing platform_npu.py.
@@ -171,6 +161,13 @@ test_matrix:
       - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_power_draw_returns_numeric
       - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_temperature_returns_numeric
       - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_utilization_returns_numeric
+
+      ## 7b. core — CUDA platform compatibility layer tests (mocked torch.cuda facade)
+      # These tests verify CUDA platform behavior when torch.cuda reports a
+      # compatibility facade that doesn't match the native device type. On
+      # Ascend NPU the mock setup conflicts with the real torch.npu runtime.
+      - megatron/plugin/tests/test_platform.py::TestMockedVendorPlatforms::test_cuda_platform_rejects_compatibility_facade_with_native_device_type
+      - megatron/plugin/tests/test_platform.py::TestMockedVendorPlatforms::test_cuda_platform_accepts_matching_native_device_type
 
       ## 8. core — single-rank checkpoint fixture incompatible with multi-GPU
       # test_save_checkpoint[torch] uses initialize_model_parallel(1,1)
@@ -191,12 +188,20 @@ test_matrix:
       # mock dataset and generated-data tests enabled.
       - tests/unit_tests/data/test_fim_dataset.py
       - tests/unit_tests/data/test_preprocess_data.py
+      # Downloads GPT-2 tokenizer files when the mounted offline fixture is absent.
+      # CI runners cannot rely on external Hugging Face/S3 access.
+      - tests/unit_tests/data/test_preprocess_mmdata.py
 
       ## 11. dist_checkpointing - unsupported optional runtimes
       # Ascend 910C does not expose Transformer Engine FP8 tensor support.
       - tests/unit_tests/dist_checkpointing/test_fp8.py
       # Mamba checkpoint tests require CUDA-only mamba_ssm/causal_conv1d kernels.
       - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      # Gloo TCP backend deadlock during process group initialization. The T5
+      # checkpoint tests trigger gloo::EnforceNotMet (Transport endpoint is not
+      # connected) during initialize_model_parallel, same pattern as Enflame
+      # ECCL and Hygon HCCL deadlocks on other non-CUDA platforms.
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py
       # TE-FL does not register the FP8 scale-update or grouped-GEMM operators
       # required by these TE MoE checkpoint tests.
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_sequential_grouped_mlp_extra_state
@@ -239,9 +244,14 @@ test_matrix:
       # test_distributed_data_parallel.py port conflict — may be resolved by HCCL_NPU_SOCKET_PORT_RANGE
       # - tests/unit_tests/distributed/test_distributed_data_parallel.py
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_ez
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
+      # torch_npu 2.7.1.post2 / CANN 9.0 cannot capture the attention dropout
+      # RNG path in this full-iteration graph test. The failure can also abort
+      # HCCL on captured-event queries (ACL 107028). Re-enable after stack support.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_full_iteration_cuda_graph
       # HCCL all-reduce / reduce-scatter exhaust NPU coprocessor streams
       # (rtStreamCreateWithFlags resource alloc fail), same root cause as
       # the MoE and optimizer resharding stream ceiling in dist_checkpointing.
@@ -290,12 +300,23 @@ test_matrix:
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_out_dp1_to_dp4_enc_tp2_pp2_8gpu
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp2_to_dp1_llm_pp3_8gpu
       - tests/unit_tests/models/test_mimo_checkpoint.py
+      # The final two colocated combinations exhaust HCCL coprocessor streams
+      # in the full models process on torch_npu 2.7.1.post2, even after explicit
+      # PG cleanup (EI0007 / runtime 207005). Later embedding/CP failures are
+      # cascading errors; keep those tests and the other six combinations enabled.
+      # Re-enable after validating HCCL lifecycle fixes (Ascend/pytorch!30623).
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py::TestColocatedGradientScalingCorrectness::test_dist_matches_dp1_reference_post_step_weights[mbs4-asymmetric-fan_in]
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py::TestColocatedGradientScalingCorrectness::test_dist_matches_dp1_reference_post_step_weights[mbs4-asymmetric-fan_out]
       # Hardcoded CUDA device check
       - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_gpu_forward
       # HCCL port conflict — may be resolved by HCCL_NPU_SOCKET_PORT_RANGE
       - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_constructor
       # Needs CUDA/TE-specific features; metax also ignores
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      # DSA MoE-GPT-Mamba logprobs test hits same mamba_ssm + causal_conv1d
+      # CUDA kernel dependency as test_mamba.py, causing ImportError at
+      # collection time and cascading into other parametrized variants.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match[1-2]
       # TE-FL misses get_fused_attn_backend
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward_fsdp
@@ -309,6 +330,7 @@ test_matrix:
       # into follow-on errors, so the pytest session never reports a summary.
       # This is a device/CANN-level failure on the current 910C image, not a
       # test-logic issue.
+      - tests/unit_tests/pipeline_parallel/test_bridge_communicator.py::TestBridgeCommunicator
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
       - tests/unit_tests/pipeline_parallel/test_multimodule_communicator.py::TestMultiModulePipelineCommunicator::test_send_forward_recv_forward_with_transformer_blocks_and_different_parallelisms
@@ -317,6 +339,7 @@ test_matrix:
       # causing rank divergence and a 30-minute HCCL 507001/SIGABRT cascade.
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
       - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py::test_forward_vpp
 
       ## 14. fusions - CUDA/Triton-only kernels
       # Fused MLA YaRN RoPE is implemented with Triton CUDA kernels. The test

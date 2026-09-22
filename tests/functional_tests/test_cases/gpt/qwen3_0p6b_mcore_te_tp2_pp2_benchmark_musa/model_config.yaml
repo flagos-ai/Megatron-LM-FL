@@ -28,10 +28,10 @@ MODEL_ARGS:
   --timing-log-level: 0
   --save: ${CHECKPOINT_SAVE_PATH}
   --load: ${CHECKPOINT_LOAD_PATH}
-  --data-path: /opt/data/datasets/pile_wikipedia_demo/pile_wikipedia_demo
+  --data-path: /home/gitlab-runner/data/pile_wikipedia_demo/pile_wikipedia_demo
   --split: 100,0,0
   --tokenizer-type: HuggingFaceTokenizer
-  --tokenizer-model: /opt/data/tokenizers/qwentokenizer
+  --tokenizer-model: /home/gitlab-runner/tokenizers/qwentokenizer
   --trust-remote-code: true
   --distributed-backend: mccl
   --lr: 3.0e-3
@@ -52,6 +52,7 @@ MODEL_ARGS:
   --overlap-grad-reduce: true
   --overlap-param-gather: true
   --no-mmap-bin-files: true
+  --no-gradient-accumulation-fusion: true
   --attention-backend: unfused
   --attention-softmax-in-fp32: true
   --accumulate-allreduce-grads-in-fp32: true

@@ -355,16 +355,29 @@ def test_grad_sync(
         with register_grad_sync_context:
             bucket_group.register_grad_ready(param)
 
-        with finish_grad_sync_context:
-            # When overlap_grad_reduce is True, this should throw an assertion error until all
-            # params in the model have registered their grad above.
-            # When overlap_grad_reduce is False, the collective is forced through.
-            bucket_group.finish_grad_sync()
+        # With multiple optimizer instances, finish_grad_sync records completion even if
+        # no communication has started. Calling it before all gradients are ready would
+        # make the final call skip the wait for the actual reduction on the communication
+        # stream. Only the single-instance path promises an assertion on an early finish.
+        if not (
+            overlap_grad_reduce
+            and num_distributed_optimizer_instances > 1
+            and i < (len(params) - 1)
+        ):
+            with finish_grad_sync_context:
+                bucket_group.finish_grad_sync()
 
         expected_grad_data_value = expected_grad_data_value_after_collective
         if overlap_grad_reduce and i < (len(params) - 1):
             expected_grad_data_value = 1
         assert param_and_grad_buffer.grad_data[0] == expected_grad_data_value
+
+        if overlap_grad_reduce and i == (len(params) - 1):
+            # Finalization can revisit a bucket already drained by its successor. A second
+            # finish must neither wait on a cleared handle nor change the reduced gradients.
+            grad_data_after_sync = param_and_grad_buffer.grad_data.clone()
+            bucket_group.finish_grad_sync()
+            assert torch.equal(param_and_grad_buffer.grad_data, grad_data_after_sync)
 
         if not overlap_grad_reduce:
             # Reset grad_data for subsequent collectives.

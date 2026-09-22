@@ -146,6 +146,8 @@ class TestPlatformManager(unittest.TestCase):
 
     def test_get_platform_prefers_cuda_over_cpu(self):
         """When cuda is available, get_platform should prefer cuda over cpu."""
+        platform_register.PLATFORMS.clear()
+        platform_register.PLATFORMS["cpu"] = PlatformCPU()
         mock_cuda = _create_mock_platform("cuda")
         mock_cuda.is_available = lambda: True
         platform_register.PLATFORMS["cuda"] = mock_cuda
@@ -523,6 +525,15 @@ class _FakeAccelerator:
         return ("capture", graph, pool, stream)
 
 
+class _FakeDevice:
+    def __init__(self, device_type, index=None):
+        self.type = device_type
+        self.index = index
+
+    def __str__(self):
+        return self.type if self.index is None else f"{self.type}:{self.index}"
+
+
 def _fake_torch_for_platform(accelerator_name, accelerator):
     fake_nvtx = types.SimpleNamespace(
         range=lambda msg: ("nvtx_range", msg),
@@ -530,13 +541,18 @@ def _fake_torch_for_platform(accelerator_name, accelerator):
         range_pop=lambda: "nvtx_pop",
     )
     fake_cuda = types.SimpleNamespace(nvtx=fake_nvtx)
+
+    def _fake_device(name, index=None):
+        """Mock torch.device() with torch.device-like attributes and formatting."""
+        return _FakeDevice(name, index)
+
     fake_torch = types.SimpleNamespace(
         float="float",
         half="half",
         bfloat16="bf16",
         random="random-module",
         cuda=fake_cuda,
-        device=lambda name, index=None: f"{name}:{index}" if index is not None else name,
+        device=_fake_device,
     )
     setattr(fake_torch, accelerator_name, accelerator)
     if accelerator_name == "cuda":
@@ -547,6 +563,36 @@ def _fake_torch_for_platform(accelerator_name, accelerator):
 
 class TestMockedVendorPlatforms(unittest.TestCase):
     """Cover platform wrappers without requiring real vendor hardware."""
+
+    def test_cuda_platform_rejects_compatibility_facade_with_native_device_type(self):
+        """A torch.cuda compatibility facade must not register as native CUDA."""
+        module = __import__(
+            "megatron.plugin.platform.platform_cuda", fromlist=["PlatformCUDA"]
+        )
+
+        accelerator = _FakeAccelerator()
+        fake_torch = _fake_torch_for_platform("cuda", accelerator)
+        fake_torch.device = lambda name, index=None: types.SimpleNamespace(type="gcu")
+
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            self.assertFalse(module.PlatformCUDA().is_available())
+
+    def test_cuda_platform_accepts_matching_native_device_type(self):
+        """Native CUDA remains available when the device identity is consistent."""
+        module = __import__(
+            "megatron.plugin.platform.platform_cuda", fromlist=["PlatformCUDA"]
+        )
+
+        accelerator = _FakeAccelerator()
+        fake_torch = _fake_torch_for_platform("cuda", accelerator)
+        fake_torch.device = lambda name, index=None: types.SimpleNamespace(type="cuda")
+
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            self.assertTrue(module.PlatformCUDA().is_available())
 
     def _exercise_accelerator_platform(
         self,
@@ -584,7 +630,11 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertFalse(platform.handles_memory_backpressure())
             self.assertEqual(platform.device_name(), device_prefix)
             self.assertEqual(platform.device_name(3), f"{device_prefix}:3")
-            self.assertEqual(platform.device(2), f"{device_prefix}:2")
+            # platform.device(2) returns a torch.device object, check its string representation
+            device_obj = platform.device(2)
+            self.assertEqual(str(device_obj), f"{device_prefix}:2")
+            self.assertEqual(device_obj.type, device_prefix)
+            self.assertEqual(device_obj.index, 2)
             self.assertEqual(platform.current_device(), 1)
             self.assertEqual(platform.current_device_name(), f"{device_prefix}:1")
             self.assertEqual(platform.device_count(), 2)
@@ -711,7 +761,7 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             platform = module.PlatformNPU()
             self.assertTrue(platform.is_available())
             self.assertEqual(platform.device_name(2), "npu:2")
-            self.assertEqual(platform.device(2), "npu:2")
+            self.assertEqual(str(platform.device(2)), "npu:2")
             self.assertEqual(platform.default_generators, ("gen0",))
             self.assertEqual(platform.MemPool, "pool-type")
             self.assertEqual(platform.use_mem_pool("pool"), ("pool", "pool"))
@@ -727,6 +777,153 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertTrue(graph.replayed)
             self.assertEqual(platform.visible_devices_envs(), ["ASCEND_RT_VISIBLE_DEVICES"])
 
+
+class TestNPUPatchesManager(unittest.TestCase):
+    """NPU patch registration must be repeatable without hiding conflicting replacements."""
+
+    def setUp(self):
+        module = __import__("megatron.plugin.platform.platform_npu", fromlist=["PatchesManager"])
+        self.manager = module.PatchesManager
+        registry = patch.object(self.manager, "patches_info", {})
+        registry.start()
+        self.addCleanup(registry.stop)
+
+        self.target = types.ModuleType("_megatron_test_npu_patch_target")
+        self.target.function = lambda value: value
+        modules = patch.dict(sys.modules, {self.target.__name__: self.target})
+        modules.start()
+        self.addCleanup(modules.stop)
+        self.target_name = f"{self.target.__name__}.function"
+
+    def test_repeated_replacement_registration_is_noop(self):
+        def replacement(value):
+            return value + 1
+
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.apply_patches()
+        registered_patch = self.manager.get_patch(self.target_name)
+
+        self.manager.register_patch(self.target_name, replacement)
+        self.assertTrue(registered_patch.is_applied)
+        self.manager.apply_patches()
+        self.assertIs(self.target.function, replacement)
+        self.assertEqual(self.target.function(2), 3)
+
+    def test_different_replacement_requires_force(self):
+        def first(value):
+            return value + 1
+
+        def second(value):
+            return value + 2
+
+        def double_wrapper(function):
+            def wrapped(value):
+                return function(value) * 2
+
+            return wrapped
+
+        self.manager.register_patch(self.target_name, first)
+        self.manager.register_patch(self.target_name, double_wrapper)
+        self.manager.apply_patches()
+        applied_function = self.target.function
+        with self.assertRaisesRegex(RuntimeError, "the patch of function exist"):
+            self.manager.register_patch(self.target_name, second)
+        self.assertIs(self.target.function, applied_function)
+        self.assertIs(self.manager.get_patch(self.target_name).patch_func, first)
+        self.assertEqual(self.target.function(2), 6)
+
+        self.manager.register_patch(self.target_name, second, force_patch=True)
+        self.manager.apply_patches()
+        self.assertIs(self.manager.get_patch(self.target_name).patch_func, second)
+        self.assertEqual(self.target.function(2), 8)
+
+        self.manager.register_patch(self.target_name, None, force_patch=True)
+        self.manager.apply_patches()
+        self.assertIsNone(self.manager.get_patch(self.target_name).patch_func)
+        self.assertEqual(self.target.function(2), 4)
+
+    def test_repeated_wrapper_registration_preserves_applied_function(self):
+        wrapped_functions = []
+
+        def increment_wrapper(function):
+            wrapped_functions.append(function)
+
+            def wrapped(value):
+                return function(value) + 1
+
+            return wrapped
+
+        self.manager.register_patch(self.target_name, increment_wrapper)
+        self.manager.apply_patches()
+        applied_function = self.target.function
+
+        self.manager.register_patch(self.target_name, increment_wrapper)
+        self.manager.apply_patches()
+        self.assertIs(self.target.function, applied_function)
+        self.assertEqual(len(wrapped_functions), 1)
+        self.assertEqual(self.target.function(2), 3)
+
+    def test_wrapper_removal_reapplies_remaining_wrappers(self):
+        def replacement(value):
+            return value + 1
+
+        def add_ten_wrapper(function):
+            def wrapped(value):
+                return function(value) + 10
+
+            return wrapped
+
+        def double_wrapper(function):
+            def wrapped(value):
+                return function(value) * 2
+
+            return wrapped
+
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.register_patch(self.target_name, add_ten_wrapper)
+        self.manager.register_patch(self.target_name, double_wrapper)
+        self.manager.apply_patches()
+        self.assertEqual(self.target.function(1), 24)
+
+        self.manager.remove_wrappers(self.target_name, "add_ten_wrapper")
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.register_patch(self.target_name, double_wrapper)
+        self.manager.apply_patches()
+        self.assertEqual(self.target.function(1), 4)
+
+        self.manager.remove_wrappers(self.target_name, None)
+        self.manager.apply_patches()
+        self.assertIs(self.target.function, replacement)
+        self.assertEqual(self.target.function(1), 2)
+
+        self.manager.remove_wrappers(self.target_name, None, remove_check=False)
+        self.assertTrue(self.manager.get_patch(self.target_name).is_applied)
+        with self.assertRaisesRegex(RuntimeError, "has not remove anything"):
+            self.manager.remove_wrappers(self.target_name, "missing_wrapper")
+        self.assertTrue(self.manager.get_patch(self.target_name).is_applied)
+
+    def test_remove_patches_allows_reregistering_same_functions(self):
+        original = self.target.function
+
+        def replacement(value):
+            return value + 1
+
+        def double_wrapper(function):
+            def wrapped(value):
+                return function(value) * 2
+
+            return wrapped
+
+        for _ in range(2):
+            self.manager.register_patch(self.target_name, replacement)
+            self.manager.register_patch(self.target_name, double_wrapper)
+            self.manager.apply_patches()
+            self.assertEqual(self.target.function(2), 6)
+
+            self.manager.remove_patches()
+            self.assertIs(self.target.function, original)
+            self.assertEqual(self.target.function(2), 2)
 
 # ---------- Auto-discovery: Interface Contract Tests for ALL Registered Platforms ----------
 
@@ -819,17 +1016,19 @@ class TestAllRegisteredPlatformsContract(unittest.TestCase):
         self._for_each_platform(check)
 
     def test_device_name_matches_device_type(self):
-        """device_name() must agree with the type of the device() it hands out."""
+        """device_name() must resolve to the type returned by device()."""
+        import torch
+
         def check(name, p):
             device = p.device(0)
             if device is None:  # cpu platform returns None by design
                 return
+            device_type = torch.device(p.device_name()).type
             self.assertEqual(
                 device.type,
-                p.device_name(),
-                f"{name}: device_name() is {p.device_name()!r} but device(0) is "
-                f"{device.type!r}. The `param.device.type == device_name()` "
-                f"checks in the optimizers silently go false when these differ.",
+                device_type,
+                f"{name}: device_name() {p.device_name()!r} resolves to "
+                f"{device_type!r} but device(0) is {device.type!r}.",
             )
         self._for_each_platform(check)
 
@@ -1160,7 +1359,7 @@ def _create_mock_platform(name):
         def create_graph(self):
             return None
 
-        def capture_to_graph(self, graph, pool=None, stream=None):
+        def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
             pass
 
         def replay_graph(self, graph):
@@ -1261,12 +1460,16 @@ class TestKunLunXinDeviceContract(unittest.TestCase):
         """Regression: torch rejected 'kunlunxin' at every device= call site."""
         import torch
 
-        self.assertEqual(torch.device(self.platform.device_name()).type, "cuda")
+        self.assertEqual(
+            torch.device(self.platform.device_name()).type, torch.device("cuda").type
+        )
         self.assertEqual(torch.device(self.platform.device_name(2)).index, 2)
 
     def test_device_name_matches_inherited_device_namespace(self):
-        """device_name() must match the namespace device() actually returns."""
-        self.assertEqual(self.platform.device(1).type, self.platform.device_name())
+        """device() must use the runtime's CUDA-compatible namespace."""
+        import torch
+
+        self.assertEqual(self.platform.device(1), torch.device("cuda", 1))
 
     def test_override_vendor_resolves_to_kunlunxin(self):
         """The override registry must still select kunlunxin implementations."""

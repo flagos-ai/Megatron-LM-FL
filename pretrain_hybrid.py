@@ -44,6 +44,7 @@ from megatron.core.utils import (
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
 )
+from megatron.plugin.platform import get_platform
 from megatron.training import (
     get_args,
     get_timers,
@@ -70,6 +71,7 @@ except ImportError:
     has_nvidia_modelopt = False
 
 stimer = StragglerDetector()
+cur_platform = get_platform()
 
 
 def get_batch(data_iterator, vp_stage=None):
@@ -94,7 +96,11 @@ def get_batch(data_iterator, vp_stage=None):
     if tp_rank == 0:
         batch = next(data_iterator)
         for key in BATCH_KEYS:
-            batch[key] = batch[key].cuda(non_blocking=True) if key in batch and batch[key] is not None else None
+            batch[key] = (
+                batch[key].to(cur_platform.device(cur_platform.current_device()), non_blocking=True)
+                if key in batch and batch[key] is not None
+                else None
+            )
 
     batch = get_batch_on_this_tp_rank(batch, broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(), broadcast_group=mpu.get_tensor_model_parallel_group(), is_sft=is_sft, is_hybrid_cp=is_hybrid_cp, create_attention_mask_in_dataloader=create_attention_mask_in_dataloader, cp_size=cp_size, tp_rank=tp_rank, micro_batch_size=args.micro_batch_size, seq_length=args.seq_length, mtp_on_this_rank=mtp_on_this_rank, pipeline_model_parallel_size=args.pipeline_model_parallel_size, is_pipeline_first_stage=mpu.is_pipeline_first_stage(), is_pipeline_last_stage=mpu.is_pipeline_last_stage())
 

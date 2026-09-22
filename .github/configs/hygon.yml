@@ -4,7 +4,7 @@ setup_script: .github/scripts/set_env_hygon.sh
 
 # Built from the documented DTK image with FlagGems, TransformerEngine-FL, and
 # the test dependencies preinstalled, so CI setup only installs this project.
-ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260828-hygon-dev
+ci_image: harbor.baai.ac.cn/flagscale/flagscale-train:dev-hygon-py3.10-202609152059
 
 runner_labels:
   - hg-8g-cicd-megatron
@@ -276,6 +276,9 @@ test_matrix:
       - tests/unit_tests/models/test_hybrid_model.py
       - tests/unit_tests/models/test_hybrid_moe_model.py
       - tests/unit_tests/models/test_mamba_moe_model.py
+      # TE-FL te_general_grouped_gemm shared memory requirement (80KB) exceeds
+      # BW1000 hardware limit (64KB); same MoE grouped GEMM boundary as above.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py
 
       # fusions
       # TE-FL FlagGems backend missing rmsnorm_bwd_add operator.

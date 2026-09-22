@@ -906,7 +906,6 @@ class TorchDistLoadShardedStrategy:
                 flatten_state_dict=False,
                 flatten_sharded_tensors=False,
             ),
-            no_dist=True,
         )
 
         if self.cache_metadata:

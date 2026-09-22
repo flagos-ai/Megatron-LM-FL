@@ -5,7 +5,7 @@ import torch
 
 from megatron.core.models.common.embeddings.language_model_embedding import LanguageModelEmbedding
 from megatron.core.transformer.transformer_config import TransformerConfig
-from tests.unit_tests.test_utilities import Utils
+from tests.unit_tests.test_utilities import Utils, get_current_device, get_device_str
 
 
 class TestBaseEmbedding:
@@ -47,11 +47,11 @@ class TestBaseEmbedding:
         assert embeddings.shape[2] == self.base_embedding.config.hidden_size
 
     def test_gpu_forward(self):
-        self.base_embedding.cuda()
-        input_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).cuda()
-        position_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).cuda()
+        self.base_embedding.to(get_current_device())
+        input_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).to(get_current_device())
+        position_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).to(get_current_device())
         embeddings = self.base_embedding(input_ids, position_ids)
-        assert embeddings.device.type == 'cuda'
+        assert embeddings.device.type == get_device_str()
         assert embeddings.shape[0] == self.base_embedding.max_sequence_length
         assert embeddings.shape[1] == input_ids.shape[0]
         assert embeddings.shape[2] == self.base_embedding.config.hidden_size

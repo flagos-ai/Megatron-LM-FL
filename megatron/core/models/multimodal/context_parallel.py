@@ -168,20 +168,33 @@ def _reduce_scatter_along_second_dim(global_t):
     assert global_t.shape[1] % cp_size == 0
     samples_per_rank = global_t.shape[1] // cp_size
 
+    ######## FlagScale Begin ########
+    # Reduction backward functions can supply an expanded, zero-stride gradient.
+    # Materialize it before slicing and packing for the distributed collective.
+    global_t = global_t.contiguous()
+    ######## FlagScale End ########
+
     tensor_list = [
         global_t[:, cp_rank * samples_per_rank : (cp_rank + 1) * samples_per_rank]
         for cp_rank in range(cp_size)
     ]
 
-    local_t = torch.zeros(
-        global_t.shape[0],
-        samples_per_rank,
-        *global_t.shape[2:],
-        device=global_t.device,
-        dtype=global_t.dtype,
+    ######## FlagScale Begin ########
+    # Use the tensor-form collective to avoid backend-dependent handling of
+    # input tensor lists. Pack the sequence chunks along the leading dimension,
+    # which reduce_scatter_tensor splits across ranks.
+    packed_input = torch.cat(tensor_list, dim=0).contiguous()
+
+    # Create output tensor for reduce_scatter_tensor
+    local_t = torch.empty(
+        tensor_list[0].shape, device=global_t.device, dtype=global_t.dtype
     )
 
-    torch.distributed.reduce_scatter(local_t, tensor_list, group=get_context_parallel_group())
+    torch.distributed.reduce_scatter_tensor(
+        local_t, packed_input, group=get_context_parallel_group()
+    )
+    ######## FlagScale End ########
+
     return local_t
 
 

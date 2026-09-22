@@ -87,7 +87,7 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
         shape=[tp, cp, pp, dp, 1, 1],  # [tp, cp, pp, dp, ep, expt_dp]
         dim_names=["tp", "cp", "pp", "dp", "ep", "expt_dp"],
         rank_offset=offset,
-        backend="nccl",
+        backend=Utils.get_backend(),
     )
     grid.create_pg(["tp"])
     grid.create_pg(["cp"])
@@ -110,6 +110,12 @@ def destroy_all_grids():
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
+    # These groups are created separately from HyperCommGrid and must be
+    # destroyed explicitly before dropping the cache between test cases.
+    for embedding_groups in _embedding_pg_cache.values():
+        for group in embedding_groups:
+            if group is not None and group != dist.GroupMember.NON_GROUP_MEMBER:
+                dist.destroy_process_group(group)
     _embedding_pg_cache.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
 

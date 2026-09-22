@@ -250,12 +250,16 @@ class PlatformBase(ABC):
         ...
 
     # Graph operations
+    def graph_pool_handle(self):
+        """Return a backend graph memory-pool handle when supported."""
+        return None
+
     @abc.abstractmethod
     def create_graph(self):
         ...
 
     @abc.abstractmethod
-    def capture_to_graph(self, graph, pool=None, stream=None):
+    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
         ...
 
     @abc.abstractmethod

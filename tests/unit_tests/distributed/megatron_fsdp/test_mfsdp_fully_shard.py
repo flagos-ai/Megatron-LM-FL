@@ -261,6 +261,82 @@ class TestMegatronFsdpFullyShard:
     def teardown_class(cls):
         Utils.destroy_model_parallel()
 
+    @pytest.fixture(autouse=True)
+    def cleanup_device_mesh_process_groups(self):
+        """Release groups created by a case, including flattened and implicit meshes."""
+        from torch.distributed import device_mesh, distributed_c10d
+        from torch.distributed.tensor import DTensor
+
+        existing_groups = set(distributed_c10d._world.pg_map)
+        mesh_resources = getattr(device_mesh, "_mesh_resources", None)
+
+        def copy_containers(value):
+            # Copy cache containers without copying DeviceMesh or ProcessGroup objects.
+            if isinstance(value, dict):
+                return {key: copy_containers(item) for key, item in value.items()}
+            if isinstance(value, list):
+                return [copy_containers(item) for item in value]
+            return value
+
+        mesh_state = {
+            name: copy_containers(getattr(mesh_resources, name))
+            for name in (
+                "child_to_root_mapping",
+                "root_to_flatten_mapping",
+                "mesh_stack",
+                "mesh_dim_group_options",
+                "flatten_name_to_root_dims",
+            )
+            if hasattr(mesh_resources, name)
+        }
+        try:
+            yield
+        finally:
+            world = distributed_c10d._world
+            errors = []
+            try:
+                # Match c10d's global shutdown ordering, even when rank membership differs.
+                groups = sorted(
+                    (
+                        group
+                        for group in world.pg_map
+                        if group not in existing_groups
+                        and group is not torch.distributed.group.WORLD
+                    ),
+                    key=world.pg_names.__getitem__,
+                    reverse=True,
+                )
+                # No barrier here: a peer may have failed before reaching teardown.
+                for group in groups:
+                    if group not in world.pg_map:
+                        continue
+                    group_name = world.pg_names[group]
+                    try:
+                        torch.distributed.destroy_process_group(group)
+                    except Exception as error:
+                        errors.append((group_name, error))
+            finally:
+                # Restore pre-existing meshes, including caches cleared by legacy helpers.
+                for name, value in mesh_state.items():
+                    current = getattr(mesh_resources, name, None)
+                    if isinstance(current, dict):
+                        current.clear()
+                        current.update(value)
+                    elif isinstance(current, list):
+                        current[:] = value
+                    else:
+                        setattr(mesh_resources, name, value)
+                # Cached output specs retain meshes whose groups were just destroyed.
+                # Equal-layout meshes in later cases must not reuse those stale specs.
+                propagate = DTensor._op_dispatcher.sharding_propagator.propagate_op_sharding
+                # PyTorch versions expose either an LRU wrapper or a thread-local cache.
+                getattr(propagate, "cache", propagate).cache_clear()
+            if errors:
+                details = "; ".join(f"{name}: {error!r}" for name, error in errors)
+                raise RuntimeError(
+                    f"Failed to destroy test-owned process groups: {details}"
+                ) from errors[0][1]
+
     @pytest.mark.skipif(
         version.parse(torch.__version__) < version.parse('2.4.0'),
         reason="Requires DTensor and DeviceMesh support in (approximately) PyTorch 2.4.0 or later. Should not be run on 2.2.0a0+81ea7a4 (LTS).",

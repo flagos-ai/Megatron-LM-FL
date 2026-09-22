@@ -23,6 +23,7 @@ from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParall
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 
@@ -138,10 +139,18 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
 
 def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
+    if dist.is_initialized():
+        # Device collectives can outlive the Python call. All ranks must finish
+        # their communication before any rank releases its process groups.
+        get_platform().synchronize()
+        dist.barrier()
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
+    if dist.is_initialized():
+        # Do not create the next test's groups while a peer is still tearing down.
+        dist.barrier()
 
 
 def _get_pg_collection_from_grid(grid):

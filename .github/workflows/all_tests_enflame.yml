@@ -6,9 +6,20 @@ on:
   pull_request:
     branches: ["main"]
   workflow_dispatch: # Allows manual triggering
+    inputs:
+      run_unit_tests:
+        description: 'Run unit tests'
+        required: false
+        type: boolean
+        default: true
+      run_functional_tests:
+        description: 'Run functional tests'
+        required: false
+        type: boolean
+        default: true
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -25,15 +36,15 @@ jobs:
     uses: ./.github/workflows/all_tests_common.yml
     with:
       platform: enflame
-      run_unit_tests: true
-      run_functional_tests: false
+      run_unit_tests: ${{ github.event.inputs.run_unit_tests != 'false' }}
+      run_functional_tests: ${{ github.event.inputs.run_functional_tests != 'false' }}
       te_fl_prepare: true
       te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
 
   all_tests:
     needs: run_tests
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Verify workflow status
         run: |

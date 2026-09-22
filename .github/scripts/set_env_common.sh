@@ -210,6 +210,10 @@ PY
     return 0
   fi
 
+  # Image-provided triton packages are vendor-specific and complete.
+  # flag-gems does not depend on or provide triton, so there is no conflict.
+  # Do not uninstall image triton.
+
   echo "Installing configured runtime pip packages: ${packages[*]}"
   "$python_bin" -m pip install --no-cache-dir "${install_args[@]}" "${packages[@]}"
 }

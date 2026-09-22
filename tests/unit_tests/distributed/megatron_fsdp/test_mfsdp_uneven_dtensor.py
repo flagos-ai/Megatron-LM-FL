@@ -307,19 +307,41 @@ def test_3d_tensor_two_shards(distributed_setup):
 
 
 @pytest.mark.distributed
-def test_different_dtypes(distributed_setup):
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float64, torch.int32, torch.int64])
+def test_different_dtypes(distributed_setup, dtype):
     """Verify correctness across several dtypes."""
     setup = distributed_setup
+    if dtype == torch.float64 and setup["device"].type == "musa":
+        pytest.skip("The MUSA runtime does not support float64 tensors.")
+
     mesh = DeviceMesh(setup["device_type"], list(range(setup["world_size"])))
 
-    for dtype in (torch.float32, torch.float64, torch.int32, torch.int64):
-        global_tensor = make_global_arange((4, 4), dtype=dtype, device=setup["device"])
-        dtensor = distribute_tensor(global_tensor, mesh, [Shard(0)])
+    global_tensor = make_global_arange((4, 4), dtype=dtype, device=setup["device"])
+    dtensor = distribute_tensor(global_tensor, mesh, [Shard(0)])
 
-        gathered = uneven_dtensor_to_full_tensor(dtensor)
+    gathered = uneven_dtensor_to_full_tensor(dtensor)
 
-        assert gathered.dtype == dtype
-        assert torch.equal(gathered, global_tensor)
+    assert gathered.dtype == dtype
+    assert torch.equal(gathered, global_tensor)
+
+
+@pytest.mark.distributed
+@pytest.mark.parametrize("shape,shard_dim", [((0, 3), 0), ((2, 0), 1)])
+def test_all_ranks_empty_shards(distributed_setup, shape, shard_dim):
+    """Reconstruct a DTensor with no elements on any rank."""
+    setup = distributed_setup
+    mesh = DeviceMesh(setup["device_type"], list(range(setup["world_size"])))
+    local = torch.empty(shape, dtype=torch.float32, device=setup["device"])
+    dtensor = DTensor.from_local(
+        local, mesh, (Shard(shard_dim),), shape=local.shape, stride=local.stride()
+    )
+
+    gathered = uneven_dtensor_to_full_tensor(dtensor)
+
+    assert gathered.shape == local.shape
+    assert gathered.dtype == local.dtype
+    assert gathered.device == local.device
+    assert gathered.numel() == 0
 
 
 @pytest.mark.distributed

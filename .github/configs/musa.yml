@@ -9,7 +9,7 @@ setup_script: .github/scripts/set_env_musa.sh
 runner_labels:
   - mt-8g-cicd-megatron
 # CI image for online env
-ci_image: harbor.baai.ac.cn/flagos-dev/flagscale-train:f147682-musa-dev
+ci_image: harbor.baai.ac.cn/flagscale/flagscale-train:dev-musa-py3.10-20260917
 
 # Dataset/tokenizer volumes for local runner assets under /data
 container_volumes:
@@ -17,8 +17,6 @@ container_volumes:
   - /home/flagscale_cicd/flask/config:/workspace/config
   - /data/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data
   - /data/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers
-  - /data/megatron-ci-assets-20260726/baai_datasets:/opt/data/datasets
-  - /data/megatron-ci-assets-20260726/baai_tokenizers:/opt/data/tokenizers
   # Override broken libmusa.so stub inside the image.
   - /usr/lib/x86_64-linux-gnu/libmusa.so:/usr/lib/x86_64-linux-gnu/libmusa.so
   - /usr/lib/x86_64-linux-gnu/libmusa.so.1:/usr/lib/x86_64-linux-gnu/libmusa.so.1
@@ -123,7 +121,6 @@ test_matrix:
       # with partial ranks stalling while others complete. test_param_norm_* use DistributedDataParallel
       # and may trigger similar MCCL synchronization issues. test_straggler_detector is inherently flaky.
       # Align with Ascend's conservative approach: skip all @pytest.mark.flaky tests in test_utils.py.
-      - tests/unit_tests/test_utils.py::test_check_param_hashes_across_dp_replicas
       - tests/unit_tests/test_utils.py::test_cross_check_param_hashes_across_dp_replicas
       - tests/unit_tests/test_utils.py::test_param_norm_linear[False]
       - tests/unit_tests/test_utils.py::test_param_norm_linear[True]
@@ -332,7 +329,7 @@ test_matrix:
         golden_environment: dev
         golden_platform: s5000
         enable_lightweight_mode: false
-        data_path: /opt/data/datasets
+        data_path: /home/gitlab-runner/data
         gpus_per_node: 1
       - model: gpt
         test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_musa
@@ -341,7 +338,7 @@ test_matrix:
         golden_environment: dev
         golden_platform: s5000
         enable_lightweight_mode: false
-        data_path: /opt/data/datasets
+        data_path: /home/gitlab-runner/data
         gpus_per_node: 4
 
 # TE-FL runtime configuration

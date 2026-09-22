@@ -10,7 +10,7 @@ setup_script: .github/scripts/set_env_metax.sh
 # ci_image: localhost:5000/cr.metax-tech.com/public-ai-release/maca/megatron-lm:0.12.0-maca.ai3.3.0.11-torch2.6-py312-ubuntu22.04-amd64
 
 # CI image for online env
-ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:manual-20260827-metax-dev
+ci_image: harbor.baai.ac.cn/flagscale/flagscale-train:dev-metax-py3.12-20260915
 
 # Runner labels for Metax node
 runner_labels:
@@ -276,6 +276,22 @@ test_matrix:
       # specific case that are unstable on Metax
       # models
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
+      # MACA IPC memory management issue: mcIpcCloseMemHandle fails in teardown with
+      # "can't find memory object" when destroying process groups after MIMO tests.
+      # The compute passes but MACA runtime's memobj map loses GPU pointers during
+      # multi-process shared memory cleanup, causing SIGABRT in all 8 ranks.
+      # fan_in configurations reliably trigger; fan_out sometimes passes.
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py
+      # MetaX FlashAttention 2.6.3 crashes during graph capture with dropout=0.1.
+      # A standalone SDPA reproducer passes with dropout=0 or the math backend.
+      # Keep both FSDP variants disabled until the dropout capture path is supported.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_full_iteration_cuda_graph_e2e
+      # MACA multimodal context-parallel tests hit similar IPC/memory lifetime issues
+      # as MIMO colocated tests above. Shared GPU memory across ranks experiences
+      # cleanup race conditions or premature deallocation during teardown, leading
+      # to crashes when the MACA runtime tries to close IPC handles for already-freed
+      # or unmapped pointers.
+      - tests/unit_tests/models/test_multimodal_context_parallel.py
 
   functional:
     train:
@@ -308,6 +324,10 @@ te_fl:
     environment:
       TE_FL_SKIP_CUDA: "1"
       TE_FL_PREFER: flagos
+      # Vendor softmax supports FP16/BF16 only; unfused attention uses FP32.
+      # Reference softmax avoids the FlagGems broadcast-mask kernel issue.
+      # Vendor l2norm returns the one-element tensor expected by Megatron.
+      TE_FL_PER_OP: "scaled_masked_softmax_forward=reference;scaled_masked_softmax_backward=reference;multi_tensor_l2norm=impl:vendor.metax"
     install_pip_args: []
     # MetaX Triton is supplied by the image; no public triton-metax package is
     # available from the runtime Python index.

@@ -7,8 +7,8 @@ hardware_name: enflame
 display_name: 'Enflame Tests'
 setup_script: .github/scripts/set_env_enflame.sh
 
-# CI image for the Enflame environment (built and pushed 2026-08-10, validated on Enflame L600)
-ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260810-enflame-dev
+# CI image for the Enflame environment (built and pushed 2026-09-15, validated on Enflame L600)
+ci_image: harbor.baai.ac.cn/flagscale/flagscale-train:dev-enflame-py3.12-202609151435
 
 # Runner labels for the Enflame node
 runner_labels:
@@ -72,6 +72,20 @@ test_matrix:
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
     ignored_tests:
+      # Flash Attention GCU: undefined symbol (_ZN3c1013MessageLoggerC1EPKcii)
+      # flash_attn_gcu.so compiled against incompatible PyTorch version; causes ImportError
+      - tests/unit_tests/test_inference.py
+      - tests/unit_tests/inference/engines/test_static_engine.py
+      - tests/unit_tests/inference/test_flash_decode.py
+      # ECCL communication exception: eccl ras detect coll exception
+      - tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py::test_chunked_cross_entropy_label_smoothing
+      # ECCL communicator setup deadlock in torch.distributed.new_group(); same
+      # file already has one test failing, full distributed path unstable on GCU.
+      - tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py::test_chunked_cross_entropy_performance
+      # The 248320-token memory benchmark failed a 3396 MiB device allocation
+      # on S60 CI; failed ranks then leave peers waiting at cleanup barriers.
+      # Run this benchmark separately with sufficient free device memory.
+      - tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py::test_chunked_cross_entropy_memory
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
       - tests/unit_tests/test_layer_wise_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
@@ -101,8 +115,6 @@ test_matrix:
       # TE-FL vendor.enflame missing multi_tensor_sgd op (same pattern as ascend)
       - tests/unit_tests/test_optimizer_cpu_offloading.py::test_multi_device_hybrid_optimizer
       - tests/unit_tests/test_optimizer_cpu_offloading.py::test_overlap_cpu_optimizer_d2h_h2d_sync_correctness
-      # torch.cuda.device_count() returns 2 instead of 8 (torch_gcu lambda bug); same as musa
-      - tests/unit_tests/test_utils.py::test_check_param_hashes_across_dp_replicas
       # FP8 inference utilities require full TE vendor.enflame FP8 support (incomplete on GCU);
       # Gloo PG setup fails in test_prepare_model_for_fp8_inference_basic → ECCL collective deadlock (rank counter 3 vs 4)
       - tests/unit_tests/test_fp8_utils.py
@@ -152,6 +164,15 @@ test_matrix:
       - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_forward
       # TE-FL flaky: 8 FAILED then partial PASSED (Enflame-specific)
       - tests/unit_tests/models/test_clip_vit_model.py::TestCLIPViTModel::test_set_input_tensor
+      # dev-enflame-py3.12-202609151435 has no working grouped GEMM:
+      # FlagGems gcu.matmul compilation fails with an operandSegmentSizes mismatch,
+      # and vendor.enflame cannot import migration.patches.transformer_engine.
+      # TE reference has no grouped GEMM fallback, so these MoE forward tests fail.
+      # Keep strict weight-loading tests, which do not execute grouped GEMM.
+      # Re-enable after repairing the image dependencies/compiler and validating
+      # grouped GEMM on S60 with these model/parallelism configurations.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_moe_record_and_compare_golden_values
       # ECCL deadlock: rank 2 runtime launch counter mismatch; same as ascend/metax
       - tests/unit_tests/models/test_heterogeneous_gpt_model.py
       # flash_attn not available on GCU; collection error during import
@@ -166,6 +187,13 @@ test_matrix:
       - tests/unit_tests/models/test_mamba_moe_model.py
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py
       - tests/unit_tests/models/test_mimo_checkpoint.py
+      # dev-enflame-py3.12-202609151435 cannot load vendor FlashAttention:
+      # migration.patches.transformer_engine is missing. FlagGems rejects FP32,
+      # so these FP32 training cases fall back to PyTorch GCU efficient SDPA,
+      # whose backward aborts with TOPSATEN_STATUS_NOT_SUPPORT (unsupported dtype).
+      # Re-enable all eight variants after fixing the image/vendor dependencies
+      # and validating FP32 attention forward/backward without a TE math workaround.
+      - tests/unit_tests/models/test_mimo_colocated_correctness.py::TestColocatedGradientScalingCorrectness::test_dist_matches_dp1_reference_post_step_weights
       # TE-FL vendor.enflame layernorm_fwd DType error + tensors on different GCU devices; same as musa
       - tests/unit_tests/models/test_mimo_submodules.py
       - tests/unit_tests/models/test_multimodal_projector.py::TestMultimodalProjector::test_forward
@@ -313,6 +341,9 @@ test_matrix:
       # non-rank-0 ranks hit FileNotFoundError (file_0.idx) after the ECCL barrier; cross-rank
       # file visibility race on GCU (192 distributed cases, 144 fail). musa ignores it too.
       - tests/unit_tests/data/test_builder.py::test_fast_builder
+      # TE-FL vendor.enflame missing THD (thd_get_partitioned_indices) operator;
+      # SFT batch construction requires THD partitioning support.
+      - tests/unit_tests/data/test_get_batch.py::test_sft_batch
 
 
       # fusions
@@ -336,7 +367,25 @@ test_matrix:
 
 
   functional:
-    train: []
+    train:
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp1_pp1_s60
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: s60
+        enable_lightweight_mode: false
+        data_path: /home/gitlab-runner/data
+        gpus_per_node: 1
+      - model: gpt
+        test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark_s60
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: s60
+        enable_lightweight_mode: false
+        data_path: /home/gitlab-runner/data
+        gpus_per_node: 4
 
 # TE-FL runtime configuration
 te_fl:
