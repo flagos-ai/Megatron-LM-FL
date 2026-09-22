@@ -17,13 +17,24 @@ def register_platforms() -> None:
         PLATFORMS["cpu"] = platform_cpu # use lower keys: cpu
         print(f"Megatron-LM-FL Platform: cpu Registered")
 
+    # Register MLU Platform
+    # NOTE: registered before CUDA. The gpu_migration bridge aliases
+    # torch.cuda.* onto MLU, so PlatformCUDA.is_available() also reports True
+    # on MLU hosts; registering first makes the manager's selection chain pick
+    # mlu over the generic cuda platform.
+    from .platform_mlu import PlatformMLU
+    platform_mlu = PlatformMLU()
+    if platform_mlu.is_available():
+        PLATFORMS["mlu"] = platform_mlu
+        print(f"Megatron-LM-FL Platform: mlu Registered")
+
     # Register CUDA Platform
     from .platform_cuda import PlatformCUDA
     platform_cuda = PlatformCUDA()
     if platform_cuda.is_available():
         PLATFORMS["cuda"] = platform_cuda # use lower keys: cuda
         print(f"Megatron-LM-FL Platform: cuda Registered")
-    
+
     # Register MUSA Platform
     from .platform_musa import PlatformMUSA
     platform_musa = PlatformMUSA()
