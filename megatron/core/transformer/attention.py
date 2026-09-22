@@ -975,9 +975,14 @@ class Attention(MegatronModule, ABC):
         if inference_context and inference_context.is_dynamic_batching():
             # Platforms with a native paged-attention op (e.g. NPU) skip the
             # flash-attn version gate; see PlatformBase.requires_flash_attn_for_dynamic_batching.
+            # Where the gate does apply, DotProductAttention (--attention-backend
+            # unfused) never calls flash_attn (pure baddbmm/bmm, no block_table),
+            # so it is exempt too.
             if cur_platform.requires_flash_attn_for_dynamic_batching():
-                assert HAVE_FA3 or is_fa_min_version(
-                    "2.7.3"
+                assert (
+                    HAVE_FA3
+                    or is_fa_min_version("2.7.3")
+                    or self.core_attention.__class__.__name__ == "DotProductAttention"
                 ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]

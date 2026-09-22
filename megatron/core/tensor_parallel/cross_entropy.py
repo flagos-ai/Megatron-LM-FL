@@ -230,3 +230,231 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=
                          default is no smoothing (=0.0)
     """
     return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, label_smoothing)
+
+
+class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
+    """Chunked vocab parallel cross entropy that reduces peak memory usage.
+
+    Processes the sequence dimension in chunks so that only one chunk's worth
+    of fp32 logits exists in memory at a time instead of the full
+    [seq_len, batch, vocab/TP] tensor.
+
+    Forward peak memory:
+        Original : bf16_input + fp32_logits = S*B*V*2 + S*B*V*4  (~10.5 GiB)
+        Chunked  : bf16_input + fp32_chunk  = S*B*V*2 + C*B*V*4  (~4.4 GiB, C=4096)
+
+    Backward uses recomputation (same pattern as activation recompute): the
+    fp32 softmax is NOT saved from forward; instead the forward pass is re-run
+    per chunk during backward to recover the softmax needed for gradient
+    computation.
+
+    The computation logic is 100% delegated to VocabParallelCrossEntropy static
+    methods — no numerical differences from the original implementation.
+    """
+
+    @staticmethod
+    def _run_chunk_forward(
+        chunk_logits_bf16,
+        chunk_target,
+        vocab_start_index,
+        vocab_end_index,
+        label_smoothing,
+    ):
+        """Run one chunk through the full forward pass.
+
+        Returns:
+            softmax   : [chunk_size, batch, vocab/TP], fp32
+            chunk_loss: [chunk_size, batch], fp32
+            target_mask      : [chunk_size, batch], bool
+            masked_target_1d : [chunk_size * batch], int64
+        """
+        # Step 1 — convert to fp32 and find per-position max
+        chunk_logits, logits_max = VocabParallelCrossEntropy.calculate_logits_max(
+            chunk_logits_bf16
+        )
+        torch.distributed.all_reduce(
+            logits_max,
+            op=torch.distributed.ReduceOp.MAX,
+            group=get_tensor_model_parallel_group(),
+        )
+
+        # Step 2 — subtract max, extract ground-truth logit, compute exp
+        (target_mask, masked_target_1d, predicted_logits, sum_exp_logits, exp_logits) = (
+            VocabParallelCrossEntropy.calculate_predicted_logits(
+                chunk_logits, chunk_target, logits_max, vocab_start_index, vocab_end_index
+            )
+        )
+        torch.distributed.all_reduce(
+            predicted_logits,
+            op=torch.distributed.ReduceOp.SUM,
+            group=get_tensor_model_parallel_group(),
+        )
+        torch.distributed.all_reduce(
+            sum_exp_logits,
+            op=torch.distributed.ReduceOp.SUM,
+            group=get_tensor_model_parallel_group(),
+        )
+
+        # Step 3 — compute loss and normalise exp_logits into softmax (in-place)
+        softmax, chunk_loss = VocabParallelCrossEntropy.calculate_cross_entropy_loss(
+            exp_logits, predicted_logits, sum_exp_logits
+        )
+
+        # Step 4 — optional label smoothing (matches original logic exactly)
+        vocab_size = softmax.size(-1)  # partition_vocab_size
+        if label_smoothing > 0:
+            assert 1.0 > label_smoothing > 0.0
+            smoothing = label_smoothing * vocab_size / (vocab_size - 1)
+            log_probs = torch.log(softmax)
+            mean_log_probs = log_probs.mean(dim=-1)
+            chunk_loss = (1.0 - smoothing) * chunk_loss - smoothing * mean_log_probs
+
+        return softmax, chunk_loss, target_mask, masked_target_1d
+
+    @staticmethod
+    def forward(ctx, vocab_parallel_logits, target, label_smoothing=0.0, chunk_size=4096):
+        """Chunked forward pass.
+
+        Args:
+            vocab_parallel_logits: [seq_len, batch, vocab/TP], bf16
+            target              : [seq_len, batch], int64
+            label_smoothing     : float in [0.0, 1.0)
+            chunk_size          : number of sequence positions per chunk
+
+        Returns:
+            loss: [seq_len, batch], fp32
+        """
+        seq_len, batch, partition_vocab_size = vocab_parallel_logits.shape
+        device = vocab_parallel_logits.device
+
+        # Allocate output buffer — small (seq_len * batch * 4 bytes)
+        loss = torch.empty((seq_len, batch), dtype=torch.float32, device=device)
+
+        # Vocab range is the same for every chunk; compute once
+        get_vocab_range = VocabUtility.vocab_range_from_per_partition_vocab_size
+        rank = get_tensor_model_parallel_rank()
+        world_size = get_tensor_model_parallel_world_size()
+        vocab_start_index, vocab_end_index = get_vocab_range(
+            partition_vocab_size, rank, world_size
+        )
+
+        # Process sequence in chunks
+        for start in range(0, seq_len, chunk_size):
+            end = min(start + chunk_size, seq_len)
+
+            # fp32 chunk lives only inside this iteration (~1 GiB for chunk=4096)
+            _, chunk_loss, _, _ = _VocabParallelCrossEntropyChunked._run_chunk_forward(
+                vocab_parallel_logits[start:end],
+                target[start:end],
+                vocab_start_index,
+                vocab_end_index,
+                label_smoothing,
+            )
+
+            loss[start:end] = chunk_loss
+            # chunk tensors go out of scope here and are freed
+
+        # Save only the bf16 input for backward recomputation (not fp32 softmax)
+        ctx.save_for_backward(vocab_parallel_logits, target)
+        ctx.chunk_size = chunk_size
+        ctx.vocab_start_index = vocab_start_index
+        ctx.vocab_end_index = vocab_end_index
+        ctx.label_smoothing = label_smoothing
+        ctx.vocab_size = partition_vocab_size  # matches original ctx.vocab_size semantics
+
+        return loss
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Chunked backward pass with recomputation.
+
+        Recomputes the forward pass per chunk (recovers softmax) instead of
+        reading a stored fp32 softmax tensor, keeping peak memory at ~4.4 GiB.
+        """
+        vocab_parallel_logits, target = ctx.saved_tensors
+        chunk_size = ctx.chunk_size
+        vocab_start_index = ctx.vocab_start_index
+        vocab_end_index = ctx.vocab_end_index
+        label_smoothing = ctx.label_smoothing
+        vocab_size = ctx.vocab_size  # partition_vocab_size
+
+        seq_len = vocab_parallel_logits.size(0)
+
+        # Gradient tensor — same shape and dtype as the input logits (bf16)
+        grad_input = torch.zeros_like(vocab_parallel_logits)
+
+        for start in range(0, seq_len, chunk_size):
+            end = min(start + chunk_size, seq_len)
+
+            # Recompute softmax for this chunk (~1 GiB fp32, freed at end of iteration)
+            softmax, _, target_mask, masked_target_1d = (
+                _VocabParallelCrossEntropyChunked._run_chunk_forward(
+                    vocab_parallel_logits[start:end],
+                    target[start:end],
+                    vocab_start_index,
+                    vocab_end_index,
+                    label_smoothing,
+                )
+            )
+
+            # Compute gradients — reuses original VocabParallelCrossEntropy logic
+            (grad_2d, arange_1d, softmax_update, chunk_grad_input) = (
+                VocabParallelCrossEntropy.prepare_gradient_calculation_operands(
+                    softmax, target_mask
+                )
+            )
+
+            if label_smoothing > 0:
+                smoothing = label_smoothing * vocab_size / (vocab_size - 1)
+                grad_2d[arange_1d, masked_target_1d] -= (1.0 - smoothing) * softmax_update
+                average_grad = 1 / vocab_size
+                grad_2d[arange_1d, :] -= smoothing * average_grad
+                chunk_grad_input.mul_(grad_output[start:end].unsqueeze(dim=-1))
+            else:
+                chunk_grad_input = VocabParallelCrossEntropy.calculate_gradients(
+                    grad_2d,
+                    arange_1d,
+                    masked_target_1d,
+                    softmax_update,
+                    chunk_grad_input,
+                    grad_output[start:end],
+                )
+
+            grad_input[start:end] = chunk_grad_input
+            # softmax and intermediate tensors freed here
+
+        # Return gradients for (vocab_parallel_logits, target, label_smoothing, chunk_size)
+        return grad_input, None, None, None
+
+
+def vocab_parallel_cross_entropy_chunked(
+    vocab_parallel_logits,
+    target,
+    label_smoothing=0.0,
+    chunk_size=4096,
+):
+    """Chunked version of vocab_parallel_cross_entropy with lower peak memory.
+
+    Splits the sequence dimension into chunks so that only one chunk's fp32
+    logits exists at a time. The backward pass recomputes the softmax per chunk
+    instead of storing it from the forward pass.
+
+    Args:
+        vocab_parallel_logits: [seq_len, batch, vocab/TP], typically bf16
+        target               : [seq_len, batch], int64
+        label_smoothing      : float in [0.0, 1.0), default 0.0
+        chunk_size           : sequence positions per chunk (default 4096).
+                               Smaller values reduce peak memory further but
+                               increase the number of all-reduce calls.
+
+    Returns:
+        loss: [seq_len, batch], fp32
+
+    Memory (seq=28672, batch=1, vocab/TP=62080):
+        Original : ~10.5 GiB peak
+        chunk=4096: ~4.4 GiB peak  (58% reduction)
+        chunk=8192: ~5.4 GiB peak  (49% reduction)
+    """
+    return _VocabParallelCrossEntropyChunked.apply(
+        vocab_parallel_logits, target, label_smoothing, chunk_size
+    )

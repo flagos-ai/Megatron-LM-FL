@@ -46,3 +46,13 @@ test_matrix:
 
   functional:
     train: []
+
+te_fl:
+  prepare: false
+  # Use cuda for native CUDA extensions or python for TE_FL_SKIP_CUDA=1.
+  build_mode: python
+  build_environment: {}
+  runtime:
+    environment: {}
+    install_pip_args: []
+    pip_packages: []

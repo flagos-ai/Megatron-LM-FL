@@ -1,0 +1,53 @@
+name: daily
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: te-fl-daily-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  prepare-cuda:
+    name: prepare-cuda
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: cuda
+
+  prepare-musa:
+    name: prepare-musa
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: musa
+
+  prepare-ascend:
+    name: prepare-ascend
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: ascend
+
+  prepare-kunlunxin:
+    name: prepare-kunlunxin
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: kunlunxin
+
+  prepare-hygon:
+    name: prepare-hygon
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: hygon
+
+  prepare-metax:
+    name: prepare-metax
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: metax
+
+  prepare-enflame:
+    name: prepare-enflame
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: enflame

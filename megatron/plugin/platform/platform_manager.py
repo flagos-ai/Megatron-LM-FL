@@ -15,11 +15,16 @@ def get_platform():
     if cur_platform is not None:
         return cur_platform
 
-    # NPU is checked before CUDA: on Ascend, torch_npu's transfer_to_npu shim
+    # Both are checked before CUDA. The mlu case: the gpu_migration bridge makes
+    # the CUDA surface (and thus PLATFORMS["cuda"].is_available()) report True on
+    # MLU hosts. The npu case: torch_npu's transfer_to_npu shim
     # (TORCH_TRANSFER_TO_NPU=1) makes torch.cuda.is_available()/device_count()
-    # report the NPU as "cuda", so the real device must win the selection.
-    # On machines without torch_npu the NPU check falls through (is_available False).
-    if "npu" in PLATFORMS.keys() and PLATFORMS["npu"].is_available():
+    # report the NPU as "cuda", so the real device must win the selection. On a
+    # host without the vendor's torch each check falls through (is_available False).
+    if "mlu" in PLATFORMS.keys() and PLATFORMS["mlu"].is_available():
+        cur_platform = PLATFORMS["mlu"]
+        print(f"Megatron-LM-FL Platform: mlu Selected")
+    elif "npu" in PLATFORMS.keys() and PLATFORMS["npu"].is_available():
         cur_platform = PLATFORMS["npu"]
         print(f"Megatron-LM-FL Platform: npu Selected")
     elif "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
@@ -31,9 +36,6 @@ def get_platform():
     elif "txda" in PLATFORMS.keys() and PLATFORMS["txda"].is_available():
         cur_platform = PLATFORMS["txda"]
         print(f"Megatron-LM-FL Platform: txda Selected")
-    elif "npu" in PLATFORMS.keys() and PLATFORMS["npu"].is_available():
-        cur_platform = PLATFORMS["npu"]
-        print(f"Megatron-LM-FL Platform: npu Selected")
     elif "enflame" in PLATFORMS.keys() and PLATFORMS["enflame"].is_available():
         cur_platform = PLATFORMS["enflame"]
         print(f"Megatron-LM-FL Platform: enflame Selected")

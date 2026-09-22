@@ -82,6 +82,36 @@ class NullTokenizer:
         return self._eod_id
 
     @property
+    def pad_id(self):
+        """Returns id of padding token. NullTokenizer has none -> eod."""
+        return self._eod_id
+
+    @property
+    def pad(self):
+        """Returns padding token id (needed by RL trajectory padding)."""
+        return self._eod_id
+
+    @property
+    def bos_id(self):
+        """Returns id of beginning of sentence token. NullTokenizer has none."""
+        return None
+
+    @property
+    def bos(self):
+        """Returns beginning of sentence token id."""
+        return None
+
+    @property
+    def eos_id(self):
+        """Returns id of end of sentence token."""
+        return self._eod_id
+
+    @property
+    def eos(self):
+        """Returns end of sentence token id."""
+        return self._eod_id
+
+    @property
     def additional_special_tokens_ids(self):
         """ """
         return None

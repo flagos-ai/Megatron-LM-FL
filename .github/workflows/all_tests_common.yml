@@ -17,6 +17,21 @@ on:
         type: boolean
         default: true
         description: Whether to run functional tests in this workflow
+      te_fl_prepare:
+        required: false
+        type: boolean
+        default: false
+        description: Whether the caller prepared a TE-FL wheel for test jobs
+      te_fl_cache_key:
+        required: false
+        type: string
+        default: ''
+        description: Cache key for the caller-prepared TE-FL wheel
+      image_override:
+        required: false
+        type: string
+        default: ''
+        description: Optional image override for this run
 
 jobs:
   checkout_and_config:
@@ -26,7 +41,7 @@ jobs:
         shell: bash
     runs-on: ubuntu-latest
     outputs:
-      ci_image: ${{ steps.config.outputs.ci_image }}
+      image: ${{ steps.config.outputs.image }}
       runs_on: ${{ steps.config.outputs.runs_on }}
       container_volumes: ${{ steps.config.outputs.container_volumes }}
       container_options: ${{ steps.config.outputs.container_options }}
@@ -37,89 +52,118 @@ jobs:
       unit_test_groups: ${{ steps.config.outputs.unit_test_groups }}
       unit_pytest_extra_args: ${{ steps.config.outputs.unit_pytest_extra_args }}
       ignored_tests: ${{ steps.config.outputs.ignored_tests }}
+      te_fl_runtime_environment: ${{ steps.config.outputs.te_fl_runtime_environment }}
+      te_fl_install_pip_args: ${{ steps.config.outputs.te_fl_install_pip_args }}
+      te_fl_runtime_pip_packages: ${{ steps.config.outputs.te_fl_runtime_pip_packages }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Load platform configuration
+      - name: Install yq
+        run: |
+          set -euo pipefail
+          if ! command -v yq >/dev/null 2>&1; then
+            sudo wget -qO /usr/local/bin/yq \
+              https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
+            sudo chmod 0755 /usr/local/bin/yq
+          fi
+          yq --version
+
+      - name: Read and validate platform configuration
         id: config
+        env:
+          PLATFORM: ${{ inputs.platform }}
+          IMAGE_OVERRIDE: ${{ inputs.image_override }}
+          RUN_UNIT_TESTS: ${{ inputs.run_unit_tests }}
+          RUN_FUNCTIONAL_TESTS: ${{ inputs.run_functional_tests }}
         run: |
           set -euo pipefail
 
-          PLATFORM="${{ inputs.platform }}"
-          CONFIG_FILE=".github/configs/${PLATFORM}.yml"
-
-          # Install mikefarah/yq (v4) for YAML parsing
-          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
-          sudo chmod +x /usr/local/bin/yq
-          /usr/local/bin/yq --version
-          echo "Loading configuration from $CONFIG_FILE"
-
-          # Read CI image
-          CI_IMAGE=$(yq '.ci_image' "$CONFIG_FILE")
-          echo "ci_image=$CI_IMAGE" >> $GITHUB_OUTPUT
-
-          # Read runner labels and format as JSON array
-          RUNS_ON=$(yq '.runner_labels | tojson(0)' "$CONFIG_FILE")
-          echo "runs_on=$RUNS_ON" >> $GITHUB_OUTPUT
-
-          # Read container volumes and format as JSON array
-          VOLUMES=$(yq '.container_volumes | tojson(0)' "$CONFIG_FILE")
-          echo "container_volumes=$VOLUMES" >> $GITHUB_OUTPUT
-
-          # Read container options
-          OPTIONS=$(yq '.container_options' "$CONFIG_FILE")
-          echo "container_options=$OPTIONS" >> $GITHUB_OUTPUT
-
-          # Read device types
-          DEVICE_TYPES=$(yq '.device_types | tojson(0)' "$CONFIG_FILE")
-          echo "device_types=$DEVICE_TYPES" >> $GITHUB_OUTPUT
-
-          # Read the platform setup entry point shared by all test suites.
-          SETUP_SCRIPT=$(yq '.setup_script' "$CONFIG_FILE")
-          if [ -z "$SETUP_SCRIPT" ] || [ "$SETUP_SCRIPT" = "null" ]; then
-            echo "::error::setup_script is required"
+          config_file=".github/configs/${PLATFORM}.yml"
+          if [ ! -f "$config_file" ]; then
+            echo "::error::Platform configuration not found: $config_file" >&2
             exit 1
           fi
-          echo "setup_script=$SETUP_SCRIPT" >> $GITHUB_OUTPUT
 
-          # Read test matrix for training
-          TRAIN_MATRIX=$(yq '.test_matrix.functional.train // [] | tojson(0)' "$CONFIG_FILE")
-          if [ "${{ inputs.run_functional_tests }}" = "true" ] && [ "$TRAIN_MATRIX" = "[]" ]; then
-            echo "::error::test_matrix.functional.train must contain at least one test when functional tests are enabled"
+          image=$(yq -r '.ci_image // ""' "$config_file")
+          if [ -n "$IMAGE_OVERRIDE" ]; then
+            image="$IMAGE_OVERRIDE"
+          fi
+          if [ -z "$image" ]; then
+            echo "::error::ci_image is required in $config_file" >&2
             exit 1
           fi
-          echo "train_test_matrix=$TRAIN_MATRIX" >> $GITHUB_OUTPUT
 
-          # Read the complete unit-test contract from the platform configuration.
-          UNIT_NPROC_PER_NODE=$(yq '.test_matrix.unit.nproc_per_node // ""' "$CONFIG_FILE")
-          UNIT_TEST_GROUPS=$(yq '.test_matrix.unit.groups // [] | tojson(0)' "$CONFIG_FILE")
-          UNIT_PYTEST_EXTRA_ARGS=$(yq '.test_matrix.unit.pytest_extra_args // [] | tojson(0)' "$CONFIG_FILE")
-          IGNORED_TESTS=$(yq '.test_matrix.unit.ignored_tests // [] | tojson(0)' "$CONFIG_FILE")
+          runs_on=$(yq -o=json -I=0 '.runner_labels // []' "$config_file")
+          volumes=$(yq -o=json -I=0 '.container_volumes // []' "$config_file")
+          options=$(yq -r '.container_options // ""' "$config_file")
+          devices=$(yq -o=json -I=0 '.device_types // []' "$config_file")
+          setup_script=$(yq -r '.setup_script // ""' "$config_file")
+          unit_nproc=$(yq -r '.test_matrix.unit.nproc_per_node // ""' "$config_file")
+          unit_groups=$(yq -o=json -I=0 '.test_matrix.unit.groups // []' "$config_file")
+          unit_extra=$(yq -o=json -I=0 '.test_matrix.unit.pytest_extra_args // []' "$config_file")
+          ignored=$(yq -o=json -I=0 '.test_matrix.unit.ignored_tests // []' "$config_file")
+          train_matrix=$(yq -o=json -I=0 '.test_matrix.functional.train // []' "$config_file")
+          runtime_environment=$(yq -o=json -I=0 '.te_fl.runtime.environment // {}' "$config_file")
+          install_pip_args=$(yq -o=json -I=0 '.te_fl.runtime.install_pip_args // []' "$config_file")
+          runtime_packages=$(yq -o=json -I=0 '.te_fl.runtime.pip_packages // []' "$config_file")
 
-          if [ "${{ inputs.run_unit_tests }}" = "true" ] && [ "$UNIT_TEST_GROUPS" = "[]" ]; then
-            echo "::error::test_matrix.unit.groups must contain at least one group when unit tests are enabled"
+          if [ -z "$setup_script" ] || [ "$setup_script" = "null" ]; then
+            echo "::error::setup_script is required" >&2
             exit 1
           fi
-          if [ "${{ inputs.run_unit_tests }}" = "true" ] && ! [[ "$UNIT_NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
-            echo "::error::test_matrix.unit.nproc_per_node must be a positive integer"
+          if [ "$runs_on" = "[]" ] || [ "$devices" = "[]" ]; then
+            echo "::error::runner_labels and device_types must not be empty" >&2
             exit 1
           fi
-          echo "unit_nproc_per_node=$UNIT_NPROC_PER_NODE" >> $GITHUB_OUTPUT
-          echo "unit_test_groups=$UNIT_TEST_GROUPS" >> $GITHUB_OUTPUT
-          echo "unit_pytest_extra_args=$UNIT_PYTEST_EXTRA_ARGS" >> $GITHUB_OUTPUT
-          echo "ignored_tests=$IGNORED_TESTS" >> $GITHUB_OUTPUT
-      
+          if [ "$RUN_UNIT_TESTS" = true ]; then
+            if [ "$unit_groups" = "[]" ]; then
+              echo "::error::unit test groups are empty" >&2
+              exit 1
+            fi
+            if ! [[ "$unit_nproc" =~ ^[1-9][0-9]*$ ]]; then
+              echo "::error::unit nproc_per_node must be a positive integer" >&2
+              exit 1
+            fi
+          fi
+          if [ "$RUN_FUNCTIONAL_TESTS" = true ] && [ "$train_matrix" = "[]" ]; then
+            echo "::error::functional test matrix is empty" >&2
+            exit 1
+          fi
+
+          {
+            echo "image=$image"
+            echo "runs_on=$runs_on"
+            echo "container_volumes=$volumes"
+            echo "container_options=$options"
+            echo "device_types=$devices"
+            echo "setup_script=$setup_script"
+            echo "unit_nproc_per_node=$unit_nproc"
+            echo "train_test_matrix=$train_matrix"
+            echo "unit_test_groups=$unit_groups"
+            echo "unit_pytest_extra_args=$unit_extra"
+            echo "ignored_tests=$ignored"
+            echo "te_fl_runtime_environment=$runtime_environment"
+            echo "te_fl_install_pip_args=$install_pip_args"
+            echo "te_fl_runtime_pip_packages=$runtime_packages"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Platform: $PLATFORM"
+          echo "Image: $image"
+
   lint:
     name: lint
-    needs: 
-      - checkout_and_config
+    needs: checkout_and_config
     uses: ./.github/workflows/lint_common.yml
-          
+
   unit_tests:
     name: unit_tests
-    if: inputs.run_unit_tests
-    needs: 
+    if: >-
+      always() &&
+      inputs.run_unit_tests &&
+      needs.checkout_and_config.result == 'success' &&
+      needs.lint.result == 'success'
+    needs:
       - checkout_and_config
       - lint
     strategy:
@@ -130,7 +174,7 @@ jobs:
     with:
       platform: ${{ inputs.platform }}
       device: ${{ matrix.device }}
-      image: ${{ needs.checkout_and_config.outputs.ci_image }}
+      image: ${{ needs.checkout_and_config.outputs.image }}
       runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
       container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
@@ -139,27 +183,11 @@ jobs:
       nproc_per_node: ${{ needs.checkout_and_config.outputs.unit_nproc_per_node }}
       pytest_extra_args: ${{ needs.checkout_and_config.outputs.unit_pytest_extra_args }}
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
-
-  unit_tests_complete:
-    name: unit_tests_complete
-    # Keep a successful gate when unit tests are disabled so functional tests
-    # do not inherit a skipped dependency.
-    if: always()
-    needs: 
-      - unit_tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check unit tests result
-        run: |
-          if [ "${{ inputs.run_unit_tests }}" != "true" ]; then
-            echo "Unit tests disabled; allowing functional tests to proceed"
-            exit 0
-          fi
-          if [ "${{ needs.unit_tests.result }}" != "success" ]; then
-            echo "❌ Unit tests failed: ${{ needs.unit_tests.result }}"
-            exit 1
-          fi
-          echo "✅ Unit tests passed"
+      te_fl_prepare: ${{ inputs.te_fl_prepare }}
+      te_fl_cache_key: ${{ inputs.te_fl_cache_key }}
+      te_fl_runtime_environment: ${{ needs.checkout_and_config.outputs.te_fl_runtime_environment }}
+      te_fl_install_pip_args: ${{ needs.checkout_and_config.outputs.te_fl_install_pip_args }}
+      te_fl_runtime_pip_packages: ${{ needs.checkout_and_config.outputs.te_fl_runtime_pip_packages }}
 
   functional_tests:
     name: functional_tests
@@ -168,11 +196,11 @@ jobs:
       inputs.run_functional_tests &&
       needs.checkout_and_config.result == 'success' &&
       needs.lint.result == 'success' &&
-      needs.unit_tests_complete.result == 'success'
+      (!inputs.run_unit_tests || needs.unit_tests.result == 'success')
     needs:
       - checkout_and_config
       - lint
-      - unit_tests_complete
+      - unit_tests
     strategy:
       fail-fast: false
       matrix:
@@ -181,65 +209,66 @@ jobs:
     with:
       platform: ${{ inputs.platform }}
       device: ${{ matrix.device }}
-      image: ${{ needs.checkout_and_config.outputs.ci_image }}
+      image: ${{ needs.checkout_and_config.outputs.image }}
       runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
       container_volumes: ${{ needs.checkout_and_config.outputs.container_volumes }}
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
       setup_script: ${{ needs.checkout_and_config.outputs.setup_script }}
       test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
-
-  functional_tests_complete:
-    name: functional_tests_complete
-    if: always() && inputs.run_functional_tests
-    needs: 
-      - functional_tests
-    runs-on: ubuntu-latest
-    steps:
-      - name: Check functional tests result
-        run: |
-          if [ "${{ needs.functional_tests.result }}" != "success" ]; then
-            echo "❌ Functional tests failed: ${{ needs.functional_tests.result }}"
-            exit 1
-          fi
-          echo "✅ Functional tests passed"
+      te_fl_prepare: ${{ inputs.te_fl_prepare }}
+      te_fl_cache_key: ${{ inputs.te_fl_cache_key }}
+      te_fl_runtime_environment: ${{ needs.checkout_and_config.outputs.te_fl_runtime_environment }}
+      te_fl_install_pip_args: ${{ needs.checkout_and_config.outputs.te_fl_install_pip_args }}
+      te_fl_runtime_pip_packages: ${{ needs.checkout_and_config.outputs.te_fl_runtime_pip_packages }}
 
   all_tests_complete:
-    defaults:
-      run:
-        shell: bash
+    name: all_tests_complete
+    if: always()
     needs:
       - checkout_and_config
       - lint
-      - unit_tests_complete
-      - functional_tests_complete
+      - unit_tests
+      - functional_tests
     runs-on: ubuntu-latest
-    if: always()
     steps:
-      - name: Verify all tests passed
+      - name: Verify workflow status
+        env:
+          CHECKOUT_RESULT: ${{ needs.checkout_and_config.result }}
+          TE_FL_PREPARE: ${{ inputs.te_fl_prepare }}
+          TE_FL_CACHE_KEY: ${{ inputs.te_fl_cache_key }}
+          LINT_RESULT: ${{ needs.lint.result }}
+          RUN_UNIT_TESTS: ${{ inputs.run_unit_tests }}
+          UNIT_RESULT: ${{ needs.unit_tests.result }}
+          RUN_FUNCTIONAL_TESTS: ${{ inputs.run_functional_tests }}
+          FUNCTIONAL_RESULT: ${{ needs.functional_tests.result }}
         run: |
-          # Check all test jobs
+          set -euo pipefail
           failed=false
 
-          if [ "${{ needs.lint.result }}" != "success" ] && \
-            [ "${{ needs.lint.result }}" != "skipped" ]; then
-            echo "❌ Lint failed"
+          if [ "$CHECKOUT_RESULT" != success ]; then
+            echo "::error::Configuration failed: $CHECKOUT_RESULT" >&2
             failed=true
           fi
 
-          if [ "${{ needs.unit_tests_complete.result }}" != "success" ] && \
-            [ "${{ needs.unit_tests_complete.result }}" != "skipped" ]; then
-            echo "❌ Unit tests failed or cancelled: ${{ needs.unit_tests_complete.result }}"
+          if [ "$TE_FL_PREPARE" = true ] && [ -z "$TE_FL_CACHE_KEY" ]; then
+            echo "::error::TE-FL preparation was requested but no cache key was provided" >&2
             failed=true
           fi
 
-          if [ "${{ needs.functional_tests_complete.result }}" != "success" ] && \
-            [ "${{ needs.functional_tests_complete.result }}" != "skipped" ]; then
-            echo "❌ Functional tests failed or cancelled: ${{ needs.functional_tests_complete.result }}"
+          if [ "$LINT_RESULT" != success ]; then
+            echo "::error::Lint failed: $LINT_RESULT" >&2
+            failed=true
+          fi
+          if [ "$RUN_UNIT_TESTS" = true ] && [ "$UNIT_RESULT" != success ]; then
+            echo "::error::Unit test gate failed: $UNIT_RESULT" >&2
+            failed=true
+          fi
+          if [ "$RUN_FUNCTIONAL_TESTS" = true ] && [ "$FUNCTIONAL_RESULT" != success ]; then
+            echo "::error::Functional test gate failed: $FUNCTIONAL_RESULT" >&2
             failed=true
           fi
 
-          if [ "$failed" = "true" ]; then
+          if [ "$failed" = true ]; then
             exit 1
           fi
-
-          echo "✅ All tests completed successfully!"
+          echo "All requested checks completed successfully"
