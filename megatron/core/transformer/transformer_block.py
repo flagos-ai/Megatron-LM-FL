@@ -491,7 +491,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
         # Build execution plan:
         # 1. Prelude: layers before the loop on this rank (iteration 0)
-        # 2. Loop: layers in the loop range, repeated num_iters times
+        # 2. Loop: layers in the loop range, repeated according to loop_type
         # 3. Coda: layers after the loop on this rank (iteration 0)
         plan = []
 
@@ -500,9 +500,31 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             plan.append((i, 0))
 
         # Loop iterations
-        for iteration in range(num_iters):
-            for i in range(rank_in_loop_start, rank_in_loop_end):
-                plan.append((i, iteration))
+        loop_type = self.config.loop_type
+        if loop_type == "module-wise":
+            # ABCD → ABCDABCD
+            for iteration in range(num_iters):
+                for i in range(rank_in_loop_start, rank_in_loop_end):
+                    plan.append((i, iteration))
+        elif loop_type == "block-wise":
+            # ABCD with block_size=2 → ABABCDCD
+            block_size = self.config.loop_block_size
+            # Use global indices to determine block boundaries so that
+            # blocks align correctly across PP ranks.
+            for block_global_start in range(loop_start, loop_end, block_size):
+                block_global_end = min(block_global_start + block_size, loop_end)
+                # Intersect this block with this rank's layer range
+                local_start = max(block_global_start, overlap_start) - global_start
+                local_end = min(block_global_end, overlap_end) - global_start
+                if local_start >= local_end:
+                    continue
+                for iteration in range(num_iters):
+                    for i in range(local_start, local_end):
+                        plan.append((i, iteration))
+        else:
+            raise ValueError(
+                f"Unsupported loop_type='{loop_type}'."
+            )
 
         # Coda
         for i in range(rank_in_loop_end, local_layer_count):
@@ -511,8 +533,14 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         self._execution_plan = plan
 
         # Log execution plan summary
+        loop_span = rank_in_loop_end - rank_in_loop_start
+        block_info = ""
+        if loop_type == "block-wise":
+            block_info = f"block_size={self.config.loop_block_size}, "
         logger.info(
             f"Loop Transformer execution plan: "
+            f"loop_type='{loop_type}', "
+            f"{block_info}"
             f"global_layers=[{global_start}, {global_end}), "
             f"loop_range=[{loop_start}, {loop_end}), "
             f"local_loop=[{rank_in_loop_start}, {rank_in_loop_end}), "
@@ -520,8 +548,47 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             f"residual_scale={self._loop_residual_scale}, "
             f"total_exec_steps={len(plan)} "
             f"(prelude={rank_in_loop_start}, "
-            f"loop={rank_in_loop_end - rank_in_loop_start}x{num_iters}, "
+            f"loop={loop_span}x{num_iters}, "
             f"coda={local_layer_count - rank_in_loop_end})"
+        )
+
+        # Print expanded model structure with attention type per execution step
+        self._log_execution_plan(plan, global_start)
+
+    def _log_execution_plan(self, plan, global_start):
+        """Print the expanded model structure showing attn type and loop iteration."""
+        # Identify which local indices are loop layers (appear more than once in the plan)
+        from collections import Counter
+        local_idx_counts = Counter(local_idx for local_idx, _ in plan)
+        loop_local_indices = {idx for idx, count in local_idx_counts.items() if count > 1}
+
+        lines = []
+        for step, (local_idx, loop_iter) in enumerate(plan):
+            layer = self._get_layer(local_idx)
+            global_idx = local_idx + global_start
+
+            # Determine attention type
+            attn_module = getattr(layer, 'self_attention', None)
+            attn_type = type(attn_module).__name__ if attn_module is not None else "Unknown"
+
+            # Determine MLP type
+            mlp_module = getattr(layer, 'mlp', None)
+            mlp_type = type(mlp_module).__name__ if mlp_module is not None else "Unknown"
+
+            # Determine region
+            if local_idx in loop_local_indices:
+                region = f"loop iter={loop_iter}"
+            else:
+                region = "prelude" if not loop_local_indices or local_idx < min(loop_local_indices) else "coda"
+
+            lines.append(
+                f"  step {step:>3d}: global_layer={global_idx:>3d} "
+                f"(physical={local_idx:>3d}) | "
+                f"attn={attn_type:<30s} | mlp={mlp_type:<15s} | {region}"
+            )
+
+        logger.info(
+            f"Expanded model structure ({len(plan)} steps):\n" + "\n".join(lines)
         )
 
     def has_final_layernorm_in_this_stage(self):
@@ -1009,6 +1076,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 if self._loop_enabled:
                     print(
                         f"[Loop] loop execution (checkpointed), "
+                        f"loop_type='{self.config.loop_type}', "
                         f"exec_steps={len(self._execution_plan)}, "
                         f"scale={self._loop_residual_scale}",
                         flush=True,
@@ -1040,6 +1108,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 if self._loop_enabled:
                     print(
                         f"[Loop] loop execution (non-checkpointed), "
+                        f"loop_type='{self.config.loop_type}', "
                         f"exec_steps={len(self._execution_plan)}, "
                         f"scale={self._loop_residual_scale}",
                         flush=True,

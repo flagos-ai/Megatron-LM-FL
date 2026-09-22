@@ -110,6 +110,19 @@ class TransformerConfig(ModelParallelConfig):
     """Scale factor applied to sublayer outputs (attention & MLP) within the looped span.
     SMELT uses 1/num_loop_iterations for all iterations. None means no scaling."""
 
+    loop_type: str = "module-wise"
+    """Controls the granularity of the loop.
+    - 'module-wise': loop the entire transformer layer sequence. ABCD → ABCDABCD.
+    - 'block-wise': split the loop span into blocks of loop_block_size and repeat
+      each block. E.g. ABCD with block_size=2 → ABABCDCD.
+    Only used when loop_start_layer is not None."""
+
+    loop_block_size: Optional[int] = None
+    """Block size for block-wise loop. The loop span is split into consecutive blocks
+    of this size, and each block is repeated num_loop_iterations times.
+    Must evenly divide (loop_end_layer - loop_start_layer).
+    Only used when loop_type='block-wise'."""
+
     pipeline_model_parallel_layout: Optional[Union[str, list, PipelineParallelLayerLayout]] = None
     """Custom definition of the pipeline parallel partitioning.
     Support type:
@@ -1305,6 +1318,27 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     f"loop_residual_scale must be positive, got {self.loop_residual_scale}."
                 )
+            _VALID_LOOP_TYPES = {"module-wise", "block-wise"}
+            if self.loop_type not in _VALID_LOOP_TYPES:
+                raise ValueError(
+                    f"loop_type must be one of {_VALID_LOOP_TYPES}, got '{self.loop_type}'."
+                )
+            if self.loop_type == "block-wise":
+                if self.loop_block_size is None:
+                    raise ValueError(
+                        "loop_block_size must be set when loop_type='block-wise'."
+                    )
+                loop_span = self.loop_end_layer - self.loop_start_layer
+                if self.loop_block_size <= 0 or self.loop_block_size > loop_span:
+                    raise ValueError(
+                        f"loop_block_size must be in [1, {loop_span}], "
+                        f"got {self.loop_block_size}."
+                    )
+                if loop_span % self.loop_block_size != 0:
+                    raise ValueError(
+                        f"loop_block_size ({self.loop_block_size}) must evenly divide "
+                        f"loop span ({loop_span} = loop_end_layer - loop_start_layer)."
+                    )
 
         # When fp32 residual connections are enabled, pipeline parallel communication must
         # use fp32 to match the dtype of the residual stream between pipeline stages.
