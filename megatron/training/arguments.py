@@ -1837,6 +1837,9 @@ def _add_inference_args(parser):
     group.add_argument('--inference-max-seq-length', type=int, default=2560,
                        help='Maximum sequence length expected for inference (prefill + decode).',
                        dest='inference_max_seq_length')
+    group.add_argument('--return-log-probs', action='store_true', default=False,
+                       help='Whether to return logprobs for each generated token.',
+                       dest='return_log_probs')
     group.add_argument('--inference-dynamic-batching',
                        action='store_true', default=False,
                        help='Enable dynamic batching mode.')

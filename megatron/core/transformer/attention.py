@@ -940,8 +940,13 @@ class Attention(MegatronModule, ABC):
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if inference_context and inference_context.is_dynamic_batching():
-            assert HAVE_FA3 or is_fa_min_version(
-                "2.7.3"
+            # DotProductAttention (--attention-backend unfused) never calls
+            # flash_attn (pure baddbmm/bmm, no block_table), so the flash_attn
+            # version gate only applies to flash/TE attention implementations.
+            assert (
+                HAVE_FA3
+                or is_fa_min_version("2.7.3")
+                or self.core_attention.__class__.__name__ == "DotProductAttention"
             ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
