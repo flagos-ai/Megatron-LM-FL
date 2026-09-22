@@ -27,9 +27,9 @@ def is_built_on_zero_rank():
         bool: True if the current rank is responsible for building resources, False otherwise.
     """
     
-    from megatron.training import get_args
     #TODO: We should not depend on get_args in megatron core, the args belong to training.
     try: ### for unit tests
+        from megatron.training import get_args
         args = get_args()
     except Exception:
         if torch.distributed.get_rank() == 0 or int(os.environ["LOCAL_RANK"]) == 0:
