@@ -222,6 +222,63 @@ class PlatformBase(ABC):
     def is_triton_supported(self):
         ...
 
+    # Attention backend capabilities
+    def requires_flash_attn_for_dynamic_batching(self) -> bool:
+        """Whether the dynamic-batching inference path needs flash-attn >= 2.7.3.
+
+        Platforms with a native paged-attention op (e.g. NPU via CANN) override
+        this to False; the flash-attn version gate is then skipped. Default True.
+        """
+        return True
+
+    def paged_decode_attention(
+        self,
+        query,
+        key_cache,
+        block_table,
+        seqlens_k,
+        *,
+        value_cache=None,
+        num_heads=None,
+        num_kv_heads=None,
+        scale_value=None,
+    ):
+        """Run decode-phase attention (one query row per token) on a paged KV cache.
+
+        Default: no native op available, raise. Platforms with a vendor op
+        (NPU: torch_npu.atb._npu_paged_attention_v2) implement this; the caller
+        (Attention.flash_decode_and_prefill) dispatches on the platform and
+        never reaches here on unsupported platforms.
+        """
+        raise NotImplementedError(
+            "paged_decode_attention is not implemented for platform "
+            + self.__class__.__name__
+        )
+
+    def paged_prefill_attention(
+        self,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        seqlens_k,
+        block_table,
+        *,
+        num_heads,
+    ):
+        """Run prefill-phase attention (varlen, causal) on a paged KV cache.
+
+        Default: no native op available, raise. Platforms with a vendor op
+        (NPU: gather the paged cache into contiguous TND rows +
+        torch_npu.npu_fusion_attention) implement this; the caller dispatches on
+        the platform and never reaches here on unsupported platforms.
+        """
+        raise NotImplementedError(
+            "paged_prefill_attention is not implemented for platform "
+            + self.__class__.__name__
+        )
+
     # Graph operations
     @abc.abstractmethod
     def create_graph(self):

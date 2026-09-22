@@ -259,6 +259,144 @@ class PlatformNPU(PlatformBase):
     def is_triton_supported(self):
         pass
 
+    # Attention backend capabilities
+    def requires_flash_attn_for_dynamic_batching(self) -> bool:
+        # 910B4 has no flash-attn; dynamic batching uses the CANN paged
+        # attention op instead, so the flash-attn >= 2.7.3 gate is skipped.
+        return False
+
+    def paged_decode_attention(
+        self,
+        query,
+        key_cache,
+        block_table,
+        seqlens_k,
+        *,
+        value_cache=None,
+        num_heads=None,
+        num_kv_heads=None,
+        scale_value=None,
+    ):
+        """Decode-phase paged attention via torch_npu.atb._npu_paged_attention_v2.
+
+        Measured support boundary on 910B4 (CANN 9.0.0): blk=256 safe for
+        head_size <= 64 or == 256; blk=512 safe for head_size <= 32 or == 256;
+        blk=128 safe for head_size in [16, 256]. Outside these bounds the op
+        silently skips writes (garbage logits) or raises a device exception, so
+        fail loudly instead. MLA has no kernel on NPU and is rejected by the
+        caller (Attention.flash_decode_and_prefill).
+        """
+        import torch_npu
+
+        block_size = key_cache.shape[1]
+        head_size = query.shape[-1]
+        if block_size == 128:
+            safe = head_size <= 256
+        elif block_size == 256:
+            safe = head_size <= 64 or head_size == 256
+        elif block_size == 512:
+            safe = head_size <= 32 or head_size == 256
+        else:
+            safe = False
+        assert safe, (
+            "NPU paged attention unsupported (block_size={}, head_size={}); "
+            "see measured support matrix".format(block_size, head_size)
+        )
+
+        orig_shape = query.shape
+        flat_q = query.reshape(-1, num_heads, head_size)
+        # Align block table / lengths with the query rows: the metadata buffers
+        # are sized for the padded batch, so slice off any surplus rows.
+        num_rows = flat_q.shape[0]
+        if block_table.shape[0] != num_rows:
+            assert block_table.shape[0] >= num_rows, (
+                "NPU decode block table has fewer rows than queries"
+            )
+            block_table = block_table[:num_rows]
+        if isinstance(seqlens_k, torch.Tensor):
+            seqlens_k = seqlens_k[:num_rows]
+        context_lens = (
+            seqlens_k.tolist() if isinstance(seqlens_k, torch.Tensor) else seqlens_k
+        )
+        output = torch_npu.atb._npu_paged_attention_v2(
+            flat_q,
+            key_cache,
+            block_table,
+            context_lens,
+            value_cache=value_cache,
+            num_kv_heads=num_kv_heads,
+            num_heads=num_heads,
+            scale_value=scale_value,
+            mask_type=0,
+            out=torch.zeros_like(flat_q),
+        )
+        return output.reshape(orig_shape)
+
+    def paged_prefill_attention(
+        self,
+        q,
+        k,
+        v,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        seqlens_k,
+        block_table,
+        *,
+        num_heads,
+    ):
+        """Prefill-phase paged attention via torch_npu.npu_fusion_attention.
+
+        910B4 has no flash-attn; k/v here are the paged cache tensors
+        (num_blocks, block_size, nkv, hs). Gather per-request key/value rows
+        into contiguous TND layout, then run the op in varlen (TND) mode with a
+        square SS causal mask. bf16/fp16 pass through.
+
+        Validated on 910B4 (CANN 9.0.0): hs 16/64, variable-length batches
+        (incl. zero-length rows), maxdiff < 0.008 vs a torch reference. Note the
+        varlen op requires Sq == Skv per request (pure prefill batches); mixed
+        decode+prefill batches are not supported by this path.
+        """
+        import torch_npu
+
+        block_size = k.shape[1]
+        k_chunks, v_chunks = [], []
+        for i in range(block_table.shape[0]):
+            kv_len = int(seqlens_k[i])
+            if kv_len == 0:
+                continue
+            n_blocks = (kv_len + block_size - 1) // block_size
+            block_ids = block_table[i, :n_blocks].clamp(min=0).long()
+            # Index the block dimension of the cache directly, then trim the
+            # final (partially filled) block to the request's real KV length.
+            ck = k[block_ids].reshape(-1, k.shape[2], k.shape[3])[:kv_len]
+            cv = v[block_ids].reshape(-1, v.shape[2], v.shape[3])[:kv_len]
+            k_chunks.append(ck)
+            v_chunks.append(cv)
+        if not k_chunks:
+            raise RuntimeError("NPU prefill: empty KV gather")
+        k_tnd = torch.cat(k_chunks, dim=0)
+        v_tnd = torch.cat(v_chunks, dim=0)
+        # Square causal mask: within each request, position i attends to j <= i.
+        sq = cu_seqlens_q[1:] - cu_seqlens_q[:-1]
+        max_sq = int(sq.max().item())
+        max_skv = int(seqlens_k.max().item())
+        mask = torch.triu(
+            torch.ones((max_sq, max_skv), dtype=torch.bool, device=q.device), diagonal=1
+        )
+        return torch_npu.npu_fusion_attention(
+            q,
+            k_tnd,
+            v_tnd,
+            num_heads,
+            "TND",
+            atten_mask=mask,
+            scale=q.shape[-1] ** -0.5,
+            keep_prob=1.0,
+            actual_seq_qlen=cu_seqlens_q.tolist(),
+            actual_seq_kvlen=cu_seqlens_k.tolist(),
+            sparse_mode=0,
+        )[0]
+
     # Graph operations
     def create_graph(self):
         return torch.npu.NPUGraph()
