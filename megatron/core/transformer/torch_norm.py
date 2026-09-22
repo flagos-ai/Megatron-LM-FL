@@ -1,4 +1,5 @@
 # Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
+import warnings
 from typing import Protocol
 
 import torch
@@ -45,7 +46,19 @@ class WrappedTorchNorm:
             not config.layernorm_zero_centered_gamma
         ), f"zero_centered_gamma not supported by torch LayerNorm"
 
-        assert not config.persist_layer_norm, f"persist_layer_norm not supported by torch LayerNorm"
+        if config.persist_layer_norm:
+            # ``persist_layer_norm`` selects the persistent fused kernel in
+            # FusedLayerNorm; the torch-native path cannot provide it. Degrade
+            # with a warning instead of failing so that backends without
+            # Transformer Engine / apex can run with the default arguments
+            # (``persist_layer_norm`` defaults to True when
+            # ``--no-persist-layer-norm`` is not passed) -- the math is
+            # identical, only the kernel differs.
+            warnings.warn(
+                "persist_layer_norm=True is not supported by the torch-native "
+                "LayerNorm path; using the non-persistent torch implementation.",
+                UserWarning,
+            )
 
         assert not config.sequence_parallel, f"sequence parallel not supported by torch LayerNorm"
 

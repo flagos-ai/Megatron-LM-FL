@@ -146,6 +146,24 @@ class TestPlatformManager(unittest.TestCase):
         platform = platform_manager.get_platform()
         self.assertEqual(platform._name, "cuda")
 
+    def test_get_platform_prefers_mlu_over_cuda(self):
+        """When both mlu and cuda are available, get_platform should prefer mlu.
+
+        The gpu_migration bridge aliases the cuda surface onto MLU, so
+        PlatformCUDA.is_available() also reports True on MLU hosts; mlu must be
+        selected first or the generic cuda platform would win.
+        """
+        mock_mlu = _create_mock_platform("mlu")
+        mock_mlu.is_available = lambda: True
+        mock_cuda = _create_mock_platform("cuda")
+        mock_cuda.is_available = lambda: True
+        platform_register.PLATFORMS["mlu"] = mock_mlu
+        platform_register.PLATFORMS["cuda"] = mock_cuda
+
+        _reset_platform_manager()
+        platform = platform_manager.get_platform()
+        self.assertEqual(platform._name, "mlu")
+
     def test_get_platform_falls_back_to_cpu(self):
         """When only cpu is available, get_platform should return cpu."""
         # Remove all non-cpu platforms
@@ -165,7 +183,7 @@ class TestPlatformManager(unittest.TestCase):
             platform_manager.get_platform()
 
     def test_platform_selection_priority(self):
-        """Platforms are selected in priority order: cuda > musa > txda > npu > enflame > cpu."""
+        """Platforms are selected in priority order: mlu > cuda > musa > txda > npu > enflame > cpu."""
         # Register mock platforms for musa and cpu only
         platform_register.PLATFORMS.clear()
         mock_musa = _create_mock_platform("musa")
@@ -702,6 +720,53 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             platform.replay_graph(graph)
             self.assertTrue(graph.replayed)
             self.assertEqual(platform.visible_devices_envs(), ["ASCEND_RT_VISIBLE_DEVICES"])
+
+    def test_mlu_platform_contract_with_mock_backend(self):
+        """MLU wraps the cuda surface (via torch_mlu's gpu_migration bridge)."""
+        module = __import__("megatron.plugin.platform.platform_mlu", fromlist=["PlatformMLU"])
+        cuda_module = __import__("megatron.plugin.platform.platform_cuda", fromlist=["PlatformCUDA"])
+        accelerator = _FakeAccelerator()
+        accelerator.is_initialized = lambda: False  # force the init branch in is_available
+        fake_torch = _fake_torch_for_platform("mlu", accelerator)
+        fake_torch.ones = lambda *args, **kwargs: _FakeTensor("mlu:0")
+        fake_torch.cuda = accelerator  # bridge: the cuda surface aliases mlu
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ), patch.object(cuda_module, "torch", fake_torch):
+            platform = module.PlatformMLU()
+            self.assertTrue(platform.is_available())
+            self.assertEqual(platform._name, "mlu")
+            self.assertEqual(platform.device_name(), "mlu")
+            self.assertEqual(platform.device_name(2), "mlu:2")
+            self.assertEqual(platform.current_device_name(), "mlu:1")
+            self.assertEqual(platform.device_count(), 2)
+            self.assertEqual(platform.default_generators, ("gen0",))
+            self.assertTrue(platform.on_accelerator(_FakeTensor("mlu:0")))
+            self.assertFalse(platform.on_accelerator(_FakeTensor("cpu")))
+            self.assertEqual(platform.visible_devices_envs(), ["MLU_VISIBLE_DEVICES"])
+
+    def test_mlu_is_available_false_without_devices(self):
+        """is_available() returns False when no MLU device is visible."""
+        module = __import__("megatron.plugin.platform.platform_mlu", fromlist=["PlatformMLU"])
+        accelerator = _FakeAccelerator()
+        accelerator.is_initialized = lambda: False
+        accelerator.device_count = lambda: 0
+        fake_torch = _fake_torch_for_platform("mlu", accelerator)
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            platform = module.PlatformMLU()
+            self.assertFalse(platform.is_available())
+
+    def test_mlu_is_available_false_without_torch_mlu(self):
+        """Without the torch_mlu surface, is_available() returns False, not raises."""
+        module = __import__("megatron.plugin.platform.platform_mlu", fromlist=["PlatformMLU"])
+        fake_torch = types.SimpleNamespace()  # no .mlu attribute
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            platform = module.PlatformMLU()
+            self.assertFalse(platform.is_available())
 
 
 # ---------- Auto-discovery: Interface Contract Tests for ALL Registered Platforms ----------

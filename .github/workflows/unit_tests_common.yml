@@ -45,6 +45,22 @@ on:
         type: string
         default: '[]'
         description: JSON array of test files or node IDs to ignore
+      te_fl_prepare:
+        required: true
+        type: boolean
+      te_fl_cache_key:
+        required: false
+        type: string
+        default: ''
+      te_fl_runtime_environment:
+        required: true
+        type: string
+      te_fl_install_pip_args:
+        required: true
+        type: string
+      te_fl_runtime_pip_packages:
+        required: true
+        type: string
 
 jobs:
   unit_test:
@@ -95,6 +111,8 @@ jobs:
           CI_TEST_SUITE: unit
           CI_TEST_GROUP: ${{ matrix.test_group.name }}
           CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
+          MEGATRON_CI_IMAGE: ${{ inputs.image }}
+          TE_FL_RUNTIME_ENV_JSON: ${{ inputs.te_fl_runtime_environment }}
         run: |
           set -euo pipefail
 
@@ -108,8 +126,47 @@ jobs:
             exit 1
           fi
 
+          source "$GITHUB_WORKSPACE/.github/scripts/set_env_common.sh"
+          if [ "$TE_FL_RUNTIME_ENV_JSON" != "{}" ]; then
+            ci_apply_env_json "$TE_FL_RUNTIME_ENV_JSON"
+          fi
           bash "$GITHUB_WORKSPACE/$SETUP_SCRIPT"
         timeout-minutes: 30
+
+      - name: Install configured runtime packages
+        env:
+          CI_RUNTIME_PIP_PACKAGES_JSON: ${{ inputs.te_fl_runtime_pip_packages }}
+          CI_RUNTIME_PIP_INSTALL_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/.github/scripts/set_env_common.sh"
+          ci_install_runtime_packages
+
+      - name: Restore TE-FL wheel
+        if: inputs.te_fl_prepare
+        id: te_fl_cache
+        uses: actions/cache/restore@v4
+        with:
+          path: te-fl-wheel
+          key: ${{ inputs.te_fl_cache_key }}
+
+      - name: Check TE-FL wheel cache
+        if: inputs.te_fl_prepare
+        env:
+          CACHE_HIT: ${{ steps.te_fl_cache.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          if [ "$CACHE_HIT" != true ]; then
+            echo "::error::TE-FL wheel cache was not restored" >&2
+            exit 1
+          fi
+
+      - name: Install TE-FL wheel
+        if: inputs.te_fl_prepare
+        env:
+          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel
+          TE_FL_INSTALL_PIP_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
+        run: .github/scripts/install_te_fl_runtime.sh
 
       - name: Run unit tests - ${{ matrix.test_group.name }}
         id: unit_test

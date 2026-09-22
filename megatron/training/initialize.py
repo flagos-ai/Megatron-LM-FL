@@ -24,6 +24,7 @@ from megatron.core.rerun_state_machine import (
 )
 from megatron.core.transformer.custom_layers.batch_invariant_kernels import enable_batch_invariant_mode
 from megatron.core.utils import get_te_version, is_te_min_version, is_torch_min_version
+from megatron.plugin.platform import get_platform
 from megatron.training import get_adlr_autoresume, get_args, get_tensorboard_writer
 from megatron.training.utils import print_rank_0, warn_rank_0
 from megatron.training import inprocess_restart
@@ -57,8 +58,8 @@ def initialize_megatron(
     (optionally, only when args.lazy_mpu_init == True)
     """
     if not allow_no_cuda:
-        # Make sure cuda is available.
-        assert torch.cuda.is_available(), "Megatron requires CUDA."
+        # Make sure an accelerator (CUDA, MUSA, NPU, etc.) is available.
+        assert get_platform().device_name() != 'cpu', "Megatron requires an accelerator."
 
     # Parse arguments
     if parsed_args is None:
@@ -141,7 +142,7 @@ def initialize_megatron(
         if args.num_experts is not None:
             from megatron.core.transformer.moe.router import MoEAuxLossAutoScaler
 
-            MoEAuxLossAutoScaler.set_loss_scale(torch.ones(1, device=torch.cuda.current_device()))
+            MoEAuxLossAutoScaler.set_loss_scale(torch.ones(1, device=get_platform().device_name()))
 
     if skip_mpu_initialization:
         return None
@@ -274,7 +275,7 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
     """Initialize torch.distributed and core model parallel."""
     args = get_args()
 
-    device_count = torch.cuda.device_count()
+    device_count = get_platform().device_count()
     if torch.distributed.is_initialized():
 
         print_rank_0("torch distributed is already initialized, skipping initialization ...")
@@ -286,14 +287,14 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
         print_rank_0("> initializing torch distributed ...")
         # Manually set the device ids.
         if device_count > 0:
-            torch.cuda.set_device(args.local_rank)
-            device_id = torch.device(f'cuda:{args.local_rank}')
+            get_platform().set_device(args.local_rank)
+            device_id = get_platform().device(args.local_rank)
         else:
             device_id = None
 
         # Set to non-default stream for cudagraph capturing.
         if args.cuda_graph_impl == "transformer_engine":
-            torch.cuda.set_stream(torch.cuda.Stream())
+            get_platform().set_stream(get_platform().Stream())
 
         # Set flight recorder env vars if specified.
         # Priority: pre-existing environment variable > MLM argument.
@@ -420,7 +421,7 @@ def _set_random_seed(
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.device_count() > 0:
+        if get_platform().device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(
                 seed, te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
             )
@@ -470,10 +471,11 @@ def _warmup_jit_function():
         dtype = torch.float16
     else:
         dtype = torch.float32
+    device_name = get_platform().device_name()
 
     # Warmup fused bias+gelu
     bias = torch.rand(
-        args.ffn_hidden_size // args.tensor_model_parallel_size, dtype=dtype, device="cuda"
+        args.ffn_hidden_size // args.tensor_model_parallel_size, dtype=dtype, device=device_name
     )
     input = torch.rand(
         (
@@ -482,7 +484,7 @@ def _warmup_jit_function():
             args.ffn_hidden_size // args.tensor_model_parallel_size,
         ),
         dtype=dtype,
-        device="cuda",
+        device=device_name,
     )
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
@@ -503,14 +505,14 @@ def _warmup_jit_function():
     input = torch.rand(
         (seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
         dtype=dtype,
-        device="cuda",
+        device=device_name,
     )
     residual = torch.rand(
         (seq_length // args.context_parallel_size, args.micro_batch_size, args.hidden_size),
         dtype=dtype,
-        device="cuda",
+        device=device_name,
     )
-    bias = torch.rand((args.hidden_size), dtype=dtype, device="cuda").expand_as(residual)
+    bias = torch.rand((args.hidden_size), dtype=dtype, device=device_name).expand_as(residual)
     dropout_rate = 0.1
     # Warmup JIT fusions with the input grad_enable state of both forward
     # prop and recomputation
@@ -521,7 +523,7 @@ def _warmup_jit_function():
         for _ in range(5):
             output = bias_dropout_add_fused_train([input, bias], residual, dropout_rate)
     del bias, input, residual, output
-    torch.cuda.empty_cache()
+    get_platform().empty_cache()
 
 
 def setup_logging() -> None:

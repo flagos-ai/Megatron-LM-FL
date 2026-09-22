@@ -67,6 +67,8 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "cpu_offloading_retain_pinned_cpu_buffers": False,
     "cpu_offloading_num_layers": 0,
     "cpu_offloading_weights": False,
+    "chunked_cross_entropy": False,
+    "cross_entropy_chunk_size": 4096,
     "cross_entropy_fusion_impl": "native",
     "cross_entropy_loss_fusion": True,
     "csa_compress_ratios": None,
