@@ -16,7 +16,7 @@ from megatron.core.models.multimodal.context_parallel import (
     split_to_context_parallel_ranks_dynamic_res,
 )
 from megatron.core.packed_seq_params import PackedSeqParams
-from tests.unit_tests.test_utilities import Utils
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 
 def _assert_split_point_invariants(split_points, num_frames, temporal_patch_size, cp_size):
@@ -166,7 +166,7 @@ class TestSplitToContextParallelRanks:
     @pytest.mark.internal
     def test_cp_size_1_is_passthrough(self):
         Utils.initialize_model_parallel(tensor_model_parallel_size=1, context_parallel_size=1)
-        global_t = torch.arange(12, dtype=torch.float32, device="cuda").reshape(4, 3)
+        global_t = torch.arange(12, dtype=torch.float32, device=get_current_device()).reshape(4, 3)
 
         local_t, global_pad = split_to_context_parallel_ranks(global_t)
 
@@ -210,7 +210,7 @@ class TestDynamicResCPDistributed:
             (local_num_tubelets, patches, hidden),
             float(cp_rank),
             dtype=torch.float32,
-            device="cuda",
+            device=get_current_device(),
         )
 
         gathered = gather_from_context_parallel_ranks_dynamic_res(local_t)
@@ -233,7 +233,7 @@ class TestDynamicResCPDistributed:
         from megatron.core.parallel_state import get_context_parallel_rank
 
         cp_rank = get_context_parallel_rank()
-        local_t = torch.full((1, 2, 4), float(cp_rank), dtype=torch.float32, device="cuda")
+        local_t = torch.full((1, 2, 4), float(cp_rank), dtype=torch.float32, device=get_current_device())
 
         gathered = gather_from_context_parallel_ranks_dynamic_res(local_t, num_padded_imgs=1)
 
@@ -261,16 +261,16 @@ class TestDynamicResCPDistributed:
 
         # Token-valued so we can trace which image each rank receives.
         chunks = [
-            torch.full((per_img_seq, hidden), float(i), dtype=torch.float32, device="cuda")
+            torch.full((per_img_seq, hidden), float(i), dtype=torch.float32, device=get_current_device())
             for i in range(num_imgs)
         ]
         global_t = torch.cat(chunks, dim=0).unsqueeze(0)  # [1, num_imgs*per_img_seq, hidden]
 
         global_imgs_sizes = torch.tensor(
-            [[patch_dim, patch_dim]] * num_imgs, dtype=torch.int32, device="cuda"
+            [[patch_dim, patch_dim]] * num_imgs, dtype=torch.int32, device=get_current_device()
         )
         cu_seqlens = torch.tensor(
-            [i * per_img_seq for i in range(num_imgs + 1)], dtype=torch.int32, device="cuda"
+            [i * per_img_seq for i in range(num_imgs + 1)], dtype=torch.int32, device=get_current_device()
         )
         global_packed_seq_params = PackedSeqParams(
             qkv_format="thd",
@@ -334,15 +334,15 @@ class TestDynamicResCPDistributed:
         total_frames = num_videos * frames_per_video  # = 8 (per-frame entries)
 
         chunks = [
-            torch.full((per_img_seq, hidden), float(i), dtype=torch.float32, device="cuda")
+            torch.full((per_img_seq, hidden), float(i), dtype=torch.float32, device=get_current_device())
             for i in range(total_frames)
         ]
         global_t = torch.cat(chunks, dim=0).unsqueeze(0)
         global_imgs_sizes = torch.tensor(
-            [[patch_dim, patch_dim]] * total_frames, dtype=torch.int32, device="cuda"
+            [[patch_dim, patch_dim]] * total_frames, dtype=torch.int32, device=get_current_device()
         )
         cu_seqlens = torch.tensor(
-            [i * per_img_seq for i in range(total_frames + 1)], dtype=torch.int32, device="cuda"
+            [i * per_img_seq for i in range(total_frames + 1)], dtype=torch.int32, device=get_current_device()
         )
         global_packed_seq_params = PackedSeqParams(
             qkv_format="thd",
@@ -353,7 +353,7 @@ class TestDynamicResCPDistributed:
             max_seqlen_q=per_img_seq,
             max_seqlen_kv=per_img_seq,
         )
-        num_frames = torch.tensor([frames_per_video] * num_videos, dtype=torch.int32, device="cuda")
+        num_frames = torch.tensor([frames_per_video] * num_videos, dtype=torch.int32, device=get_current_device())
 
         (local_t, local_imgs_sizes, _packed, has_padding, num_padded_ranks, local_num_frames) = (
             split_to_context_parallel_ranks_dynamic_res(
@@ -384,9 +384,9 @@ class TestDynamicResCPDistributed:
         patch_dim = 16
         per_img_seq = patch_dim * patch_dim
         hidden = 3 * patch_dim * patch_dim
-        global_t = torch.zeros((1, per_img_seq, hidden), dtype=torch.float32, device="cuda")
-        global_imgs_sizes = torch.tensor([[patch_dim, patch_dim]], dtype=torch.int32, device="cuda")
-        cu_seqlens = torch.tensor([0, per_img_seq], dtype=torch.int32, device="cuda")
+        global_t = torch.zeros((1, per_img_seq, hidden), dtype=torch.float32, device=get_current_device())
+        global_imgs_sizes = torch.tensor([[patch_dim, patch_dim]], dtype=torch.int32, device=get_current_device())
+        cu_seqlens = torch.tensor([0, per_img_seq], dtype=torch.int32, device=get_current_device())
         global_packed_seq_params = PackedSeqParams(
             qkv_format="thd",
             cu_seqlens_q=cu_seqlens,
@@ -418,13 +418,13 @@ class TestDynamicResCPDistributed:
         per_img_seq = patch_dim * patch_dim
         wrong_hidden = 3 * patch_dim * patch_dim + 1  # off by one
         global_t = torch.zeros(
-            (1, 2 * per_img_seq, wrong_hidden), dtype=torch.float32, device="cuda"
+            (1, 2 * per_img_seq, wrong_hidden), dtype=torch.float32, device=get_current_device()
         )
         global_imgs_sizes = torch.tensor(
-            [[patch_dim, patch_dim]] * 2, dtype=torch.int32, device="cuda"
+            [[patch_dim, patch_dim]] * 2, dtype=torch.int32, device=get_current_device()
         )
         cu_seqlens = torch.tensor(
-            [0, per_img_seq, 2 * per_img_seq], dtype=torch.int32, device="cuda"
+            [0, per_img_seq, 2 * per_img_seq], dtype=torch.int32, device=get_current_device()
         )
         global_packed_seq_params = PackedSeqParams(
             qkv_format="thd",
@@ -454,7 +454,7 @@ class TestDynamicResCPDistributed:
 
         cp_rank = get_context_parallel_rank()
         # Each rank contributes a [batch=1, seq=3, h=4] tensor of value cp_rank.
-        local_t = torch.full((1, 3, 4), float(cp_rank), dtype=torch.float32, device="cuda")
+        local_t = torch.full((1, 3, 4), float(cp_rank), dtype=torch.float32, device=get_current_device())
 
         # Simulate global_pad=2 ⇒ trailing 2 columns of the gathered tensor get dropped.
         out = gather_from_context_parallel_ranks(local_t, global_pad=2)
@@ -476,7 +476,7 @@ class TestDynamicResCPDistributed:
 
         cp_rank = get_context_parallel_rank()
         local_t = torch.full(
-            (1, 4, 8), float(cp_rank + 1), dtype=torch.float32, device="cuda", requires_grad=True
+            (1, 4, 8), float(cp_rank + 1), dtype=torch.float32, device=get_current_device(), requires_grad=True
         )
 
         gathered = GatherFromContextParallelRanks.apply(local_t)

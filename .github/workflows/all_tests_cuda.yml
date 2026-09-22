@@ -8,7 +8,7 @@ on:
   workflow_dispatch: # Allows manual triggering
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -28,11 +28,12 @@ jobs:
       run_functional_tests: true
       te_fl_prepare: true
       te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
+      te_fl_local_cache_key: ${{ needs.te_fl_prepare.outputs.local_cache_key }}
 
   all_tests:
     needs: run_tests
     runs-on: ubuntu-latest
-    if: always()
+    if: always() && !cancelled()
     steps:
       - name: Verify workflow status
         run: |

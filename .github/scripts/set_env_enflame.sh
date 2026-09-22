@@ -60,6 +60,11 @@ PYEOF
 }
 
 configure_enflame_runtime() {
+  # torch_gcu rewrites the default group to ECCL, but subgroup enumeration
+  # calls c10d directly. Use ECCL explicitly to avoid NCCL initialization
+  # failures that leave process-group counters inconsistent across ranks.
+  ci_export_env DISTRIBUTED_BACKEND eccl
+
   validate_enflame_torch
   validate_enflame_capacity
 }
@@ -135,7 +140,8 @@ case "$CI_TEST_SUITE" in
     ;;
   functional)
     validate_enflame_torch
-    ci_setup_functional_environment
+    export PIP_BREAK_SYSTEM_PACKAGES=1
+    ci_setup_functional_environment --break-system-packages
     configure_enflame_runtime
     ;;
   build)

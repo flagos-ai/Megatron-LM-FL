@@ -17,6 +17,13 @@ validate_cuda_capacity() {
   ci_validate_device_capacity "$device_count"
 }
 
+install_nvrx() {
+  git clone --branch v0.6.0-main \
+    https://github.com/NVIDIA/nvidia-resiliency-ext.git \
+    /tmp/nvidia-resiliency-ext
+  python3 -m pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
+}
+
 setup_unit_environment() {
   # Deterministic unit tests must configure cuBLAS before any Python process
   # can initialize a cuBLAS handle. Export through GITHUB_ENV for the pytest step.
@@ -41,10 +48,7 @@ setup_unit_environment() {
   )
   python3 -m pip install torch boto3 "${test_dependencies[@]}" --no-cache-dir
 
-  git clone --branch v0.6.0-main \
-    https://github.com/NVIDIA/nvidia-resiliency-ext.git \
-    /tmp/nvidia-resiliency-ext
-  python3 -m pip install -e /tmp/nvidia-resiliency-ext --no-cache-dir
+  install_nvrx
   python3 -m pip install protobuf==6.33.1
   python3 -m pip install \
     git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.2.0 \
@@ -69,6 +73,7 @@ case "$CI_TEST_SUITE" in
     ;;
   functional)
     ci_setup_functional_environment
+    install_nvrx
     validate_cuda_capacity
     ;;
   build)

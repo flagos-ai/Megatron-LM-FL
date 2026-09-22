@@ -17,7 +17,7 @@ from megatron.core.transformer.enums import AttnBackend, AttnMaskType
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
-from tests.unit_tests.test_utilities import Utils
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 
 class TestBertModel:
@@ -79,12 +79,12 @@ class TestBertModel:
         sequence_length = self.bert_model.max_sequence_length
         micro_batch_size = 2
 
-        self.bert_model.cuda()
+        self.bert_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).cuda()
-        attention_mask = torch.ones((micro_batch_size, sequence_length), dtype=bool).cuda()
+        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        attention_mask = torch.ones((micro_batch_size, sequence_length), dtype=bool).to(get_current_device())
 
         logits = self.bert_model.forward(input_ids=input_ids, attention_mask=attention_mask)
 

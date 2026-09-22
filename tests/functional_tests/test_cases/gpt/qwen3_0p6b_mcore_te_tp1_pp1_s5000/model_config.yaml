@@ -25,10 +25,10 @@ MODEL_ARGS:
   --timing-log-level: 0
   --save: ${CHECKPOINT_SAVE_PATH}
   --load: ${CHECKPOINT_LOAD_PATH}
-  --data-path: /opt/data/datasets/pile_wikipedia_demo/pile_wikipedia_demo
+  --data-path: /home/gitlab-runner/data/pile_wikipedia_demo/pile_wikipedia_demo
   --split: 100,0,0
   --tokenizer-type: HuggingFaceTokenizer
-  --tokenizer-model: /opt/data/tokenizers/qwentokenizer
+  --tokenizer-model: /home/gitlab-runner/tokenizers/qwentokenizer
   --trust-remote-code: true
   --distributed-backend: mccl
   --lr: 1.0e-5

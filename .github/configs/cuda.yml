@@ -217,6 +217,9 @@ test_matrix:
 # TE-FL runtime configuration
 te_fl:
   prepare: true
+  # CONTRACT: local fallback requires preparation and consumers to share this directory.
+  # Retain backups for 7 days, with a 20 GiB admission limit across runs.
+  cache_directory: /var/cache/megatron-lm-fl/te-fl
   build_mode: cuda
   build_environment:
     NVTE_FRAMEWORK: pytorch

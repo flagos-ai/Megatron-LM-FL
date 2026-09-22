@@ -2531,7 +2531,7 @@ def training_log(
             if wandb_writer:
                 wandb_writer.log({'grpo_collection_iteration': grpo_collection_iteration}, iteration)
         if args.log_memory_to_tensorboard:
-            mem_stats = torch.cuda.memory_stats()
+            mem_stats = cur_platform.memory_stats()
             writer.add_scalar(
                 "mem-reserved-bytes", mem_stats["reserved_bytes.all.current"], iteration
             )

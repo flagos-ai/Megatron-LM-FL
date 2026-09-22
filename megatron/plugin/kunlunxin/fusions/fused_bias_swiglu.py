@@ -6,8 +6,14 @@ from megatron.plugin.kunlunxin.debug import debug_patch
 
 
 @debug_patch("fusions.fused_bias_swiglu.bias_swiglu_impl")
-def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False):
+def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False, clamp_value=None):
     """Run XPU fused bias SwiGLU through torch_xmlir."""
+    if clamp_value is not None and clamp_value > 0:
+        from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl as core_impl
+
+        # The XPU fused kernel has no clamp argument; bypass override dispatch.
+        return core_impl.__wrapped__(input, bias, fp8_input_store, cpu_offload_input, clamp_value)
+
     from torch_xmlir.nn.swiglu import SwiGLUFunction
 
     ori_shape = input.shape

@@ -13,6 +13,23 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 
 
+def get_current_device():
+    """Get current accelerator device as torch.device object.
+
+    Returns platform-agnostic device (cuda/xpu/npu) based on the active platform.
+    Use this instead of hardcoded device=get_current_device() for cross-platform compatibility.
+    """
+    return cur_platform.device(cur_platform.current_device())
+
+
+def get_device_str():
+    """Get current accelerator device type as string (e.g., 'cuda', 'xpu', 'npu').
+
+    Returns device type without index, matching tensor.device.type behavior.
+    """
+    return cur_platform.device_name()
+
+
 class TestModel(torch.nn.Module):
     def __init__(
         self,
@@ -78,13 +95,22 @@ class Utils:
             store = PrefixStore("default_pg", store)
             Utils.store = store
 
-            backend = os.getenv('DISTRIBUTED_BACKEND', 'nccl')
             torch.distributed.init_process_group(
-                backend=backend, world_size=Utils.world_size, rank=Utils.rank, store=store
+                backend=Utils.get_backend(), world_size=Utils.world_size, rank=Utils.rank, store=store
             )
 
             torch.distributed.barrier()
         Utils.inited = True
+
+    @staticmethod
+    def get_backend():
+        """Get the appropriate distributed backend for the current platform.
+
+        Returns 'mccl' for MUSA, 'nccl' for all other platforms.
+        Can be overridden via DISTRIBUTED_BACKEND environment variable.
+        """
+        default_backend = 'mccl' if cur_platform.device_name() == 'musa' else 'nccl'
+        return os.getenv('DISTRIBUTED_BACKEND', default_backend)
 
     @staticmethod
     def set_world_size(world_size=None, rank=None):
@@ -103,6 +129,24 @@ class Utils:
             Utils.rank = rank
 
     @staticmethod
+    def _destroy_model_parallel_groups():
+        # parallel_state resets device-group references without destroying the
+        # groups. Release groups owned by that state between tests while keeping
+        # the default group available to tests that create their own subgroups.
+        groups = tuple(ps._global_process_group_list or ())
+        ps.destroy_model_parallel()
+        # In the current Kunlunxin CI image, explicit subgroup shutdown can
+        # invalidate device handles used by the next test. Keep these groups
+        # registered until session teardown; parallel_state has already performed
+        # its normal reference and Gloo cleanup.
+        if os.getenv('MEGATRON_TEST_PLATFORM') == 'kunlunxin':
+            return
+        for group in groups:
+            # Gloo groups may already have been destroyed by parallel_state.
+            if group is not None and group in torch.distributed.distributed_c10d._world.pg_map:
+                torch.distributed.destroy_process_group(group)
+
+    @staticmethod
     def destroy_model_parallel():
         os.environ.pop('NVTE_FLASH_ATTN', None)
         os.environ.pop('NVTE_FUSED_ATTN', None)
@@ -111,14 +155,13 @@ class Utils:
             return
 
         try:
-            # Flush pending device work before the barrier so slow ranks don't
-            # time out while fast ranks tear down process groups.
+            # Flush pending device work before tearing down process groups.
             cur_platform.synchronize()
             torch.distributed.barrier()
         except Exception:
             Utils.inited = False
             return
-        ps.destroy_model_parallel()
+        Utils._destroy_model_parallel_groups()
         Utils.inited = False
         cur_platform.empty_cache()  # FlagScale Modify
 
@@ -135,7 +178,7 @@ class Utils:
         os.environ.pop('NVTE_FUSED_ATTN', None)
         os.environ.pop('NVTE_UNFUSED_ATTN', None)
 
-        ps.destroy_model_parallel()
+        Utils._destroy_model_parallel_groups()
         Utils.initialize_distributed()
         if cur_platform.device_name() == 'musa' and 'create_gloo_process_groups' not in kwargs:
             kwargs['create_gloo_process_groups'] = False

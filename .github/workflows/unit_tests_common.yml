@@ -57,6 +57,14 @@ on:
         required: false
         type: string
         default: ''
+      te_fl_cache_directory:
+        required: false
+        type: string
+        default: ''
+      te_fl_local_cache_key:
+        required: false
+        type: string
+        default: ''
       te_fl_runtime_environment:
         required: true
         type: string
@@ -140,6 +148,7 @@ jobs:
 
       - name: Install configured runtime packages
         env:
+          CI_PLATFORM: ${{ inputs.platform }}
           CI_RUNTIME_PIP_PACKAGES_JSON: ${{ inputs.te_fl_runtime_pip_packages }}
           CI_RUNTIME_PIP_INSTALL_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
         run: |
@@ -147,29 +156,69 @@ jobs:
           source "$GITHUB_WORKSPACE/.github/scripts/set_env_common.sh"
           ci_install_runtime_packages
 
-      - name: Restore TE-FL wheel
-        if: inputs.te_fl_prepare
-        id: te_fl_cache
+      - name: Restore TE-FL wheel (attempt 1)
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != ''
+        id: te_fl_cache_1
+        continue-on-error: true
         uses: actions/cache/restore@v4
         with:
           path: te-fl-wheel
           key: ${{ inputs.te_fl_cache_key }}
 
-      - name: Check TE-FL wheel cache
-        if: inputs.te_fl_prepare
+      - name: Wait before restoring TE-FL wheel (attempt 2)
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true'
+        run: sleep 5
+
+      - name: Restore TE-FL wheel (attempt 2)
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true'
+        id: te_fl_cache_2
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: te-fl-wheel
+          key: ${{ inputs.te_fl_cache_key }}
+
+      - name: Wait before restoring TE-FL wheel (attempt 3)
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true'
+        run: sleep 15
+
+      - name: Restore TE-FL wheel (attempt 3)
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true'
+        id: te_fl_cache_3
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: te-fl-wheel
+          key: ${{ inputs.te_fl_cache_key }}
+
+      - name: Restore local TE-FL wheel fallback
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && inputs.te_fl_cache_directory != '' && inputs.te_fl_local_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true' && steps.te_fl_cache_3.outputs.cache-hit != 'true'
+        id: local_cache
+        timeout-minutes: 5
         env:
-          CACHE_HIT: ${{ steps.te_fl_cache.outputs.cache-hit }}
+          TE_FL_CACHE_DIRECTORY: ${{ inputs.te_fl_cache_directory }}
+          TE_FL_CACHE_KEY: ${{ inputs.te_fl_local_cache_key }}
+          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel-fallback
+        run: python3 .github/scripts/te_fl_local_cache.py restore --required
+
+      - name: Check TE-FL wheel cache
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != ''
+        env:
+          CACHE_HIT_1: ${{ steps.te_fl_cache_1.outputs.cache-hit }}
+          CACHE_HIT_2: ${{ steps.te_fl_cache_2.outputs.cache-hit }}
+          CACHE_HIT_3: ${{ steps.te_fl_cache_3.outputs.cache-hit }}
+          LOCAL_CACHE_HIT: ${{ steps.local_cache.outputs.cache-hit }}
         run: |
           set -euo pipefail
-          if [ "$CACHE_HIT" != true ]; then
+          if [ "$CACHE_HIT_1" != true ] && [ "$CACHE_HIT_2" != true ] && [ "$CACHE_HIT_3" != true ] && [ "$LOCAL_CACHE_HIT" != true ]; then
             echo "::error::TE-FL wheel cache was not restored" >&2
             exit 1
           fi
 
       - name: Install TE-FL wheel
-        if: inputs.te_fl_prepare
+        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != ''
         env:
-          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel
+          TE_FL_WHEEL_DIR: ${{ github.workspace }}/${{ steps.local_cache.outputs.cache-hit == 'true' && 'te-fl-wheel-fallback' || 'te-fl-wheel' }}
           TE_FL_INSTALL_PIP_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
         run: .github/scripts/install_te_fl_runtime.sh
 

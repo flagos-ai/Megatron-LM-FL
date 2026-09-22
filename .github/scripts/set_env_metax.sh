@@ -28,7 +28,20 @@ setup_metax_toolchain() {
   "$nvcc_path" -V
 }
 
+configure_metax_unit_runtime() {
+  case "${CI_TEST_GROUP:-}" in
+    data|tensor_parallel|distributed)
+      # MACA 3.3 / MCCL can abort in mcIpcCloseMemHandle when these suites
+      # repeatedly destroy process groups. Keep normal group cleanup, but use
+      # non-P2P transports until the runtime's IPC teardown is fixed.
+      ci_export_env MCCL_P2P_DISABLE 1
+      echo "Disabling MCCL P2P for MetaX unit group: $CI_TEST_GROUP (IPC teardown workaround)."
+      ;;
+  esac
+}
+
 setup_unit_environment() {
+  configure_metax_unit_runtime
   ci_activate_python_environment
   ci_ensure_curl
 

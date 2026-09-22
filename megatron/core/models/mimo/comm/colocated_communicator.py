@@ -80,6 +80,9 @@ class ColocatedBridgeCommunicator:
         self.gather_pg: Optional[dist.ProcessGroup] = None
         self.gather_group_ranks: List[List[int]] = []
 
+        # Dynamically detect backend to support NCCL, MCCL, RCCL, Gloo, etc.
+        backend = dist.get_backend()
+
         if self.src_dp_size > self.dest_dp_size:
             self.direction = BridgeDirection.FAN_IN
             self.scale = self.src_dp_size // self.dest_dp_size
@@ -90,7 +93,7 @@ class ColocatedBridgeCommunicator:
                 rank_to_pos=self.rank_to_src_pos,
             )
             self.gather_pg, _ = dist.new_subgroups_by_enumeration(
-                self.gather_group_ranks, backend='nccl'
+                self.gather_group_ranks, backend=backend
             )
         elif self.dest_dp_size > self.src_dp_size:
             self.direction = BridgeDirection.FAN_OUT
@@ -102,7 +105,7 @@ class ColocatedBridgeCommunicator:
                 rank_to_pos=self.rank_to_dest_pos,
             )
             self.gather_pg, _ = dist.new_subgroups_by_enumeration(
-                self.gather_group_ranks, backend='nccl'
+                self.gather_group_ranks, backend=backend
             )
         else:
             self.direction = BridgeDirection.EQUAL

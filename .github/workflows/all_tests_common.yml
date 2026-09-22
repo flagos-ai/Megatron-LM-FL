@@ -32,6 +32,11 @@ on:
         type: string
         default: ''
         description: Optional image override for this run
+      te_fl_local_cache_key:
+        required: false
+        type: string
+        default: ''
+        description: Local backup identity returned by the preparation job
 
 jobs:
   checkout_and_config:
@@ -56,6 +61,7 @@ jobs:
       te_fl_runtime_environment: ${{ steps.config.outputs.te_fl_runtime_environment }}
       te_fl_install_pip_args: ${{ steps.config.outputs.te_fl_install_pip_args }}
       te_fl_runtime_pip_packages: ${{ steps.config.outputs.te_fl_runtime_pip_packages }}
+      te_fl_cache_directory: ${{ steps.config.outputs.te_fl_cache_directory }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
@@ -109,6 +115,16 @@ jobs:
           runtime_environment=$(yq -o=json -I=0 '.te_fl.runtime.environment // {}' "$config_file")
           install_pip_args=$(yq -o=json -I=0 '.te_fl.runtime.install_pip_args // []' "$config_file")
           runtime_packages=$(yq -o=json -I=0 '.te_fl.runtime.pip_packages // []' "$config_file")
+          cache_directory=$(yq -r '.te_fl.cache_directory // ""' "$config_file")
+
+          if [ -n "$cache_directory" ]; then
+            if ! [[ "$cache_directory" =~ ^/[a-zA-Z0-9_/-]+$ ]] || [[ "$cache_directory" = / || "$cache_directory" = */ ]]; then
+              echo "::error::te_fl.cache_directory must be a dedicated absolute path without a trailing slash" >&2
+              exit 1
+            fi
+            volumes=$(CACHE_DIRECTORY="$cache_directory" yq -o=json -I=0 \
+              '(.container_volumes // []) + [strenv(CACHE_DIRECTORY) + ":" + strenv(CACHE_DIRECTORY) + ":ro"]' "$config_file")
+          fi
 
           if [ -z "$setup_script" ] || [ "$setup_script" = "null" ]; then
             echo "::error::setup_script is required" >&2
@@ -149,6 +165,7 @@ jobs:
             echo "te_fl_runtime_environment=$runtime_environment"
             echo "te_fl_install_pip_args=$install_pip_args"
             echo "te_fl_runtime_pip_packages=$runtime_packages"
+            echo "te_fl_cache_directory=$cache_directory"
           } >> "$GITHUB_OUTPUT"
 
           echo "Platform: $PLATFORM"
@@ -163,6 +180,7 @@ jobs:
     name: unit_tests
     if: >-
       always() &&
+      !cancelled() &&
       inputs.run_unit_tests &&
       needs.checkout_and_config.result == 'success' &&
       needs.lint.result == 'success'
@@ -189,6 +207,8 @@ jobs:
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
       te_fl_prepare: ${{ inputs.te_fl_prepare }}
       te_fl_cache_key: ${{ inputs.te_fl_cache_key }}
+      te_fl_cache_directory: ${{ needs.checkout_and_config.outputs.te_fl_cache_directory }}
+      te_fl_local_cache_key: ${{ inputs.te_fl_local_cache_key }}
       te_fl_runtime_environment: ${{ needs.checkout_and_config.outputs.te_fl_runtime_environment }}
       te_fl_install_pip_args: ${{ needs.checkout_and_config.outputs.te_fl_install_pip_args }}
       te_fl_runtime_pip_packages: ${{ needs.checkout_and_config.outputs.te_fl_runtime_pip_packages }}
@@ -197,6 +217,7 @@ jobs:
     name: functional_tests
     if: >-
       always() &&
+      !cancelled() &&
       inputs.run_functional_tests &&
       needs.checkout_and_config.result == 'success' &&
       needs.lint.result == 'success' &&
@@ -221,13 +242,15 @@ jobs:
       test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
       te_fl_prepare: ${{ inputs.te_fl_prepare }}
       te_fl_cache_key: ${{ inputs.te_fl_cache_key }}
+      te_fl_cache_directory: ${{ needs.checkout_and_config.outputs.te_fl_cache_directory }}
+      te_fl_local_cache_key: ${{ inputs.te_fl_local_cache_key }}
       te_fl_runtime_environment: ${{ needs.checkout_and_config.outputs.te_fl_runtime_environment }}
       te_fl_install_pip_args: ${{ needs.checkout_and_config.outputs.te_fl_install_pip_args }}
       te_fl_runtime_pip_packages: ${{ needs.checkout_and_config.outputs.te_fl_runtime_pip_packages }}
 
   all_tests_complete:
     name: all_tests_complete
-    if: always()
+    if: always() && !cancelled()
     needs:
       - checkout_and_config
       - lint

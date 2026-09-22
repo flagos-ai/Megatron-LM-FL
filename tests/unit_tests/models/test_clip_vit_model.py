@@ -6,7 +6,7 @@ from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transfor
 from megatron.core.models.vision.clip_vit_model import CLIPViTModel, get_num_image_embeddings
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
-from tests.unit_tests.test_utilities import Utils
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 
 class TestCLIPViTModel:
@@ -42,9 +42,9 @@ class TestCLIPViTModel:
         assert self.model.decoder.input_tensor.shape == torch.Size(expected_shape)
 
     def test_forward(self):
-        self.model.cuda()
+        self.model.to(get_current_device())
 
-        img = torch.zeros((2, 3, 336, 336)).cuda()
+        img = torch.zeros((2, 3, 336, 336)).to(get_current_device())
 
         out = self.model.forward(img)
         assert out.shape == torch.Size([2, 577, 64])

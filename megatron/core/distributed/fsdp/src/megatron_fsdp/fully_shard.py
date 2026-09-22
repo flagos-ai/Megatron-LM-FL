@@ -22,6 +22,8 @@ from torch.distributed import DeviceMesh
 from torch.distributed.device_mesh import init_device_mesh
 from torch.distributed.tensor import DTensor
 
+from megatron.plugin.decorators import overridable
+
 from .megatron_fsdp import MegatronFSDP
 from .mixed_precision import MixedPrecisionPolicy
 from .uneven_dtensor import preprocess_state_dict_for_uneven_dtensor
@@ -439,6 +441,11 @@ def fully_shard_model(
     return model
 
 
+@overridable
+def _configure_optimizer_for_dtensor_meshes(optimizer: torch.optim.Optimizer) -> None:
+    """Allow plugins to configure DTensor compatibility before optimizer initialization."""
+
+
 @experimental_api
 def fully_shard_optimizer(
     optimizer: torch.optim.Optimizer, preproc_state_dict_for_dcp_ckpt: bool = True
@@ -485,6 +492,8 @@ def fully_shard_optimizer(
             "before initializing the optimizer on the MegatronFSDP model. "
         )
     mfsdp_model = first_mfsdp_param._megatron_fsdp_model
+
+    _configure_optimizer_for_dtensor_meshes(optimizer)
 
     # Save a reference to the optimizer.step() and optimizer.zero_grad() methods.
     optimizer_step_base_func = type(optimizer).step
