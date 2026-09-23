@@ -43,10 +43,11 @@ def register_platforms() -> None:
         print(f"Megatron-LM-FL Platform: musa Registered")
 
     # Register TXDA Platform
-    from .platform_txda import PlatformTXDA
+    from .platform_txda import PlatformTXDA, registry_patch
     platform_txda = PlatformTXDA()
     if platform_txda.is_available():
         PLATFORMS["txda"] = platform_txda # use lower keys: txda
+        registry_patch()
         print(f"Megatron-LM-FL Platform: txda Registered")
 
     # Register NPU Platform

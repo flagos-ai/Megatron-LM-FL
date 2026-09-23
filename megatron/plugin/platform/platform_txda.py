@@ -2,6 +2,7 @@
 
 import os
 import sys
+import warnings
 
 from .platform_base import PlatformBase
 
@@ -11,6 +12,37 @@ try:
     from torch_txda import transfer_to_txda
 except Exception:
     pass
+
+
+def registry_patch():
+    """Bind the vendor's graph-capture query to the truth.
+
+    torch_txda._C._txda_isCurrentStreamCapturing() reports True even with no
+    capture underway (and the device rejects capture altogether:
+    txStreamEndCapture -> streamCaptureUnsupported), but torch.cuda is aliased
+    onto torch.txda, so torch.optim's accelerator graph-capture health check
+    read that True and refused to step any optimizer whose `capturable` is
+    False -- which is the default. Report False, which is what this device
+    actually does.
+    """
+    try:
+        import torch
+        import torch_txda
+        import torch_txda.txda
+
+        if not torch_txda._C._txda_isCurrentStreamCapturing():
+            # The query is truthful on this build; leave it alone.
+            return
+
+        def is_current_stream_capturing():
+            return False
+
+        torch_txda.txda.graphs.is_current_stream_capturing = is_current_stream_capturing
+        torch_txda.txda.is_current_stream_capturing = is_current_stream_capturing
+        torch.cuda.graphs.is_current_stream_capturing = is_current_stream_capturing
+        torch.cuda.is_current_stream_capturing = is_current_stream_capturing
+    except Exception as e:
+        warnings.warn(f"could not bind the TXDA graph-capture query: {e}")
 
 
 class PlatformTXDA(PlatformBase):
