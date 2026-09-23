@@ -57,6 +57,14 @@ def register_platforms() -> None:
         registry_patch()
         print(f"Megatron-LM-FL Platform: npu Registered")
 
+    # Register PTPU Platform
+    from .platform_ptpu import PlatformPTPU, enable_flag_gems
+    platform_ptpu = PlatformPTPU()
+    if platform_ptpu.is_available():
+        PLATFORMS["ptpu"] = platform_ptpu # use lower keys: ptpu
+        enable_flag_gems()
+        print(f"Megatron-LM-FL Platform: ptpu Registered")
+
     # Register ENFLAME Platform
     from .platform_enflame import PlatformENFLAME
     platform_enflame = PlatformENFLAME()
