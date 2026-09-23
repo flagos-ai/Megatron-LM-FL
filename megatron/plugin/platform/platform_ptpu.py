@@ -402,10 +402,16 @@ def enable_flag_gems():
 
     Called only when the platform is available, and tolerant of a device whose
     torch_ptpu build is complete enough not to need it.
+
+    The pow family is excluded: its scalar-tensor entry reaches
+    flag_gems' _fallback_pow, which compiles `x ** exponent` on a tl.tensor and
+    therefore cannot build on either compiler (`tl.tensor` has no __pow__). The
+    vendor kernel covers these, and the same exclusion is what the sglang line
+    for this device carries. Filed upstream as FlagGems #6173.
     """
     try:
         import flag_gems
 
-        flag_gems.enable()
+        flag_gems.enable(unused=["pow_scalar", "pow_tensor_scalar", "pow_tensor_tensor"])
     except Exception as e:  # noqa: BLE001 - a missing op library must not be fatal here
         warnings.warn(f"flag_gems could not be enabled for ptpu: {e}")
