@@ -164,6 +164,24 @@ class TestPlatformManager(unittest.TestCase):
         platform = platform_manager.get_platform()
         self.assertEqual(platform._name, "mlu")
 
+    def test_get_platform_prefers_ptpu_over_cpu(self):
+        """When ptpu is available, get_platform should prefer it over cpu.
+
+        torch_ptpu does not alias its surface onto torch.cuda, so on a PPU host
+        no other vendor check fires and the always-available cpu platform would
+        win — and initialize.py then aborts with "Megatron requires an
+        accelerator."
+        """
+        platform_register.PLATFORMS.clear()
+        mock_ptpu = _create_mock_platform("ptpu")
+        mock_ptpu.is_available = lambda: True
+        platform_register.PLATFORMS["ptpu"] = mock_ptpu
+        platform_register.PLATFORMS["cpu"] = PlatformCPU()
+
+        _reset_platform_manager()
+        platform = platform_manager.get_platform()
+        self.assertEqual(platform._name, "ptpu")
+
     def test_get_platform_falls_back_to_cpu(self):
         """When only cpu is available, get_platform should return cpu."""
         # Remove all non-cpu platforms
@@ -692,6 +710,16 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             "TXDA_VISIBLE_DEVICES",
             "CUDAGraph",
             extras,
+        )
+
+    def test_ptpu_platform_wrapper_contract_with_mock_backend(self):
+        self._exercise_accelerator_platform(
+            "megatron.plugin.platform.platform_ptpu",
+            "PlatformPTPU",
+            "ptpu",
+            "ptpu",
+            "TANG_VISIBLE_DEVICES",
+            "PTPUGraph",
         )
 
     def test_npu_platform_wrapper_contract_with_mock_backend(self):

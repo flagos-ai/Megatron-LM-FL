@@ -5,7 +5,7 @@ import functools
 import logging
 import math
 import warnings
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from enum import Enum
 from functools import partial
 from typing import Dict, List, Optional, Tuple
@@ -13,6 +13,13 @@ from typing import Dict, List, Optional, Tuple
 import torch
 from torch._utils import _flatten_dense_tensors, _unflatten_dense_tensors
 from torch.distributed import _coalescing_manager
+from torch.distributed.distributed_c10d import (
+    _get_default_group,
+    _world,
+    all_gather_into_tensor,
+    all_reduce,
+    reduce_scatter_tensor,
+)
 
 import megatron.core.nccl_allocator as nccl_allocator
 from megatron.core import parallel_state
@@ -50,6 +57,89 @@ import megatron.core.nccl_allocator as nccl_allocator
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+########## FlagScale End ##########
+
+########## FlagScale Begin ##########
+# Gradient and parameter collectives for a backend without the *_coalesced
+# entry points.
+#
+# torch's _coalescing_manager records the collectives issued inside its block
+# and replays them through allreduce_coalesced / allgather_into_tensor_coalesced
+# / reduce_scatter_tensor_coalesced. Those are optional: a backend that does not
+# implement them raises "Backend <name> does not support allreduce_coalesced"
+# on the first replay, which aborts the first optimizer step. torch gates its
+# own coalescing on Backend.supports_coalescing (see batch_isend_irecv) and so
+# only ever asks a backend that has them; the two call sites below went
+# straight to the manager, which made a training run require a backend that
+# implements all three (NCCL/HCCL/MCCL do, Sunrise's PCCL does not).
+#
+# The capture side is unchanged and the recorded ops are replayed one at a
+# time, which is what a non-coalescing backend does support. A synchronous
+# block is then equivalent to the coalesced path; an asynchronous one still
+# returns a handle that waits every collective the block issued.
+
+
+class _SequentialCollectiveHandle:
+    """The coalescing manager's handle, without the coalescing.
+
+    Mirrors _CoalescingManager: `works` collects the per-collective handles and
+    `wait()` drains them, so callers that keep the handle (overlap_grad_reduce)
+    keep working.
+    """
+
+    def __init__(self, works=None):
+        self.works = list(works) if works else []
+
+    def append(self, work=None):
+        if work is not None:
+            self.works.append(work)
+
+    def wait(self):
+        for work in self.works:
+            work.wait()
+
+
+@contextmanager
+def _sequential_coalescing_manager(group=None, async_ops=False):
+    group = group or _get_default_group()
+    op_list = _world.pg_coalesce_state.setdefault(group, [])
+    if op_list:
+        raise ValueError("ProcessGroup has non-empty op list at the start of coalescing")
+    handle = _SequentialCollectiveHandle()
+    yield handle
+    for coll in _world.pg_coalesce_state.pop(group):
+        if coll.op is all_reduce:
+            work = torch.distributed.all_reduce(
+                coll.tensor, op=coll.redop, group=group, async_op=async_ops
+            )
+        elif coll.op is all_gather_into_tensor:
+            work = torch.distributed.all_gather_into_tensor(
+                coll.dst_tensor, coll.tensor, group=group, async_op=async_ops
+            )
+        elif coll.op is reduce_scatter_tensor:
+            work = torch.distributed.reduce_scatter_tensor(
+                coll.dst_tensor, coll.tensor, op=coll.redop, group=group, async_op=async_ops
+            )
+        else:
+            raise AssertionError(
+                f"Coalescing manager does not support coalescing of {coll.op}"
+            )
+        handle.append(work)
+    handle.wait()
+
+
+def coalescing_manager(group=None, async_ops=False):
+    """_coalescing_manager when the backend has the *_coalesced entry points,
+    the one-collective-at-a-time manager above when it does not."""
+    try:
+        backend = group._get_backend(torch.device(cur_platform.device_name()))
+    except Exception:
+        backend = None
+    if backend is not None and not getattr(backend, "supports_coalescing", False):
+        return _sequential_coalescing_manager(group=group, async_ops=async_ops)
+    return _coalescing_manager(group, async_ops=async_ops)
+
+
 ########## FlagScale End ##########
 
 
@@ -407,10 +497,10 @@ class _ParamAndGradBucketGroup:
                     bucket._layerwise_src_buffer = None
                 self.param_gather_handle = None
         else:
-            # Standard distributed optimizer path: use _coalescing_manager.
+            # Standard distributed optimizer path: use the coalescing manager.
             # all_gather_into_tensor writes directly into a contiguous output buffer and
             # does not need a copy-back step, so coalescing works correctly.
-            with _coalescing_manager(
+            with coalescing_manager(
                 self.intra_distributed_optimizer_instance_group, async_ops=async_op
             ) as cm:
                 for idx, bucket in enumerate(self.buckets):
@@ -601,7 +691,7 @@ class _ParamAndGradBucketGroup:
 
         # Coalesce communication kernels across buckets in the bucket group.
         grad_reduce_handle = None
-        with stream_context, _coalescing_manager(communication_group, async_ops=async_op) as cm:
+        with stream_context, coalescing_manager(communication_group, async_ops=async_op) as cm:
             for idx, bucket in enumerate(self.buckets):
                 if self.ddp_config.use_distributed_optimizer and not force_all_reduce:
                     if self.cached_grad_buffer_shard_list[idx] is None:
@@ -636,7 +726,7 @@ class _ParamAndGradBucketGroup:
             # Create a new coalescing manager for the inter-instance all-reduce.
             with (
                 stream_context,
-                _coalescing_manager(
+                coalescing_manager(
                     self.inter_distributed_optimizer_instance_group, async_ops=async_op
                 ) as cm,
             ):

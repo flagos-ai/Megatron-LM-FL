@@ -71,8 +71,12 @@ class ProfilingConfig:
 class DistributedInitConfig:
     """Configuration settings for distributed training initialization."""
 
-    distributed_backend: Literal["nccl", "gloo", "mccl"] = "nccl"
-    """Which backend to use for distributed training."""
+    distributed_backend: Literal["nccl", "gloo", "mccl", "pccl"] = "nccl"
+    """Which backend to use for distributed training.
+
+    mccl is MUSA's (mthreads) and pccl is PTPU's (Sunrise); both are registered
+    with torch.distributed by the vendor's torch and are not aliases of nccl,
+    so the name has to be selectable here."""
 
     distributed_timeout_minutes: int = 10
     """Timeout minutes for torch.distributed."""

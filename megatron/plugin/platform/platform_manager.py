@@ -44,6 +44,12 @@ def get_platform():
         print(f"Megatron-LM-FL Platform: kunlunxin Selected")
         # Deferred XME init (after platform selection to avoid circular import)
         cur_platform.ensure_xme_init()
+    elif "ptpu" in PLATFORMS.keys() and PLATFORMS["ptpu"].is_available():
+        # PT-PU does not alias torch.cuda, but like every vendor check it must
+        # come before the CPU platform: platform_cpu.is_available() is
+        # unconditionally True, so reaching it means no accelerator was found.
+        cur_platform = PLATFORMS["ptpu"]
+        print(f"Megatron-LM-FL Platform: ptpu Selected")
     elif "cpu" in PLATFORMS.keys() and PLATFORMS["cpu"].is_available():
         cur_platform = PLATFORMS["cpu"]
         print(f"Megatron-LM-FL Platform: cpu Selected")
