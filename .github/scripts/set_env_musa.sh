@@ -159,7 +159,7 @@ setup_unit_environment() {
   )
   python3 -m pip install "${test_dependencies[@]}" --no-cache-dir
   python3 -m pip install fastapi uvicorn --no-cache-dir
-  if [ "${CI_TEST_GROUP:-}" = "models" ]; then
+  if [[ "${CI_TEST_GROUP:-}" = models || "${CI_TEST_GROUP:-}" = __all__ ]]; then
     # rl_utils imports SummaryWriter while model tests are being collected.
     install_musa_tensorboard
   fi
@@ -183,6 +183,10 @@ setup_build_environment() {
 
 ci_require_env CI_TEST_SUITE
 case "$CI_TEST_SUITE" in
+  unit_group)
+    configure_musa_runtime
+    install_flash_attn_collection_stub
+    ;;
   unit)
     setup_unit_environment
     ;;

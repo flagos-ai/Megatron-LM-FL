@@ -26,15 +26,72 @@ all_tests_<platform>.yml
   -> all_tests_common.yml
      -> lint_common.yml
      -> unit_tests_common.yml
-        -> set_env_<platform>.sh
-        -> tests/test_utils/runners/run_ci_unit_tests.sh
+        -> checkout + set_env_<platform>.sh once per device
+        -> install runtime packages + restore/install TE-FL once
+        -> run_unit_groups.py, in configured group order
+           -> set_env_<platform>.sh (unit_group, no installation)
+           -> tests/test_utils/runners/run_ci_unit_tests.sh
      -> functional_tests_common.yml
         -> set_env_<platform>.sh
         -> tests/functional_tests/shell_test_utils/run_ci_test.sh
 ```
 
 Unit tests run before functional tests when both suites are enabled. A failed
-unit matrix prevents the functional matrix from starting.
+unit job prevents the functional matrix from starting.
+
+### Single-runner unit execution
+
+Each platform/device uses one container and one unit job. Checkout, platform
+setup, dynamic dependency installation and TE-FL restoration/installation happen
+once, without dependency wheel snapshots or artifact transfers between test jobs.
+The existing dependency resolution policy and TE-FL build/cache workflow are
+unchanged. There is no new cross-run environment cache or image freshness policy.
+
+Initial setup receives `CI_TEST_SUITE=unit` and `CI_TEST_GROUP=__all__` and installs
+the union of unit-group dependencies. Each group then gets a fresh shell and
+distributed test process, invoking the setup script with `CI_TEST_SUITE=unit_group`
+for lightweight group-specific runtime settings only. Those hooks must not install
+packages. Their environment exports do not propagate to other groups or later
+Actions steps. The container filesystem is shared; tests must still clean up their
+own files and external resources. Processes remaining in the group's process group
+are killed before starting the next group.
+
+Each group retains a 60-minute timeout. Failed or timed-out groups do not prevent
+later groups from running, but any nonzero group result fails the unit job. The job
+has a 12-hour total limit to accommodate sequential groups and setup. There is no
+new retry of tests and no change to assertions, ignore lists, distributed process
+counts or experimental passes.
+
+On GitHub's **Re-run failed jobs**, unit jobs restore a small checkpoint containing
+group results and coverage data. Groups that already passed in the same workflow
+run are skipped; failed, timed-out and unfinished groups run again. Each completed
+group updates the checkpoint, and the workflow attempts to cache it even after a
+failure or cancellation. Missing, evicted or invalid checkpoints fall back to
+running all groups. A hard runner shutdown may prevent saving the checkpoint.
+Checkpoints are scoped to the run, commit, platform/device and test configuration;
+they are never reused by a new workflow run. Multiple reruns retain prior successes.
+**Re-run all jobs** also reuses successful unit groups; start a new workflow run to
+force all groups to execute again.
+
+Environment setup still runs normally on every attempt. Dependencies may change
+between attempts: this is result reuse, not a frozen environment or container
+snapshot. No automatic test retries are added.
+
+Coverage data is isolated per group. The coverage artifact retains each completed
+group's JSON and `unit-results.json`; a combined `coverage-<platform>-<device>-all.json`
+is sent to FlagCICD. Available reports are uploaded even after test failures.
+Each completed group prints `PASS`, `FAIL` or `TIMEOUT` outside its collapsible log
+section, so its result remains visible without expanding test output. The Actions
+summary lists the same status and exit code. Interrupted groups are marked
+`INCOMPLETE`, not passed, and remain eligible for rerun. Reused successes show
+`PASS` with `Previously passed`; their JSON results have `reused: true`. Reused groups retain
+their coverage, while retries replace the failed attempt's coverage. Hardware timing
+and residual cross-group filesystem effects still need validation in the platform
+container.
+
+The unit check is now `unit-<device>` instead of separate `unit-<device>-<group>`
+checks. Before merging, update any branch protection rules that require individual
+group checks; the existing `all_tests_complete` aggregate gate remains unchanged.
 
 ## Platform configuration contract
 
@@ -62,7 +119,7 @@ workflow does not read it. Do not add that field to new configs.
 The setup script receives the suite and distributed process count:
 
 ```text
-CI_TEST_SUITE=unit|functional|build
+CI_TEST_SUITE=unit|unit_group|functional|build
 CI_NPROC_PER_NODE=<positive integer>
 ```
 
@@ -104,7 +161,8 @@ The complete unit-test selection path is:
 .github/configs/<platform>.yml
   test_matrix.unit.groups[].path
     -> all_tests_common.yml reads the groups
-    -> unit_tests_common.yml creates one job per device and group
+    -> unit_tests_common.yml creates one job per device
+    -> run_unit_groups.py iterates the configured groups in that job
     -> CI_TEST_PATH=<group path>
     -> run_ci_unit_tests.sh expands paths and platform exclusions
     -> torch.distributed.run starts CI_NPROC_PER_NODE processes
@@ -483,6 +541,7 @@ GitHub Actions path.
 2. Add `.github/scripts/set_env_<platform>.sh`. Reuse
    `set_env_common.sh`, preserve the image's vendor packages, and implement the
    `unit`, `functional`, and `build` suite branches that the platform supports.
+   Add an install-free `unit_group` branch (a no-op if no group settings are needed).
 3. Add `.github/workflows/all_tests_<platform>.yml` that calls
    `all_tests_common.yml` with `platform: <platform>`.
 4. Register an online self-hosted runner with every label in `runner_labels`.

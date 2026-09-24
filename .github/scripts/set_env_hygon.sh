@@ -79,7 +79,13 @@ configure_hygon_unit_safety() {
   cat > "$timeout_wrapper" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
+timeout_args=()
+# Keep sequential ranks in the group runner's process group for final cleanup.
+if [ "\${CI_TEST_SUITE:-}" = unit_group ]; then
+  timeout_args+=(--foreground)
+fi
 exec timeout \
+  "\${timeout_args[@]}" \
   --signal=TERM \
   --kill-after=30s \
   "${timeout_seconds}s" \
@@ -211,6 +217,8 @@ setup_build_environment() {
 
 ci_require_env CI_TEST_SUITE
 case "$CI_TEST_SUITE" in
+  unit_group)
+    ;;
   unit)
     setup_unit_environment
     ;;

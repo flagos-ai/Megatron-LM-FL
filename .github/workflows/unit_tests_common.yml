@@ -81,11 +81,9 @@ jobs:
       run:
         shell: bash
     runs-on: ${{ fromJson(inputs.runs_on) }}
-    strategy:
-      fail-fast: false
-      matrix:
-        test_group: ${{ fromJson(inputs.test_groups) }}
-    name: unit-${{ inputs.device }}-${{ matrix.test_group.name }}
+    name: unit-${{ inputs.device }}
+    # Groups retain their individual 60-minute limits in the sequential runner.
+    timeout-minutes: 720
     container:
       image: ${{ inputs.image }}
       ports:
@@ -98,7 +96,7 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           set-safe-directory: true
 
       - name: Checkout Source Code (attempt 2)
@@ -107,7 +105,7 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           set-safe-directory: true
 
       - name: Checkout Source Code (attempt 3)
@@ -115,14 +113,14 @@ jobs:
         if: steps.checkout2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 1
           set-safe-directory: true
 
       - name: Setup platform environment
         working-directory: ${{ github.workspace }}
         env:
           CI_TEST_SUITE: unit
-          CI_TEST_GROUP: ${{ matrix.test_group.name }}
+          CI_TEST_GROUP: __all__
           CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
           MEGATRON_CI_IMAGE: ${{ inputs.image }}
           TE_FL_RUNTIME_ENV_JSON: ${{ inputs.te_fl_runtime_environment }}
@@ -222,29 +220,53 @@ jobs:
           TE_FL_INSTALL_PIP_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
         run: .github/scripts/install_te_fl_runtime.sh
 
-      - name: Run unit tests - ${{ matrix.test_group.name }}
+      - name: Restore previous unit results
+        id: unit_results_cache
+        if: github.run_attempt > 1
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/cache/restore@v4
+        with:
+          path: .unit-checkpoint
+          key: unit-results-v1-${{ github.run_id }}-${{ github.sha }}-${{ inputs.platform }}-${{ inputs.device }}-${{ github.run_attempt }}
+          restore-keys: |
+            unit-results-v1-${{ github.run_id }}-${{ github.sha }}-${{ inputs.platform }}-${{ inputs.device }}-
+
+      - name: Run unit test groups sequentially
         id: unit_test
         working-directory: ${{ github.workspace }}
         env:
+          CI_UNIT_RESUME: ${{ steps.unit_results_cache.outcome == 'success' && steps.unit_results_cache.outputs.cache-matched-key != '' }}
           CI_PLATFORM: ${{ inputs.platform }}
           CI_DEVICE: ${{ inputs.device }}
-          CI_TEST_GROUP: ${{ matrix.test_group.name }}
-          CI_TEST_PATH: ${{ matrix.test_group.path }}
+          CI_TEST_GROUPS: ${{ inputs.test_groups }}
+          CI_SETUP_SCRIPT: ${{ inputs.setup_script }}
           CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
           CI_IGNORED_TESTS: ${{ inputs.ignored_tests }}
           CI_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS: ${{ inputs.experimental_pytest_extra_args }}
-        run: tests/test_utils/runners/run_ci_unit_tests.sh
-        timeout-minutes: 60
+        run: python3 .github/scripts/run_unit_groups.py
+
+      - name: Save unit results for reruns
+        if: ${{ always() && steps.unit_test.outcome != 'skipped' }}
+        continue-on-error: true
+        timeout-minutes: 5
+        uses: actions/cache/save@v4
+        with:
+          path: .unit-checkpoint
+          key: unit-results-v1-${{ github.run_id }}-${{ github.sha }}-${{ inputs.platform }}-${{ inputs.device }}-${{ github.run_attempt }}
 
       - name: Upload Coverage Report
+        if: ${{ !cancelled() && steps.unit_test.outcome != 'skipped' }}
         uses: actions/upload-artifact@v4
         continue-on-error: true
         with:
-          name: coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}
-          path: coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json
+          name: coverage-${{ inputs.platform }}-${{ inputs.device }}
+          overwrite: true
+          path: coverage-report/**/*.json
 
       - name: Upload Coverage Report to FlagCICD
+        if: ${{ !cancelled() && steps.unit_test.outcome != 'skipped' }}
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
         env:
@@ -252,5 +274,5 @@ jobs:
         with:
           backend_url: 'http://flagcicd-inner.flagos.net:8000/metrics/'
           user_id: '000000000000000000'
-          report_path: 'coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_group.name }}.json'
+          report_path: 'coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-all.json'
           fail_on_error: 'false'

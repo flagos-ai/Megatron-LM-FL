@@ -30,9 +30,9 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Test CI wheel cache helpers
+      - name: Test CI helpers
         run: |
-          python3 -m pip install PyYAML==6.0.2
+          python3 -m pip install PyYAML==6.0.2 coverage
           python3 -m unittest discover -s .github/scripts/tests -p 'test_*.py' -v
 
       - name: Install uv

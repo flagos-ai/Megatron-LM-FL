@@ -130,7 +130,7 @@ printf 'Selected test arguments:'
 printf ' %q' "${TEST_PATHS[@]}"
 printf '\n'
 
-COVERAGE_DIR="$GITHUB_WORKSPACE/coverage-report"
+COVERAGE_DIR="${CI_COVERAGE_DIRECTORY:-$GITHUB_WORKSPACE/coverage-report}"
 COVERAGE_TRAINING_SOURCE="$GITHUB_WORKSPACE/megatron/training"
 COVERAGE_PLUGIN_SOURCE="$GITHUB_WORKSPACE/megatron/plugin"
 COVERAGE_INCLUDE="megatron/training/*,megatron/plugin/*"

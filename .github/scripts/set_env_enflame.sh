@@ -135,6 +135,8 @@ setup_build_environment() {
 ci_require_env CI_TEST_SUITE
 
 case "$CI_TEST_SUITE" in
+  unit_group)
+    ;;
   unit)
     setup_unit_environment
     ;;
