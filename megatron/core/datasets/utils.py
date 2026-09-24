@@ -21,14 +21,17 @@ def compile_helpers():
     """Compile C++ helper functions at runtime. Make sure this is invoked on a single process."""
     import os
     import subprocess
+    import sysconfig
 
     ######## FlagScale Begin ########
     src_dir = os.path.abspath(os.path.dirname(__file__))
     # Skip compilation if the shared library already exists (e.g. pip-installed package
     # where the .so is pre-built but the Makefile is not included in the wheel).
-    ext_suffix = subprocess.check_output(
-        ["python3-config", "--extension-suffix"], text=True
-    ).strip()
+    # EXT_SUFFIX comes from the running interpreter rather than `python3-config`,
+    # which is a CPython build artifact and is absent from venvs (uv and friends
+    # do not put it in bin/), so shelling out to it raised FileNotFoundError on
+    # the very path this check exists for.
+    ext_suffix = sysconfig.get_config_var("EXT_SUFFIX")
     so_path = os.path.join(src_dir, f"helpers_cpp{ext_suffix}")
     if os.path.isfile(so_path):
         return

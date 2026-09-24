@@ -41,6 +41,12 @@ jobs:
       IMAGE: ${{ matrix.IMAGE }}
       PLATFORM: ${{ matrix.PLATFORM }}
       PUBLISH_DRYRUN: ${{ inputs.dry-run }}
+      # megatron/core/package_info.py appends +<git-sha> to __version__ unless
+      # this is set, and PyPI/TestPyPI reject local version identifiers. It also
+      # has to be consistent between the wheel built inside the container and the
+      # expected-release-number computed on the runner, or the Test wheels step
+      # compares two different strings.
+      NO_VCS_VERSION: "1"
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -70,7 +76,7 @@ jobs:
 
           pushd $BUILD_DIR
             rm LICENSE || true
-            docker run --rm -v $(pwd):/workspace -w /workspace $IMAGE bash -c '\
+            docker run --rm -e NO_VCS_VERSION=1 -v $(pwd):/workspace -w /workspace $IMAGE bash -c '\
               for python_version in cp311 cp312 cp313; do \
                 /opt/python/${python_version}-${python_version}/bin/pip install --upgrade "setuptools<80.0.0,>=77.0.0" build; \
               done && \
@@ -126,7 +132,7 @@ jobs:
             WHEEL_GLOB="dist/${WHEEL_PREFIX}*.whl"
           fi
 
-          docker run --rm -v $(pwd):/workspace -w /workspace $IMAGE bash -c "\
+          docker run --rm -e NO_VCS_VERSION=1 -v $(pwd):/workspace -w /workspace $IMAGE bash -c "\
             /opt/python/cp312-cp312/bin/pip install --no-cache-dir $WHEEL_GLOB && \
             rm -rf megatron/ && \
             RELEASE_NUMBER=\$(/opt/python/cp312-cp312/bin/python -c 'import $ROOTPATH; print($ROOTPATH.__version__)') && \
