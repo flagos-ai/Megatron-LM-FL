@@ -3,6 +3,8 @@
 import abc
 from abc import ABC
 
+import torch
+
 
 class PlatformBase(ABC):
 
@@ -223,13 +225,17 @@ class PlatformBase(ABC):
         ...
 
     # Attention backend capabilities
-    def requires_flash_attn_for_dynamic_batching(self) -> bool:
-        """Whether the dynamic-batching inference path needs flash-attn >= 2.7.3.
+    def supports_paged_attention(self) -> bool:
+        """Whether paged_decode_attention/paged_prefill_attention are usable.
 
-        Platforms with a native paged-attention op (e.g. NPU via CANN) override
-        this to False; the flash-attn version gate is then skipped. Default True.
+        The dynamic-batching attention path needs a kernel that reads a paged KV
+        cache: either the flash-attn varlen kernels with a block_table, or the
+        platform's own paged op. Platforms without the former (the NPU and the
+        devices with no flash-attn build) override this to True; the default
+        False keeps a platform with working flash-attn kernels on that path, and
+        is also what keeps the flash-attn >= 2.7.3 gate in force there.
         """
-        return True
+        return False
 
     def paged_decode_attention(
         self,
@@ -245,15 +251,43 @@ class PlatformBase(ABC):
     ):
         """Run decode-phase attention (one query row per token) on a paged KV cache.
 
-        Default: no native op available, raise. Platforms with a vendor op
-        (NPU: torch_npu.atb._npu_paged_attention_v2) implement this; the caller
-        (Attention.flash_decode_and_prefill) dispatches on the platform and
-        never reaches here on unsupported platforms.
+        Default: the flag_gems paged kernel. Platforms with a vendor op (NPU:
+        torch_npu.atb._npu_paged_attention_v2) override this; the caller reaches
+        here only after supports_paged_attention() answered True.
         """
-        raise NotImplementedError(
-            "paged_decode_attention is not implemented for platform "
-            + self.__class__.__name__
+        flash_attn_varlen_func = flag_gems_paged_attention()
+        if flash_attn_varlen_func is None:
+            raise NotImplementedError(
+                "paged_decode_attention is not implemented for platform "
+                + self.__class__.__name__
+                + " and flag_gems is not installed"
+            )
+        orig_shape = query.shape
+        flat_q = query.reshape(-1, num_heads, query.shape[-1])
+        rows = flat_q.shape[0]
+        # The metadata buffers are sized for the padded batch: drop surplus rows.
+        if block_table.shape[0] != rows:
+            block_table = block_table[:rows]
+        if isinstance(seqlens_k, torch.Tensor):
+            seqlens_k = seqlens_k[:rows]
+            max_seqlen_k = int(seqlens_k.max())
+        else:
+            max_seqlen_k = int(max(seqlens_k))
+        cu_seqlens_q = torch.arange(rows + 1, device=query.device, dtype=torch.int32)
+        out = flash_attn_varlen_func(
+            q=flat_q.contiguous(),
+            k=key_cache,
+            v=value_cache,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=1,
+            seqused_k=seqlens_k,
+            max_seqlen_k=max_seqlen_k,
+            block_table=block_table,
+            causal=True,
+            softmax_scale=scale_value,
+            fa_version=2,
         )
+        return out.reshape(orig_shape)
 
     def paged_prefill_attention(
         self,
@@ -269,14 +303,34 @@ class PlatformBase(ABC):
     ):
         """Run prefill-phase attention (varlen, causal) on a paged KV cache.
 
-        Default: no native op available, raise. Platforms with a vendor op
-        (NPU: gather the paged cache into contiguous TND rows +
-        torch_npu.npu_fusion_attention) implement this; the caller dispatches on
-        the platform and never reaches here on unsupported platforms.
+        Default: gather the paged cache into contiguous TND rows and run the
+        flag_gems varlen kernel. Platforms with a vendor op (NPU:
+        torch_npu.npu_fusion_attention) override this; the caller reaches here
+        only after supports_paged_attention() answered True.
         """
-        raise NotImplementedError(
-            "paged_prefill_attention is not implemented for platform "
-            + self.__class__.__name__
+        flash_attn_varlen_func = flag_gems_paged_attention()
+        if flash_attn_varlen_func is None:
+            raise NotImplementedError(
+                "paged_prefill_attention is not implemented for platform "
+                + self.__class__.__name__
+                + " and flag_gems is not installed"
+            )
+        max_seqlen_q = int((cu_seqlens_q[1:] - cu_seqlens_q[:-1]).max())
+        if isinstance(seqlens_k, torch.Tensor):
+            max_seqlen_k = int(seqlens_k.max())
+        else:
+            max_seqlen_k = int(max(seqlens_k))
+        return flash_attn_varlen_func(
+            q=q.contiguous(),
+            k=k,
+            v=v,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_q=max_seqlen_q,
+            seqused_k=seqlens_k,
+            max_seqlen_k=max_seqlen_k,
+            block_table=block_table,
+            causal=True,
+            fa_version=2,
         )
 
     # Graph operations
@@ -375,3 +429,17 @@ class PlatformBase(ABC):
     @abc.abstractmethod
     def clock_rate(self):
         ...
+
+
+def flag_gems_paged_attention():
+    """The flag_gems paged-attention kernel, or None when flag_gems is absent.
+
+    flag_gems is the vendor-neutral kernel layer, so one implementation serves
+    every device without a vendor paged op. The import is deferred because
+    flag_gems is optional at import time.
+    """
+    try:
+        from flag_gems import flash_attn_varlen_func
+    except Exception:
+        return None
+    return flash_attn_varlen_func
