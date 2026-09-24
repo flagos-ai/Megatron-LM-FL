@@ -387,6 +387,14 @@ class PlatformPTPU(PlatformBase):
     def clock_rate(self):
         pass
 
+    # Attention backend capabilities
+    def supports_paged_attention(self) -> bool:
+        # No flash-attn build for this device, so dynamic batching runs the
+        # flag_gems paged kernel through the PlatformBase implementations. This
+        # asserts the wiring, not that flag_gems is importable: the base
+        # implementation names the missing package when it is not.
+        return True
+
 
 def enable_flag_gems():
     """Bind the device's operator library.

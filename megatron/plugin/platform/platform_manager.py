@@ -15,18 +15,24 @@ def get_platform():
     if cur_platform is not None:
         return cur_platform
 
-    # Both are checked before CUDA. The mlu case: the gpu_migration bridge makes
-    # the CUDA surface (and thus PLATFORMS["cuda"].is_available()) report True on
-    # MLU hosts. The npu case: torch_npu's transfer_to_npu shim
-    # (TORCH_TRANSFER_TO_NPU=1) makes torch.cuda.is_available()/device_count()
-    # report the NPU as "cuda", so the real device must win the selection. On a
-    # host without the vendor's torch each check falls through (is_available False).
+    # mlu, npu and iluvatar are all checked before CUDA. The mlu case: the
+    # gpu_migration bridge makes the CUDA surface (and thus
+    # PLATFORMS["cuda"].is_available()) report True on MLU hosts. The npu case:
+    # torch_npu's transfer_to_npu shim (TORCH_TRANSFER_TO_NPU=1) makes
+    # torch.cuda.is_available()/device_count() report the NPU as "cuda", so the
+    # real device must win the selection. The iluvatar case: CoreX is the CUDA
+    # API on a device that is not NVIDIA, so the check is True there too. On a
+    # host without the vendor's torch each check falls through (is_available
+    # False).
     if "mlu" in PLATFORMS.keys() and PLATFORMS["mlu"].is_available():
         cur_platform = PLATFORMS["mlu"]
         print(f"Megatron-LM-FL Platform: mlu Selected")
     elif "npu" in PLATFORMS.keys() and PLATFORMS["npu"].is_available():
         cur_platform = PLATFORMS["npu"]
         print(f"Megatron-LM-FL Platform: npu Selected")
+    elif "iluvatar" in PLATFORMS.keys() and PLATFORMS["iluvatar"].is_available():
+        cur_platform = PLATFORMS["iluvatar"]
+        print(f"Megatron-LM-FL Platform: iluvatar Selected")
     elif "cuda" in PLATFORMS.keys() and PLATFORMS["cuda"].is_available():
         cur_platform = PLATFORMS["cuda"]
         print(f"Megatron-LM-FL Platform: cuda Selected")
