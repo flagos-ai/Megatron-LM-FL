@@ -241,6 +241,17 @@ no-build-isolation-package = [
     "fast-hadamard-transform",
 ]
 link-mode = "copy"
+# Some extras pin versions that another extra or dependency group disagrees with
+# (nvidia-modelopt 0.43.0 vs >=0.44; openai 3.1.0 vs nemo-run's leptonai), and one
+# environment cannot hold two versions of the same package at once. Each pair below
+# tells uv to resolve those sets separately instead of declaring the project
+# unsatisfiable; it also means the two members of a pair are mutually exclusive in a
+# single environment, which is why `uv lock` no longer tries to solve them together.
+conflicts = [
+    [{ extra = "dev" }, { extra = "training" }],
+    [{ extra = "dev" }, { extra = "rl" }],
+    [{ extra = "rl" }, { group = "test" }],
+]
 # We don't define override-dependencies globally but rather locally where we need it.
 # For instance, when installing into a PyTorch base image, we don't want to install torch,
 # torchvision, and triton.
