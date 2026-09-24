@@ -4,5 +4,8 @@ include megatron/core/package_info.py
 # Include C++ source files and Makefile for runtime compilation
 include megatron/core/datasets/helpers.cpp
 include megatron/core/datasets/Makefile
+# Bundled memory quantization presets, read from the package directory by
+# megatron/elastification/memory_config.py at runtime.
+include megatron/elastification/memory_profiles.yaml
 global-exclude LICENSE
 recursive-include requirements *
