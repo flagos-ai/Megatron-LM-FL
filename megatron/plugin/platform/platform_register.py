@@ -28,6 +28,16 @@ def register_platforms() -> None:
         PLATFORMS["mlu"] = platform_mlu
         print(f"Megatron-LM-FL Platform: mlu Registered")
 
+    # Register Iluvatar CoreX Platform
+    # NOTE: registered before CUDA, for the same reason as MLU: CoreX's torch is
+    # the CUDA API on a device that is not NVIDIA, so PlatformCUDA.is_available()
+    # also reports True on a CoreX host.
+    from .platform_iluvatar import PlatformIluvatar
+    platform_iluvatar = PlatformIluvatar()
+    if platform_iluvatar.is_available():
+        PLATFORMS["iluvatar"] = platform_iluvatar
+        print(f"Megatron-LM-FL Platform: iluvatar Registered")
+
     # Register CUDA Platform
     from .platform_cuda import PlatformCUDA
     platform_cuda = PlatformCUDA()

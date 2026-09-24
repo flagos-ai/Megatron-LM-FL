@@ -3753,7 +3753,10 @@ def build_train_valid_test_data_loaders(build_train_valid_test_datasets_provider
             test_dataloader = None
             do_train = (args.train_iters or 0) > 0
             do_valid = (args.full_validation or args.eval_iters > 0)
-            do_test = (args.full_validation or args.eval_iters > 0)
+            # RL evaluation runs in the validation phase (evaluate_and_print_results_rl,
+            # which drives the inference engine directly and never touches
+            # test_dataloader), so there is no test phase to run here.
+            do_test = False
 
         else:
             # Build datasets.

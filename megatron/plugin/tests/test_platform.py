@@ -796,6 +796,48 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             platform = module.PlatformMLU()
             self.assertFalse(platform.is_available())
 
+    def test_iluvatar_platform_keeps_the_cuda_surface(self):
+        """CoreX is the cuda API, so nothing but the capability bit changes."""
+        module = __import__(
+            "megatron.plugin.platform.platform_iluvatar", fromlist=["PlatformIluvatar"]
+        )
+        cuda_module = __import__(
+            "megatron.plugin.platform.platform_cuda", fromlist=["PlatformCUDA"]
+        )
+        accelerator = _FakeAccelerator()
+        accelerator.get_device_name = lambda device_index=None: "Iluvatar BI-V150"
+        fake_torch = _fake_torch_for_platform("cuda", accelerator)
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ), patch.object(cuda_module, "torch", fake_torch):
+            platform = module.PlatformIluvatar()
+            self.assertIsInstance(platform, cuda_module.PlatformCUDA)
+            self.assertTrue(platform.is_available())
+            self.assertEqual(platform.device_name(), "cuda")
+            self.assertEqual(platform.device_name(2), "cuda:2")
+            self.assertEqual(platform.device_count(), 2)
+            self.assertEqual(platform.visible_devices_envs(), ["CUDA_VISIBLE_DEVICES"])
+            self.assertTrue(platform.supports_paged_attention())
+
+    def test_iluvatar_platform_leaves_nvidia_hosts_to_cuda(self):
+        """The detector must not claim a host whose devices are NVIDIA's."""
+        module = __import__(
+            "megatron.plugin.platform.platform_iluvatar", fromlist=["PlatformIluvatar"]
+        )
+        accelerator = _FakeAccelerator()
+        accelerator.get_device_name = lambda device_index=None: "NVIDIA H100 PCIe"
+        fake_torch = _fake_torch_for_platform("cuda", accelerator)
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            self.assertFalse(module.PlatformIluvatar().is_available())
+
+        fake_torch = types.SimpleNamespace()  # no cuda surface at all
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            self.assertFalse(module.PlatformIluvatar().is_available())
+
 
 # ---------- Auto-discovery: Interface Contract Tests for ALL Registered Platforms ----------
 
