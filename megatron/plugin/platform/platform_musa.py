@@ -297,3 +297,8 @@ class PlatformMUSA(PlatformBase):
 
     def clock_rate(self):
         pass
+
+    def supports_paged_attention(self) -> bool:
+        # No flash-attn build for this device: dynamic batching runs the
+        # flag_gems paged kernel (PlatformBase implementations).
+        return True

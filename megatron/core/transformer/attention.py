@@ -810,9 +810,9 @@ class Attention(MegatronModule, ABC):
                 softmax_scale = self.softmax_scale
             else:
                 softmax_scale = q.shape[-1] ** -0.5
-            if cur_platform.device_name() == "npu":
-                # NPU: no flash-attn on 910B4; the platform provides the paged
-                # prefill op (gather + torch_npu.npu_fusion_attention).
+            if cur_platform.supports_paged_attention():
+                # No flash-attn varlen kernel on this device: the paged
+                # prefill op comes from a vendor op or from flag_gems.
                 output_total = cur_platform.paged_prefill_attention(
                     q,
                     k,
@@ -855,14 +855,15 @@ class Attention(MegatronModule, ABC):
                 )
             output_total = output_total.unsqueeze(1)
         else:  # decode only
-            if cur_platform.device_name() == "npu":
-                # NPU: no flash-attn / FlashMLA kernels available (910B4); the
-                # platform provides the CANN paged attention op (see
-                # PlatformNPU.paged_decode_attention for the measured (block_size,
-                # head_size) support boundary).
+            if cur_platform.supports_paged_attention():
+                # No flash-attn / FlashMLA kernel on this device: the paged
+                # decode op comes from a vendor op or from flag_gems.
+                # PlatformNPU.paged_decode_attention documents its measured
+                # (block_size, head_size) support boundary.
                 if isinstance(self.config, MLATransformerConfig):
                     raise NotImplementedError(
-                        "MLA decode is not supported on NPU (no FlashMLA kernel)"
+                        "MLA decode needs a FlashMLA kernel, which this "
+                        "device does not provide"
                     )
                 output_total = cur_platform.paged_decode_attention(
                     q,
@@ -974,11 +975,11 @@ class Attention(MegatronModule, ABC):
 
         if inference_context and inference_context.is_dynamic_batching():
             # Platforms with a native paged-attention op (e.g. NPU) skip the
-            # flash-attn version gate; see PlatformBase.requires_flash_attn_for_dynamic_batching.
+            # flash-attn version gate; see PlatformBase.supports_paged_attention.
             # Where the gate does apply, DotProductAttention (--attention-backend
             # unfused) never calls flash_attn (pure baddbmm/bmm, no block_table),
             # so it is exempt too.
-            if cur_platform.requires_flash_attn_for_dynamic_batching():
+            if not cur_platform.supports_paged_attention():
                 assert (
                     HAVE_FA3
                     or is_fa_min_version("2.7.3")

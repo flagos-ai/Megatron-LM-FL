@@ -260,10 +260,10 @@ class PlatformNPU(PlatformBase):
         pass
 
     # Attention backend capabilities
-    def requires_flash_attn_for_dynamic_batching(self) -> bool:
+    def supports_paged_attention(self) -> bool:
         # 910B4 has no flash-attn; dynamic batching uses the CANN paged
         # attention op instead, so the flash-attn >= 2.7.3 gate is skipped.
-        return False
+        return True
 
     def paged_decode_attention(
         self,
