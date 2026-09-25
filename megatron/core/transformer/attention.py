@@ -905,8 +905,18 @@ class Attention(MegatronModule, ABC):
                     causal=True,
                 )
             else:
+                # Token-major decode: the dynamic context pads the query batch
+                # to TOKEN_ROUNDER rows, but block_table / seqlens_k only cover
+                # the active requests. flash-attn enforces block_table rows ==
+                # q batch dim, so trim the padded rows for the kernel call and
+                # pad the output back so the layer's output length matches the
+                # padded input length (padding rows are never sampled -- logits
+                # are sliced to the active count downstream).
+                full_q_len = q.shape[0]
+                active_batch = seqlens_k.shape[0]
+                q_for_kernel = q if full_q_len == active_batch else q[:active_batch]
                 flash_attn_args = {
-                    "q": q,
+                    "q": q_for_kernel,
                     "k_cache": k,
                     "v_cache": v,
                     "cache_seqlens": seqlens_k,
@@ -921,6 +931,19 @@ class Attention(MegatronModule, ABC):
                         not self.batch_invariant_mode
                     ), "Batch invariant mode is not supported for flash attention 2"
                     output_total = flash_attn_with_kvcache(**flash_attn_args)
+                if output_total.shape[0] != full_q_len:
+                    output_total = torch.cat(
+                        [
+                            output_total,
+                            torch.zeros(
+                                full_q_len - active_batch,
+                                *output_total.shape[1:],
+                                dtype=output_total.dtype,
+                                device=output_total.device,
+                            ),
+                        ],
+                        dim=0,
+                    )
         return output_total
 
     def forward(

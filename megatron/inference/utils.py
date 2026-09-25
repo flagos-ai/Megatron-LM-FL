@@ -90,12 +90,6 @@ def add_inference_args(parser: ArgumentParser) -> ArgumentParser:
     group.add_argument("--top_k", type=int, default=1, help='Top k sampling.')
     group.add_argument("--top_p", type=float, default=0.0, help='Top p sampling.')
     group.add_argument(
-        "--return-log-probs",
-        action='store_true',
-        default=False,
-        help='Return the log probabilities of the final output tokens',
-    )
-    group.add_argument(
         "--prompts",
         metavar='N',
         type=str,

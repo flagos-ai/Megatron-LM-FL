@@ -2316,7 +2316,9 @@ class DynamicInferenceContext(BaseInferenceContext):
 
                 # Apply updates only to the requests that required a new block
                 relative_row_idx = torch.nonzero(needs_new_block).squeeze(1)
-                row_idx = resume_start + relative_row_idx
+                # request_kv_block_counts is int32; advanced indexing into it with
+                # an int64 index tensor raises CNNL BAD_PARAM, so align the dtype.
+                row_idx = (resume_start + relative_row_idx).to(self.request_kv_block_counts.dtype)
                 col_idx = self.request_kv_block_counts[row_idx]
 
                 self.request_to_kv_block_ids[row_idx, col_idx] = block_ids
@@ -2919,7 +2921,9 @@ class DynamicInferenceContext(BaseInferenceContext):
         logits_squeezed = logits.squeeze(0).float()
 
         if only_last_token_logits or self.is_decode_only():
-            seq_idx = torch.arange(len(new_tokens), dtype=torch.int32, device=logits.device)
+            # seq_idx must be int64: CNNL advanced indexing (log_probs[seq_idx, ...])
+            # rejects int32 indices with BAD_PARAM.
+            seq_idx = torch.arange(len(new_tokens), device=logits.device)
             log_probs = F.log_softmax(logits_squeezed[seq_idx], dim=-1)
             selected_log_probs = log_probs[seq_idx, new_tokens]
             return [[lp] for lp in selected_log_probs.tolist()], log_probs

@@ -199,16 +199,29 @@ class PlatformMUSA(PlatformBase):
         return None
 
     def range(self, msg):
-        if hasattr(torch.cuda.nvtx, 'range'):
+        if self._nvtx_usable():
             return torch.cuda.nvtx.range(msg)
 
     def range_push(self, msg):
-        if hasattr(torch.cuda.nvtx, 'range_push'):
+        if self._nvtx_usable():
             return torch.cuda.nvtx.range_push(msg)
 
     def range_pop(self):
-        if hasattr(torch.cuda.nvtx, 'range_pop'):
+        if self._nvtx_usable():
             return torch.cuda.nvtx.range_pop()
+
+    def _nvtx_usable(self):
+        """The MUSA torch ships an importable torch.cuda.nvtx stub that raises
+        at call time ("NVTX functions not installed"), so hasattr alone is not
+        enough; probe an actual call once and cache the result."""
+        if not hasattr(self, "_nvtx_ok"):
+            try:
+                torch.cuda.nvtx.range_push("probe")
+                torch.cuda.nvtx.range_pop()
+                self._nvtx_ok = True
+            except Exception:
+                self._nvtx_ok = False
+        return self._nvtx_ok
 
     def lazy_call(self, callback):
         pass
