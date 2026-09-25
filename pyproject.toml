@@ -120,6 +120,7 @@ rl = [
     "msgpack==1.2.1",
     "quart==0.20.0",
     "hypercorn==0.18.0",
+    "einops~=0.8",
 ]
 
 ### 'mlm' group is deprecated. please use 'training' instead ###

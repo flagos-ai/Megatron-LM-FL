@@ -80,7 +80,11 @@ class TextGenerationController:
         else:
             self.vocab_size = unwrapped_model.vocab_size
 
-        self.sampling_rng = torch.Generator(device=torch.cuda.current_device())
+        # Sampling must use a CPU generator: torch.multinomial requires a CPU
+        # generator when the probabilities tensor is not on CPU, and
+        # torch.Generator(device=<int>) is not portable across vendor torches
+        # (enflame GCU rejects it while the CUDA-alias vendors accept it).
+        self.sampling_rng = torch.Generator()
         self.num_mtp_heads = self._get_mtp_num_heads()
         self.sampling_rng.manual_seed(self.model_config.inference_sampling_seed)
 
