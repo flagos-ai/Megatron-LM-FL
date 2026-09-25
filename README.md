@@ -13,6 +13,68 @@ Megatron-LM and Megatron Core
 
 <div align="left">
 
+## SlideFormer for Megatron-LM-FL
+
+> [!IMPORTANT]
+> This branch provides a Megatron Core + Transformer Engine implementation of
+> the single-GPU layer-sliding training design introduced by
+> [SlideFormer](https://arxiv.org/abs/2603.16428). It preserves SlideFormer's
+> CPU-resident parameter, optimizer, and activation-offload design while
+> adapting the execution engine, asynchronous scheduling, checkpointing, and
+> fused-kernel policy from PyTorch + Hugging Face to Megatron-LM-FL + TE.
+> The currently validated scope is single-GPU dense Qwen3-class training.
+
+Implementation details, limitations, and the complete acceptance protocol are
+available in the
+[SlideFormer design and acceptance report](docs/user-guide/slideformer_megatron_fl.md).
+The reference PyTorch implementation is available at
+[RegiaYoung/SlideFormer](https://github.com/RegiaYoung/SlideFormer).
+
+### Qwen3 single-GPU results
+
+The figures below compare this Megatron-LM-FL implementation with the
+SlideFormer PyTorch reference on the same Qwen3 checkpoints. Measurements use
+BF16, sequence length 1024, batch sizes 1--64, three warmup steps, and ten
+measured optimizer steps on one RTX 4090.
+
+<table>
+  <tr>
+    <th>Throughput</th>
+    <th>Peak GPU allocated memory</th>
+  </tr>
+  <tr>
+    <td><img src="docs/user-guide/images/slideformer/qwen3_scaling_throughput.png" alt="Qwen3 throughput scaling"></td>
+    <td><img src="docs/user-guide/images/slideformer/qwen3_scaling_gpu_allocated.png" alt="Qwen3 peak GPU allocated memory scaling"></td>
+  </tr>
+  <tr>
+    <th>Peak GPU reserved memory</th>
+    <th>Peak process RSS</th>
+  </tr>
+  <tr>
+    <td><img src="docs/user-guide/images/slideformer/qwen3_scaling_gpu_reserved.png" alt="Qwen3 peak GPU reserved memory scaling"></td>
+    <td><img src="docs/user-guide/images/slideformer/qwen3_scaling_cpu_rss.png" alt="Qwen3 peak process RSS scaling"></td>
+  </tr>
+</table>
+
+### Citation
+
+If you use this implementation, its design, or its benchmark results, please
+cite the SlideFormer paper and reference the
+[SlideFormer repository](https://github.com/RegiaYoung/SlideFormer):
+
+```bibtex
+@misc{yang2026slideformer,
+  title         = {An Efficient Heterogeneous Co-Design for Fine-Tuning on a Single GPU},
+  author        = {Ruijia Yang and Zeyi Wen},
+  year          = {2026},
+  eprint        = {2603.16428},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.DC},
+  doi           = {10.1145/3770743.3804125},
+  url           = {https://arxiv.org/abs/2603.16428}
+}
+```
+
 ## About
 
 This repository contains two components: **Megatron-LM** and **Megatron Core**.
