@@ -178,3 +178,13 @@ register(
     impl="megatron.plugin.Ascend.transformer.transformer_config.NPUTransformerConfig",
     vendor="npu",
 )
+
+
+# =============================================================================
+# Transformer - MoE chunk reorder
+# =============================================================================
+register(
+    target="megatron.core.transformer.moe.moe_utils._sort_chunks_by_idxs",
+    impl="megatron.plugin.Ascend.transformer.moe.moe_utils._sort_chunks_by_idxs",
+    vendor="npu",
+)
