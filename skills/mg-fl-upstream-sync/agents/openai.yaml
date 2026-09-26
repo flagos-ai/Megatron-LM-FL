@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron-LM-FL Upstream Sync"
+  short_description: "Integrate an approved NVIDIA upstream release"
+  default_prompt: "Use $mg-fl-upstream-sync to integrate an approved fork-delta plan into a new NVIDIA Megatron-LM release."

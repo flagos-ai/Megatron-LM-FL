@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron CI/CD Auditor"
+  short_description: "Audit workflows, configs, references, and coverage"
+  default_prompt: "Use $mg-audit-cicd to statically audit Megatron workflows, CI configs, local references, backend matrices, and failure semantics against pinned upgrade refs."

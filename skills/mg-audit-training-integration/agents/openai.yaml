@@ -1,0 +1,4 @@
+interface:
+  display_name: "Megatron Training Integration Auditor"
+  short_description: "Audit training lifecycle compatibility and tests"
+  default_prompt: "Use $mg-audit-training-integration to audit training lifecycle changes across an upstream upgrade."
