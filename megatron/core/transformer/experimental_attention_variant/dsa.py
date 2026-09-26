@@ -3,6 +3,7 @@
 import copy
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -194,6 +195,49 @@ class DSAIndexerLossLoggingHelper:
         DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
 
 
+##### FlagScale Begin #####
+@lru_cache(maxsize=16)
+def _cached_causal_neg_inf_mask(sq: int, sk: int, device: torch.device) -> torch.Tensor:
+    """Return a cached upper-triangular additive causal mask.
+
+    Shape ``[sq, sk]``, fp32, ``-inf`` above the diagonal and ``0`` elsewhere.
+    The mask depends only on ``(sq, sk, device)``, so it is memoized to avoid
+    re-allocating and re-computing a potentially large ``[sq, sk]`` tensor on
+    every layer / micro-batch (e.g. ~256MB at seqlen=8192).
+
+    The returned tensor is shared across callers and MUST be treated as
+    read-only (only added to scores, never mutated in place).
+    """
+    return torch.triu(
+        torch.full((sq, sk), float("-inf"), dtype=torch.float32, device=device),
+        diagonal=1,
+    )
+
+
+_DSA_TOPK_HOLDER_ATTR = "_dsa_index_share_topk_holder"
+
+
+def _dsa_source_layer(indexer_types: List[str], layer_number: int) -> int:
+    """Resolve which 'full' layer a 'shared' DSA layer reuses top-k indices from.
+
+    ``indexer_types`` is 0-indexed; ``layer_number`` is 1-indexed. Returns the
+    1-indexed layer number of the nearest preceding 'full' layer. Raises if no
+    preceding 'full' layer exists (a 'shared' layer must be preceded by a 'full'
+    source within the same pipeline stage).
+    """
+    for prev in range(layer_number - 1, 0, -1):
+        if indexer_types[prev - 1] == "full":
+            return prev
+    raise ValueError(
+        f"DSA layer {layer_number} has indexer_type='shared' but no preceding 'full' "
+        f"layer to source top-k from. Ensure each 'shared' layer is preceded by a "
+        f"'full' layer (and that a pipeline stage never starts with 'shared')."
+    )
+
+
+##### FlagScale End #####
+
+
 def compute_dsa_indexer_loss(
     index_scores: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -250,12 +294,7 @@ def compute_dsa_indexer_loss(
     if causal_mask_override is not None:
         causal_mask = causal_mask_override.to(dtype=torch.float32)  # [b, sq, sk]
     else:
-        causal_mask = torch.triu(
-            torch.full(
-                (sq, sk), float('-inf'), dtype=torch.float32, device=attention_scores.device
-            ),
-            diagonal=1,
-        )
+        causal_mask = _cached_causal_neg_inf_mask(sq, sk, attention_scores.device)
     # index_mask [b, sq, sk]
     index_mask = torch.full(
         (b, sq, sk), float("-inf"), dtype=torch.float32, device=causal_mask.device
@@ -475,12 +514,7 @@ def bwd_fused_indexer_loss_naive(
     if causal_mask_override is not None:
         causal_mask = causal_mask_override.to(dtype=torch.float32)  # [b, sq, sk]
     else:
-        causal_mask = torch.triu(
-            torch.full(
-                (sq, sk), float('-inf'), dtype=torch.float32, device=attention_scores.device
-            ),
-            diagonal=1,
-        )
+        causal_mask = _cached_causal_neg_inf_mask(sq, sk, attention_scores.device)
     # index_mask [b, sq, sk]
     index_mask = torch.full(
         (b, sq, sk), float("-inf"), dtype=torch.float32, device=causal_mask.device
@@ -1094,10 +1128,7 @@ def unfused_dsa_fn(query, key, value, topk_indices, softmax_scale):
     index_mask = torch.full((b, sq, skv), float("-inf"), device=attention_scores.device)
     index_mask.scatter_(-1, topk_indices, 0)
     # causal_mask [sq, skv]
-    causal_mask = torch.triu(
-        torch.full((sq, skv), float('-inf'), dtype=torch.float32, device=index_mask.device),
-        diagonal=1,
-    )
+    causal_mask = _cached_causal_neg_inf_mask(sq, skv, index_mask.device)
     # [b, sq, skv] + [1, sq, skv] -> [b, sq, skv]
     index_mask += causal_mask.view(1, sq, skv)
     # [b, np, sq, skv] + [b, 1, sq, skv] -> [b, np, sq, skv]
@@ -1149,15 +1180,18 @@ class DSAttention(MegatronModule):
         self.layer_number = layer_number
         if is_mtp_layer:
             self.layer_number = self.layer_number + self.config.num_layers
+        self.index_share = self.config.indexer_types is not None
 
-        # indexer_types is 0-indexed, layer_number is 1-indexed.
-        # "share" means this layer reuses the previous layer's topk indices (no indexer needed).
-        if (
-            self.config.indexer_types is not None
-            and self.config.indexer_types[layer_number - 1] == "share"
-        ):
+        # indexer_types is 0-indexed, layer_number is 1-indexed. A "shared" layer has no
+        # indexer and reuses a preceding 'full' layer's topk (resolved here as source_layer).
+        self.skip_topk = (
+            self.index_share and self.config.indexer_types[layer_number - 1] == "shared"
+        )
+        if self.skip_topk:
             self.indexer = None
+            self.source_layer = _dsa_source_layer(self.config.indexer_types, layer_number)
         else:
+            self.source_layer = None
             self.indexer = build_module(
                 submodules.indexer, config=self.config, pg_collection=pg_collection
             )
@@ -1167,6 +1201,40 @@ class DSAttention(MegatronModule):
                 k_channels if k_channels is not None else config.kv_channels
             )
         self.softmax_scale = softmax_scale
+
+    ##### FlagScale Begin #####
+    def _get_index_share_carrier(
+        self,
+        packed_seq_params: Optional[PackedSeqParams],
+        attention_mask: Optional[torch.Tensor],
+    ) -> object:
+        """Return the object that carries DSA top-k sharing state for this forward.
+
+        The carrier must flow through every DSA layer of a single forward pass. Because
+        it travels as a forward *argument*, the holder also survives activation
+        recompute: the checkpointed closure re-runs with the same carrier. Preferring
+        ``packed_seq_params`` keeps packed (THD) sequences isolated. ``self.config`` is a
+        fallback for the mask-free causal path; being module state, its holder lives
+        until the next forward overwrites it.
+        """
+        if packed_seq_params is not None:
+            return packed_seq_params
+        return attention_mask if attention_mask is not None else self.config
+
+    def _get_index_share_topk_holder(
+        self,
+        packed_seq_params: Optional[PackedSeqParams],
+        attention_mask: Optional[torch.Tensor],
+    ) -> dict:
+        """Return the ``{layer_number: topk_indices}`` holder for this forward."""
+        carrier = self._get_index_share_carrier(packed_seq_params, attention_mask)
+        holder = getattr(carrier, _DSA_TOPK_HOLDER_ATTR, None)
+        if holder is None:
+            holder = {}
+            setattr(carrier, _DSA_TOPK_HOLDER_ATTR, holder)
+        return holder
+
+    ##### FlagScale End #####
 
     def forward(
         self,
@@ -1179,7 +1247,6 @@ class DSAttention(MegatronModule):
         attn_mask_type: AttnMaskType = None,
         attention_bias: torch.Tensor = None,
         packed_seq_params: PackedSeqParams = None,
-        prev_topk_indices: Optional[torch.Tensor] = None,
     ):
         """
         Forward pass for Sparse Attention.
@@ -1194,7 +1261,6 @@ class DSAttention(MegatronModule):
             attn_mask_type: Type of attention mask.
             attention_bias: Optional attention bias.
             packed_seq_params: Packed sequence parameters.
-            prev_topk_indices: Top-k indices from previous layer for 'share' mode.
 
         Returns:
             output: Output tensor [sq, b, hidden_size]
@@ -1203,16 +1269,23 @@ class DSAttention(MegatronModule):
         skv = key.size(0)
         hnv = value.size(3)
 
-        # Share mode: reuse previous layer's topk indices, skip indexer computation
-        if self.indexer is None:
-            assert prev_topk_indices is not None, (
-                f"Layer {self.layer_number} has indexer_type='shared' but no prev_topk_indices "
-                f"available. Ensure the preceding layer has indexer_type='full'."
+        # 'full' layers publish holder[self.layer_number]; 'shared' layers read
+        # holder[self.source_layer].
+        topk_holder = (
+            self._get_index_share_topk_holder(packed_seq_params, attention_mask)
+            if self.index_share
+            else None
+        )
+
+        if self.skip_topk:
+            assert topk_holder is not None and self.source_layer in topk_holder, (
+                f"Layer {self.layer_number} (indexer_type='shared') needs top-k from source "
+                f"layer {self.source_layer}, not found in holder "
+                f"(available: {sorted(topk_holder) if topk_holder else '[]'}). "
+                f"Ensure its source layer runs earlier in the same pipeline stage."
             )
-            output = unfused_dsa_fn(query, key, value, prev_topk_indices, self.softmax_scale)
-            self.current_topk_indices = (
-                prev_topk_indices  # Store for potential use by next layer in share mode
-            )
+            topk_indices = topk_holder[self.source_layer]
+            output = unfused_dsa_fn(query, key, value, topk_indices, self.softmax_scale)
             return output
 
         # Detach x and qr to prevent gradients of indexer from flowing back to the main model.
@@ -1222,13 +1295,8 @@ class DSAttention(MegatronModule):
         # Get a FP32 mask with -inf for masked positions.
         if attn_mask_type is not None:
             assert attn_mask_type == AttnMaskType.causal, 'Only causal mask is supported for now'
-            # Generate upper triangular mask with -inf above diagonal, 0 elsewhere
-            # torch.triu with diagonal=1 creates upper triangular matrix (excluding main diagonal)
-            # float_mask [sq, skv]
-            float_mask = torch.triu(
-                torch.full((sq, skv), float('-inf'), dtype=torch.float32, device=x.device),
-                diagonal=1,
-            )
+            # float_mask [sq, skv] (cached, read-only)
+            float_mask = _cached_causal_neg_inf_mask(sq, skv, x.device)
         else:
             assert attention_mask.shape == (b, 1, sq, skv), 'attention_mask shape mismatch'
             # [b, 1, sq, skv] -> [b, sq, skv]
@@ -1292,8 +1360,9 @@ class DSAttention(MegatronModule):
             # ===================================
             output = unfused_dsa_fn(query, key, value, topk_indices, self.softmax_scale)
 
-        self.current_topk_indices = (
-            topk_indices  # Store for potential use by next layer in share mode
-        )
+        # Publish this 'full' layer's top-k so subsequent 'shared' layers can reuse it.
+        # detach() keeps the holder from pinning this layer's autograd graph alive.
+        if topk_holder is not None:
+            topk_holder[self.layer_number] = topk_indices.detach()
 
         return output

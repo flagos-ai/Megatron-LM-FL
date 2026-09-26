@@ -947,7 +947,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     # No intermediate_hidden_states requested: just hidden_states
                     hidden_states = checkpointed_result
             else:
-                _dsa_prev_topk_indices = None  # FlagSale Add
                 for l_no, layer in enumerate(self.layers):
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
@@ -982,20 +981,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                                 )
                         #### FlagScale End ####
 
-                        #### FlagScale Begin ####
-                        # Pass DSA prev_topk_indices via attribute
-                        # If the current layer is 'full',
-                        # the current_topk_indices will be updated in the layer.
-                        if hasattr(layer, 'self_attention') and hasattr(
-                            layer.self_attention, 'core_attention'
-                        ):
-                            setattr(
-                                layer.self_attention.core_attention,
-                                'current_topk_indices',
-                                _dsa_prev_topk_indices,
-                            )
-                        #### FlagScale End ####
-
                         hidden_states, context = layer(
                             hidden_states=hidden_states,
                             attention_mask=attention_mask,
@@ -1014,15 +999,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             input_ids=input_ids,
                         )
 
-                        #### FlagScale Begin ####
-                        # Read DSA topk_indices for next layer
-                        if hasattr(layer, 'self_attention') and hasattr(
-                            layer.self_attention, 'core_attention'
-                        ):
-                            _dsa_prev_topk_indices = getattr(
-                                layer.self_attention.core_attention, 'current_topk_indices', None
-                            )
-                        #### FlagScale End ####
                     self._finalize_mhc_recompute_layer(
                         mhc_manager=mhc_manager,
                         hidden_states=hidden_states,
