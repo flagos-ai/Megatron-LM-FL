@@ -32,6 +32,7 @@ from megatron.core.transformer.utils import (
     sharded_state_dict_default,
 )
 from megatron.core.utils import deprecate_inference_params, nvtx_range_pop, nvtx_range_push
+from megatron.plugin.decorators import overridable
 
 # TODO: Implement GatedDeltaNetContextParallel
 # from .gated_delta_net_context_parallel import GatedDeltaNetContextParallel
@@ -350,8 +351,8 @@ class GatedDeltaNet(MegatronModule):
         value = value.reshape(batch, seq_len, -1, self.value_head_dim)
         # Apply L2 norm to query and key
         if self.use_qk_l2norm:
-            query = l2norm(query.contiguous())
-            key = l2norm(key.contiguous())
+            query = self._normalize_qk(query.contiguous())
+            key = self._normalize_qk(key.contiguous())
         if self.num_value_heads // self.num_key_heads > 1:
             query = query.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
             key = key.repeat_interleave(self.num_value_heads // self.num_key_heads, dim=2)
@@ -371,28 +372,9 @@ class GatedDeltaNet(MegatronModule):
         nvtx_range_pop(suffix="g_and_beta")
 
         nvtx_range_push(suffix="gated_delta_rule")
-        if self.config.deterministic_mode:
-            core_attn_out, last_recurrent_state = torch_chunk_gated_delta_rule(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=False,
-            )
-        else:
-            core_attn_out, last_recurrent_state = chunk_gated_delta_rule(
-                query,
-                key,
-                value,
-                g=g,
-                beta=beta,
-                initial_state=None,
-                output_final_state=False,
-                use_qk_l2norm_in_kernel=False,
-            )
+        core_attn_out, last_recurrent_state = self._gated_delta_rule(
+            query, key, value, g, beta
+        )
         nvtx_range_pop(suffix="gated_delta_rule")
 
         # RMSNorm
@@ -411,6 +393,22 @@ class GatedDeltaNet(MegatronModule):
         nvtx_range_pop(suffix="out_proj")
 
         return out, out_bias
+
+    @overridable
+    def _normalize_qk(self, x):
+        """Normalize Q/K independently of the model's projection and head layout."""
+        return l2norm(x)
+
+    @overridable
+    def _gated_delta_rule(self, query, key, value, g, beta):
+        """Dispatch only the recurrent attention calculation."""
+        fn = torch_chunk_gated_delta_rule
+        if not self.config.deterministic_mode:
+            fn = chunk_gated_delta_rule
+        return fn(
+            query, key, value, g=g, beta=beta, initial_state=None,
+            output_final_state=False, use_qk_l2norm_in_kernel=False,
+        )
 
     @jit_fuser
     def _apply_gated_norm(self, x, gate):
