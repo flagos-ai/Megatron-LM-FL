@@ -1,8 +1,10 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
 import copy
+import logging
 import math
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import List, Optional, Tuple, Union
 
 import torch
@@ -31,6 +33,8 @@ try:
     from fast_hadamard_transform import hadamard_transform
 except ImportError:
     hadamard_transform = None
+
+logger = logging.getLogger(__name__)
 
 
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
@@ -192,6 +196,62 @@ class DSAIndexerLossLoggingHelper:
             wandb_writer.log({"indexer loss": avg_indexer_loss}, iteration)
 
         DSAIndexerLossLoggingHelper.clean_loss_in_tracker()
+
+
+##### FlagScale Begin #####
+@lru_cache(maxsize=16)
+def _cached_causal_neg_inf_mask(sq: int, sk: int, device: torch.device) -> torch.Tensor:
+    """Return a cached upper-triangular additive causal mask.
+
+    Shape ``[sq, sk]``, fp32, ``-inf`` above the diagonal and ``0`` elsewhere.
+    The mask depends only on ``(sq, sk, device)``, so it is memoized to avoid
+    re-allocating and re-computing a potentially large ``[sq, sk]`` tensor on
+    every layer / micro-batch (e.g. ~256MB at seqlen=8192).
+
+    The returned tensor is shared across callers and MUST be treated as
+    read-only (only added to scores, never mutated in place).
+    """
+    return torch.triu(
+        torch.full((sq, sk), float("-inf"), dtype=torch.float32, device=device),
+        diagonal=1,
+    )
+
+
+# Fused Triton indexer-loss backend (see triton_indexer_loss.py). Independent of the
+# sparse-attention kernels above: it reduces over the head dimension inside the kernel
+# so the [b, np, sq, sk] / [sq, b, index_n_heads, sk] fp32 intermediates never exist.
+_fwd_indexer_loss_triton = None
+_bwd_indexer_loss_triton = None
+
+
+def _ensure_indexer_loss_kernels() -> bool:
+    """Lazily import the fused Triton indexer-loss kernels.
+
+    Returns True if they are usable. On import failure this returns False rather
+    than raising, so a missing/incompatible Triton degrades to the unfused path
+    instead of killing the run. ``TransformerConfig`` already validates the flag
+    up front, so a False here means an unexpected environment.
+    """
+    global _fwd_indexer_loss_triton, _bwd_indexer_loss_triton
+    if _fwd_indexer_loss_triton is not None:
+        return True
+    try:
+        from megatron.plugin.dsa_kernel.triton_indexer_loss import (
+            bwd_indexer_loss_triton,
+            fwd_indexer_loss_triton,
+        )
+    except ImportError:
+        logger.warning(
+            "apply_dsa_indexer_loss_fusion is set but the Triton indexer-loss kernels "
+            "could not be imported; falling back to the unfused PyTorch path."
+        )
+        return False
+    _fwd_indexer_loss_triton = fwd_indexer_loss_triton
+    _bwd_indexer_loss_triton = bwd_indexer_loss_triton
+    return True
+
+
+##### FlagScale End #####
 
 
 def compute_dsa_indexer_loss(
@@ -665,24 +725,45 @@ class FusedDSAIndexerLoss(torch.autograd.Function):
         sparse_loss,
         pg_collection,
         calculate_per_token_loss,
+        use_triton=False,  # FlagScale Add
     ):
         """
         Fused forward: index_scores never materialized in full.
         """
-        topk_indices, loss = fwd_fused_indexer_loss_naive(
-            q,
-            weights,
-            k,
-            query,
-            key,
-            topk,
-            softmax_scale,
-            loss_coeff,
-            mask,
-            sparse_loss,
-            pg_collection,
-            calculate_per_token_loss,
-        )
+        ##### FlagScale Begin #####
+        # The Triton kernels implement only the dense loss; sparse_loss keeps the
+        # PyTorch path. Resolved here (not by the caller) so ctx records what ran.
+        use_triton = use_triton and not sparse_loss and _ensure_indexer_loss_kernels()
+        if use_triton:
+            topk_indices, loss, _ = _fwd_indexer_loss_triton(
+                q,
+                weights,
+                k,
+                query,
+                key,
+                topk,
+                softmax_scale,
+                loss_coeff,
+                mask,
+                pg_collection,
+                calculate_per_token_loss,
+            )
+        else:
+            ##### FlagScale End #####
+            topk_indices, loss = fwd_fused_indexer_loss_naive(
+                q,
+                weights,
+                k,
+                query,
+                key,
+                topk,
+                softmax_scale,
+                loss_coeff,
+                mask,
+                sparse_loss,
+                pg_collection,
+                calculate_per_token_loss,
+            )
 
         # Save for backward (recomputation strategy)
         ctx.save_for_backward(q, weights, k, query, key, topk_indices, mask)
@@ -691,6 +772,7 @@ class FusedDSAIndexerLoss(torch.autograd.Function):
         ctx.sparse_loss = sparse_loss
         ctx.pg_collection = pg_collection
         ctx.calculate_per_token_loss = calculate_per_token_loss
+        ctx.use_triton = use_triton  # FlagScale Add
 
         return topk_indices, loss
 
@@ -701,24 +783,46 @@ class FusedDSAIndexerLoss(torch.autograd.Function):
         """
         q, weights, k, query, key, topk_indices, mask = ctx.saved_tensors
 
-        grad_q, grad_weights, grad_k = bwd_fused_indexer_loss_naive(
-            q,
-            weights,
-            k,
-            query,
-            key,
-            topk_indices,
-            ctx.softmax_scale,
-            ctx.loss_coeff,
-            ctx.sparse_loss,
-            grad_loss,
-            ctx.pg_collection,
-            causal_mask_override=mask,
-            calculate_per_token_loss=ctx.calculate_per_token_loss,
-        )
+        ##### FlagScale Begin #####
+        if ctx.use_triton:
+            grad_q, grad_weights, grad_k = _bwd_indexer_loss_triton(
+                q,
+                weights,
+                k,
+                query,
+                key,
+                ctx.softmax_scale,
+                ctx.loss_coeff,
+                grad_loss,
+                ctx.pg_collection,
+                mask,
+                ctx.calculate_per_token_loss,
+            )
+        else:
+            ##### FlagScale End #####
+            grad_q, grad_weights, grad_k = bwd_fused_indexer_loss_naive(
+                q,
+                weights,
+                k,
+                query,
+                key,
+                topk_indices,
+                ctx.softmax_scale,
+                ctx.loss_coeff,
+                ctx.sparse_loss,
+                grad_loss,
+                ctx.pg_collection,
+                causal_mask_override=mask,
+                calculate_per_token_loss=ctx.calculate_per_token_loss,
+            )
 
         # query and key are detached in forward, so return None for their gradients
-        return grad_q, grad_weights, grad_k, None, None, None, None, None, None, None, None, None
+        return (
+            grad_q,
+            grad_weights,
+            grad_k,
+            *([None] * 10),  # query, key, and the scalar/flag args
+        )
 
 
 class DSAIndexerLossAutoScaler(torch.autograd.Function):
@@ -1149,6 +1253,11 @@ class DSAttention(MegatronModule):
         self.layer_number = layer_number
         if is_mtp_layer:
             self.layer_number = self.layer_number + self.config.num_layers
+        ##### FlagScale Begin #####
+        # The fused indexer-loss kernels need no special KV layout, so they apply to
+        # plain 'dsa' as well as any absorbed variant.
+        self.use_fused_indexer_loss = getattr(self.config, "apply_dsa_indexer_loss_fusion", False)
+        ##### FlagScale End #####
 
         # indexer_types is 0-indexed, layer_number is 1-indexed.
         # "share" means this layer reuses the previous layer's topk indices (no indexer needed).
@@ -1262,6 +1371,7 @@ class DSAttention(MegatronModule):
                 getattr(self.config, "dsa_indexer_use_sparse_loss", False),
                 self.indexer.pg_collection,
                 self.config.calculate_per_token_loss,
+                self.use_fused_indexer_loss,  # FlagScale Add
             )
             # Save indexer loss for logging
             if indexer_loss_coeff > 0:
