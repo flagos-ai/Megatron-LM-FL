@@ -3,7 +3,7 @@
 import os
 import sys
 
-from .platform_base import PlatformBase
+from .platform_base import PlatformBase, flag_gems_paged_attention
 
 try:
     import torch.cuda
@@ -44,6 +44,24 @@ class PlatformCUDA(PlatformBase):
 
     def get_device_capability(self, device_index=None):
         return torch.cuda.get_device_capability(device_index)
+
+    def supports_paged_attention(self) -> bool:
+        # The dynamic-batching path needs a paged KV kernel. A CUDA platform
+        # with a flash-attn build (>= 2.7.3) reads a paged cache through
+        # flash_attn's varlen kernels, which is what the PlatformBase default
+        # False keeps active. But CUDA also fronts accelerator compatibility
+        # builds (DTK/MACA) that ship no usable flash-attn; for those the
+        # flag_gems varlen kernel is the paged implementation, so report True
+        # when it is importable.
+        try:
+            import flash_attn
+
+            usable = tuple(int(x) for x in flash_attn.__version__.split(".")[:2]) >= (2, 7)
+        except Exception:
+            usable = False
+        if usable:
+            return False
+        return flag_gems_paged_attention() is not None
 
     def is_synchronized_device(self):
         return False
