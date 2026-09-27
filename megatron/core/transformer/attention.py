@@ -880,7 +880,20 @@ class Attention(MegatronModule, ABC):
                 softmax_scale = self.softmax_scale
             else:
                 softmax_scale = q.shape[-1] ** -0.5
-            if HAVE_FA4:
+            if cur_platform.supports_paged_attention():
+                # No flash-attn varlen kernel on this device: the paged
+                # prefill op comes from a vendor op or from flag_gems.
+                output_total = cur_platform.paged_prefill_attention(
+                    q,
+                    k,
+                    v,
+                    cu_seqlens_q,
+                    cu_seqlens_k,
+                    seqlens_k,
+                    block_table,
+                    num_heads=self.num_attention_heads_per_partition,
+                )
+            elif HAVE_FA4:
                 output_total, _ = flash_attn4_varlen_func(
                     q,
                     k,
@@ -933,10 +946,28 @@ class Attention(MegatronModule, ABC):
             tokens_per_request = q.shape[0] // num_requests
             q = q.reshape(num_requests, tokens_per_request, q.shape[2], q.shape[3])
 
-            # If using MLA we use the FlashMLA kernel
-            # The `softmax_scale` attribute check is to find out whether this is an MLA layer or
-            # standard Attention.
-            if isinstance(self.config, MLATransformerConfig) and hasattr(self, "softmax_scale"):
+            if cur_platform.supports_paged_attention():
+                # No flash-attn / FlashMLA kernel on this device: the paged
+                # decode op comes from a vendor op or from flag_gems.
+                # PlatformNPU.paged_decode_attention documents its measured
+                # (block_size, head_size) support boundary. The common tail
+                # reshape below restores the (B*S, 1, H, D) output shape.
+                if isinstance(self.config, MLATransformerConfig):
+                    raise NotImplementedError(
+                        "MLA decode needs a FlashMLA kernel, which this "
+                        "device does not provide"
+                    )
+                output_total = cur_platform.paged_decode_attention(
+                    q,
+                    k,
+                    block_table,
+                    seqlens_k,
+                    value_cache=v,
+                    num_heads=self.num_attention_heads_per_partition,
+                    num_kv_heads=self.num_query_groups_per_partition,
+                    scale_value=q.shape[-1] ** -0.5,
+                )
+            elif isinstance(self.config, MLATransformerConfig) and hasattr(self, "softmax_scale"):
                 softmax_scale = self.softmax_scale
 
                 num_heads_k = 1  # Only a single head for MLA Flash
@@ -1064,9 +1095,15 @@ class Attention(MegatronModule, ABC):
         inference_context = deprecate_inference_params(inference_context, inference_params)
 
         if inference_context and inference_context.is_dynamic_batching():
-            assert (
-                HAVE_FA4 or HAVE_FA3 or is_fa_min_version("2.7.3")
-            ), "flash attn verion v2.7.3 and above is required for dynamic batching."
+            # Platforms with a native paged-attention op (e.g. NPU) skip the
+            # flash-attn version gate; see PlatformBase.supports_paged_attention.
+            # Where the gate does apply, DotProductAttention (--attention-backend
+            # unfused) never calls flash_attn (pure baddbmm/bmm, no block_table),
+            # so it is exempt too.
+            if not cur_platform.supports_paged_attention():
+                assert (
+                    HAVE_FA4 or HAVE_FA3 or is_fa_min_version("2.7.3")
+                ), "flash attn verion v2.7.3 and above is required for dynamic batching."
 
         # hidden_states: [sq, b, h]
         is_inference_mode = InferenceMode.is_active()

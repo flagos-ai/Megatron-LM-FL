@@ -9,6 +9,8 @@ import unittest
 from contextlib import ExitStack
 from unittest.mock import MagicMock, patch
 
+import torch
+
 from megatron.plugin.platform import platform_manager, platform_register
 from megatron.plugin.platform.platform_base import PlatformBase
 from megatron.plugin.platform.platform_cpu import PlatformCPU
@@ -1112,6 +1114,65 @@ class TestAllRegisteredPlatformsContract(unittest.TestCase):
         """is_triton_supported() must return a bool."""
         def check(name, p):
             self.assertIsInstance(p.is_triton_supported(), bool)
+        self._for_each_platform(check)
+
+    def test_supports_paged_attention_returns_bool(self):
+        """supports_paged_attention() must return a bool."""
+        def check(name, p):
+            self.assertIsInstance(p.supports_paged_attention(), bool)
+        self._for_each_platform(check)
+
+    def test_paged_api_is_callable_when_supported(self):
+        """A platform that reports paged support must have the paged methods.
+
+        The bodies are allowed to raise (they name the missing vendor op or
+        flag_gems package at call time); only the shape of the API is asserted
+        here, so a platform can opt in without shipping a kernel.
+        """
+        def check(name, p):
+            if not p.supports_paged_attention():
+                return
+            self.assertTrue(callable(getattr(p, "paged_decode_attention", None)))
+            self.assertTrue(callable(getattr(p, "paged_prefill_attention", None)))
+        self._for_each_platform(check)
+
+    def test_flag_gems_fallback_raises_when_absent(self):
+        """Without flag_gems, the flag_gems-backed paged methods raise.
+
+        NPU overrides both methods with vendor ops, so it is exempt.
+        """
+        def check(name, p):
+            if not p.supports_paged_attention():
+                return
+            if name == "npu":
+                return
+            from unittest.mock import patch
+            with patch(
+                "megatron.plugin.platform.platform_base.flag_gems_paged_attention",
+                return_value=None,
+            ):
+                with self.assertRaises(NotImplementedError):
+                    p.paged_decode_attention(
+                        torch.empty(4, 2, 8, 16),
+                        torch.empty(2, 64, 2, 16),
+                        torch.empty(4, 8, dtype=torch.long),
+                        torch.ones(4, dtype=torch.long),
+                        value_cache=torch.empty(2, 64, 2, 16),
+                        num_heads=2,
+                        num_kv_heads=2,
+                        scale_value=0.25,
+                    )
+                with self.assertRaises(NotImplementedError):
+                    p.paged_prefill_attention(
+                        torch.empty(4, 2, 8, 16),
+                        torch.empty(4, 2, 8, 16),
+                        torch.empty(4, 2, 8, 16),
+                        torch.tensor([0, 2, 4], dtype=torch.int32),
+                        torch.tensor([0, 2, 4], dtype=torch.int32),
+                        torch.ones(2, dtype=torch.long),
+                        torch.empty(2, 8, dtype=torch.long),
+                        num_heads=2,
+                    )
         self._for_each_platform(check)
 
     # --- Visible devices ---
