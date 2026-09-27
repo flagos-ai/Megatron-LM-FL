@@ -97,6 +97,16 @@ class NullTokenizer:
         return self._pad_id
 
     @property
+    def bos_id(self):
+        """Returns id of beginning of sentence token. NullTokenizer has none."""
+        return None
+
+    @property
+    def bos(self):
+        """Returns beginning of sentence token id."""
+        return None
+
+    @property
     def additional_special_tokens_ids(self):
         """ """
         return None
