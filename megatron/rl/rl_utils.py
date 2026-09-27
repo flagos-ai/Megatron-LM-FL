@@ -774,7 +774,9 @@ def get_logprobs(model, tokens, position_ids, no_grad=False, sequence_packing=Fa
                 max_sequences_per_bin=args.rl_sequence_packing_max_sequences_per_bin,
                 device=tokens.device,
             )
-        else:
+        elif args.transformer_impl != "local":
+            # local impl (DotProductAttention) rejects THD packed sequences —
+            # thd is only consumed by TE fused attention. Pass None through.
             cu_seqlens = torch.tensor([0, tokens.shape[1]], dtype=torch.int32, device=tokens.device)
             packed_seq_params = PackedSeqParams(
                 qkv_format='thd',
