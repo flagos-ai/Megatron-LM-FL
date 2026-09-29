@@ -275,6 +275,180 @@ class MegatronOptimizer(ABC):
             tp_group=getattr(self, 'tp_group', None),
         )
 
+    # ---- Per-module grad norm (FlagScale) ----
+
+    def build_param_to_name_map(self, model_chunks):
+        """Build parameter-to-name mapping from model chunks for per-module grad norm.
+
+        Should be called once after optimizer construction, passing the same model_chunks
+        used for training.  For ChainedOptimizer this is delegated to each sub-optimizer.
+
+        Maps data_ptr → name for both the original (float16) parameter and its
+        fp32 main copy (if it exists).  Float16OptimizerWithFloat16Params replaces
+        optimizer param_group entries with fp32 clones, so get_parameters() returns
+        those clones.  Without registering the main_param data_ptr the lookup in
+        compute_per_module_grad_norm would miss every float16-origin parameter.
+
+        Args:
+            model_chunks: list of MegatronModule instances.
+        """
+        self._module_param_to_name = {}
+        for model_chunk in model_chunks:
+            for name, param in model_chunk.named_parameters():
+                self._module_param_to_name[param.data_ptr()] = name
+                # Also register the fp32 main param created by Float16Optimizer,
+                # since get_parameters() returns main params, not the originals.
+                if getattr(param, 'main_param', None) is not None:
+                    self._module_param_to_name[param.main_param.data_ptr()] = name
+
+    # Sub-module names unique to GatedDeltaNet (not present in SDPA).
+    _GDN_SUBMODULES = ('in_proj', 'conv1d', 'dt_bias', 'A_log', 'out_norm', 'out_proj')
+
+    # All sub-category keys used by _classify_module.
+    _MODULE_SUBCATEGORIES = (
+        'attn/gdn', 'attn/sdpa',
+        'mlp/experts', 'mlp/shared_experts', 'mlp/router',
+        'other/layernorm', 'other/embed', 'other/lm_head', 'other/unmapped',
+    )
+
+    # Mapping from sub-category prefix to its parent category.
+    _PARENT_CATEGORIES = ('attn', 'mlp', 'other')
+
+    @staticmethod
+    def _classify_module(name: str) -> str:
+        """Classify a parameter name into a sub-category.
+
+        Returns one of the keys in _MODULE_SUBCATEGORIES.
+
+        Classification rules (checked in order):
+          1. 'self_attention' in name
+             - contains a GDN-specific sub-module → 'attn/gdn'
+             - otherwise                          → 'attn/sdpa'
+          2. 'pre_mlp_layernorm' in name          → 'other/layernorm'
+             (contains 'mlp' but is a standalone layernorm, must precede rule 3)
+          3. 'mlp' in name
+             - 'shared_experts' in name           → 'mlp/shared_experts'
+             - 'router' in name                   → 'mlp/router'
+             - otherwise                          → 'mlp/experts'
+          4. 'embedding' in name                  → 'other/embed'
+          5. 'output_layer' in name               → 'other/lm_head'
+          6. 'layernorm' in name                  → 'other/layernorm'
+          7. everything else                      → 'other/unmapped'
+        """
+        # --- attention ---
+        if 'self_attention' in name:
+            for sub in MegatronOptimizer._GDN_SUBMODULES:
+                if sub in name:
+                    return 'attn/gdn'
+            return 'attn/sdpa'
+        # --- standalone layernorm (before 'mlp' check) ---
+        if 'pre_mlp_layernorm' in name:
+            return 'other/layernorm'
+        # --- mlp / moe ---
+        if 'mlp' in name:
+            if 'shared_experts' in name:
+                return 'mlp/shared_experts'
+            if 'router' in name:
+                return 'mlp/router'
+            return 'mlp/experts'
+        # --- other ---
+        if 'embedding' in name:
+            return 'other/embed'
+        if 'output_layer' in name:
+            return 'other/lm_head'
+        if 'layernorm' in name:
+            return 'other/layernorm'
+        return 'other/unmapped'
+
+    @staticmethod
+    def _aggregate_parent_norms(
+        sub_norms: Dict[str, float], detailed: bool = False,
+    ) -> Dict[str, float]:
+        """Given sub-category norms, compute parent-category norms and merge.
+
+        Args:
+            sub_norms: mapping from sub-category key to its L2 norm.
+            detailed: if True, include sub-category entries alongside parents;
+                      if False, only return the three parent categories.
+
+        Returns:
+            Ordered dict: parent (and optionally sub-category) norms.
+        """
+        result: Dict[str, float] = {}
+        for parent in MegatronOptimizer._PARENT_CATEGORIES:
+            prefix = parent + '/'
+            sq_sum = sum(v ** 2 for k, v in sub_norms.items() if k.startswith(prefix))
+            result[parent] = math.sqrt(sq_sum)
+            if detailed:
+                for k in sub_norms:
+                    if k.startswith(prefix):
+                        result[k] = sub_norms[k]
+        return result
+
+    @torch.no_grad()
+    def _compute_sub_norms(self) -> Optional[Dict[str, float]]:
+        """Compute L2 grad norm for each sub-category.
+
+        Always runs all allreduces (one per sub-category) regardless of the
+        detailed config, so that every rank participates in every collective.
+
+        Returns:
+            Dict mapping sub-category key to its L2 norm, or None if the
+            param-to-name mapping has not been initialised.
+        """
+        if not hasattr(self, '_module_param_to_name') or not self._module_param_to_name:
+            return None
+
+        # Collect grads per sub-category, applying the same filtering as
+        # get_main_grads_for_grad_norm (skip None / shared / TP-duplicate).
+        grouped_grads: Dict[str, List[torch.Tensor]] = {
+            k: [] for k in self._MODULE_SUBCATEGORIES
+        }
+        params = self.get_parameters()
+        for param in params:
+            grad = param.grad
+            if grad is None:
+                continue
+            if not param_is_not_shared(param):
+                continue
+            if not tensor_parallel.param_is_not_tensor_parallel_duplicate(
+                param, getattr(self, 'tp_group', None)
+            ):
+                continue
+
+            name = self._module_param_to_name.get(param.data_ptr(), '')
+            module_type = self._classify_module(name)
+            grouped_grads[module_type].append(grad)
+
+        grad_stats_parallel_group = self.get_grad_stats_parallel_group()
+        sub_norms: Dict[str, float] = {}
+        for module_type, grads in grouped_grads.items():
+            # Always call get_grad_norm_fp32 even when grads is empty so that
+            # every rank in grad_stats_parallel_group participates in the
+            # allreduce.  Skipping the call on ranks where a module type has no
+            # local grads (e.g. TP-replicated params only on rank 0) causes
+            # mismatched collectives → NCCL hang.
+            sub_norms[module_type] = get_grad_norm_fp32(
+                grads, grad_stats_parallel_group=grad_stats_parallel_group,
+            )
+        return sub_norms
+
+    def compute_per_module_grad_norm(self) -> Optional[Dict[str, float]]:
+        """Compute per-module grad norm, respecting the detailed config.
+
+        - ``log_per_module_grad_norm_detailed = False`` (default):
+          returns ``{'attn': ..., 'mlp': ..., 'other': ...}``
+        - ``log_per_module_grad_norm_detailed = True``:
+          returns parent + sub-category keys
+
+        This method is read-only: it does NOT modify any parameter or gradient.
+        """
+        sub_norms = self._compute_sub_norms()
+        if sub_norms is None:
+            return None
+        detailed = getattr(self.config, 'log_per_module_grad_norm_detailed', False)
+        return self._aggregate_parent_norms(sub_norms, detailed=detailed)
+
     @abstractmethod
     def zero_grad(self, set_to_none: bool = True):
         """Zero gradients and prepare for next forward pass."""
@@ -672,6 +846,12 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
         if found_inf_flag:
             return False, None, None
 
+        # Compute per-module grad norm before clipping (raw gradients).
+        per_module_grad_norm = None
+        if self.config.log_per_module_grad_norm:
+            per_module_grad_norm = self.compute_per_module_grad_norm()
+        self.per_module_grad_norm = per_module_grad_norm
+
         # Clip the main gradients.
         nvtx_range_push(msg="optimizer.clip_grad")
         if timers is not None:
@@ -1059,6 +1239,12 @@ class FP32Optimizer(MegatronOptimizer):
         if found_inf_flag:
             return False, None, None
 
+        # Compute per-module grad norm before clipping (raw gradients).
+        per_module_grad_norm = None
+        if self.config.log_per_module_grad_norm:
+            per_module_grad_norm = self.compute_per_module_grad_norm()
+        self.per_module_grad_norm = per_module_grad_norm
+
         # Clip gradients.
         if timers is not None:
             timers('optimizer-clip-main-grad', log_level=1).start(
@@ -1196,6 +1382,34 @@ class ChainedOptimizer(MegatronOptimizer):
         else:
             self.is_stub_optimizer = True
         self.chained_optimizers = chained_optimizers
+
+    def build_param_to_name_map(self, model_chunks):
+        """Delegate param-to-name mapping to each sub-optimizer."""
+        for optimizer in self.chained_optimizers:
+            optimizer.build_param_to_name_map(model_chunks)
+
+    def _compute_chained_per_module_grad_norm(self) -> Optional[Dict[str, float]]:
+        """Aggregate per-module grad norms across all chained sub-optimizers.
+
+        Calls _compute_sub_norms on each sub-optimizer (always sub-category
+        granularity), merges via sum-of-squares, then applies the detailed flag.
+        """
+        merged_sq: Dict[str, float] = {
+            k: 0.0 for k in MegatronOptimizer._MODULE_SUBCATEGORIES
+        }
+        any_result = False
+        for optimizer in self.chained_optimizers:
+            result = optimizer._compute_sub_norms()
+            if result is not None:
+                any_result = True
+                for k, v in result.items():
+                    merged_sq[k] += v ** 2
+        if not any_result:
+            return None
+        sub_norms = {k: math.sqrt(v) for k, v in merged_sq.items()}
+        detailed = getattr(self.config, 'log_per_module_grad_norm_detailed', False) \
+            if self.config is not None else False
+        return MegatronOptimizer._aggregate_parent_norms(sub_norms, detailed=detailed)
 
     @property
     def optimizer(self):
@@ -1509,6 +1723,12 @@ class ChainedOptimizer(MegatronOptimizer):
         found_inf_flag = self.prepare_grads()
         if found_inf_flag:
             return False, None, None
+
+        # Compute per-module grad norm before clipping (raw gradients).
+        per_module_grad_norm = None
+        if self.config is not None and self.config.log_per_module_grad_norm:
+            per_module_grad_norm = self._compute_chained_per_module_grad_norm()
+        self.per_module_grad_norm = per_module_grad_norm
 
         grad_norm = self.get_grad_norm()
 
