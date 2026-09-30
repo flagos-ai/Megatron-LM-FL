@@ -733,6 +733,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             padding_mask=padding_mask,
                             input_ids=input_ids,
                             loop_residual_scale=loop_residual_scale,
+                            loop_iter=loop_iter if self._loop_enabled else None,
                         )
 
                 return hidden_states, context
@@ -1172,6 +1173,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             mhc_recompute_manager=mhc_manager,
                             input_ids=input_ids,
                             loop_residual_scale=loop_residual_scale,
+                            loop_iter=loop_iter if self._loop_enabled else None,
                         )
 
                     self._finalize_mhc_recompute_layer(

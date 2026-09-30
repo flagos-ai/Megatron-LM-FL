@@ -233,6 +233,37 @@ class GatedDeltaNet(MegatronModule):
         setattr(self.A_log, "tensor_model_parallel", True)
         setattr(self.A_log, "partition_dim", 0)
 
+        # Per-loop-iteration dt_bias offset (Loop Transformer only).
+        # Allows different decay rates at each loop iteration.
+        # Shape: [num_loop_iterations, num_v_heads_local_tp], initialized to zeros
+        # so existing checkpoints load without any behavioural change.
+        # Only created for GDN layers that fall within the loop range — prelude/coda
+        # layers never receive a loop_iter, so their loop_dt_offset would never
+        # participate in the computation graph, causing a DDP grad-buffer assertion
+        # failure (unused parameter → backward hook never fires).
+        _in_loop_range = (
+            config.loop_start_layer is not None
+            and self.layer_number is not None
+            and config.loop_start_layer < self.layer_number <= config.loop_end_layer
+        )  # layer_number is 1-based, loop range is 0-based half-open [start, end)
+        if (
+            getattr(config, 'enable_loop_dt_offset', False)
+            and _in_loop_range
+            and config.num_loop_iterations >= 2
+        ):
+            self.loop_dt_offset = nn.Parameter(
+                torch.zeros(
+                    config.num_loop_iterations,
+                    self.num_v_heads_local_tp,
+                    dtype=config.params_dtype,
+                    device=torch.cuda.current_device(),
+                )
+            )
+            setattr(self.loop_dt_offset, "tensor_model_parallel", True)
+            setattr(self.loop_dt_offset, "partition_dim", 1)  # TP along head dim
+        else:
+            self.loop_dt_offset = None
+
         # Fused kernel flag
         self.gdn_pre_gated_delta_rule_fusion = config.gdn_pre_gated_delta_rule_fusion
         if self.gdn_pre_gated_delta_rule_fusion and self.config.deterministic_mode:
@@ -339,6 +370,9 @@ class GatedDeltaNet(MegatronModule):
         # TODO: Deal with attention_mask
 
         inference_context = deprecate_inference_params(inference_context, inference_params)
+
+        # Read loop_iter set by TransformerLayer on this module before calling forward.
+        loop_iter = getattr(self, '_loop_iter', None)
 
         # Route the CP group to either the headwise (Ulysses-style) path or the
         # chunkwise CP path according to config.linear_cp_mode. The two paths
@@ -460,6 +494,7 @@ class GatedDeltaNet(MegatronModule):
                     cu_seqlens_q,
                     packed_seq_params,
                     chunkwise_cp_context,
+                    loop_iter,
                 )
 
             out, out_bias = tensor_parallel.checkpoint(_checkpointed_compute, False, hidden_states)
@@ -475,6 +510,7 @@ class GatedDeltaNet(MegatronModule):
                 cu_seqlens_q,
                 packed_seq_params,
                 chunkwise_cp_context,
+                loop_iter,
             )
 
         return out, out_bias
@@ -491,6 +527,7 @@ class GatedDeltaNet(MegatronModule):
         cu_seqlens_q,
         packed_seq_params,
         chunkwise_cp_context,
+        loop_iter=None,
     ):
         """Core GDN computation (in_proj -> conv1d -> gated_delta_rule -> gated norm -> out_proj).
 
@@ -555,6 +592,7 @@ class GatedDeltaNet(MegatronModule):
                 cp_group=cp_group_chunkwise if cp_size_chunkwise > 1 else None,
                 cp_size_headwise=cp_size_headwise,
                 cp_group_headwise=cp_group_headwise,
+                loop_iter=loop_iter,
             )
         else:
             # Non-fused path
@@ -567,6 +605,7 @@ class GatedDeltaNet(MegatronModule):
                 cu_seqlens_q,
                 chunkwise_cp_context,
                 packed_seq_params=packed_seq_params,
+                loop_iter=loop_iter,
             )
         nvtx_range_pop(suffix="pre_gated_delta_rule")
 
@@ -631,6 +670,7 @@ class GatedDeltaNet(MegatronModule):
         cp_group=None,
         cp_size_headwise=1,
         cp_group_headwise=None,
+        loop_iter=None,
     ):
         """Call the streamed fused pre-GDR wrapper."""
 
@@ -667,6 +707,12 @@ class GatedDeltaNet(MegatronModule):
         )
         A_log = get_parameter_local_cp_headwise(self.A_log, dim=0, cp_group=cp_group_headwise)
         dt_bias = get_parameter_local_cp_headwise(self.dt_bias, dim=0, cp_group=cp_group_headwise)
+        # Apply per-iteration dt_bias offset
+        if self.loop_dt_offset is not None and loop_iter is not None:
+            dt_offset = get_parameter_local_cp_headwise(
+                self.loop_dt_offset[loop_iter], dim=0, cp_group=cp_group_headwise
+            )
+            dt_bias = dt_bias + dt_offset
         num_key_heads = self.qk_dim_local_tp // self.key_head_dim // cp_size_headwise
         num_value_heads = self.v_dim_local_tp // self.value_head_dim // cp_size_headwise
 
@@ -696,6 +742,7 @@ class GatedDeltaNet(MegatronModule):
         cu_seqlens_q=None,
         chunkwise_cp_context=None,
         packed_seq_params=None,
+        loop_iter=None,
     ):
         """Prepare QKV, gate, beta, and decay tensors before the gated delta rule."""
 
@@ -815,6 +862,12 @@ class GatedDeltaNet(MegatronModule):
         dt_bias_local_cp = get_parameter_local_cp_headwise(
             self.dt_bias, dim=0, cp_group=cp_group_headwise
         )
+        # Apply per-iteration dt_bias offset
+        if self.loop_dt_offset is not None and loop_iter is not None:
+            dt_offset_local_cp = get_parameter_local_cp_headwise(
+                self.loop_dt_offset[loop_iter], dim=0, cp_group=cp_group_headwise
+            )
+            dt_bias_local_cp = dt_bias_local_cp + dt_offset_local_cp
         g, beta = self._compute_g_and_beta(A_log_local_cp, dt_bias_local_cp, alpha, beta)
         nvtx_range_pop(suffix="g_and_beta")
 
@@ -992,13 +1045,17 @@ class GatedDeltaNet(MegatronModule):
         sharded_state_dict = {}
         # Parameters
         self._save_to_state_dict(sharded_state_dict, "", keep_vars=True)
+        tp_axis_map = {
+            "A_log": 0,
+            "dt_bias": 0,
+        }
+        # loop_dt_offset has shape [R, num_v_heads_local_tp], TP along dim 1.
+        if self.loop_dt_offset is not None:
+            tp_axis_map["loop_dt_offset"] = 1
         sharded_state_dict = make_sharded_tensors_for_checkpoint(
             sharded_state_dict,
             prefix,
-            tensor_parallel_layers_axis_map={
-                "A_log": 0,
-                "dt_bias": 0,
-            },  # parameters sharded across TP
+            tensor_parallel_layers_axis_map=tp_axis_map,
             sharded_offsets=sharded_offsets,
             tp_group=(tp_group if tp_group is not None else self.pg_collection.tp),
             dp_cp_group=metadata['dp_cp_group'],

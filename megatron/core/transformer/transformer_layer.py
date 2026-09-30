@@ -695,6 +695,15 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
+        # Pass loop_iter to self_attention module (used by GDN's per-iteration
+        # dt_bias offset).  Set as attribute rather than function argument to
+        # avoid changing the Attention.forward() / SelfAttention.forward()
+        # signature — GDN reads it from kwargs via **kwargs, but SDPA modules
+        # would reject an unknown keyword.  The attribute is cleared immediately
+        # after the call.
+        _loop_iter = getattr(self, '_loop_iter', None)
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = _loop_iter
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
@@ -707,6 +716,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = None
         nvtx_range_pop(suffix="self_attention")
 
         if self.recompute_input_layernorm:
@@ -799,6 +810,10 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         # Store on self temporarily so _forward_attention and _forward_mlp can read it.
         loop_residual_scale = kwargs.pop("loop_residual_scale", None)
         self._loop_residual_scale = loop_residual_scale
+        # Extract loop_iter and store on self so _forward_attention can pass it
+        # to self_attention (used by GDN's per-iteration dt_bias offset).
+        loop_iter = kwargs.pop("loop_iter", None)
+        self._loop_iter = loop_iter
         hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,
@@ -807,6 +822,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             input_ids=kwargs.get("input_ids", None),
         )
         self._loop_residual_scale = None
+        self._loop_iter = None
         return output, context
 
     def _forward_pre_mlp_layernorm(self, hidden_states: Tensor):
@@ -1563,10 +1579,14 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         # Pop loop_residual_scale to prevent it leaking into _forward_attention kwargs.
         # HyperConnectionTransformerLayer does not use loop residual scaling.
         kwargs.pop("loop_residual_scale", None)
+        # Pop and store loop_iter so self_attention can receive it via getattr.
+        self._loop_iter = kwargs.pop("loop_iter", None)
 
         hidden_states, context = self._forward_attention(
             *args, mhc_recompute_manager=mhc_recompute_manager, **kwargs
         )
+
+        self._loop_iter = None
 
         output = self._forward_mlp(
             hidden_states,
@@ -1627,6 +1647,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
+        # Pass loop_iter to self_attention module (used by GDN's per-iteration
+        # dt_bias offset).  Set as attribute rather than function argument to
+        # avoid changing the Attention.forward() / SelfAttention.forward()
+        # signature — GDN reads it from kwargs via **kwargs, but SDPA modules
+        # would reject an unknown keyword.  The attribute is cleared immediately
+        # after the call.
+        _loop_iter = getattr(self, '_loop_iter', None)
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = _loop_iter
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
@@ -1639,6 +1668,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = None
         nvtx_range_pop(suffix="self_attention")
 
         if checkpoint_input_layernorm:

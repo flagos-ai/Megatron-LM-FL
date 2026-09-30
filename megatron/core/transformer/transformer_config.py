@@ -123,6 +123,13 @@ class TransformerConfig(ModelParallelConfig):
     Must evenly divide (loop_end_layer - loop_start_layer).
     Only used when loop_type='block-wise'."""
 
+    enable_loop_dt_offset: bool = False
+    """When True, GDN layers gain a per-loop-iteration learnable offset to dt_bias,
+    allowing different decay rates at each loop iteration.  The parameter shape is
+    [num_loop_iterations, num_value_heads_per_tp], initialized to zeros so it is
+    backward-compatible with existing checkpoints.  Ignored when looping is disabled
+    (loop_start_layer is None)."""
+
     pipeline_model_parallel_layout: Optional[Union[str, list, PipelineParallelLayerLayout]] = None
     """Custom definition of the pipeline parallel partitioning.
     Support type:
@@ -1339,6 +1346,15 @@ class TransformerConfig(ModelParallelConfig):
                         f"loop_block_size ({self.loop_block_size}) must evenly divide "
                         f"loop span ({loop_span} = loop_end_layer - loop_start_layer)."
                     )
+        else:
+            # Looping is disabled; enable_loop_dt_offset has no effect.
+            if self.enable_loop_dt_offset:
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "enable_loop_dt_offset is set but looping is disabled "
+                    "(loop_start_layer is None). The flag will be ignored.",
+                )
 
         # When fp32 residual connections are enabled, pipeline parallel communication must
         # use fp32 to match the dtype of the residual stream between pipeline stages.
