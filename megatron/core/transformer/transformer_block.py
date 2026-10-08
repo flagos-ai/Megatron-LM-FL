@@ -447,9 +447,10 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
           - self._execution_plan: list of (local_layer_idx, loop_iteration) tuples.
             loop_iteration=0 for all layers on their first visit, >=1 for repeated visits.
           - self._loop_enabled: whether any looping happens on this PP rank.
-          - self._loop_residual_scale: the scale factor, or None.
+          - self._loop_residual_scales: list[dict] with per-iteration attn/mlp
+            scale factors, or None.
         """
-        self._loop_residual_scale = self.config.loop_residual_scale
+        self._loop_residual_scales = self.config._loop_residual_scales
         self._loop_enabled = False
 
         if self.config.loop_start_layer is None:
@@ -545,7 +546,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             f"loop_range=[{loop_start}, {loop_end}), "
             f"local_loop=[{rank_in_loop_start}, {rank_in_loop_end}), "
             f"num_iters={num_iters}, "
-            f"residual_scale={self._loop_residual_scale}, "
+            f"residual_scales={self._loop_residual_scales}, "
             f"total_exec_steps={len(plan)} "
             f"(prelude={rank_in_loop_start}, "
             f"loop={loop_span}x{num_iters}, "
@@ -699,8 +700,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     layer = self._get_layer(local_idx)
 
                     loop_residual_scale = (
-                        self._loop_residual_scale
+                        self._loop_residual_scales[loop_iter]
                         if self._loop_enabled and loop_iter >= 0
+                        and self._loop_residual_scales is not None
                         else None
                     )
 
@@ -1079,7 +1081,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         f"[Loop] loop execution (checkpointed), "
                         f"loop_type='{self.config.loop_type}', "
                         f"exec_steps={len(self._execution_plan)}, "
-                        f"scale={self._loop_residual_scale}",
+                        f"scales={self._loop_residual_scales}",
                         flush=True,
                     )
                 else:
@@ -1111,7 +1113,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         f"[Loop] loop execution (non-checkpointed), "
                         f"loop_type='{self.config.loop_type}', "
                         f"exec_steps={len(self._execution_plan)}, "
-                        f"scale={self._loop_residual_scale}",
+                        f"scales={self._loop_residual_scales}",
                         flush=True,
                     )
                 else:
@@ -1121,8 +1123,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
                     # Determine loop residual scale for this execution step
                     loop_residual_scale = (
-                        self._loop_residual_scale
+                        self._loop_residual_scales[loop_iter]
                         if self._loop_enabled and loop_iter >= 0
+                        and self._loop_residual_scales is not None
                         else None
                     )
 

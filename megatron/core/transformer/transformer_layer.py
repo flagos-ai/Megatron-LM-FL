@@ -738,6 +738,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         else:
             # Apply loop residual scale to attention output before residual add
             if getattr(self, '_loop_residual_scale', None) is not None:
+                attn_scale = (
+                    self._loop_residual_scale["attn"]
+                    if isinstance(self._loop_residual_scale, dict)
+                    else self._loop_residual_scale
+                )
                 if attention_output_with_bias[1] is not None:
                     warnings.warn(
                         "loop_residual_scale only scales the attention output, not the bias. "
@@ -745,7 +750,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                         stacklevel=2,
                     )
                 attention_output_with_bias = (
-                    attention_output_with_bias[0] * self._loop_residual_scale,
+                    attention_output_with_bias[0] * attn_scale,
                     attention_output_with_bias[1],
                 )
             with self.bias_dropout_add_exec_handler():
@@ -1003,6 +1008,11 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         else:
             # Apply loop residual scale to MLP output before residual add
             if getattr(self, '_loop_residual_scale', None) is not None:
+                mlp_scale = (
+                    self._loop_residual_scale["mlp"]
+                    if isinstance(self._loop_residual_scale, dict)
+                    else self._loop_residual_scale
+                )
                 if mlp_output_with_bias[1] is not None:
                     warnings.warn(
                         "loop_residual_scale only scales the MLP output, not the bias. "
@@ -1010,7 +1020,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
                         stacklevel=2,
                     )
                 mlp_output_with_bias = (
-                    mlp_output_with_bias[0] * self._loop_residual_scale,
+                    mlp_output_with_bias[0] * mlp_scale,
                     mlp_output_with_bias[1],
                 )
             with self.bias_dropout_add_exec_handler():

@@ -106,9 +106,20 @@ class TransformerConfig(ModelParallelConfig):
     Effective depth = prelude + loop_span * num_loop_iterations + coda.
     Only used when loop_start_layer is not None."""
 
-    loop_residual_scale: Optional[float] = None
+    loop_residual_scale: Optional[float] = field(default=None, metadata={"argparse_meta": {"type": float, "nargs": "+"}})
     """Scale factor applied to sublayer outputs (attention & MLP) within the looped span.
-    SMELT uses 1/num_loop_iterations for all iterations. None means no scaling."""
+
+    Accepted formats (via YAML config):
+      - float: uniform scale for all iterations and both sublayers.
+            e.g. 0.5
+      - list[float]: per-iteration scale (length must equal num_loop_iterations),
+            shared by attention and MLP.
+            e.g. [0.6, 0.4]
+      - list[dict]: per-iteration + per-sublayer scale.  Each dict must contain
+            'attn' and 'mlp' keys.
+            e.g. [{"attn": 0.7, "mlp": 0.5}, {"attn": 0.3, "mlp": 0.5}]
+
+    None means no scaling.  Normalised to ``_loop_residual_scales`` in __post_init__."""
 
     loop_type: str = "module-wise"
     """Controls the granularity of the loop.
@@ -1321,9 +1332,64 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError(
                     f"num_loop_iterations must be >= 2, got {self.num_loop_iterations}."
                 )
-            if self.loop_residual_scale is not None and self.loop_residual_scale <= 0:
+            # --- Normalise loop_residual_scale → _loop_residual_scales ---
+            # Internal format: list[dict] with keys "attn" and "mlp",
+            # length == num_loop_iterations.  None if no scaling.
+            raw = self.loop_residual_scale
+            R = self.num_loop_iterations
+            # nargs="+" makes argparse wrap a single value into [val];
+            # unwrap single-element lists so the scalar path handles them.
+            if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], (int, float)):
+                raw = raw[0]
+            if raw is None:
+                self._loop_residual_scales = None
+            elif isinstance(raw, (int, float)):
+                if raw <= 0:
+                    raise ValueError(
+                        f"loop_residual_scale must be positive, got {raw}."
+                    )
+                self._loop_residual_scales = [
+                    {"attn": float(raw), "mlp": float(raw)} for _ in range(R)
+                ]
+            elif isinstance(raw, list):
+                if len(raw) != R:
+                    raise ValueError(
+                        f"loop_residual_scale list length ({len(raw)}) must equal "
+                        f"num_loop_iterations ({R})."
+                    )
+                scales = []
+                for i, entry in enumerate(raw):
+                    if isinstance(entry, (int, float)):
+                        if entry <= 0:
+                            raise ValueError(
+                                f"loop_residual_scale[{i}] must be positive, got {entry}."
+                            )
+                        scales.append({"attn": float(entry), "mlp": float(entry)})
+                    elif isinstance(entry, dict):
+                        for key in ("attn", "mlp"):
+                            if key not in entry:
+                                raise ValueError(
+                                    f"loop_residual_scale[{i}] dict must contain "
+                                    f"'{key}' key, got {entry}."
+                                )
+                            if entry[key] <= 0:
+                                raise ValueError(
+                                    f"loop_residual_scale[{i}]['{key}'] must be "
+                                    f"positive, got {entry[key]}."
+                                )
+                        scales.append(
+                            {"attn": float(entry["attn"]), "mlp": float(entry["mlp"])}
+                        )
+                    else:
+                        raise ValueError(
+                            f"loop_residual_scale[{i}] must be a number or a dict "
+                            f"with 'attn'/'mlp' keys, got {type(entry).__name__}."
+                        )
+                self._loop_residual_scales = scales
+            else:
                 raise ValueError(
-                    f"loop_residual_scale must be positive, got {self.loop_residual_scale}."
+                    f"loop_residual_scale must be None, a number, or a list, "
+                    f"got {type(raw).__name__}."
                 )
             _VALID_LOOP_TYPES = {"module-wise", "block-wise"}
             if self.loop_type not in _VALID_LOOP_TYPES:
@@ -1347,6 +1413,7 @@ class TransformerConfig(ModelParallelConfig):
                         f"loop span ({loop_span} = loop_end_layer - loop_start_layer)."
                     )
         else:
+            self._loop_residual_scales = None
             # Looping is disabled; enable_loop_dt_offset has no effect.
             if self.enable_loop_dt_offset:
                 log_single_rank(
