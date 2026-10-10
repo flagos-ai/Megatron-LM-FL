@@ -609,6 +609,13 @@ class GatedDeltaNet(MegatronModule):
             )
         nvtx_range_pop(suffix="pre_gated_delta_rule")
 
+        # --- Spike diagnostics: stash lightweight g reference ---
+        # Only store the tensor reference; no .item() or device sync here.
+        # The expensive sync is deferred to the spike-detection path after
+        # backward (see transformer_block.py / training.py).
+        if getattr(self.config, 'gdn_spike_diag_threshold', None) is not None:
+            self._g_diag_ref = g.detach()
+
         nvtx_range_push(suffix="gated_delta_rule")
         core_attn_out, _ = self.gated_delta_rule(
             query,

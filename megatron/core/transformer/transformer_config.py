@@ -141,6 +141,13 @@ class TransformerConfig(ModelParallelConfig):
     backward-compatible with existing checkpoints.  Ignored when looping is disabled
     (loop_start_layer is None)."""
 
+    gdn_spike_diag_threshold: Optional[float] = None
+    """When set, enables GDN spike diagnostics.  Each step whose total grad norm
+    exceeds this threshold triggers per-layer grad norm + GDN decay stats output.
+    During forward, each GDN layer records lightweight references to its decay
+    tensor g; the expensive host sync (.item()) only happens when a spike is
+    detected after backward.  Set to None to disable (default)."""
+
     pipeline_model_parallel_layout: Optional[Union[str, list, PipelineParallelLayerLayout]] = None
     """Custom definition of the pipeline parallel partitioning.
     Support type:

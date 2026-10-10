@@ -301,6 +301,16 @@ class MegatronOptimizer(ABC):
                 if getattr(param, 'main_param', None) is not None:
                     self._module_param_to_name[param.main_param.data_ptr()] = name
 
+        # Reverse pass: register fp32 main params via Float16Optimizer's
+        # float16_groups ↔ fp32_from_float16_groups pairing.
+        if hasattr(self, 'float16_groups') and hasattr(self, 'fp32_from_float16_groups'):
+            for f16_group, f32_group in zip(self.float16_groups, self.fp32_from_float16_groups):
+                for f16_param, f32_param in zip(f16_group, f32_group):
+                    if f32_param.data_ptr() not in self._module_param_to_name:
+                        name = self._module_param_to_name.get(f16_param.data_ptr(), None)
+                        if name is not None:
+                            self._module_param_to_name[f32_param.data_ptr()] = name
+
     # Sub-module names unique to GatedDeltaNet (not present in SDPA).
     _GDN_SUBMODULES = ('in_proj', 'conv1d', 'dt_bias', 'A_log', 'out_norm', 'out_proj')
 
@@ -448,6 +458,75 @@ class MegatronOptimizer(ABC):
             return None
         detailed = getattr(self.config, 'log_per_module_grad_norm_detailed', False)
         return self._aggregate_parent_norms(sub_norms, detailed=detailed)
+
+    def compute_per_layer_grad_norm(self) -> Optional[Dict[str, float]]:
+        """Compute per-layer grad norm for spike diagnostics.
+
+        Returns a dict mapping 'L{global_layer}/{gdn|sdpa|mlp|other}' to its
+        L2 norm.  Uses allreduce so every rank gets the globally-correct result.
+        """
+        if not hasattr(self, '_module_param_to_name') or not self._module_param_to_name:
+            return None
+
+        import re
+        layer_pat = re.compile(r'layers\.(\d+)')
+
+        # First pass: discover all layer indices present in the name map
+        max_layer = -1
+        for name in self._module_param_to_name.values():
+            lm = layer_pat.search(name)
+            if lm:
+                max_layer = max(max_layer, int(lm.group(1)))
+        if max_layer < 0:
+            return None
+
+        n_layers = max_layer + 1
+        # 4 module types per layer: gdn=0, sdpa=1, mlp=2, other=3
+        _MOD_IDX = {'gdn': 0, 'sdpa': 1, 'mlp': 2, 'other': 3}
+        local_sq = torch.zeros(n_layers * 4, dtype=torch.float32,
+                               device=torch.cuda.current_device())
+
+        params = self.get_parameters()
+        for param in params:
+            grad = param.grad
+            if grad is None:
+                continue
+            if not param_is_not_shared(param):
+                continue
+            if not tensor_parallel.param_is_not_tensor_parallel_duplicate(
+                param, getattr(self, 'tp_group', None)
+            ):
+                continue
+            name = self._module_param_to_name.get(param.data_ptr(), '')
+            lm = layer_pat.search(name)
+            if not lm:
+                continue
+            layer_idx = int(lm.group(1))
+            if 'self_attention' in name:
+                mod = 'gdn'
+                for sub in self._GDN_SUBMODULES:
+                    if sub in name:
+                        break
+                else:
+                    mod = 'sdpa'
+            elif 'mlp' in name:
+                mod = 'mlp'
+            else:
+                mod = 'other'
+            local_sq[layer_idx * 4 + _MOD_IDX[mod]] += grad.float().norm() ** 2
+
+        # Single allreduce for all layer×module pairs
+        grad_stats_parallel_group = self.get_grad_stats_parallel_group()
+        torch.distributed.all_reduce(
+            local_sq, group=grad_stats_parallel_group)
+
+        result = {}
+        for li in range(n_layers):
+            for mod, mi in _MOD_IDX.items():
+                val = local_sq[li * 4 + mi].item()
+                if val > 0:
+                    result[f'L{li}/{mod}'] = val ** 0.5
+        return result
 
     @abstractmethod
     def zero_grad(self, set_to_none: bool = True):
@@ -852,6 +931,12 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             per_module_grad_norm = self.compute_per_module_grad_norm()
         self.per_module_grad_norm = per_module_grad_norm
 
+        # Compute per-layer grad norm for spike diagnostics (before clipping).
+        per_layer_grad_norm = None
+        if getattr(self, '_module_param_to_name', None):
+            per_layer_grad_norm = self.compute_per_layer_grad_norm()
+        self.per_layer_grad_norm = per_layer_grad_norm
+
         # Clip the main gradients.
         nvtx_range_push(msg="optimizer.clip_grad")
         if timers is not None:
@@ -1245,6 +1330,12 @@ class FP32Optimizer(MegatronOptimizer):
             per_module_grad_norm = self.compute_per_module_grad_norm()
         self.per_module_grad_norm = per_module_grad_norm
 
+        # Compute per-layer grad norm for spike diagnostics (before clipping).
+        per_layer_grad_norm = None
+        if getattr(self, '_module_param_to_name', None):
+            per_layer_grad_norm = self.compute_per_layer_grad_norm()
+        self.per_layer_grad_norm = per_layer_grad_norm
+
         # Clip gradients.
         if timers is not None:
             timers('optimizer-clip-main-grad', log_level=1).start(
@@ -1410,6 +1501,20 @@ class ChainedOptimizer(MegatronOptimizer):
         detailed = getattr(self.config, 'log_per_module_grad_norm_detailed', False) \
             if self.config is not None else False
         return MegatronOptimizer._aggregate_parent_norms(sub_norms, detailed=detailed)
+
+    def compute_per_layer_grad_norm(self) -> Optional[Dict[str, float]]:
+        """Aggregate per-layer grad norms across all chained sub-optimizers."""
+        merged_sq: Dict[str, float] = {}
+        any_result = False
+        for optimizer in self.chained_optimizers:
+            result = optimizer.compute_per_layer_grad_norm()
+            if result is not None:
+                any_result = True
+                for k, v in result.items():
+                    merged_sq[k] = merged_sq.get(k, 0.0) + v ** 2
+        if not any_result:
+            return None
+        return {k: math.sqrt(v) for k, v in merged_sq.items()}
 
     @property
     def optimizer(self):
@@ -1729,6 +1834,13 @@ class ChainedOptimizer(MegatronOptimizer):
         if self.config is not None and self.config.log_per_module_grad_norm:
             per_module_grad_norm = self._compute_chained_per_module_grad_norm()
         self.per_module_grad_norm = per_module_grad_norm
+
+        # Compute per-layer grad norm for spike diagnostics (before clipping).
+        # Computed whenever param-to-name map is available; training.py reads it on spike.
+        per_layer_grad_norm = None
+        if any(getattr(opt, '_module_param_to_name', None) for opt in self.chained_optimizers):
+            per_layer_grad_norm = self.compute_per_layer_grad_norm()
+        self.per_layer_grad_norm = per_layer_grad_norm
 
         grad_norm = self.get_grad_norm()
 
