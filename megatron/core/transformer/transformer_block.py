@@ -78,6 +78,23 @@ else:
 logger = logging.getLogger(__name__)
 
 
+class _GradScale(torch.autograd.Function):
+    """Identity in forward, scales gradient in backward.
+
+    Used at the loop→prelude boundary to attenuate gradients flowing from
+    the loop region back into the prelude layers.
+    """
+
+    @staticmethod
+    def forward(ctx, x, scale):
+        ctx.scale = scale
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        return grad_output * ctx.scale, None
+
+
 def get_num_layers_to_build(
     config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None,
     dualpipev_stage: Optional[int] = None # FlagScale Add
@@ -452,6 +469,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         """
         self._loop_residual_scales = self.config._loop_residual_scales
         self._loop_enabled = False
+        self._loop_entry_exec_idx = None
 
         if self.config.loop_start_layer is None:
             # No looping: standard sequential execution
@@ -532,6 +550,17 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             plan.append((i, 0))
 
         self._execution_plan = plan
+
+        # Identify the exec-step index where the loop region begins.
+        # This is where _GradScale is inserted to attenuate backward flow
+        # from the loop into the prelude.
+        self._loop_entry_exec_idx = None
+        if rank_in_loop_start > 0:
+            # This rank has prelude layers; find the first loop exec step.
+            for idx, (local_idx, loop_iter) in enumerate(plan):
+                if local_idx >= rank_in_loop_start:
+                    self._loop_entry_exec_idx = idx
+                    break
 
         # Log execution plan summary
         loop_span = rank_in_loop_end - rank_in_loop_start
@@ -696,6 +725,15 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 padding_mask=None,
             ):
                 for exec_idx in range(start, end):
+                    # Scale gradients at the prelude→loop boundary
+                    if (
+                        exec_idx == self._loop_entry_exec_idx
+                        and self.config.loop_prelude_grad_scale is not None
+                    ):
+                        hidden_states = _GradScale.apply(
+                            hidden_states, self.config.loop_prelude_grad_scale
+                        )
+
                     local_idx, loop_iter = self._execution_plan[exec_idx]
                     layer = self._get_layer(local_idx)
 
@@ -1119,6 +1157,15 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 else:
                     print("[Loop] without loop execution (non-checkpointed)", flush=True)
                 for exec_step, (local_idx, loop_iter) in enumerate(self._execution_plan):
+                    # Scale gradients at the prelude→loop boundary
+                    if (
+                        exec_step == self._loop_entry_exec_idx
+                        and self.config.loop_prelude_grad_scale is not None
+                    ):
+                        hidden_states = _GradScale.apply(
+                            hidden_states, self.config.loop_prelude_grad_scale
+                        )
+
                     layer = self.layers[local_idx]
 
                     # Determine loop residual scale for this execution step

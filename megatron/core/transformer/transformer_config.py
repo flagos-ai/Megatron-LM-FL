@@ -148,6 +148,13 @@ class TransformerConfig(ModelParallelConfig):
     tensor g; the expensive host sync (.item()) only happens when a spike is
     detected after backward.  Set to None to disable (default)."""
 
+    loop_prelude_grad_scale: Optional[float] = None
+    """When set, scales gradients flowing backward from the loop region into the
+    prelude layers by this factor.  For example, 0.5 halves the gradient magnitude
+    reaching prelude layers.  This counteracts the gradient amplification caused by
+    loop backpropagation through repeated layers.
+    Only effective when loop_start_layer is not None.  None means no scaling (default)."""
+
     pipeline_model_parallel_layout: Optional[Union[str, list, PipelineParallelLayerLayout]] = None
     """Custom definition of the pipeline parallel partitioning.
     Support type:
@@ -1418,6 +1425,13 @@ class TransformerConfig(ModelParallelConfig):
                     raise ValueError(
                         f"loop_block_size ({self.loop_block_size}) must evenly divide "
                         f"loop span ({loop_span} = loop_end_layer - loop_start_layer)."
+                    )
+            # Validate loop_prelude_grad_scale
+            if self.loop_prelude_grad_scale is not None:
+                if self.loop_prelude_grad_scale <= 0:
+                    raise ValueError(
+                        f"loop_prelude_grad_scale must be positive, "
+                        f"got {self.loop_prelude_grad_scale}."
                     )
         else:
             self._loop_residual_scales = None
