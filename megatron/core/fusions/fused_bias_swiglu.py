@@ -78,6 +78,7 @@ def clamped_weighted_swiglu(y, weights, clamp_value):
 # gradient of tanh approximation of gelu
 # gradient of actual gelu is:
 # 0.5 * (1. + torch.erf(x * 0.70710678)) + 0.3989423 * x * torch.exp(-0.5 * x * x)
+@overridable  # FlagScale Modify
 @jit_fuser
 def swiglu_back(g, y):
     """Computes the gradient for the SwiGLU activation function.
