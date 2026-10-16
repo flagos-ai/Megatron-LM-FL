@@ -1405,7 +1405,7 @@ class TransformerConfig(ModelParallelConfig):
                     f"loop_residual_scale must be None, a number, or a list, "
                     f"got {type(raw).__name__}."
                 )
-            _VALID_LOOP_TYPES = {"module-wise", "block-wise"}
+            _VALID_LOOP_TYPES = {"module-wise", "block-wise", "sdpa-wise"}
             if self.loop_type not in _VALID_LOOP_TYPES:
                 raise ValueError(
                     f"loop_type must be one of {_VALID_LOOP_TYPES}, got '{self.loop_type}'."
@@ -1425,6 +1425,33 @@ class TransformerConfig(ModelParallelConfig):
                     raise ValueError(
                         f"loop_block_size ({self.loop_block_size}) must evenly divide "
                         f"loop span ({loop_span} = loop_end_layer - loop_start_layer)."
+                    )
+            if self.loop_type == "sdpa-wise":
+                # Repeats only the SDPA layers in the loop range, in place
+                # (ABC -> ABBC for B=SDPA), so the loop span needs no block
+                # alignment. It does need an attention pattern to read.
+                if self.linear_attention_freq is None:
+                    raise ValueError(
+                        "loop_type='sdpa-wise' requires linear_attention_freq to be set "
+                        "so SDPA layers can be identified."
+                    )
+                from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+                    get_linear_attention_pattern,
+                )
+
+                _pattern = get_linear_attention_pattern(self)
+                _n_sdpa = sum(
+                    1
+                    for g in range(self.loop_start_layer, self.loop_end_layer)
+                    if _pattern[g] == 0
+                )
+                if _n_sdpa == 0:
+                    raise ValueError(
+                        f"loop_type='sdpa-wise' found no SDPA layers in loop range "
+                        f"[{self.loop_start_layer}, {self.loop_end_layer}); the loop "
+                        f"would be a no-op. Attention pattern (1=linear/GDN, 0=SDPA) "
+                        f"over that range: "
+                        f"{_pattern[self.loop_start_layer:self.loop_end_layer]}."
                     )
             # Validate loop_prelude_grad_scale
             if self.loop_prelude_grad_scale is not None:

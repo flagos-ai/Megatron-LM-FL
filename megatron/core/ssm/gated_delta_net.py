@@ -246,6 +246,11 @@ class GatedDeltaNet(MegatronModule):
             and self.layer_number is not None
             and config.loop_start_layer < self.layer_number <= config.loop_end_layer
         )  # layer_number is 1-based, loop range is 0-based half-open [start, end)
+        # loop_type='sdpa-wise' repeats only SDPA layers, so a GDN layer never gets a
+        # loop_iter even when it sits inside the loop range — same unused-parameter
+        # hazard as a prelude/coda layer.
+        if getattr(config, 'loop_type', None) == "sdpa-wise":
+            _in_loop_range = False
         if (
             getattr(config, 'enable_loop_dt_offset', False)
             and _in_loop_range
@@ -714,8 +719,14 @@ class GatedDeltaNet(MegatronModule):
         )
         A_log = get_parameter_local_cp_headwise(self.A_log, dim=0, cp_group=cp_group_headwise)
         dt_bias = get_parameter_local_cp_headwise(self.dt_bias, dim=0, cp_group=cp_group_headwise)
-        # Apply per-iteration dt_bias offset
-        if self.loop_dt_offset is not None and loop_iter is not None:
+        # Apply per-iteration dt_bias offset. loop_iter < 0 means this layer is
+        # outside the loop (prelude/coda, or a GDN layer under 'sdpa-wise'), so it
+        # gets no offset — indexing with -1 would silently pick the last iteration.
+        if (
+            self.loop_dt_offset is not None
+            and loop_iter is not None
+            and loop_iter >= 0
+        ):
             dt_offset = get_parameter_local_cp_headwise(
                 self.loop_dt_offset[loop_iter], dim=0, cp_group=cp_group_headwise
             )
@@ -869,8 +880,13 @@ class GatedDeltaNet(MegatronModule):
         dt_bias_local_cp = get_parameter_local_cp_headwise(
             self.dt_bias, dim=0, cp_group=cp_group_headwise
         )
-        # Apply per-iteration dt_bias offset
-        if self.loop_dt_offset is not None and loop_iter is not None:
+        # Apply per-iteration dt_bias offset (see the other call site: loop_iter < 0
+        # means outside the loop, and -1 would silently index the last iteration).
+        if (
+            self.loop_dt_offset is not None
+            and loop_iter is not None
+            and loop_iter >= 0
+        ):
             dt_offset_local_cp = get_parameter_local_cp_headwise(
                 self.loop_dt_offset[loop_iter], dim=0, cp_group=cp_group_headwise
             )

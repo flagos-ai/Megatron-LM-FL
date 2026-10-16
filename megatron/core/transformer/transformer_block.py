@@ -470,10 +470,11 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         self._loop_residual_scales = self.config._loop_residual_scales
         self._loop_enabled = False
         self._loop_entry_exec_idx = None
+        self._loop_local_range = (0, 0)
 
         if self.config.loop_start_layer is None:
             # No looping: standard sequential execution
-            self._execution_plan = [(i, 0) for i in range(len(self.layers))]
+            self._execution_plan = [(i, -1) for i in range(len(self.layers))]
             return
 
         # Compute the global layer range owned by this PP rank.
@@ -497,7 +498,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
         if overlap_start >= overlap_end:
             # No loop layers on this rank
-            self._execution_plan = [(i, 0) for i in range(local_layer_count)]
+            self._execution_plan = [(i, -1) for i in range(local_layer_count)]
             return
 
         # Validate: loop range must be fully contained within this rank's range,
@@ -514,9 +515,11 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         # 3. Coda: layers after the loop on this rank (iteration 0)
         plan = []
 
-        # Prelude
+        # Prelude. loop_iteration=-1 marks "not part of the loop": the scale
+        # lookup below is guarded by `loop_iter >= 0`, so these layers keep a
+        # full-strength residual (h + f(h)) instead of a scaled one.
         for i in range(rank_in_loop_start):
-            plan.append((i, 0))
+            plan.append((i, -1))
 
         # Loop iterations
         loop_type = self.config.loop_type
@@ -540,16 +543,34 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 for iteration in range(num_iters):
                     for i in range(local_start, local_end):
                         plan.append((i, iteration))
+        elif loop_type == "sdpa-wise":
+            # Only SDPA layers inside the loop range are repeated, each one in place:
+            # with A=GDN, B=SDPA, ABC → ABBC. Layer order is never changed and GDN
+            # layers always execute exactly once, so the sequential state each GDN
+            # layer carries is never recomputed on an already-transformed input.
+            sdpa_locals = self._get_sdpa_local_indices(
+                global_start, overlap_start, overlap_end
+            )
+            for i in range(rank_in_loop_start, rank_in_loop_end):
+                if i in sdpa_locals:
+                    for iteration in range(num_iters):
+                        plan.append((i, iteration))
+                else:
+                    # A GDN layer inside the loop range: executes once and is not
+                    # part of the loop, so -1 keeps its residual at full strength.
+                    plan.append((i, -1))
         else:
             raise ValueError(
                 f"Unsupported loop_type='{loop_type}'."
             )
 
-        # Coda
+        # Coda (see prelude above for why -1)
         for i in range(rank_in_loop_end, local_layer_count):
-            plan.append((i, 0))
+            plan.append((i, -1))
 
         self._execution_plan = plan
+        # Local [start, end) of the loop range on this rank, for region reporting.
+        self._loop_local_range = (rank_in_loop_start, rank_in_loop_end)
 
         # Identify the exec-step index where the loop region begins.
         # This is where _GradScale is inserted to attenuate backward flow
@@ -567,6 +588,15 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         block_info = ""
         if loop_type == "block-wise":
             block_info = f"block_size={self.config.loop_block_size}, "
+        if loop_type == "sdpa-wise":
+            # Only the SDPA layers repeat, so report how many did.
+            from collections import Counter as _Counter
+            _repeated = sum(
+                1 for _, c in _Counter(i for i, _ in plan).items() if c > 1
+            )
+            loop_info = f"loop={_repeated}of{loop_span}x{num_iters}, "
+        else:
+            loop_info = f"loop={loop_span}x{num_iters}, "
         logger.info(
             f"Loop Transformer execution plan: "
             f"loop_type='{loop_type}', "
@@ -578,19 +608,51 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             f"residual_scales={self._loop_residual_scales}, "
             f"total_exec_steps={len(plan)} "
             f"(prelude={rank_in_loop_start}, "
-            f"loop={loop_span}x{num_iters}, "
+            f"{loop_info}"
             f"coda={local_layer_count - rank_in_loop_end})"
         )
 
         # Print expanded model structure with attention type per execution step
         self._log_execution_plan(plan, global_start)
 
+    def _get_sdpa_local_indices(self, global_start, overlap_start, overlap_end):
+        """Local indices of SDPA (non-linear-attention) layers in [overlap_start, overlap_end).
+
+        Used by loop_type='sdpa-wise'. The attention pattern comes from
+        ``get_linear_attention_pattern`` (1=linear attention/GDN, 0=SDPA), the same
+        source the layer specs are built from, so this cannot drift from the layers
+        actually instantiated.
+        """
+        from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+            get_linear_attention_pattern,
+        )
+
+        pattern = get_linear_attention_pattern(self.config)
+        sdpa_locals = {
+            g - global_start for g in range(overlap_start, overlap_end) if pattern[g] == 0
+        }
+        if not sdpa_locals:
+            # A rank whose share of the loop range holds no SDPA layer is legitimate
+            # under PP, but if the whole loop range has none the config is a no-op.
+            logger.warning(
+                f"loop_type='sdpa-wise' found no SDPA layers in loop range "
+                f"[{overlap_start}, {overlap_end}) on this rank; no looping will "
+                f"happen here. Check loop_start_layer/loop_end_layer against the "
+                f"attention pattern (linear_attention_freq="
+                f"{self.config.linear_attention_freq})."
+            )
+        return sdpa_locals
+
     def _log_execution_plan(self, plan, global_start):
         """Print the expanded model structure showing attn type and loop iteration."""
-        # Identify which local indices are loop layers (appear more than once in the plan)
-        from collections import Counter
-        local_idx_counts = Counter(local_idx for local_idx, _ in plan)
-        loop_local_indices = {idx for idx, count in local_idx_counts.items() if count > 1}
+        # Loop layers are the ones carrying loop_iter >= 0, which is also what
+        # drives the residual-scale lookup. Counting repeats would mislabel a
+        # 'sdpa-wise' GDN layer, which sits inside the loop range but runs once.
+        loop_local_indices = {local_idx for local_idx, it in plan if it >= 0}
+        # Range boundaries come from the config rather than from the plan: under
+        # 'sdpa-wise' the looped layers are scattered, so the first/last looped
+        # index does not delimit the prelude and coda.
+        range_start, range_end = self._loop_local_range
 
         lines = []
         for step, (local_idx, loop_iter) in enumerate(plan):
@@ -606,10 +668,16 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             mlp_type = type(mlp_module).__name__ if mlp_module is not None else "Unknown"
 
             # Determine region
-            if local_idx in loop_local_indices:
+            if loop_iter >= 0:
                 region = f"loop iter={loop_iter}"
+            elif local_idx < range_start:
+                region = "prelude (no scale)"
+            elif local_idx >= range_end:
+                region = "coda (no scale)"
             else:
-                region = "prelude" if not loop_local_indices or local_idx < min(loop_local_indices) else "coda"
+                # Inside the loop range but run once and unscaled: a GDN layer
+                # under 'sdpa-wise'.
+                region = "in range, not looped (no scale)"
 
             lines.append(
                 f"  step {step:>3d}: global_layer={global_idx:>3d} "

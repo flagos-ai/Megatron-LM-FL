@@ -146,6 +146,10 @@ class Router(ABC, MegatronModule):
         layer_number is 1-based; loop_start_layer / loop_end_layer are 0-based
         with [start, end) semantics.  Convert to 0-based for a straightforward
         comparison.
+
+        Note: being inside the range does not imply the layer is looped — under
+        ``loop_type='sdpa-wise'`` only the SDPA layers are. Use
+        ``_num_executions_per_forward`` when you need the execution count.
         """
         if self.config.loop_start_layer is None:
             return False
@@ -153,6 +157,28 @@ class Router(ABC, MegatronModule):
         return (
             self.config.loop_start_layer <= layer_idx_0based < self.config.loop_end_layer
         )
+
+    def _num_executions_per_forward(self) -> int:
+        """How many times this layer runs in one forward pass.
+
+        Every execution writes its aux loss into the same per-layer tracker slot
+        via ``+=``, so the logged value must be divided by this count to report an
+        average rather than a sum. Layers outside the loop range run once; inside
+        the range it depends on ``loop_type``, and for ``'sdpa-wise'`` a GDN layer
+        still runs exactly once even though it sits within the range.
+        """
+        if not self._is_in_loop_range():
+            return 1
+        if self.config.loop_type == "sdpa-wise":
+            from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+                get_linear_attention_pattern,
+            )
+
+            # pattern: 1 = linear attention (GDN, not looped), 0 = SDPA (looped)
+            pattern = get_linear_attention_pattern(self.config)
+            if pattern[self.layer_number - 1] == 1:
+                return 1
+        return self.config.num_loop_iterations
 
 
 class TopKRouter(Router):
@@ -521,12 +547,18 @@ class TopKRouter(Router):
         else:
             layer_number = self.layer_number
 
-        # For loop transformer: each looped MoE layer is executed num_loop_iterations
-        # times per forward pass, each writing aux_loss to the same tracker slot via +=.
-        # Pre-divide by num_loop_iterations so the accumulated value equals the average.
+        # For loop transformer: a looped MoE layer is executed several times per
+        # forward pass, each writing aux_loss to the same tracker slot via +=.
+        # Pre-divide by the execution count so the accumulated value is the average.
+        # This must be the actual count, not num_loop_iterations: under
+        # 'sdpa-wise' a GDN layer inside the loop range still runs only once, and
+        # dividing it by num_loop_iterations under-reported the logged
+        # global_load_balancing_loss (40-layer model, 27 such layers: 0.66 vs 1.0).
+        # Only the logged value is affected; aux_loss itself carries the gradient.
         tracker_loss = aux_loss / aux_loss_coeff
-        if self._is_in_loop_range():
-            tracker_loss = tracker_loss / self.config.num_loop_iterations
+        _n_exec = self._num_executions_per_forward()
+        if _n_exec > 1:
+            tracker_loss = tracker_loss / _n_exec
 
         save_to_aux_losses_tracker(
             aux_loss_name,
