@@ -15,7 +15,7 @@ import torch.nn.functional as F
 # before torch, it registers the same namespace first, causing:
 # "RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace triton"
 try:
-    import triton  # noqa: F401
+    import triton  # noqa: F401 # pylint: disable=unused-import
 
     HAVE_TRITON = True
 except ImportError:
@@ -32,14 +32,15 @@ from megatron.core.transformer.cuda_graph_config import (
     normalize_inference_cuda_graph_scope,
     validate_deprecated_cuda_graph_modules_migration_inputs,
 )
+from megatron.core.transformer.enums import LayerType  # FlagScale Modify
 from megatron.core.transformer.enums import (
     AttnBackend,
     CudaGraphModule,
     CudaGraphScope,
     InferenceCudaGraphScope,
-    LayerType,  # FlagScale Modify
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 from .._rank_utils import log_single_rank
 from ..fusions.fused_bias_geglu import quick_gelu
@@ -52,7 +53,7 @@ from ..utils import (
     mup_scaled_init_method_normal,
     scaled_init_method_normal,
 )
-from megatron.plugin.decorators import overridable  # FlagScale Modify
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -311,24 +312,19 @@ class TransformerConfig(ModelParallelConfig):
     """Number of residual branches for hyper connections.
     Only used when enable_hyper_connections is True."""
 
-    mhc_sinkhorn_iterations: int = 10
+    mhc_sinkhorn_iterations: int = 20
     """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
 
     mhc_init_gating_factor: float = 0.01
     """Initial value of Gating Factor (alpha in paper)."""
 
     use_fused_mhc: bool = False
-    """Use unified fused kernels for mHC operations.
+    """Use unified fused kernels for mHC operations."""
 
-    When True, attempts to replace the reference mHC modules (SinkhornKnopp,
-    H_aggregate, H_post_bda, ProjRms) with fused/autograd implementations for
-    better performance on supported GPUs.  Backend selection is internal and
-    op-specific: Triton for Sinkhorn and H_post_bda backward when available,
-    cuTile for the remaining fused kernels when available, then native torch
-    fallback. If every mHC operation uses the native torch fallback,
-    use_fused_mhc remains enabled and a rank-0 warning is emitted. The all-native
-    fallback is functionally equivalent, but may not provide fused backend
-    performance benefits.
+    mhc_fused_backend: Literal["auto", "native", "triton", "cutile"] = "auto"
+    """Backend policy for fused mHC operations; auto selects per operation.
+
+    Explicit backends fail if unavailable instead of silently falling back.
     """
 
     mhc_recompute_layer_num: Optional[int] = None
@@ -659,7 +655,8 @@ class TransformerConfig(ModelParallelConfig):
 
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
-    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts", "mhc".
+    choices: "core_attn", "moe_act", "layernorm", 
+             "mla_up_proj", "mlp", "moe", "shared_experts", "mhc".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
     "moe_act": recompute the MoE MLP activation function.
@@ -1365,6 +1362,7 @@ class TransformerConfig(ModelParallelConfig):
 
     lora_out_init_method: str = "zero"
     """Initialization method for LoRA B matrix."""
+
     ######## FlagScale End ########
     @overridable  # FlagScale Modify
     def __post_init__(self):
@@ -1946,6 +1944,8 @@ class TransformerConfig(ModelParallelConfig):
                 self.recompute_modules.append("moe")
 
         ######## FlagScale Begin ########
+        if self.mhc_fused_backend not in ("auto", "native", "triton", "cutile"):
+            raise ValueError("mhc_fused_backend must be auto, native, triton, or cutile")
         # Validation for "mhc" in recompute_modules
         if self.recompute_granularity == "selective" and "mhc" in self.recompute_modules:
             if not self.enable_hyper_connections:
@@ -3038,7 +3038,9 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         return result
+
     ######## FlagScale End ########
+
 
 @dataclass
 class MLATransformerConfig(TransformerConfig):

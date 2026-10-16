@@ -26,9 +26,13 @@ from megatron.core.typed_torch import apply_module
 from megatron.core.utils import get_pg_size, is_te_min_version
 
 try:
-    from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_inplace
+    from megatron.core.fusions.fused_mla_yarn_rope_apply import (
+        fused_mla_rope_inplace,
+        fused_mla_rope_out_of_place,
+    )
 except Exception:
     fused_mla_rope_inplace = None
+    fused_mla_rope_out_of_place = None
 
 
 if HAVE_TE:
@@ -284,7 +288,7 @@ class DSv4HybridAttention(Attention):
                 x=hidden_states,
                 qr=q_compressed,
             )
-        # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) -> group_offload(latest)
+        # NOTE: It is same to the group_offload in latest version.
         if self.offload_core_attention and self.training:
             core_attn_out = core_attn_manager.group_commit(
                 core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
@@ -342,7 +346,8 @@ class DSv4HybridAttention(Attention):
         else:
             rotary_pos_emb = self.rotary_pos_emb(rope_seqlen, packed_seq=packed_seq)
         if self.config.apply_rope_fusion:
-            core_attn_out = fused_mla_rope_inplace(
+            # Sparse attention backward retains this output; rotate a private copy.
+            core_attn_out = fused_mla_rope_out_of_place(
                 core_attn_out,
                 rotary_pos_cos,
                 rotary_pos_sin,
@@ -388,9 +393,11 @@ class DSv4HybridAttention(Attention):
         attn_proj_manager = off_interface(self.offload_attn_proj, core_attn_out, "attn_proj")
         with attn_proj_manager as core_attn_out:
             output, bias = self.linear_proj(core_attn_out)
-        # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) -> group_offload(latest)
+        # NOTE: It is same to the group_offload in latest version.
         if self.offload_attn_proj:
-            output = attn_proj_manager.group_commit(output, name="attn_proj", forced_released_tensors=[core_attn_out])
+            output = attn_proj_manager.group_commit(
+                output, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
 
         return output, bias
 
@@ -716,6 +723,7 @@ class DSv4HybridSelfAttention(DSv4HybridAttention):
         """Execute weight gradient computation"""
         self._backward_kv_proj()
         self._backward_q_proj()
+        self.core_attention.backward_dw()
         self._backward_output_proj()
 
     def _backward_kv_proj(self):

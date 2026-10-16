@@ -20,7 +20,6 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
 from megatron.core.transformer.enums import CudaGraphModule, InferenceCudaGraphScope, LayerType
-from megatron.core.transformer.hyper_connection import HyperConnectionModule  # FlagScale Modify
 from megatron.core.transformer.identity_op import IdentityFuncOp, IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.module import GraphableMegatronModule
@@ -51,7 +50,9 @@ logger = logging.getLogger(__name__)
 
 
 def get_transformer_layer_offset(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None,
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
     dualpipev_stage: Optional[int] = None,  # FlagScale Modify
 ):
     """Get the index offset of current pipeline stage, given the level of pipelining."""
@@ -259,10 +260,14 @@ def get_transformer_layer_offset(
                 num_layers_per_dualpipev_rank = num_layers_per_pipeline_rank // 2
                 total_dualpipev_chunks = num_layers // 2
                 if dualpipev_stage == 0:
-                    offset = dualpipev_stage * total_dualpipev_chunks + (pp_rank * num_layers_per_dualpipev_rank)
+                    offset = dualpipev_stage * total_dualpipev_chunks + (
+                        pp_rank * num_layers_per_dualpipev_rank
+                    )
                 else:
                     reverse_pp_rank = pp_size - pp_rank - 1
-                    offset = dualpipev_stage * total_dualpipev_chunks + (reverse_pp_rank * num_layers_per_dualpipev_rank)
+                    offset = dualpipev_stage * total_dualpipev_chunks + (
+                        reverse_pp_rank * num_layers_per_dualpipev_rank
+                    )
             else:
                 offset = pp_rank * num_layers_per_pipeline_rank
 
@@ -502,9 +507,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             )
         additional_mlp_kwargs = {}
         ######## FlagScale Begin ########
-        if (
-            isinstance(submodules.mlp, ModuleSpec) and submodules.mlp.module is MoELayer
-        ) or (
+        if (isinstance(submodules.mlp, ModuleSpec) and submodules.mlp.module is MoELayer) or (
             isinstance(submodules.mlp, functools.partial) and submodules.mlp.func is MoELayer
         ):
             additional_mlp_kwargs["layer_number"] = self.layer_number
@@ -1463,7 +1466,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
     def __call__(self, *args, **kwargs):
         # Extract mhc_recompute_manager before CUDA graph manager processes kwargs,
-        # since CheckpointManager is not a CUDA-graph-supported type.
+        # since CheckpointWithoutOutputManager is not a CUDA-graph-supported type.
         self._mhc_recompute_manager = kwargs.pop("mhc_recompute_manager", None)
         kwargs.pop("is_last_layer_in_recompute_block", None)
 
@@ -1555,6 +1558,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         from megatron.core.pipeline_parallel.fine_grained_activation_offload import (
             FineGrainedActivationOffloadingInterface as off_interface,
         )
+
         self.off_interface = off_interface
 
     def get_layer_static_inputs(self, seq_length, micro_batch_size):
@@ -1635,7 +1639,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         sequence_len_offset: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
         input_ids: Optional[Tensor] = None,
-        mhc_recompute_manager: Optional['CheckpointManager'] = None,
+        mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
         *,
         inference_params: Optional[Any] = None,
     ):
@@ -1645,7 +1649,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         nvtx_range_push(suffix="self_attention_hyper_connection")
         hidden_states, self_attn_h_res, self_attn_hc_h_post, residual = (
             self.self_attention_hyper_connection(
-                hidden_states, mhc_recompute_manager=mhc_recompute_manager
+                hidden_states, mhc_recompute_manager=mhc_recompute_manager, return_residual=True
             )
         )
         nvtx_range_pop(suffix="self_attention_hyper_connection")
@@ -1735,7 +1739,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         inference_context=None,
         padding_mask=None,
         input_ids=None,
-        mhc_recompute_manager: Optional['CheckpointManager'] = None,
+        mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
     ):
         """Forward MLP with hyper connection pre/post processing."""
         is_last_in_recompute_block = bool(
@@ -1746,7 +1750,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         nvtx_range_push(suffix="mlp_hyper_connection")
         hidden_states, mlp_h_res, mlp_hc_h_post, residual = self.mlp_hyper_connection(
-            hidden_states, mhc_recompute_manager=mhc_recompute_manager
+            hidden_states, mhc_recompute_manager=mhc_recompute_manager, return_residual=True
         )
         nvtx_range_pop(suffix="mlp_hyper_connection")
 
@@ -1841,7 +1845,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         mlp_h_res,
         residual,
         mlp_hc_h_post,
-        mhc_mlp_bda_recompute_manager: Optional['CheckpointManager'] = None,
+        mhc_mlp_bda_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
     ):
         """
         Perform operations after the MLP computation with fused hyper connection kernel.
@@ -1853,7 +1857,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             mlp_h_res (Tensor): [s, b, n, n] - residual mixing matrix from hyper connection.
             residual (Tensor): [s, b, n*C] - original residual (n-stream hidden states).
             mlp_hc_h_post (Tensor): [s, b, n] - expansion weights from hyper connection.
-            mhc_recompute_manager: Optional CheckpointManager for checkpoint management.
+            mhc_recompute_manager: Optional CheckpointWithoutOutputManager for checkpoint management. # pylint: disable=line-too-long
 
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].
@@ -2096,7 +2100,9 @@ class MoETransformerLayer(TransformerLayer):
             obj, name = self._resolve_token_dispatcher_attr(attr_name)
             setattr(obj, name, attr)
 
-    def _forward_mlp_router(self, hidden_states, padding_mask=None, input_ids=None):  # FlagScale Modify
+    def _forward_mlp_router(
+        self, hidden_states, padding_mask=None, input_ids=None
+    ):  # FlagScale Modify
         """
         Executes the router phase of the MoE block.
 

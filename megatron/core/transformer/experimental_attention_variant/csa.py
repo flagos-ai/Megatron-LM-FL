@@ -8,6 +8,7 @@ from typing import Optional, Tuple, Union
 import torch
 import torch.nn as nn
 
+from megatron.core.fp8_utils import get_fp8_disabled_context
 from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_inplace
 from megatron.core.models.common.embeddings import RotaryEmbedding, apply_rotary_pos_emb
 from megatron.core.packed_seq_params import PackedSeqParams
@@ -20,7 +21,7 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
     fused_qk_topk_naive,
     rotate_activation,
 )
-from megatron.core.transformer.module import MegatronModule
+from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import nvtx_range_pop, nvtx_range_push
@@ -58,6 +59,7 @@ def _ensure_dsa_kernels():
             fused_indexer_sparse_attn,
             indexer_topk,
         )
+
         _dsa_sparse_attn = dsa_sparse_attn
         _fused_indexer_sparse_attn = fused_indexer_sparse_attn
         _indexer_topk = indexer_topk
@@ -66,14 +68,21 @@ def _ensure_dsa_kernels():
         # SM90: use the Triton plugin implementations.
         from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
             build_flat_topk_idxs as _triton_build_flat_topk_idxs,
-            dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,
-            fused_indexer_sparse_attn as _triton_fused,
-            indexer_topk as _triton_topk,
         )
+        from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
+            dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,
+        )
+        from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
+            fused_indexer_sparse_attn as _triton_fused,
+        )
+        from megatron.plugin.dsa_kernel.triton_dsa_kernels import indexer_topk as _triton_topk
+
         _dsa_sparse_attn = _triton_dsa_sparse_attn_sbhd
         _fused_indexer_sparse_attn = _triton_fused
         _indexer_topk = _triton_topk
         _build_flat_topk_idxs_fn = _triton_build_flat_topk_idxs
+
+
 ######## FlagScale End ########
 
 # ---------------------------------------------------------------------------
@@ -346,42 +355,48 @@ class Compressor(MegatronModule):
 
         proj_out_dim = self.coff * head_dim
 
-        self.linear_wkv = build_module(
-            submodules.linear_wkv,
-            config.hidden_size,
-            proj_out_dim,
-            config=config,
-            init_method=config.init_method,
-            bias=False,
-            skip_bias_add=False,
-            skip_weight_param_allocation=False,
-            parallel_mode="duplicated",
-        )
+        with get_fp8_disabled_context(config, is_init=True):
+            self.linear_wkv = build_module(
+                submodules.linear_wkv,
+                config.hidden_size,
+                proj_out_dim,
+                config=config,
+                init_method=config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+                parallel_mode="duplicated",
+            )
 
-        self.linear_wgate = build_module(
-            submodules.linear_wgate,
-            config.hidden_size,
-            proj_out_dim,
-            config=config,
-            init_method=config.init_method,
-            bias=False,
-            skip_bias_add=False,
-            skip_weight_param_allocation=False,
-            parallel_mode="duplicated",
-        )
+            self.linear_wgate = build_module(
+                submodules.linear_wgate,
+                config.hidden_size,
+                proj_out_dim,
+                config=config,
+                init_method=config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+                parallel_mode="duplicated",
+            )
 
         # keep to high precision
         _ape = torch.empty(
             compress_ratio, proj_out_dim, device=torch.cuda.current_device(), dtype=torch.float32
         )
         config.init_method(_ape)
-        self.ape = nn.Parameter(_ape)
+        self.ape = mark_keep_in_fp32(nn.Parameter(_ape))
 
         norm_config = copy.copy(config)
         norm_config.normalization = "RMSNorm"
         self.norm = build_module(
             submodules.norm, config=norm_config, hidden_size=head_dim, eps=config.layernorm_epsilon
         )
+
+    def backward_dw(self) -> None:
+        """Compute the deferred weight gradients (delay_wgrad_compute) of the compressor linears."""
+        self.linear_wkv.backward_dw()
+        self.linear_wgate.backward_dw()
 
     def _overlap_transform(self, tensor: torch.Tensor, fill_value: float = 0) -> torch.Tensor:
         """Apply overlapping window transform for 4x compression.
@@ -414,8 +429,9 @@ class Compressor(MegatronModule):
             nvtx_range_pop("compressor")
             return None
 
-        kv, _ = self.linear_wkv(x)  # [sq, b, coff * head_dim]
-        score, _ = self.linear_wgate(x)  # [sq, b, coff * head_dim]
+        with get_fp8_disabled_context(self.config):
+            kv, _ = self.linear_wkv(x)  # [sq, b, coff * head_dim]
+            score, _ = self.linear_wgate(x)  # [sq, b, coff * head_dim]
 
         cutoff = (sq // ratio) * ratio
         if cutoff < sq:
@@ -522,17 +538,18 @@ class CSAIndexer(MegatronModule):
         )
 
         # Weights projection
-        self.linear_weights_proj = build_module(
-            submodules.linear_weights_proj,
-            self.hidden_size,
-            self.index_n_heads,
-            config=config,
-            init_method=config.init_method,
-            bias=False,
-            skip_bias_add=False,
-            skip_weight_param_allocation=False,
-            parallel_mode="duplicated",
-        )
+        with get_fp8_disabled_context(config, is_init=True):
+            self.linear_weights_proj = build_module(
+                submodules.linear_weights_proj,
+                self.hidden_size,
+                self.index_n_heads,
+                config=config,
+                init_method=config.init_method,
+                bias=False,
+                skip_bias_add=False,
+                skip_weight_param_allocation=False,
+                parallel_mode="duplicated",
+            )
 
         # Own compressor (smaller head_dim, with Hadamard rotation)
         self.compressor = build_module(
@@ -544,6 +561,12 @@ class CSAIndexer(MegatronModule):
             rotary_pos_emb=rotary_pos_emb,
             pg_collection=pg_collection,
         )
+
+    def backward_dw(self) -> None:
+        """Compute the deferred weight gradients (delay_wgrad_compute) of the indexer linears."""
+        self.linear_wq_b.backward_dw()
+        self.linear_weights_proj.backward_dw()
+        self.compressor.backward_dw()
 
     def forward_before_topk(
         self, x: torch.Tensor, qr: torch.Tensor, packed_seq_params: Optional[PackedSeqParams] = None
@@ -571,7 +594,8 @@ class CSAIndexer(MegatronModule):
         # K path: own compressor
         k = self.compressor(x)  # [sq//ratio, b, index_head_dim]
 
-        weights, _ = self.linear_weights_proj(x)  # [sq, b, n_heads]
+        with get_fp8_disabled_context(self.config):
+            weights, _ = self.linear_weights_proj(x)  # [sq, b, n_heads]
         weights = weights * (self.index_n_heads**-0.5)
 
         nvtx_range_pop("indexer_before_topk")
@@ -664,7 +688,9 @@ class CompressedSparseAttention(MegatronModule):
         ######## FlagScale End ########
 
         # Learnable attention sink per head
-        self.attn_sink = nn.Parameter(torch.zeros(self.n_local_heads, dtype=torch.float32))
+        self.attn_sink = mark_keep_in_fp32(
+            nn.Parameter(torch.zeros(self.n_local_heads, dtype=torch.float32))
+        )
 
         # Conditionally build Compressor (ratio > 1)
         if self.compress_ratio > 1 and submodules.compressor is not None:
@@ -695,6 +721,17 @@ class CompressedSparseAttention(MegatronModule):
             )
         else:
             self.indexer = None
+
+    def backward_dw(self) -> None:
+        """Compute the deferred weight gradients of the optional compressor/indexer submodules.
+
+        The None-guards mirror __init__: compressor exists only for compress_ratio > 1,
+        the indexer only for compress_ratio == 4 outside csa_dense_mode.
+        """
+        if self.compressor is not None:
+            self.compressor.backward_dw()
+        if self.indexer is not None:
+            self.indexer.backward_dw()
 
     # ------------------------------------------------------------------
     # Private helpers – each owns one logical slice of the forward pass.
