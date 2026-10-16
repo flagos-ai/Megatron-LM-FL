@@ -1,13 +1,212 @@
 #!/usr/bin/env python3
-"""Run configured unit groups in one prepared container, preserving group failures."""
+"""Run unit groups or a single test command with bounded transient retries."""
 
+import argparse
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
+import threading
+import xml.etree.ElementTree as ET
 from pathlib import Path
+
+TRANSIENT = re.compile(
+    r"ReadTimeout|ConnectTimeout|ConnectionResetError|Connection aborted|"
+    r"Temporary failure in name resolution|Network is unreachable|"
+    r"HTTP(?:Error| error| status)?[: ]+(?:502|503|504)\b",
+    re.IGNORECASE,
+)
+DETERMINISTIC = re.compile(
+    r"AssertionError|golden.{0,40}mismatch|loss.{0,40}mismatch|"
+    r"SyntaxError|ModuleNotFoundError|ImportError|unrecognized arguments|"
+    r"invalid configuration|invalid platform|out of memory|^(?:E\s+)?assert\b",
+    re.IGNORECASE | re.MULTILINE,
+)
+
+
+def retry_limit(value: object) -> int:
+    """Validate the limit: at most one additional execution is permitted."""
+    if isinstance(value, bool) or str(value) not in ("0", "1"):
+        raise ValueError("transient_retries must be 0 or 1")
+    return int(value)
+
+
+def _retryable_exit(code: int) -> bool:
+    return code > 0 and code not in (124, 130, 137, 143)
+
+
+def junit_allows_retry(environment: dict) -> bool:
+    """Require complete reports whose failure messages all identify network errors."""
+    directory = environment.get("CI_JUNIT_DIRECTORY")
+    if not directory:
+        return True  # Non-pytest commands retain the log-based policy.
+    reports = list(Path(directory).glob("*.xml"))
+    expected = int(environment.get("CI_JUNIT_EXPECTED", "0"))
+    if not reports or (expected and len(reports) != expected):
+        return False
+    failures = []
+    try:
+        for report in reports:
+            root = ET.parse(report).getroot()
+            if root.tag not in ("testsuite", "testsuites") or not list(root.iter("testcase")):
+                return False
+            for node in root.iter():
+                if node.tag in ("failure", "error"):
+                    message = node.get("message", "")
+                    kind = node.get("type") or message.split(":", 1)[0]
+                    failures.append((kind.strip().rsplit(".", 1)[-1], message))
+    except (OSError, ET.ParseError):
+        return False
+    return bool(failures) and all(
+        kind
+        in {
+            "ReadTimeout",
+            "ReadTimeoutError",
+            "ConnectTimeout",
+            "ConnectTimeoutError",
+            "ConnectionResetError",
+            "ConnectionError",
+            "HTTPError",
+            "URLError",
+            "gaierror",
+        }
+        and TRANSIENT.search(f"{kind}: {message}")
+        and not DETERMINISTIC.search(message)
+        for kind, message in failures
+    )
+
+
+def pytest_worker() -> None:
+    """Give each distributed pytest rank and phase its own JUnit report."""
+    directory = Path(os.environ["CI_JUNIT_DIRECTORY"])
+    report = directory / f"{os.environ['CI_JUNIT_PHASE']}-{os.environ.get('RANK', '0')}.xml"
+    args = [
+        sys.executable,
+        "-m",
+        "coverage",
+        "run",
+        f"--rcfile={os.environ['CI_COVERAGE_DIRECTORY']}/.coveragerc",
+        *sys.argv[2:],
+        f"--junitxml={report}",
+    ]
+    os.execv(sys.executable, args)
+
+
+def execute(
+    command: list[str],
+    environment: dict,
+    logs: Path,
+    retries: int = 0,
+    timeout: float = 3600,
+    cleanup: Path | None = None,
+) -> int:
+    """Run a process tree, preserving output and cleaning failed retry outputs."""
+    retries = retry_limit(retries)
+    logs.mkdir(parents=True, exist_ok=True)
+    records = []
+    for attempt in range(1, retries + 2):
+        if directory := environment.get("CI_JUNIT_DIRECTORY"):
+            shutil.rmtree(directory, ignore_errors=True)
+            Path(directory).mkdir(parents=True, exist_ok=True)
+        log = logs / f"attempt-{attempt}.log"
+        log.touch()
+        process = subprocess.Popen(
+            command,
+            env=environment,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
+
+        signals = [False, False]
+
+        def copy_output() -> None:
+            tail = ""
+            with log.open("wb") as stream:
+                while chunk := os.read(process.stdout.fileno(), 8192):
+                    stream.write(chunk)
+                    decoded = chunk.decode(errors="replace")
+                    text = tail + decoded
+                    for i, pattern in enumerate((TRANSIENT, DETERMINISTIC)):
+                        signals[i] |= bool(pattern.search(text))
+                    tail = text[-256:]
+                    print(decoded, end="", flush=True)
+
+        reader = threading.Thread(target=copy_output, daemon=True)
+        reader.start()
+        try:
+            try:
+                code = process.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                code = 124
+                print(f"::error::Test attempt exceeded {timeout}s", flush=True)
+        finally:
+            # Also remove distributed workers left behind by a failed parent.
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait(timeout=10)
+            reader.join(timeout=10)
+            process.stdout.close()
+        transient = (
+            _retryable_exit(code)
+            and signals[0]
+            and not signals[1]
+            and junit_allows_retry(environment)
+        )
+        if directory := environment.get("CI_JUNIT_DIRECTORY"):
+            destination = logs / f"attempt-{attempt}-junit"
+            shutil.rmtree(destination, ignore_errors=True)
+            shutil.move(directory, str(destination))
+        records.append({"attempt": attempt, "exit_code": code, "transient": transient})
+        status = "FLAKY_PASS" if code == 0 and attempt > 1 else "PASS" if code == 0 else "FAIL"
+        (logs / "result.json").write_text(json.dumps({"status": status, "attempts": records}))
+        if code == 0 or not transient or attempt > retries:
+            return code
+        print("::warning::Transient infrastructure failure; retrying once", flush=True)
+        if cleanup is not None and cleanup.exists():
+            # Keep diagnostics, excluding model weights and checkpoint directories.
+            destination = logs / f"attempt-{attempt}-outputs"
+            if destination.exists():
+                shutil.rmtree(destination)
+            shutil.copytree(
+                cleanup,
+                destination,
+                ignore=shutil.ignore_patterns(
+                    "checkpoints", "iter_*", "*.pt", "*.pth", "*.ckpt", "*.safetensors", "*.bin"
+                ),
+            )
+            shutil.rmtree(cleanup)
+            cleanup.mkdir(parents=True, exist_ok=True)
+    raise AssertionError("Unreachable retry state")
+
+
+def run_command() -> int:
+    """Expose the same retry policy to the functional-test shell workflow."""
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--logs", type=Path, required=True)
+    parser.add_argument("--cleanup-dir", type=Path, required=True)
+    parser.add_argument("--timeout", type=float, default=3600)
+    parser.add_argument("command", nargs=argparse.REMAINDER)
+    args = parser.parse_args()
+    command = args.command[1:] if args.command[:1] == ["--"] else args.command
+    if not command:
+        parser.error("A test command is required")
+    config = json.loads(os.environ.get("CI_TEST_CONFIG", "{}"))
+    retries = retry_limit(config.get("transient_retries", os.environ.get("CI_TEST_RETRIES", "0")))
+    environment = {**os.environ, "CI_JUNIT_DIRECTORY": str(args.cleanup_dir.resolve() / "junit")}
+    code = execute(command, environment, args.logs, retries, args.timeout, args.cleanup_dir)
+    result = json.loads((args.logs / "result.json").read_text())
+    if summary := os.environ.get("GITHUB_STEP_SUMMARY"):
+        with open(summary, "a") as stream:
+            stream.write(
+                f"\nFunctional result: {result['status']} ({len(result['attempts'])} attempts)\n"
+            )
+    return code if code >= 0 else 128 - code
 
 
 def run_group(environment: dict, timeout: float = 3600) -> int:
@@ -19,19 +218,23 @@ def run_group(environment: dict, timeout: float = 3600) -> int:
         'source "$CI_SETUP_SCRIPT"\n'
         'exec bash "$GITHUB_WORKSPACE/tests/test_utils/runners/run_ci_unit_tests.sh"',
     ]
-    process = subprocess.Popen(command, env=environment, start_new_session=True)
-    try:
-        return process.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        print(f"::error::Unit group {environment['CI_TEST_GROUP']} exceeded {timeout}s", flush=True)
-        return 124
-    finally:
-        # Kill only this group's process tree, including ranks left by failed torchrun.
-        try:
-            os.killpg(process.pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        process.wait(timeout=10)
+    return execute(
+        command,
+        environment,
+        Path(environment["GITHUB_WORKSPACE"])
+        / ".retry-logs"
+        / (
+            f"unit-{environment.get('CI_PLATFORM', 'local')}-"
+            f"{environment.get('CI_DEVICE', 'local')}-{environment['CI_TEST_GROUP']}"
+        ),
+        retries=retry_limit(environment.get("CI_TEST_RETRIES", "0")),
+        timeout=timeout,
+        cleanup=(
+            Path(environment["CI_COVERAGE_DIRECTORY"])
+            if environment.get("CI_COVERAGE_DIRECTORY")
+            else None
+        ),
+    )
 
 
 def combine_coverage(directories: list, output: Path, environment: dict) -> None:
@@ -140,6 +343,7 @@ def main() -> int:
             "CI_IGNORED_TESTS",
             "CI_PYTEST_EXTRA_ARGS",
             "CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS",
+            "CI_TEST_RETRIES",
         )
     }
     completed = (
@@ -175,7 +379,21 @@ def main() -> int:
                 "CI_TEST_SUITE": "unit_group",
                 "CI_TEST_GROUP": name,
                 "CI_TEST_PATH": group["path"],
+                "CI_TEST_RETRIES": str(
+                    retry_limit(
+                        group.get("transient_retries", os.environ.get("CI_TEST_RETRIES", "0"))
+                    )
+                ),
                 "CI_COVERAGE_DIRECTORY": str(directory),
+                "CI_JUNIT_DIRECTORY": str(directory / "junit"),
+                "CI_JUNIT_EXPECTED": str(
+                    int(os.environ.get("CI_NPROC_PER_NODE", "1"))
+                    * (
+                        2
+                        if json.loads(os.environ.get("CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS", "[]"))
+                        else 1
+                    )
+                ),
                 "CI_SETUP_SCRIPT": str(workspace / os.environ["CI_SETUP_SCRIPT"]),
                 # A group's hook must not change subsequent groups or Actions steps.
                 "GITHUB_ENV": os.devnull,
@@ -191,13 +409,30 @@ def main() -> int:
                         stream.write(f"| {name} | INCOMPLETE | - | Interrupted |\n")
                 raise
         print("::endgroup::", flush=True)
-        status = "PASS" if code == 0 else "TIMEOUT" if code == 124 else "FAIL"
+        retry_result = (
+            workspace
+            / ".retry-logs"
+            / f"unit-{os.environ['CI_PLATFORM']}-{os.environ['CI_DEVICE']}-{name}"
+            / "result.json"
+        )
+        flaky = (
+            bool(completed[name].get("flaky"))
+            if reused
+            else code == 0
+            and retry_result.exists()
+            and json.loads(retry_result.read_text())["status"] == "FLAKY_PASS"
+        )
+        status = (
+            "FLAKY_PASS" if flaky else "PASS" if code == 0 else "TIMEOUT" if code == 124 else "FAIL"
+        )
         execution = "Previously passed" if reused else "Executed"
         if code:
             print(f"::error::{status}: Unit group {name} failed with exit code {code}", flush=True)
         else:
-            print(f"PASS: Unit tests: {name} ({execution})", flush=True)
+            print(f"{status}: Unit tests: {name} ({execution})", flush=True)
         result = {"name": name, "exit_code": code}
+        if flaky:
+            result["flaky"] = True
         if reused:
             result["reused"] = True
         completed[name] = result
@@ -221,4 +456,6 @@ def terminate_group(signum, frame):
 
 if __name__ == "__main__":
     signal.signal(signal.SIGTERM, terminate_group)
-    raise SystemExit(main())
+    if sys.argv[1:2] == ["pytest-worker"]:
+        pytest_worker()
+    raise SystemExit(run_command() if len(sys.argv) > 1 else main())

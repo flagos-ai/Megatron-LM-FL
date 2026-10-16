@@ -354,3 +354,14 @@ te_fl:
       TE_FL_SKIP_CUDA: "1"
       TE_FL_PREFER: vendor
     install_pip_args: [--ignore-requires-python]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/kunlunxin.yml
+  - .github/scripts/set_env_kunlunxin.sh
+  - .github/workflows/all_tests_kunlunxin.yml
+  - megatron/plugin/kunlunxin/
+  - megatron/plugin/platform/platform_kunlunxin.py
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_kunlunxin/
+
+test_retry: {transient_retries: 1}

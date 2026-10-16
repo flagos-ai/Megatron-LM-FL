@@ -157,24 +157,27 @@ PYTEST_ARGS+=(
   addopts="--durations=15 -s -rA"
 )
 
+export CI_COVERAGE_DIRECTORY="$COVERAGE_DIR"
+export CI_JUNIT_DIRECTORY="${CI_JUNIT_DIRECTORY:-$COVERAGE_DIR/junit}"
+mkdir -p "$CI_JUNIT_DIRECTORY"
+
 run_pytest() {
   "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node="$CI_NPROC_PER_NODE" \
     --master_port="${MASTER_PORT:-29500}" \
-    -m coverage run \
-    --rcfile="$COVERAGE_DIR/.coveragerc" \
+    "$GITHUB_WORKSPACE/.github/scripts/run_unit_groups.py" pytest-worker \
     "$PYTEST_BIN" \
     "${PYTEST_ARGS[@]}" \
     "$@"
 }
 
 set +e
-run_pytest "${EXTRA_ARGS[@]}"
+CI_JUNIT_PHASE=normal run_pytest "${EXTRA_ARGS[@]}"
 normal_exit_code=$?
 
 experimental_exit_code=0
 if [ "${#EXPERIMENTAL_ARGS[@]}" -gt 0 ]; then
   echo "Running experimental unit tests: $CI_TEST_GROUP"
-  run_pytest "${EXPERIMENTAL_ARGS[@]}"
+  CI_JUNIT_PHASE=experimental run_pytest "${EXPERIMENTAL_ARGS[@]}"
   experimental_exit_code=$?
 fi
 set -e

@@ -217,9 +217,6 @@ test_matrix:
 # TE-FL runtime configuration
 te_fl:
   prepare: true
-  # CONTRACT: local fallback requires preparation and consumers to share this directory.
-  # Retain backups for 7 days, with a 20 GiB admission limit across runs.
-  cache_directory: /var/cache/megatron-lm-fl/te-fl
   build_mode: cuda
   build_environment:
     NVTE_FRAMEWORK: pytorch
@@ -234,3 +231,13 @@ te_fl:
       TE_FL_PREFER: flagos
     install_pip_args: []
     pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/cuda.yml
+  - .github/scripts/set_env_cuda.sh
+  - .github/workflows/all_tests_cuda.yml
+  - megatron/plugin/platform/platform_cuda.py
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark/
+
+test_retry: {transient_retries: 1}

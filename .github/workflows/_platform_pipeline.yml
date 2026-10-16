@@ -14,9 +14,9 @@
 
 # Reusable per-platform pipeline for Megatron-LM-FL CI:
 #   prepare_te_fl -> all_tests_common.
-# Called from ci.yml with a platform matrix so each platform runs independently.
+# Shared by automatic CI, requested tests, and manual platform entrypoints.
 #
-# TE-FL is prepared once per platform and restored from cache by the common test
+# TE-FL is prepared once per platform and delivered by artifact to the common test
 # jobs.  Skipping this step leaves the test jobs on whatever Transformer Engine
 # the image ships, which is not the version this commit is built against.
 
@@ -24,7 +24,18 @@ name: Platform Pipeline
 
 on:
   workflow_call:
+    secrets:
+      FLAGCICD_API_TOKEN:
+        required: false
     inputs:
+      run_unit_tests: {required: false, type: boolean, default: true}
+      run_functional_tests: {required: false, type: boolean, default: true}
+      image_override: {required: false, type: string, default: ''}
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: Optional immutable Megatron source SHA for requested tests
       platform:
         required: true
         type: string
@@ -36,13 +47,19 @@ jobs:
     uses: ./.github/workflows/prepare_te_fl.yml
     with:
       platform: ${{ inputs.platform }}
+      source_ref: ${{ inputs.source_ref }}
+      image_override: ${{ inputs.image_override }}
 
   test:
     name: test / ${{ inputs.platform }}
     needs: te_fl_prepare
     uses: ./.github/workflows/all_tests_common.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ inputs.platform }}
-      te_fl_prepare: true
-      te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
-      te_fl_local_cache_key: ${{ needs.te_fl_prepare.outputs.local_cache_key }}
+      source_ref: ${{ inputs.source_ref }}
+      run_unit_tests: ${{ inputs.run_unit_tests }}
+      run_functional_tests: ${{ inputs.run_functional_tests }}
+      image_override: ${{ inputs.image_override }}
+      te_fl_artifact: ${{ needs.te_fl_prepare.outputs.wheel_artifact }}

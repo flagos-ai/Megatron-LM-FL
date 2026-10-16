@@ -307,6 +307,38 @@ class UnitGroupTests(unittest.TestCase):
                 if platform == "metax":
                     self.assertEqual((first[2], second[2]), ("1", ""))
 
+    def test_transient_retry_keeps_only_final_coverage_and_reports_flakiness(self):
+        script = self.root / "tests/test_utils/runners/run_ci_unit_tests.sh"
+        script.write_text(
+            'mkdir -p "$CI_COVERAGE_DIRECTORY"\n'
+            'if [ ! -f "$GITHUB_WORKSPACE/first-failed" ]; then\n'
+            '  touch "$GITHUB_WORKSPACE/first-failed"\n'
+            '  echo partial > "$CI_COVERAGE_DIRECTORY/partial"\n'
+            '  mkdir -p "$CI_JUNIT_DIRECTORY"\n'
+            '  echo \'<testsuite><testcase><failure message="ReadTimeout"/></testcase></testsuite>\' > "$CI_JUNIT_DIRECTORY/normal-0.xml"\n'
+            '  echo ReadTimeout; exit 1\n'
+            'fi\n'
+            'test ! -e "$CI_COVERAGE_DIRECTORY/partial"\n'
+            'echo final > "$CI_COVERAGE_DIRECTORY/final"\n'
+        )
+        self.env["CI_TEST_RETRIES"] = "1"
+        result = self.run_groups([{"name": "flaky", "path": "a"}])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("FLAKY_PASS", (self.root / "summary").read_text())
+        self.assertTrue(
+            json.loads((self.root / "coverage-report/unit-results.json").read_text())[0]["flaky"]
+        )
+        self.assertTrue(
+            (self.root / ".retry-logs/unit-fake-device-flaky/attempt-1-outputs/partial").exists()
+        )
+        self.assertFalse((self.root / ".unit-checkpoint/flaky/partial").exists())
+        self.env["GITHUB_RUN_ATTEMPT"] = "2"
+        rerun = self.run_groups([{"name": "flaky", "path": "a"}])
+        self.assertEqual(rerun.returncode, 0, rerun.stderr)
+        saved = json.loads((self.root / "coverage-report/unit-results.json").read_text())[0]
+        self.assertTrue(saved["flaky"])
+        self.assertTrue(saved["reused"])
+
     def test_timeout_kills_the_group_and_returns_failure(self):
         (self.root / "setup.sh").write_text('echo $$ > "$GITHUB_WORKSPACE/pid"\nsleep 30\n')
         env = {**self.env, "CI_SETUP_SCRIPT": str(self.root / "setup.sh"), "CI_TEST_GROUP": "slow"}
@@ -322,12 +354,13 @@ class UnitGroupTests(unittest.TestCase):
             with (
                 mock.patch.object(RUNNER.subprocess, "Popen", return_value=process),
                 mock.patch.object(RUNNER.os, "killpg") as kill,
+                mock.patch.object(RUNNER.threading, "Thread"),
             ):
                 if isinstance(outcome, BaseException):
                     with self.assertRaises(KeyboardInterrupt):
-                        RUNNER.run_group({})
+                        RUNNER.run_group({**self.env, "CI_TEST_GROUP": "cleanup"})
                 else:
-                    self.assertEqual(RUNNER.run_group({}), 0)
+                    self.assertEqual(RUNNER.run_group({**self.env, "CI_TEST_GROUP": "cleanup"}), 0)
                 kill.assert_called_once_with(12345, signal.SIGKILL)
 
     def test_combined_coverage_includes_normal_and_partial_group_data(self):
@@ -405,6 +438,11 @@ class UnitGroupTests(unittest.TestCase):
 class UnitWorkflowTests(unittest.TestCase):
     def test_all_configured_platforms_use_shared_group_runner(self):
         common = yaml.safe_load((ROOT / ".github/workflows/all_tests_common.yml").read_text())
+        pipeline = yaml.safe_load((ROOT / ".github/workflows/_platform_pipeline.yml").read_text())
+        self.assertEqual(
+            pipeline["jobs"]["test"]["uses"], "./.github/workflows/all_tests_common.yml"
+        )
+        self.assertTrue(pipeline[True]["workflow_call"]["inputs"]["run_unit_tests"]["default"])
         unit = common["jobs"]["unit_tests"]
         self.assertEqual(unit["uses"], "./.github/workflows/unit_tests_common.yml")
         self.assertEqual(
@@ -429,9 +467,9 @@ class UnitWorkflowTests(unittest.TestCase):
                     (ROOT / f".github/workflows/all_tests_{path.stem}.yml").read_text()
                 )
                 job = workflow["jobs"]["run_tests"]
-                self.assertEqual(job["uses"], "./.github/workflows/all_tests_common.yml")
+                self.assertEqual(job["uses"], "./.github/workflows/_platform_pipeline.yml")
                 self.assertEqual(job["with"]["platform"], path.stem)
-                self.assertTrue(job["with"]["run_unit_tests"])
+                self.assertTrue(job["with"].get("run_unit_tests", True))
                 self.assertIn("  unit_group)", (ROOT / config["setup_script"]).read_text())
         self.assertTrue(platforms)
 
@@ -449,7 +487,9 @@ class UnitWorkflowTests(unittest.TestCase):
         for step in job["steps"]:
             if step.get("uses") == "actions/checkout@v4":
                 self.assertEqual(step["with"]["fetch-depth"], 1)
-            self.assertNotEqual(step.get("uses"), "actions/download-artifact@v4")
+            if step.get("uses") == "actions/download-artifact@v4":
+                self.assertEqual(step["with"]["name"], "${{ inputs.te_fl_artifact }}")
+                self.assertEqual(step["with"]["path"], "te-fl-wheel")
         for name in ("Upload Coverage Report", "Upload Coverage Report to FlagCICD"):
             self.assertIn("!cancelled()", steps[name]["if"])
         self.assertIn(

@@ -332,3 +332,13 @@ te_fl:
     # MetaX Triton is supplied by the image; no public triton-metax package is
     # available from the runtime Python index.
     pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/metax.yml
+  - .github/scripts/set_env_metax.sh
+  - .github/workflows/all_tests_metax.yml
+  - megatron/plugin/metax/
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark_metax/
+
+test_retry: {transient_retries: 1}

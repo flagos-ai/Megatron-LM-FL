@@ -2,7 +2,20 @@ name: Common Unit Tests
 
 on:
   workflow_call:
+    secrets:
+      FLAGCICD_API_TOKEN:
+        required: false
     inputs:
+      te_fl_artifact: {required: true, type: string}
+      test_retries:
+        required: false
+        type: number
+        default: 0
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: Optional immutable Megatron source SHA for requested tests
       platform:
         required: true
         type: string
@@ -50,21 +63,6 @@ on:
         type: string
         default: '[]'
         description: JSON array of test files or node IDs to ignore
-      te_fl_prepare:
-        required: true
-        type: boolean
-      te_fl_cache_key:
-        required: false
-        type: string
-        default: ''
-      te_fl_cache_directory:
-        required: false
-        type: string
-        default: ''
-      te_fl_local_cache_key:
-        required: false
-        type: string
-        default: ''
       te_fl_runtime_environment:
         required: true
         type: string
@@ -96,6 +94,8 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
           set-safe-directory: true
 
@@ -105,6 +105,8 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
           set-safe-directory: true
 
@@ -113,6 +115,8 @@ jobs:
         if: steps.checkout2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
           set-safe-directory: true
 
@@ -154,69 +158,15 @@ jobs:
           source "$GITHUB_WORKSPACE/.github/scripts/set_env_common.sh"
           ci_install_runtime_packages
 
-      - name: Restore TE-FL wheel (attempt 1)
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != ''
-        id: te_fl_cache_1
-        continue-on-error: true
-        uses: actions/cache/restore@v4
+      - name: Download prepared TE-FL wheel
+        uses: actions/download-artifact@v4
         with:
+          name: ${{ inputs.te_fl_artifact }}
           path: te-fl-wheel
-          key: ${{ inputs.te_fl_cache_key }}
-
-      - name: Wait before restoring TE-FL wheel (attempt 2)
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true'
-        run: sleep 5
-
-      - name: Restore TE-FL wheel (attempt 2)
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true'
-        id: te_fl_cache_2
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: te-fl-wheel
-          key: ${{ inputs.te_fl_cache_key }}
-
-      - name: Wait before restoring TE-FL wheel (attempt 3)
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true'
-        run: sleep 15
-
-      - name: Restore TE-FL wheel (attempt 3)
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true'
-        id: te_fl_cache_3
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: te-fl-wheel
-          key: ${{ inputs.te_fl_cache_key }}
-
-      - name: Restore local TE-FL wheel fallback
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != '' && inputs.te_fl_cache_directory != '' && inputs.te_fl_local_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true' && steps.te_fl_cache_3.outputs.cache-hit != 'true'
-        id: local_cache
-        timeout-minutes: 5
-        env:
-          TE_FL_CACHE_DIRECTORY: ${{ inputs.te_fl_cache_directory }}
-          TE_FL_CACHE_KEY: ${{ inputs.te_fl_local_cache_key }}
-          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel-fallback
-        run: python3 .github/scripts/te_fl_local_cache.py restore --required
-
-      - name: Check TE-FL wheel cache
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != ''
-        env:
-          CACHE_HIT_1: ${{ steps.te_fl_cache_1.outputs.cache-hit }}
-          CACHE_HIT_2: ${{ steps.te_fl_cache_2.outputs.cache-hit }}
-          CACHE_HIT_3: ${{ steps.te_fl_cache_3.outputs.cache-hit }}
-          LOCAL_CACHE_HIT: ${{ steps.local_cache.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-          if [ "$CACHE_HIT_1" != true ] && [ "$CACHE_HIT_2" != true ] && [ "$CACHE_HIT_3" != true ] && [ "$LOCAL_CACHE_HIT" != true ]; then
-            echo "::error::TE-FL wheel cache was not restored" >&2
-            exit 1
-          fi
 
       - name: Install TE-FL wheel
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_key != ''
         env:
-          TE_FL_WHEEL_DIR: ${{ github.workspace }}/${{ steps.local_cache.outputs.cache-hit == 'true' && 'te-fl-wheel-fallback' || 'te-fl-wheel' }}
+          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel
           TE_FL_INSTALL_PIP_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
         run: .github/scripts/install_te_fl_runtime.sh
 
@@ -236,6 +186,7 @@ jobs:
         id: unit_test
         working-directory: ${{ github.workspace }}
         env:
+          CI_TEST_RETRIES: ${{ inputs.test_retries }}
           CI_UNIT_RESUME: ${{ steps.unit_results_cache.outcome == 'success' && steps.unit_results_cache.outputs.cache-matched-key != '' }}
           CI_PLATFORM: ${{ inputs.platform }}
           CI_DEVICE: ${{ inputs.device }}
@@ -265,14 +216,41 @@ jobs:
           overwrite: true
           path: coverage-report/**/*.json
 
-      - name: Upload Coverage Report to FlagCICD
+      - name: Check FlagCICD upload prerequisites
+        id: flagcicd
         if: ${{ !cancelled() && steps.unit_test.outcome != 'skipped' }}
+        env:
+          FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
+          COVERAGE_REPORT_PATH: coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-all.json
+        run: |
+          if [ ! -f "$COVERAGE_REPORT_PATH" ]; then
+            echo "::notice::Skipping FlagCICD upload: coverage report was not generated."
+            echo "upload_ready=false" >> "$GITHUB_OUTPUT"
+          elif [ -z "$FLAGCICD_API_TOKEN" ]; then
+            echo "::notice::Skipping FlagCICD upload: FLAGCICD_API_TOKEN is unavailable."
+            echo "upload_ready=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "upload_ready=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Upload Coverage Report to FlagCICD
+        if: ${{ !cancelled() && steps.flagcicd.outputs.upload_ready == 'true' }}
         uses: flagos-ai/FlagOps/actions/post-pytest-report@v2
         continue-on-error: true
-        env:
-          NO_PROXY: "flagcicd-inner.flagos.net"
+        timeout-minutes: 2
         with:
-          backend_url: 'http://flagcicd-inner.flagos.net:8000/metrics/'
-          user_id: '000000000000000000'
+          backend_url: 'https://flagcicd.flagos.net/flagcicd/api/v1/cicd/metrics/'
+          api_token: ${{ secrets.FLAGCICD_API_TOKEN }}
           report_path: 'coverage-report/coverage-${{ inputs.platform }}-${{ inputs.device }}-all.json'
+          job_name: coverage-${{ inputs.platform }}-${{ inputs.device }}-all
           fail_on_error: 'false'
+
+      - name: Upload unit retry attempts
+        if: always() && steps.unit_test.outcome != 'skipped'
+        uses: actions/upload-artifact@v4
+        with:
+          name: unit-retry-${{ inputs.platform }}-${{ inputs.device }}
+          path: .retry-logs/
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: ignore

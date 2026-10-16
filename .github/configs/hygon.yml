@@ -454,3 +454,13 @@ te_fl:
       TE_FL_PREFER: flagos
     install_pip_args: [--ignore-requires-python]
     pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/hygon.yml
+  - .github/scripts/set_env_hygon.sh
+  - .github/workflows/all_tests_hygon.yml
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_hygon/
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark_hygon/
+
+test_retry: {transient_retries: 1}

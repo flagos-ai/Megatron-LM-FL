@@ -108,7 +108,7 @@ ci_install_yq() {
       ;;
   esac
 
-  wget -qO /usr/local/bin/yq \
+  wget --tries=2 --timeout=60 -qO /usr/local/bin/yq \
     "https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_${architecture}"
   chmod 0755 /usr/local/bin/yq
   yq --version
