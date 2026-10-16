@@ -1,0 +1,86 @@
+diff --git a/transformer_engine/plugin/core/ops.py b/transformer_engine/plugin/core/ops.py
+--- a/transformer_engine/plugin/core/ops.py
++++ b/transformer_engine/plugin/core/ops.py
+@@ -1714,6 +1714,18 @@ class TEFLBackendBase(ABC):
+         raise NotImplementedError
+ 
+     # Comm+GEMM Overlap
++    def device_supports_multicast(self, device_id: int = -1) -> bool:
++        """Return whether the active device supports CUDA multicast."""
++        raise NotImplementedError
++
++    def ubuf_built_with_mpi(self) -> bool:
++        """Return whether UserBuffer support was built with MPI."""
++        raise NotImplementedError
++
++    def get_stream_priority_range(self, device_id: int = -1) -> Tuple[int, int]:
++        """Return the CUDA stream priority range."""
++        raise NotImplementedError
++
+     def bulk_overlap_ag_with_external_gemm(
+         self,
+         allgather_communicator: CommOverlap,
+diff --git a/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py b/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py
+--- a/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py
++++ b/transformer_engine/plugin/core/backends/vendor/cuda/cuda.py
+@@ -1931,6 +1931,18 @@ class CUDABackend(TEFLBackendBase):
+         )
+ 
+     # Comm+GEMM Overlap
++    def device_supports_multicast(self, device_id: int = -1) -> bool:
++        tex = self._get_tex()
++        return tex.device_supports_multicast(device_id)
++
++    def ubuf_built_with_mpi(self) -> bool:
++        tex = self._get_tex()
++        return tex.ubuf_built_with_mpi()
++
++    def get_stream_priority_range(self, device_id: int = -1) -> Tuple[int, int]:
++        tex = self._get_tex()
++        return tex.get_stream_priority_range(device_id)
++
+     def bulk_overlap_ag_with_external_gemm(
+         self,
+         allgather_communicator: CommOverlap,
+@@ -2009,6 +2021,7 @@ class CUDABackend(TEFLBackendBase):
+         aggregate: bool = False,
+     ) -> "CommOverlapP2P":
+         tex = self._get_tex()
++        comm_type = tex.CommOverlapType(int(comm_type))
+         return tex.CommOverlapP2P(
+             buffer_shape,
+             buffer_dtype,
+diff --git a/transformer_engine/plugin/core/backends/vendor/cuda/register_ops.py b/transformer_engine/plugin/core/backends/vendor/cuda/register_ops.py
+--- a/transformer_engine/plugin/core/backends/vendor/cuda/register_ops.py
++++ b/transformer_engine/plugin/core/backends/vendor/cuda/register_ops.py
+@@ -1110,6 +1110,30 @@ def register(registry):
+             priority=100,
+         ),
+         # Communication overlap operations
++        OpImpl(
++            op_name="device_supports_multicast",
++            impl_id="vendor.cuda",
++            kind=BackendImplKind.VENDOR,
++            fn=_bind_is_available(backend.device_supports_multicast, is_avail),
++            vendor="CUDA",
++            priority=100,
++        ),
++        OpImpl(
++            op_name="get_stream_priority_range",
++            impl_id="vendor.cuda",
++            kind=BackendImplKind.VENDOR,
++            fn=_bind_is_available(backend.get_stream_priority_range, is_avail),
++            vendor="CUDA",
++            priority=100,
++        ),
++        OpImpl(
++            op_name="ubuf_built_with_mpi",
++            impl_id="vendor.cuda",
++            kind=BackendImplKind.VENDOR,
++            fn=_bind_is_available(backend.ubuf_built_with_mpi, is_avail),
++            vendor="CUDA",
++            priority=100,
++        ),
+         OpImpl(
+             op_name="bulk_overlap_ag_with_external_gemm",
+             impl_id="vendor.cuda",

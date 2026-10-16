@@ -610,6 +610,26 @@ def get_pg_src_rank(group=None):
     return ranks[0]
 
 
+# BEGIN MEGALENS OBSERVABILITY
+def get_process_group_peer_ranks(group):
+    """Return peer global ranks, or ``None`` when membership is unavailable.
+
+    This best-effort query is intended for optional diagnostics. Callers must
+    not use its result to control collective behavior.
+    """
+    get_group_ranks = getattr(torch.distributed, "get_process_group_ranks", None)
+    if not callable(get_group_ranks):
+        return None
+
+    try:
+        global_rank = int(torch.distributed.get_rank())
+        group_ranks = [int(rank) for rank in get_group_ranks(group)]
+    except Exception:
+        return None
+    return [rank for rank in group_ranks if rank != global_rank]
+# END MEGALENS OBSERVABILITY
+
+
 def get_attr_wrapped_model(model, attr, allow_none=True, return_model_obj=False):
     """Get an attribute from a wrapped model.
     If return_model_obj is true, return the object that has the 'attr' attribute;
@@ -1134,6 +1154,13 @@ def drain_embedding_wgrad_compute(
     import fused_weight_gradient_mlp_cuda
 
     from megatron.core.parallel_state import get_global_memory_buffer
+    # BEGIN MEGALENS OBSERVABILITY  # isort: split
+    from megatron.core.tensor_parallel.observability import (
+        async_linear_collective_launch_scope,
+        sync_linear_all_gather_scope,
+        wait_async_linear_collective,
+    )
+    # END MEGALENS OBSERVABILITY  # isort: split
 
     input = embedding_activation_buffer.pop(0)
     world_size = tp_group.size()
@@ -1143,7 +1170,10 @@ def drain_embedding_wgrad_compute(
     all_gathered_input = [None, None]
     if config.sequence_parallel:
         all_gather_buffer = get_global_memory_buffer().get_tensor(dim_size, input.dtype, "mpu_0")
-        handle = dist_all_gather_func(all_gather_buffer, input, group=tp_group, async_op=False)
+        # BEGIN MEGALENS OBSERVABILITY
+        with sync_linear_all_gather_scope(input, tp_group):
+            handle = dist_all_gather_func(all_gather_buffer, input, group=tp_group, async_op=False)
+        # END MEGALENS OBSERVABILITY
 
         all_gathered_input[0] = all_gather_buffer
         all_gather_buffer = None
@@ -1181,7 +1211,19 @@ def drain_embedding_wgrad_compute(
         if config.sequence_parallel:
             name = "mpu_" + str((i + 1) % 2)
             all_gather_buffer = get_global_memory_buffer().get_tensor(dim_size, input.dtype, name)
-            handle = dist_all_gather_func(all_gather_buffer, input, group=tp_group, async_op=True)
+            # BEGIN MEGALENS OBSERVABILITY
+            with async_linear_collective_launch_scope(
+                input,
+                tp_group,
+                collective_op="all-gather",
+                dim="first",
+                launch_site="embedding_wgrad_drain_all_gather",
+                payload_role="weight_gradient_input",
+            ) as all_gather_observation:
+                handle = dist_all_gather_func(
+                    all_gather_buffer, input, group=tp_group, async_op=True
+                )
+            # END MEGALENS OBSERVABILITY
 
             all_gathered_input[(i + 1) % 2] = all_gather_buffer
             all_gather_buffer = None
@@ -1194,7 +1236,15 @@ def drain_embedding_wgrad_compute(
         input, all_gathered_input[i % 2], grad_output = None, None, None
 
         if config.sequence_parallel:
-            handle.wait()
+            # BEGIN MEGALENS OBSERVABILITY
+            wait_async_linear_collective(
+                handle,
+                all_gather_observation,
+                completion_site="embedding_wgrad_drain_input_ready",
+                wait_role="dependency",
+                terminal=True,
+            )
+            # END MEGALENS OBSERVABILITY
 
     grad_output = grad_output_buffer.pop(0)
     wgrad_compute(all_gathered_input[drain_idx], grad_output, weight)

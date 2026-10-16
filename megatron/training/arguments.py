@@ -6,18 +6,29 @@ import argparse
 import dataclasses
 import json
 import os
-from pathlib import Path
 import re
 import types
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+import warnings
+
+# END MEGALENS OBSERVABILITY  # isort: split
+from pathlib import Path
 
 import torch
 import torch.nn.functional as F
 from packaging.version import Version as PkgVersion
 
+from megatron.core.activations import squared_relu
 from megatron.core.dist_checkpointing.validation import StrictHandling
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
+from megatron.core.msc_utils import MultiStorageClientFeature
+from megatron.core.quantization.utils import (
+    kitchen_quantization_recipe_config,
+    load_quantization_recipe,
+)
 from megatron.core.rerun_state_machine import RerunStateMachine
 from megatron.core.transformer import MLATransformerConfig, TransformerConfig
-from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.transformer.cuda_graph_config import (
     ALLOWED_INFERENCE_SCOPES,
     get_deprecated_cuda_graph_modules_migration,
@@ -30,29 +41,22 @@ from megatron.core.transformer.heterogeneous.heterogeneous_config import (
     HeterogeneousTransformerConfig,
     MLPConfig,
 )
+from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
 from megatron.core.utils import (
     get_torch_version,
     is_flashinfer_min_version,
     is_te_min_version,
     is_torch_min_version,
 )
-from megatron.core.activations import squared_relu
-from megatron.core.fusions.fused_bias_geglu import quick_gelu
+from megatron.training.argument_utils import ArgumentGroupFactory, core_transformer_config_from_args
 from megatron.training.global_vars import set_global_variables
 from megatron.training.utils import (
     get_device_arch_version,
-    update_use_dist_ckpt,
     print_rank_0,
+    update_use_dist_ckpt,
     warn_rank_0,
 )
-from megatron.core.msc_utils import MultiStorageClientFeature
 
-from megatron.core.quantization.utils import (
-    kitchen_quantization_recipe_config,
-    load_quantization_recipe,
-)
-
-from megatron.training.argument_utils import ArgumentGroupFactory, core_transformer_config_from_args
 
 def add_megatron_arguments(parser: argparse.ArgumentParser):
     """"Add Megatron-LM arguments to the given parser."""
@@ -90,10 +94,100 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
     parser = _add_msc_args(parser)
     parser = _add_kitchen_quantization_arguments(parser)
     parser = _add_sft_args(parser)
+    # BEGIN MEGALENS OBSERVABILITY
+    parser = _add_megalens_args(parser)
+    # END MEGALENS OBSERVABILITY
 
     parser = _add_fault_injector_args(parser)
 
     return parser
+
+
+# BEGIN MEGALENS OBSERVABILITY
+def _add_megalens_args(parser):
+    group = parser.add_argument_group(title='megalens')
+    group.add_argument(
+        '--trace',
+        action='store_true',
+        help='Enable rank-local MegaLens training traces.',
+    )
+    group.add_argument(
+        '--trace-mode',
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help='0 records the lightweight sentinel; 1 records framework scopes.',
+    )
+    group.add_argument(
+        '--hardware-monitor',
+        action='store_true',
+        help='Sample hardware counters during active MegaLens iterations.',
+    )
+    group.add_argument('--trace-dir', type=str, default='trace_output')
+    group.add_argument('--trace-interval', type=int, default=1000)
+    group.add_argument('--continuous-trace-iterations', type=int, default=1)
+    group.add_argument(
+        '--trace-granularity',
+        choices=['base', 'full'],
+        default='full',
+    )
+    group.add_argument('--sentinel-hw-sample-ms', type=float, default=100.0)
+    group.add_argument('--sentinel-flush-interval', type=int, default=100)
+    group.add_argument(
+        '--trace-gather-to-rank0',
+        action='store_true',
+        default=False,
+        help='Use the legacy collective single-writer trace path.',
+    )
+    group.add_argument(
+        '--trace-cupti-kernels',
+        choices=['auto', 'on', 'off'],
+        default='off',
+        help=(
+            'Optional CUDA kernel-level tracing via torch.profiler. "auto" enables '
+            'kernel capture for mode-1 full traces, "on" forces it for mode-1 '
+            'traces, and "off" disables it.'
+        ),
+    )
+    return parser
+
+
+def _validate_megalens_args(args):
+    if args.hardware_monitor and not args.trace:
+        raise ValueError('--hardware-monitor requires --trace')
+    if not args.trace:
+        return
+    if args.trace_interval <= 0:
+        raise ValueError('--trace-interval must be greater than zero')
+    if not 0 < args.continuous_trace_iterations <= args.trace_interval:
+        raise ValueError(
+            '--continuous-trace-iterations must be in [1, trace-interval]'
+        )
+    if args.sentinel_hw_sample_ms <= 0:
+        raise ValueError('--sentinel-hw-sample-ms must be greater than zero')
+    if args.sentinel_flush_interval <= 0:
+        raise ValueError('--sentinel-flush-interval must be greater than zero')
+    kernel_capture_requested = (
+        args.trace_mode != 0 and args.trace_cupti_kernels != 'off'
+    )
+    if args.cuda_graph_impl != 'none':
+        warnings.warn(
+            'MegaLens tracing with CUDA Graphs records eager and graph-external '
+            'framework scopes; Python scopes inside managed capture/replay are '
+            'unavailable.',
+            RuntimeWarning,
+            stacklevel=2,
+        )
+    if (
+        kernel_capture_requested
+        and args.profile
+        and args.use_pytorch_profiler
+    ):
+        raise ValueError(
+            'MegaLens kernel capture cannot nest the Megatron PyTorch profiler'
+        )
+# END MEGALENS OBSERVABILITY
+
 
 def parse_and_validate_args(extra_args_provider=None, ignore_unknown_args=False, args_defaults={}):
     args = parse_args(extra_args_provider, ignore_unknown_args)
@@ -398,6 +492,9 @@ def tuple_type(x):
 
 def validate_args(args, defaults={}):
 
+    # BEGIN MEGALENS OBSERVABILITY
+    _validate_megalens_args(args)
+    # END MEGALENS OBSERVABILITY
     # Prep for checkpoint conversion.
     if args.ckpt_convert_format is not None:
         assert args.ckpt_convert_save is not None
@@ -409,8 +506,9 @@ def validate_args(args, defaults={}):
         'Currently only global and local checkpoints are supported'
     if args.non_persistent_ckpt_type == 'local':
         try:
-            from nvidia_resiliency_ext.checkpointing.local.ckpt_managers.local_manager import \
-                LocalCheckpointManager
+            from nvidia_resiliency_ext.checkpointing.local.ckpt_managers.local_manager import (
+                LocalCheckpointManager,
+            )
         except ModuleNotFoundError as e:
             raise RuntimeError('nvidia_resiliency_ext is required for local checkpointing') from e
 
@@ -756,8 +854,10 @@ def validate_args(args, defaults={}):
         )
 
     from megatron.core.models.hybrid.hybrid_layer_allocation import (
-        Symbols, parse_hybrid_pattern, get_hybrid_total_layer_count,
+        Symbols,
+        get_hybrid_total_layer_count,
         get_hybrid_total_pipeline_segment_count,
+        parse_hybrid_pattern,
     )
     sep = Symbols.MTP_SEPARATOR
 
@@ -1141,7 +1241,7 @@ def validate_args(args, defaults={}):
 
         assert args.ckpt_format == "fsdp_dtensor", \
             "Megatron-FSDP requires the `fsdp_dtensor` checkpointing format."
-    
+
         if args.nccl_ub:
             # In Megatron-LM, required implementation for manual registration is already provided.
             # So we enable the manual registration by default when nccl-ub and use_megatron_fsdp is set.
@@ -1156,7 +1256,7 @@ def validate_args(args, defaults={}):
 
     if args.fsdp_manual_registration:
         assert args.use_megatron_fsdp, "FSDP manual registration is only supported with Megatron FSDP."
-        assert args.nccl_ub, "FSDP manual registration is only supported with --nccl-ub argument."      
+        assert args.nccl_ub, "FSDP manual registration is only supported with --nccl-ub argument."
 
     # Parameters dtype.
     args.params_dtype = torch.float
@@ -1756,10 +1856,10 @@ def validate_args(args, defaults={}):
     assert not (
         args.cuda_graph_impl == "full_iteration" and args.cuda_graph_modules
     ), '--cuda-graph-modules must be empty when --cuda-graph-impl=full_iteration.'
-    
+
     if args.multi_latent_attention:
         assert not args.group_query_attention, "Group query attention is mutually exclusive with multi latent attention."
-        
+
     if args.mla_down_proj_fusion:
         assert args.multi_latent_attention, "--mla-down-proj-fusion requires --multi-latent-attention"
 
@@ -2443,7 +2543,7 @@ def _add_rl_args(parser):
                        default=False,
                        help='If set, do not toggle CUDA graphs on/off between inference and training phases.')
     group.add_argument('--rl-inference-tensor-model-parallel-size', type=int, default=None,
-                       help='Degree of tensor model parallelism for inference for RL.')     
+                       help='Degree of tensor model parallelism for inference for RL.')
     group.add_argument(
         '--rl-inference-pipeline-model-parallel-size',
         type=int,
@@ -2508,8 +2608,7 @@ def _add_rl_args(parser):
     return parser
 
 def _add_training_args(parser):
-    from megatron.training.config import TrainingConfig
-    from megatron.training.config import ProfilingConfig
+    from megatron.training.config import ProfilingConfig, TrainingConfig
 
     prof_factory = ArgumentGroupFactory(ProfilingConfig)
     prof_group = prof_factory.build_group(parser, "profiling")
@@ -3345,7 +3444,7 @@ def _add_kitchen_quantization_arguments(parser: argparse.ArgumentParser):
     If kitchen isn't available, nothing to do here, return unchanged parser
     """
     try:
-        from megatron.core.extensions.kitchen import KitchenSpecProvider, HAVE_KITCHEN
+        from megatron.core.extensions.kitchen import HAVE_KITCHEN, KitchenSpecProvider
 
     except (ImportError, ModuleNotFoundError):
         HAVE_KITCHEN = False

@@ -14,6 +14,11 @@ from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fusions.fused_bias_geglu import bias_geglu_impl
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.tensor_parallel.mappings import (
     copy_to_tensor_model_parallel_region,
     gather_from_sequence_parallel_region,
@@ -29,6 +34,7 @@ from megatron.core.utils import (
     is_torch_min_version,
     make_sharded_tensor_for_checkpoint,
 )
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
@@ -155,6 +161,9 @@ class SharedExpertMLP(MLP):
                 set_save_original_input(self.linear_fc1)
 
         if self.config.moe_shared_expert_overlap:
+            # BEGIN MEGALENS OBSERVABILITY
+            self._shared_expert_trace_identity = (None, None)
+            # END MEGALENS OBSERVABILITY
             # disable TP related AG/RS communications in the linear module
             for linear in [self.linear_fc1, self.linear_fc2]:
                 if hasattr(linear, 'parallel_mode'):
@@ -190,6 +199,17 @@ class SharedExpertMLP(MLP):
             if self.__class__.stream is None:
                 self.__class__.stream = cur_platform.Stream()  # FlagScale Modify
             self.stream = self.__class__.stream
+
+    # BEGIN MEGALENS OBSERVABILITY
+    def _overlap_trace_scope(self, stage: str):
+        """Open one shared-stream stage without changing its execution lifecycle."""
+        gate = prepare_trace_scope("moe-shared-expert")
+        attrs = None
+        if gate is not None:
+            layer, ep_size = self._shared_expert_trace_identity
+            attrs = {"layer": layer, "ep_size": ep_size, "stage": stage}
+        return open_trace_scope(gate, "moe-shared-expert", attrs=attrs)
+    # END MEGALENS OBSERVABILITY
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Forward function"""
@@ -234,18 +254,21 @@ class SharedExpertMLP(MLP):
         if wait_current_stream:
             self.wait_current_stream()
         with cur_platform.stream(self.stream):  # FlagScale Modify
-            if self.use_shared_expert_gate:
-                logits = torch.nn.functional.linear(input, self.gate_weight)
-                self.gate_score = torch.nn.functional.sigmoid(logits)
-            if self.config.sequence_parallel:
-                self.cached_fc1_input = gather_from_sequence_parallel_region(
-                    input, tensor_parallel_output_grad=True, group=self.tp_group
-                )
-            else:
-                self.cached_fc1_input = copy_to_tensor_model_parallel_region(
-                    input, group=self.tp_group
-                )
-            set_tensor_grad_fn_sequence_sr(self.cached_fc1_input, torch.iinfo(torch.int).max)
+            # BEGIN MEGALENS OBSERVABILITY
+            with self._overlap_trace_scope("pre_forward_comm"):
+                if self.use_shared_expert_gate:
+                    logits = torch.nn.functional.linear(input, self.gate_weight)
+                    self.gate_score = torch.nn.functional.sigmoid(logits)
+                if self.config.sequence_parallel:
+                    self.cached_fc1_input = gather_from_sequence_parallel_region(
+                        input, tensor_parallel_output_grad=True, group=self.tp_group
+                    )
+                else:
+                    self.cached_fc1_input = copy_to_tensor_model_parallel_region(
+                        input, group=self.tp_group
+                    )
+                set_tensor_grad_fn_sequence_sr(self.cached_fc1_input, torch.iinfo(torch.int).max)
+            # END MEGALENS OBSERVABILITY
 
     @overlap_state_check(
         SharedExpertState.PRE_FORWARD_COMM_DONE, SharedExpertState.FC1_FORWARD_DONE
@@ -257,53 +280,56 @@ class SharedExpertMLP(MLP):
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
         with cur_platform.stream(self.stream):  # FlagScale Modify
-            # [s, b, 4 * h/p]
-            intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
-                self.cached_fc1_input
-            )
-            self.cached_fc1_input = None
+            # BEGIN MEGALENS OBSERVABILITY
+            with self._overlap_trace_scope("linear_fc1_forward_and_act"):
+                # [s, b, 4 * h/p]
+                intermediate_parallel, bias_parallel = apply_module(self.linear_fc1)(
+                    self.cached_fc1_input
+                )
+                self.cached_fc1_input = None
 
-            if self.config.use_te_activation_func:
-                if bias_parallel is not None:
-                    intermediate_parallel = intermediate_parallel + bias_parallel
-                intermediate_parallel = self.activation_func(intermediate_parallel)
-            elif self.config.bias_activation_fusion:
-                if self.activation_func == F.gelu:
-                    if self.config.gated_linear_unit:
-                        intermediate_parallel = bias_geglu_impl(
-                            intermediate_parallel, bias_parallel
+                if self.config.use_te_activation_func:
+                    if bias_parallel is not None:
+                        intermediate_parallel = intermediate_parallel + bias_parallel
+                    intermediate_parallel = self.activation_func(intermediate_parallel)
+                elif self.config.bias_activation_fusion:
+                    if self.activation_func == F.gelu:
+                        if self.config.gated_linear_unit:
+                            intermediate_parallel = bias_geglu_impl(
+                                intermediate_parallel, bias_parallel
+                            )
+                        else:
+                            assert self.config.add_bias_linear is True
+                            intermediate_parallel = bias_gelu_impl(intermediate_parallel, bias_parallel)
+                    elif self.activation_func == F.silu and self.config.gated_linear_unit:
+                        intermediate_parallel = bias_swiglu_impl(
+                            intermediate_parallel,
+                            bias_parallel,
+                            self.config.activation_func_fp8_input_store,
+                            clamp_value=self.config.activation_func_clamp_value,
                         )
                     else:
-                        assert self.config.add_bias_linear is True
-                        intermediate_parallel = bias_gelu_impl(intermediate_parallel, bias_parallel)
-                elif self.activation_func == F.silu and self.config.gated_linear_unit:
-                    intermediate_parallel = bias_swiglu_impl(
-                        intermediate_parallel,
-                        bias_parallel,
-                        self.config.activation_func_fp8_input_store,
-                        clamp_value=self.config.activation_func_clamp_value,
-                    )
+                        raise ValueError("Only support fusion of gelu and swiglu")
                 else:
-                    raise ValueError("Only support fusion of gelu and swiglu")
-            else:
-                if bias_parallel is not None:
-                    intermediate_parallel = intermediate_parallel + bias_parallel
-                if self.config.gated_linear_unit:
+                    if bias_parallel is not None:
+                        intermediate_parallel = intermediate_parallel + bias_parallel
+                    if self.config.gated_linear_unit:
 
-                    def glu(x):
-                        x_glu, x_linear = torch.chunk(x, 2, dim=-1)
-                        if (val := self.config.activation_func_clamp_value) is not None:
-                            x_glu = x_glu.clamp(min=None, max=val)
-                            x_linear = x_linear.clamp(min=-val, max=val)
-                        return self.config.activation_func(x_glu) * (
-                            x_linear + self.config.glu_linear_offset
-                        )
+                        def glu(x):
+                            x_glu, x_linear = torch.chunk(x, 2, dim=-1)
+                            if (val := self.config.activation_func_clamp_value) is not None:
+                                x_glu = x_glu.clamp(min=None, max=val)
+                                x_linear = x_linear.clamp(min=-val, max=val)
+                            return self.config.activation_func(x_glu) * (
+                                x_linear + self.config.glu_linear_offset
+                            )
 
-                    intermediate_parallel = glu(intermediate_parallel)
-                else:
-                    intermediate_parallel = self.activation_func(intermediate_parallel)
+                        intermediate_parallel = glu(intermediate_parallel)
+                    else:
+                        intermediate_parallel = self.activation_func(intermediate_parallel)
 
-            self.cached_fc2_input = intermediate_parallel
+                self.cached_fc2_input = intermediate_parallel
+            # END MEGALENS OBSERVABILITY
         # Tensor sequence number is used to control the backward order.
         # Decrease the sequence number of the expert output to make the comm launched first
         # in the backward order.
@@ -323,9 +349,12 @@ class SharedExpertMLP(MLP):
         if overlapped_comm_output is not None:
             set_tensor_grad_fn_sequence_sr(overlapped_comm_output, torch.iinfo(torch.int).max)
         with cur_platform.stream(self.stream):  # FlagScale Modify
-            # [s, b, h]
-            self.cached_fc2_output, _ = apply_module(self.linear_fc2)(self.cached_fc2_input)
-            self.cached_fc2_input = None
+            # BEGIN MEGALENS OBSERVABILITY
+            with self._overlap_trace_scope("linear_fc2_forward"):
+                # [s, b, h]
+                self.cached_fc2_output, _ = apply_module(self.linear_fc2)(self.cached_fc2_input)
+                self.cached_fc2_input = None
+            # END MEGALENS OBSERVABILITY
 
     @overlap_state_check(
         SharedExpertState.FC2_FORWARD_DONE, SharedExpertState.POST_FORWARD_COMM_DONE
@@ -337,16 +366,19 @@ class SharedExpertMLP(MLP):
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
         with cur_platform.stream(self.stream):  # FlagScale Modify
-            if self.config.sequence_parallel:
-                self.cached_output = reduce_scatter_to_sequence_parallel_region(
-                    self.cached_fc2_output, group=self.tp_group
-                )
-            else:
-                self.cached_output = reduce_from_tensor_model_parallel_region(
-                    self.cached_fc2_output, group=self.tp_group
-                )
-            self.cached_fc2_output = None
-            set_tensor_grad_fn_sequence_sr(self.cached_output, torch.iinfo(torch.int).max)
+            # BEGIN MEGALENS OBSERVABILITY
+            with self._overlap_trace_scope("post_forward_comm"):
+                if self.config.sequence_parallel:
+                    self.cached_output = reduce_scatter_to_sequence_parallel_region(
+                        self.cached_fc2_output, group=self.tp_group
+                    )
+                else:
+                    self.cached_output = reduce_from_tensor_model_parallel_region(
+                        self.cached_fc2_output, group=self.tp_group
+                    )
+                self.cached_fc2_output = None
+                set_tensor_grad_fn_sequence_sr(self.cached_output, torch.iinfo(torch.int).max)
+            # END MEGALENS OBSERVABILITY
 
     @overlap_state_check(SharedExpertState.POST_FORWARD_COMM_DONE, SharedExpertState.IDLE)
     def get_output(self):
@@ -356,13 +388,16 @@ class SharedExpertMLP(MLP):
         It is only useful when --moe-shared-expert-overlap is set and may be changed.
         """
         with cur_platform.stream(self.stream):  # FlagScale Modify
-            if self.use_shared_expert_gate:
-                assert self.gate_score is not None
-                output = self.cached_output * self.gate_score
-                self.gate_score = None
-            else:
-                output = self.cached_output
-            self.cached_output = None
+            # BEGIN MEGALENS OBSERVABILITY
+            with self._overlap_trace_scope("get_output"):
+                if self.use_shared_expert_gate:
+                    assert self.gate_score is not None
+                    output = self.cached_output * self.gate_score
+                    self.gate_score = None
+                else:
+                    output = self.cached_output
+                self.cached_output = None
+            # END MEGALENS OBSERVABILITY
         cur_platform.current_stream().wait_stream(self.stream)  # FlagScale Modify
         return output
 

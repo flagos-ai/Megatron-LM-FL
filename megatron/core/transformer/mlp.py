@@ -23,6 +23,11 @@ from megatron.core.fusions.fused_bias_geglu import (
 )
 from megatron.core.fusions.fused_bias_gelu import bias_gelu_impl
 from megatron.core.fusions.fused_bias_swiglu import bias_swiglu_impl, weighted_bias_swiglu_impl
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import scoped_forward
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -249,6 +254,9 @@ class MLP(MegatronModule):
             name=(name + ".linear_fc2") if name is not None else None,
         )
 
+    # BEGIN MEGALENS OBSERVABILITY
+    @scoped_forward("MLP.forward")
+    # END MEGALENS OBSERVABILITY
     def forward(
         self, hidden_states: torch.Tensor, per_token_scale: torch.Tensor | None = None, **kwargs
     ):

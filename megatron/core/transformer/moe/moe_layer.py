@@ -4,13 +4,22 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, Protocol
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from typing import Any, Mapping, Optional, Protocol
+
+# END MEGALENS OBSERVABILITY  # isort: split
 
 import torch
 
 from megatron.core import tensor_parallel, utils
 from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.inference.utils import InferenceMode
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import open_trace_scope, prepare_trace_scope, trace_is_enabled
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.moe.moe_utils import (
@@ -19,6 +28,22 @@ from megatron.core.transformer.moe.moe_utils import (
     get_default_pg_collection,
     maybe_skip_or_early_return_by_cudagraph,
 )
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.transformer.moe.observability import (
+    EXPERT_WORKLOAD_SLOTS,
+    bind_dispatch_fields,
+    capture_dispatch_fields,
+    combine_trace_context,
+    current_dispatch_fields,
+    dispatch_trace_context,
+    expert_workload,
+    experts_trace_context,
+    set_trace_fields,
+    shared_experts_trace_context,
+)
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.moe.token_dispatcher import (
@@ -208,6 +233,14 @@ class BaseMoELayer(MegatronModule, ABC):
         """Set the layer number for the MoE layer."""
         self.layer_number = layer_number
         self.router.set_layer_number(layer_number)
+        # BEGIN MEGALENS OBSERVABILITY
+        if self.shared_expert_overlap and self.shared_experts is not None:
+            setattr(
+                self.shared_experts,
+                "_shared_expert_trace_identity",
+                (self.layer_number, int(utils.get_pg_size(self.ep_group))),
+            )
+        # END MEGALENS OBSERVABILITY
 
 
 class MoELayer(BaseMoELayer):
@@ -347,6 +380,13 @@ class MoELayer(BaseMoELayer):
                 name=(name + ".shared_experts") if name is not None else None,
             )
             if self.shared_expert_overlap:
+                # BEGIN MEGALENS OBSERVABILITY
+                setattr(
+                    self.shared_experts,
+                    "_shared_expert_trace_identity",
+                    (self.layer_number, int(utils.get_pg_size(self.ep_group))),
+                )
+                # END MEGALENS OBSERVABILITY
                 self.token_dispatcher.set_shared_experts(self.shared_experts)
 
         # Inference-optimized mode setup
@@ -456,6 +496,23 @@ class MoELayer(BaseMoELayer):
         return probs, routing_map
     ######## FlagScale End ########
 
+    # BEGIN MEGALENS OBSERVABILITY
+    def _route_for_dispatch(
+        self,
+        hidden_states: torch.Tensor,
+        padding_mask: Optional[torch.Tensor] = None,
+        input_ids: Optional[torch.Tensor] = None,
+    ):
+        """Route once and capture fields for the matching eager dispatch."""
+        if not trace_is_enabled("moe-dispatch"):
+            probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
+            return probs, routing_map, None
+
+        with capture_dispatch_fields() as collector:
+            probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
+        return probs, routing_map, collector.fields()
+    # END MEGALENS OBSERVABILITY
+
     @maybe_skip_or_early_return_by_cudagraph("preprocess")
     def preprocess(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
@@ -507,7 +564,30 @@ class MoELayer(BaseMoELayer):
         """
         if self.config.overlap_dispatch_backward_with_experts_wgrad:
             hidden_states = _RegisterDelayedWgradForExperts.apply(self, hidden_states)
-        return self.token_dispatcher.token_dispatch(hidden_states, probs)
+        # BEGIN MEGALENS OBSERVABILITY
+        dispatch_gate = prepare_trace_scope("moe-dispatch")
+        dispatch_context = (
+            dispatch_trace_context(self, hidden_states, current_dispatch_fields())
+            if dispatch_gate is not None
+            else None
+        )
+        with open_trace_scope(dispatch_gate, "moe-dispatch", attrs=dispatch_context):
+            return self.token_dispatcher.token_dispatch(hidden_states, probs)
+        # END MEGALENS OBSERVABILITY
+
+    # BEGIN MEGALENS OBSERVABILITY
+    def _dispatch_with_fields(
+        self,
+        hidden_states: torch.Tensor,
+        probs: torch.Tensor,
+        fields: Mapping[str, Any] | None,
+    ):
+        """Dispatch with router evidence captured for this invocation."""
+        if fields is None:
+            return self.dispatch(hidden_states, probs)
+        with bind_dispatch_fields(fields):
+            return self.dispatch(hidden_states, probs)
+    # END MEGALENS OBSERVABILITY
 
     @maybe_skip_or_early_return_by_cudagraph("shared_experts_compute")
     def shared_experts_compute(self, hidden_states: torch.Tensor):
@@ -518,22 +598,31 @@ class MoELayer(BaseMoELayer):
         """
         shared_expert_output = None
         if self.use_shared_expert and not self.shared_expert_overlap:
-            # Compute the shared expert separately when not overlapped with communication.
-            if self.shared_experts_recompute:
-                if self.config.fp8 or self.config.fp4:
-                    shared_expert_output = te_checkpoint(
-                        apply_module(self.shared_experts),
-                        False,
-                        tensor_parallel.random.get_cuda_rng_tracker,
-                        self.tp_group,
-                        hidden_states,
-                    )
+            # BEGIN MEGALENS OBSERVABILITY
+            shared_expert_gate = prepare_trace_scope("moe-shared-expert")
+            shared_expert_context = (
+                shared_experts_trace_context(self) if shared_expert_gate is not None else None
+            )
+            with open_trace_scope(
+                shared_expert_gate, "moe-shared-expert", attrs=shared_expert_context
+            ):
+                # Compute the shared expert separately when not overlapped with communication.
+                if self.shared_experts_recompute:
+                    if self.config.fp8 or self.config.fp4:
+                        shared_expert_output = te_checkpoint(
+                            apply_module(self.shared_experts),
+                            False,
+                            tensor_parallel.random.get_cuda_rng_tracker,
+                            self.tp_group,
+                            hidden_states,
+                        )
+                    else:
+                        shared_expert_output = tensor_parallel.checkpoint(
+                            apply_module(self.shared_experts), False, hidden_states
+                        )
                 else:
-                    shared_expert_output = tensor_parallel.checkpoint(
-                        apply_module(self.shared_experts), False, hidden_states
-                    )
-            else:
-                shared_expert_output = apply_module(self.shared_experts)(hidden_states)
+                    shared_expert_output = apply_module(self.shared_experts)(hidden_states)
+            # END MEGALENS OBSERVABILITY
 
         return shared_expert_output
 
@@ -552,19 +641,41 @@ class MoELayer(BaseMoELayer):
         dispatched_input, tokens_per_expert, permuted_probs = (
             self.token_dispatcher.dispatch_postprocess(hidden_states, probs)
         )
-        if hasattr(self, "_inference_token_dispatcher") and InferenceMode.is_active():
-            routing_map = self.token_dispatcher.routing_map
-            expert_output, mlp_bias = apply_module(self.experts)(
-                dispatched_input, tokens_per_expert, permuted_probs, routing_map=routing_map
-            )
-        else:
-            expert_output, mlp_bias = apply_module(self.experts)(
-                dispatched_input, tokens_per_expert, permuted_probs
-            )
+        # BEGIN MEGALENS OBSERVABILITY
+        experts_gate = prepare_trace_scope("moe-experts")
+        experts_context = experts_trace_context(self) if experts_gate is not None else None
+        experts_workload = expert_workload(tokens_per_expert) if experts_gate is not None else None
+        with open_trace_scope(
+            experts_gate, "moe-experts", attrs=experts_context, slots=EXPERT_WORKLOAD_SLOTS
+        ) as experts_scope:
+            if experts_workload is not None:
+                set_trace_fields(experts_scope, experts_workload)
+            if hasattr(self, "_inference_token_dispatcher") and InferenceMode.is_active():
+                routing_map = self.token_dispatcher.routing_map
+                expert_output, mlp_bias = apply_module(self.experts)(
+                    dispatched_input, tokens_per_expert, permuted_probs, routing_map=routing_map
+                )
+            else:
+                expert_output, mlp_bias = apply_module(self.experts)(
+                    dispatched_input, tokens_per_expert, permuted_probs
+                )
+        # END MEGALENS OBSERVABILITY
         assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
         output = self.token_dispatcher.combine_preprocess(expert_output)
 
         return output, mlp_bias
+
+    # BEGIN MEGALENS OBSERVABILITY
+    def _combine_with_scope(self, output: torch.Tensor, *, include_postprocess: bool):
+        """Use the full source boundary for sequential calls and a short split-call boundary."""
+        combine_gate = prepare_trace_scope("moe-combine")
+        combine_context = combine_trace_context(self, output) if combine_gate is not None else None
+        with open_trace_scope(combine_gate, "moe-combine", attrs=combine_context):
+            output = self.token_dispatcher.token_combine(output)
+            if include_postprocess:
+                output = self.token_dispatcher.combine_postprocess(output)
+        return output
+    # END MEGALENS OBSERVABILITY
 
     def combine(self, output: torch.Tensor):
         """Combines expert outputs via communication and adds shared expert output.
@@ -572,18 +683,15 @@ class MoELayer(BaseMoELayer):
         This method uses the token dispatcher to combine the outputs from different
         experts (e.g., via an All-to-All communication).
         """
-        output = self.token_dispatcher.token_combine(output)
-        return output
+        # BEGIN MEGALENS OBSERVABILITY
+        return self._combine_with_scope(output, include_postprocess=False)
+        # END MEGALENS OBSERVABILITY
 
-    def postprocess(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]):
-        """Project the output back from latent dimension to hidden dimension after combine
-        in latent dimension if needed. Combine expert output with shared_experts if needed.
-
-        _latent_shared_expert_output is inference-only (latent-MoE + NVLS dispatcher with
-        shared-expert overlap). It is populated in preprocess and joined here, after
-        fc2_latent_proj, so the dimensions match the full hidden dim."""
-
-        output = self.token_dispatcher.combine_postprocess(output)
+    # BEGIN MEGALENS OBSERVABILITY
+    def _finish_postprocess(
+        self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]
+    ):
+        """Apply target-only post-combine computation outside the source scope."""
         if self.config.moe_latent_size:
             output, _ = self.fc2_latent_proj(output)
 
@@ -599,6 +707,23 @@ class MoELayer(BaseMoELayer):
             output = output + self._latent_shared_expert_output
             self._latent_shared_expert_output = None
         return output
+
+    def _combine_and_postprocess(
+        self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]
+    ):
+        """Restore the source combine boundary for sequential target call paths."""
+        output = self._combine_with_scope(output, include_postprocess=True)
+        return self._finish_postprocess(output, shared_expert_output)
+    # END MEGALENS OBSERVABILITY
+
+    def postprocess(self, output: torch.Tensor, shared_expert_output: Optional[torch.Tensor]):
+        """Project the output back from latent dimension to hidden dimension after combine
+        in latent dimension if needed. Combine expert output with shared_experts if needed."""
+
+        output = self.token_dispatcher.combine_postprocess(output)
+        # BEGIN MEGALENS OBSERVABILITY
+        return self._finish_postprocess(output, shared_expert_output)
+        # END MEGALENS OBSERVABILITY
 
     def router_and_preprocess(self, hidden_states: torch.Tensor):
         """This method is a combined method of route and preprocess. Deprecated."""
@@ -657,6 +782,10 @@ class MoELayer(BaseMoELayer):
 
         # MoE forward: route -> dispatch -> compute -> combine
         def custom_forward(hidden_states, intermediate_tensors=None, padding_mask=None):
+            # BEGIN MEGALENS OBSERVABILITY
+            combine_postprocess_completed = False
+            dispatch_fields = None
+            # END MEGALENS OBSERVABILITY
             try:
                 if "route" in self.fwd_execution_map:
                     shared_expert_output = self.shared_experts_compute(hidden_states)
@@ -665,8 +794,11 @@ class MoELayer(BaseMoELayer):
                         self._overload_log_num_local_tokens = (
                             self._num_token_rows_from_moe_hidden_states(hidden_states)
                         )
-                    probs, routing_map = self.route(hidden_states, padding_mask, input_ids)
-                    ######## FlagScale End ########
+                    # BEGIN MEGALENS OBSERVABILITY
+                    probs, routing_map, dispatch_fields = self._route_for_dispatch(
+                        hidden_states, padding_mask, input_ids
+                    )
+                    # END MEGALENS OBSERVABILITY
                     hidden_states, probs = self.preprocess(hidden_states, probs, routing_map)
 
                     if intermediate_tensors is not None:
@@ -684,12 +816,22 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     hidden_states, probs = intermediate_tensors
 
-                dispatched_input, probs = self.dispatch(hidden_states, probs)
+                # BEGIN MEGALENS OBSERVABILITY
+                dispatched_input, probs = self._dispatch_with_fields(
+                    hidden_states, probs, dispatch_fields
+                )
+                # END MEGALENS OBSERVABILITY
                 output, mlp_bias = self.routed_experts_compute(dispatched_input, probs)
                 assert (
                     mlp_bias is None
                 ), f"mlp_bias is not supported for {type(self.token_dispatcher)}"
-                output = self.combine(output)
+                # BEGIN MEGALENS OBSERVABILITY
+                if intermediate_tensors is None and "postprocess" in self.fwd_execution_map:
+                    output = self._combine_and_postprocess(output, shared_expert_output)
+                    combine_postprocess_completed = True
+                else:
+                    output = self.combine(output)
+                # END MEGALENS OBSERVABILITY
 
                 if intermediate_tensors is not None:
                     return output, mlp_bias
@@ -698,7 +840,10 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     output, shared_expert_output = intermediate_tensors
 
-                output = self.postprocess(output, shared_expert_output)
+                # BEGIN MEGALENS OBSERVABILITY
+                if not combine_postprocess_completed:
+                    output = self.postprocess(output, shared_expert_output)
+                # END MEGALENS OBSERVABILITY
 
                 if intermediate_tensors is not None:
                     return output
@@ -755,6 +900,14 @@ class MoELayer(BaseMoELayer):
             from megatron.core.extensions.transformer_engine import set_save_original_input
 
             set_save_original_input(self.shared_experts.linear_fc1)
+
+
+# BEGIN MEGALENS OBSERVABILITY
+setattr(MoELayer.dispatch, "__megatron_trace_event__", "moe-dispatch")
+setattr(MoELayer.shared_experts_compute, "__megatron_trace_event__", "moe-shared-expert")
+setattr(MoELayer.routed_experts_compute, "__megatron_trace_event__", "moe-experts")
+setattr(MoELayer._combine_with_scope, "__megatron_trace_event__", "moe-combine")
+# END MEGALENS OBSERVABILITY
 
 
 class _RecordExpertDgradCompletion(torch.autograd.Function):

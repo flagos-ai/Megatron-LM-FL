@@ -13,6 +13,10 @@ try:
 except ImportError:
     HAVE_DTENSOR = False
 
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import open_trace_scope, prepare_trace_scope, trace_scope
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.pipeline_parallel.utils import (
     get_pp_last_rank,
     is_pp_first_stage,
@@ -40,12 +44,17 @@ except ImportError:
 from .. import parallel_state
 from ..transformer.moe.moe_utils import get_updated_expert_bias
 from ..transformer.transformer_config import TransformerConfig
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
 from ..utils import (
     get_attr_wrapped_model,
     get_model_config,
     get_pg_size,
+    get_process_group_peer_ranks,
     get_tensor_model_parallel_group_if_none,
 )
+
+# END MEGALENS OBSERVABILITY  # isort: split
 
 
 def _get_main_grad_attr(param: torch.nn.Parameter):
@@ -103,6 +112,42 @@ def _reshard_if_dtensor(
     return reference_tensor
 
 
+# BEGIN MEGALENS OBSERVABILITY
+def _reduce_op_name(op: torch.distributed.ReduceOp) -> str:
+    """Return the stable source-contract name for a distributed reduce operation."""
+    return getattr(op, "name", str(op).split(".")[-1])
+
+
+def _all_reduce_with_trace(
+    tensor: torch.Tensor,
+    group: torch.distributed.ProcessGroup,
+    name: str,
+    op: Optional[torch.distributed.ReduceOp] = None,
+    ctx: Optional[dict] = None,
+):
+    """Run one synchronous all-reduce with source-compatible observability."""
+    gate = prepare_trace_scope(name)
+    trace_ctx = None
+    if gate is not None:
+        trace_ctx = {
+            "data_bytes": int(tensor.numel() * tensor.element_size()),
+            "group_size": get_pg_size(group),
+        }
+        if op is not None:
+            trace_ctx["reduce_op"] = _reduce_op_name(op)
+        if ctx:
+            trace_ctx.update(ctx)
+
+    with open_trace_scope(gate, name, ctx=trace_ctx, slots=("group",)) as scope:
+        if op is None:
+            torch.distributed.all_reduce(tensor, group=group)
+        else:
+            torch.distributed.all_reduce(tensor, op=op, group=group)
+        if gate is not None:
+            scope.set("group", get_process_group_peer_ranks(group))
+# END MEGALENS OBSERVABILITY
+
+
 def _allreduce_conditional_embedding_grads(
     model: List[torch.nn.Module],
     config: TransformerConfig,
@@ -143,7 +188,14 @@ def _allreduce_conditional_embedding_grads(
             # All-reduce the gradient on the first VPP rank.
             grads = [param_grad[0] for _, param_grad in grads_dict.items()]
             coalesced = _flatten_dense_tensors(grads)
-            torch.distributed.all_reduce(coalesced, group=pp_group)
+            # BEGIN MEGALENS OBSERVABILITY
+            _all_reduce_with_trace(
+                coalesced,
+                pp_group,
+                "embedding-grads-allreduce",
+                ctx={"embedding_kind": "conditional"},
+            )
+            # END MEGALENS OBSERVABILITY
             for buf, synced in zip(grads, _unflatten_dense_tensors(coalesced, grads)):
                 buf.copy_(synced)
 
@@ -216,13 +268,16 @@ def _allreduce_word_embedding_grads(
             assert pp_group is None
             pp_group = parallel_state.get_pipeline_model_parallel_group()
 
+    # BEGIN MEGALENS OBSERVABILITY
     _allreduce_embedding_grad(
         model,
         embd_group,
         pp_group,
         partial(_get_shared_word_embedding_weight, config=config),
         config=config,
+        trace_kind="word",
     )
+    # END MEGALENS OBSERVABILITY
 
 
 def _allreduce_embedding_grad(
@@ -232,6 +287,9 @@ def _allreduce_embedding_grad(
     weight_getter: Callable[[torch.nn.Module], Optional[torch.nn.Parameter]],
     skip_if_none: bool = True,
     config: TransformerConfig = None,
+    # BEGIN MEGALENS OBSERVABILITY
+    trace_kind: str = "embedding",
+    # END MEGALENS OBSERVABILITY
 ):
     """Unified helper to all-reduce embedding parameters across pipeline stages.
 
@@ -245,6 +303,8 @@ def _allreduce_embedding_grad(
             (or ``None`` if not applicable).
         skip_if_none (bool, optional): If True, quietly returns when the parameter or its
             gradient is ``None``. Defaults to True.
+        trace_kind (str, optional): Stable embedding subtype recorded on the all-reduce
+            observation. Defaults to ``"embedding"``.
     """
 
     embd_group_is_list = isinstance(embd_group, list)  # FlagScale Modify
@@ -282,7 +342,11 @@ def _allreduce_embedding_grad(
         # When the embedding is frozen, the grad is None.
         if grad is None and skip_if_none:
             return
-        torch.distributed.all_reduce(grad, group=embd_group)
+        # BEGIN MEGALENS OBSERVABILITY
+        _all_reduce_with_trace(
+            grad, embd_group, "embedding-grads-allreduce", ctx={"embedding_kind": trace_kind}
+        )
+        # END MEGALENS OBSERVABILITY
         setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
 
     ######## FlagScale Begin ########
@@ -330,28 +394,56 @@ def _allreduce_embedding_grad(
                 per_partion_size = grad.shape[0] // dp_world_size
                 if len(embd_group) == 1:
                     offset = per_partion_size * dp_rank
-                    torch.distributed.all_reduce(
-                        grad[offset : offset + per_partion_size, :], group=embd_group[0]
+                    # BEGIN MEGALENS OBSERVABILITY
+                    _all_reduce_with_trace(
+                        grad[offset : offset + per_partion_size, :],
+                        embd_group[0],
+                        "embedding-grads-allreduce",
+                        ctx={"embedding_kind": trace_kind},
                     )
+                    # END MEGALENS OBSERVABILITY
                 else:
                     group_idx = 0
                     per_partion_size = per_partion_size // len(embd_group)
                     for group in embd_group:
                         offset = per_partion_size * (dp_rank * len(embd_group) + group_idx)
-                        torch.distributed.all_reduce(
-                            grad[offset : offset + per_partion_size, :], group=group
+                        # BEGIN MEGALENS OBSERVABILITY
+                        _all_reduce_with_trace(
+                            grad[offset : offset + per_partion_size, :],
+                            group,
+                            "embedding-grads-allreduce",
+                            ctx={"embedding_kind": trace_kind},
                         )
+                        # END MEGALENS OBSERVABILITY
                         group_idx += 1
             else:  # megartron default method
-                torch.distributed.all_reduce(grad, group=embd_group[0])
+                # BEGIN MEGALENS OBSERVABILITY
+                _all_reduce_with_trace(
+                    grad,
+                    embd_group[0],
+                    "embedding-grads-allreduce",
+                    ctx={"embedding_kind": trace_kind},
+                )
+                # END MEGALENS OBSERVABILITY
         else:
             if len(embd_group) == 1:  # megartron default method
-                torch.distributed.all_reduce(grad, group=embd_group[0])
+                # BEGIN MEGALENS OBSERVABILITY
+                _all_reduce_with_trace(
+                    grad,
+                    embd_group[0],
+                    "embedding-grads-allreduce",
+                    ctx={"embedding_kind": trace_kind},
+                )
+                # END MEGALENS OBSERVABILITY
             else:
                 original_grad_data = grad.clone().detach().data
                 for group in embd_group:
                     grad.data.copy_(original_grad_data)
-                    torch.distributed.all_reduce(grad, group=group)
+                    # BEGIN MEGALENS OBSERVABILITY
+                    _all_reduce_with_trace(
+                        grad, group, "embedding-grads-allreduce", ctx={"embedding_kind": trace_kind}
+                    )
+                    # END MEGALENS OBSERVABILITY
         if grad.device == torch.device('cpu'):
             grad.to(cur_platform.current_device())
         setattr(weight, grad_attr, _reshard_if_dtensor(grad, orig_grad))
@@ -369,9 +461,16 @@ def _allreduce_position_embedding_grads(
     embeddings parameters stay in sync.
     """
 
+    # BEGIN MEGALENS OBSERVABILITY
     _allreduce_embedding_grad(
-        model, pos_emb_group, pp_group, _get_position_embedding_weight, skip_if_none=False
+        model,
+        pos_emb_group,
+        pp_group,
+        _get_position_embedding_weight,
+        skip_if_none=False,
+        trace_kind="position",
     )
+    # END MEGALENS OBSERVABILITY
 
 
 def _allreduce_router_grads(model: List[torch.nn.Module], config: TransformerConfig):
@@ -521,7 +620,19 @@ def _allreduce_non_tensor_model_parallel_grads(
     ):
         if grads:
             coalesced = _flatten_dense_tensors(grads)
-            torch.distributed.all_reduce(coalesced, op=all_reduce_op, group=tp_group)
+            # BEGIN MEGALENS OBSERVABILITY
+            _all_reduce_with_trace(
+                coalesced,
+                tp_group,
+                "sp-layernorm-allreduce",
+                op=all_reduce_op,
+                ctx={
+                    "grad_bucket": (
+                        "sum" if all_reduce_op == torch.distributed.ReduceOp.SUM else "avg"
+                    )
+                },
+            )
+            # END MEGALENS OBSERVABILITY
             for param, buf, synced in zip(
                 params, grads, _unflatten_dense_tensors(coalesced, grads)
             ):
@@ -593,8 +704,11 @@ def finalize_model_grads(
     # All-reduce / reduce-scatter across DP replicas.
     if config.timers is not None:
         config.timers('all-grads-sync', log_level=1).start(barrier=config.barrier_with_L1_time)
-    for model_chunk in model:
-        model_chunk.finish_grad_sync(force_all_reduce=force_all_reduce)
+    # BEGIN MEGALENS OBSERVABILITY
+    with trace_scope("all-grads-sync"):
+        for model_chunk in model:
+            model_chunk.finish_grad_sync(force_all_reduce=force_all_reduce)
+    # END MEGALENS OBSERVABILITY
     if config.timers is not None:
         config.timers('all-grads-sync').stop()
 

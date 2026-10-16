@@ -202,6 +202,51 @@ def test_nvtx_decorator(monkeypatch):
     assert all(execution_tracker.values())
 
 
+@pytest.mark.parametrize("tp_rank", [0, 1], ids=["source", "receiver"])
+def test_get_batch_on_this_tp_rank_skips_dense_metadata(monkeypatch, tp_rank):
+    calls = []
+    batch = {
+        "tokens": torch.ones((2, 3), dtype=torch.long),
+        "labels": torch.ones((2, 3), dtype=torch.long),
+        "loss_mask": torch.ones((2, 3), dtype=torch.float32),
+        "position_ids": torch.ones((2, 3), dtype=torch.long),
+        "cu_seqlens": None,
+        "max_seqlen": None,
+    }
+    monkeypatch.setattr(util.cur_platform, "current_device", lambda: 0)
+    monkeypatch.setattr(util.cur_platform, "device", lambda index: torch.device("cpu"))
+
+    def fake_broadcast(item, src, group=None):
+        assert src == 0
+        assert group == "tp-group"
+        calls.append((tuple(item.shape), item.dtype))
+
+    monkeypatch.setattr(util.torch.distributed, "broadcast", fake_broadcast)
+
+    result = util.get_batch_on_this_tp_rank(
+        batch=batch if tp_rank == 0 else {},
+        is_sft=False,
+        is_hybrid_cp=False,
+        create_attention_mask_in_dataloader=False,
+        broadcast_src_rank=0,
+        broadcast_group="tp-group",
+        cp_size=1,
+        tp_rank=tp_rank,
+        micro_batch_size=2,
+        seq_length=3,
+        mtp_on_this_rank=False,
+    )
+
+    assert result["cu_seqlens"] is None
+    assert result["max_seqlen"] is None
+    assert calls == [
+        ((2, 3), torch.int64),
+        ((2, 3), torch.int64),
+        ((2, 3), torch.float32),
+        ((2, 3), torch.int64),
+    ]
+
+
 @pytest.mark.flaky
 @pytest.mark.flaky_in_dev
 def test_check_param_hashes_across_dp_replicas():

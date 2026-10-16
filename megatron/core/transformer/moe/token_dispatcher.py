@@ -12,6 +12,11 @@ from megatron.core.config import is_experimental_enabled
 from megatron.core.fusions.fused_indices_converter import fused_indices_to_multihot
 from megatron.core.fusions.fused_pad_routing_map import fused_pad_routing_map
 from megatron.core.jit import jit_fuser
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import open_trace_scope, prepare_trace_scope
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.tensor_parallel import (
     all_to_all,
     gather_from_sequence_parallel_region,
@@ -35,6 +40,11 @@ from megatron.core.transformer.moe.moe_utils import (
     sort_chunks_by_idxs,
     unpermute,
 )
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.transformer.moe.observability import ep_collective_trace_context
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 
@@ -272,24 +282,39 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
     def token_dispatch(self, hidden_states, probs):
         """Gathers tokens from all TP*EP ranks using AllGather."""
 
-        # Permute the tokens across the expert parallel devices.
-        if self.tp_size > 1 or self.ep_size > 1:
-            ## local_indices calculation
-            with torch.no_grad():
-                # [num_local_tokens, num_experts] -> [num_global_tokens, num_experts], where:
-                #     num_local_tokens=(S/TP)*B, num_global_tokens=S*B*EP
-                self.routing_map = gather_from_sequence_parallel_region(
-                    self.routing_map, group=self.tp_ep_group
-                )
-
-            ## local_probs calculation
-            # max_prob: [S/TP*B, num_experts] -> global_probs: [S*B*EP, num_experts]
-            probs = gather_from_sequence_parallel_region(probs, group=self.tp_ep_group)
-            # Note that this allgather spans the communication domain of TP*EP.
-            #  [(S/TP)*B, H] -> [((S/TP)*B)*(TP*EP), H] = [S*B*EP, H]
-            hidden_states = gather_from_sequence_parallel_region(
-                hidden_states, group=self.tp_ep_group, use_global_buffer=True
+        # BEGIN MEGALENS OBSERVABILITY
+        dispatch_gate = prepare_trace_scope("ep-allgather-dispatch")
+        dispatch_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-allgather",
+                dispatcher_name="allgather",
+                group=self.tp_ep_group,
             )
+            if dispatch_gate is not None
+            else None
+        )
+        with open_trace_scope(dispatch_gate, "ep-allgather-dispatch", attrs=dispatch_context):
+            # Permute the tokens across the expert parallel devices.
+            if self.tp_size > 1 or self.ep_size > 1:
+                ## local_indices calculation
+                with torch.no_grad():
+                    # [num_local_tokens, num_experts] -> [num_global_tokens, num_experts], where:
+                    #     num_local_tokens=(S/TP)*B, num_global_tokens=S*B*EP
+                    self.routing_map = gather_from_sequence_parallel_region(
+                        self.routing_map, group=self.tp_ep_group
+                    )
+
+                ## local_probs calculation
+                # max_prob: [S/TP*B, num_experts] -> global_probs: [S*B*EP, num_experts]
+                probs = gather_from_sequence_parallel_region(probs, group=self.tp_ep_group)
+                # Note that this allgather spans the communication domain of TP*EP.
+                #  [(S/TP)*B, H] -> [((S/TP)*B)*(TP*EP), H] = [S*B*EP, H]
+                hidden_states = gather_from_sequence_parallel_region(
+                    hidden_states, group=self.tp_ep_group, use_global_buffer=True
+                )
+        # END MEGALENS OBSERVABILITY
 
         return hidden_states, probs
 
@@ -351,11 +376,26 @@ class MoEAllGatherTokenDispatcher(MoETokenDispatcher):
         originally held them. This completes the expert processing
         communication pattern and prepares tokens for final unpermutation.
         """
-        # Unpermute the tokens across ranks.
-        if self.tp_size > 1 or self.ep_size > 1:
-            hidden_states = reduce_scatter_to_sequence_parallel_region(
-                hidden_states.to(self.local_probs.dtype), group=self.tp_ep_group
-            ).to(hidden_states.dtype)
+        # BEGIN MEGALENS OBSERVABILITY
+        combine_gate = prepare_trace_scope("ep-allgather-combine")
+        combine_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-reduce-scatter",
+                dispatcher_name="allgather",
+                group=self.tp_ep_group,
+            )
+            if combine_gate is not None
+            else None
+        )
+        with open_trace_scope(combine_gate, "ep-allgather-combine", attrs=combine_context):
+            # Unpermute the tokens across ranks.
+            if self.tp_size > 1 or self.ep_size > 1:
+                hidden_states = reduce_scatter_to_sequence_parallel_region(
+                    hidden_states.to(self.local_probs.dtype), group=self.tp_ep_group
+                ).to(hidden_states.dtype)
+        # END MEGALENS OBSERVABILITY
         return hidden_states
 
     def combine_postprocess(self, hidden_states):
@@ -701,29 +741,44 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if self.shared_experts is not None:
             self.shared_experts.wait_current_stream()
         # Perform expert parallel AlltoAll communication
-        self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
-            "before_ep_alltoall", self.tokens_per_expert
+        # BEGIN MEGALENS OBSERVABILITY
+        dispatch_gate = prepare_trace_scope("ep-alltoall-dispatch")
+        dispatch_context = (
+            ep_collective_trace_context(
+                self,
+                (permutated_local_input_tokens, permuted_probs),
+                comm_type="ep-alltoall",
+                dispatcher_name="alltoall",
+                group=self.ep_group,
+            )
+            if dispatch_gate is not None
+            else None
         )
-        global_input_tokens = all_to_all(
-            self.ep_group,
-            permutated_local_input_tokens,
-            self.output_splits,
-            self.input_splits,
-            use_nccl_stream=self.use_nccl_stream,
-        )
-        # Move the shared experts fc1 right after the tokens A2A, to prevent the probs A2A
-        # block the launch of fc1 GEMM when CUDA_DEVICE_MAX_CONNECTIONS=1.
-        # Forward launch order: tokens A2A -> shared experts fc1 -> probs A2A
-        # Backward launch order: probs A2A -> tokens A2A -> shared experts fc1
-        if self.shared_experts is not None:
-            self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
-        global_probs = all_to_all(
-            self.ep_group,
-            permuted_probs,
-            self.output_splits,
-            self.input_splits,
-            use_nccl_stream=self.use_nccl_stream,
-        )
+        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", attrs=dispatch_context):
+            self.tokens_per_expert = self._maybe_dtoh_and_synchronize(
+                "before_ep_alltoall", self.tokens_per_expert
+            )
+            global_input_tokens = all_to_all(
+                self.ep_group,
+                permutated_local_input_tokens,
+                self.output_splits,
+                self.input_splits,
+                use_nccl_stream=self.use_nccl_stream,
+            )
+            # Move the shared experts fc1 right after the tokens A2A, to prevent the probs A2A
+            # block the launch of fc1 GEMM when CUDA_DEVICE_MAX_CONNECTIONS=1.
+            # Forward launch order: tokens A2A -> shared experts fc1 -> probs A2A
+            # Backward launch order: probs A2A -> tokens A2A -> shared experts fc1
+            if self.shared_experts is not None:
+                self.shared_experts.linear_fc1_forward_and_act(global_input_tokens)
+            global_probs = all_to_all(
+                self.ep_group,
+                permuted_probs,
+                self.output_splits,
+                self.input_splits,
+                use_nccl_stream=self.use_nccl_stream,
+            )
+        # END MEGALENS OBSERVABILITY
 
         return global_input_tokens, global_probs
 
@@ -863,13 +918,28 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.shared_experts.wait_current_stream()
         # Perform expert parallel AlltoAll communication
         # hidden_states: [SEQL, H] -> [SEQL, H/TP]
-        permutated_local_input_tokens = all_to_all(
-            self.ep_group,
-            hidden_states,
-            self.input_splits,
-            self.output_splits,
-            use_nccl_stream=self.use_nccl_stream,
+        # BEGIN MEGALENS OBSERVABILITY
+        combine_gate = prepare_trace_scope("ep-alltoall-combine")
+        combine_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type="ep-alltoall",
+                dispatcher_name="alltoall",
+                group=self.ep_group,
+            )
+            if combine_gate is not None
+            else None
         )
+        with open_trace_scope(combine_gate, "ep-alltoall-combine", attrs=combine_context):
+            permutated_local_input_tokens = all_to_all(
+                self.ep_group,
+                hidden_states,
+                self.input_splits,
+                self.output_splits,
+                use_nccl_stream=self.use_nccl_stream,
+            )
+        # END MEGALENS OBSERVABILITY
         if self.shared_experts is not None:
             self.shared_experts.linear_fc2_forward(permutated_local_input_tokens)
             self.shared_experts.post_forward_comm()
@@ -928,7 +998,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if not self.drop_and_pad:
             if point == self.cuda_dtoh_point:
                 # Move all possible GPU tensors to CPU at self.cuda_dtoh_point.
-                on_side_stream = cur_platform.current_stream() != self.cuda_dtoh_stream  # FlagScale Modify
+                on_side_stream = (
+                    cur_platform.current_stream() != self.cuda_dtoh_stream
+                )  # FlagScale Add
                 if on_side_stream:
                     ######## FlagScale Begin ########
                     self.cuda_dtoh_stream.wait_stream(cur_platform.current_stream())
@@ -1555,9 +1627,29 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         """
         if self.shared_experts is not None:
             self.shared_experts.wait_current_stream()
-        dispatched_hidden_states = self._comm_manager.dispatch(
-            hidden_states, async_finish, allocate_on_comm_stream
+        # BEGIN MEGALENS OBSERVABILITY
+        comm_type = (
+            "ep-hybridep"
+            if self.config.moe_flex_dispatcher_backend == "hybridep"
+            else "ep-deepep"
         )
+        dispatch_gate = prepare_trace_scope("ep-alltoall-dispatch")
+        dispatch_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type=comm_type,
+                dispatcher_name="flex",
+                group=self.tp_ep_group,
+            )
+            if dispatch_gate is not None
+            else None
+        )
+        with open_trace_scope(dispatch_gate, "ep-alltoall-dispatch", attrs=dispatch_context):
+            dispatched_hidden_states = self._comm_manager.dispatch(
+                hidden_states, async_finish, allocate_on_comm_stream
+            )
+        # END MEGALENS OBSERVABILITY
         if self.shared_experts is not None:
             self.shared_experts.pre_forward_comm(hidden_states, wait_current_stream=False)
             self.shared_experts.linear_fc1_forward_and_act(dispatched_hidden_states)
@@ -1614,7 +1706,27 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         # when CUDA_DEVICE_MAX_CONNECTIONS>1.
         if self.shared_experts is not None:
             self.shared_experts.wait_current_stream()
-        return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
+        # BEGIN MEGALENS OBSERVABILITY
+        comm_type = (
+            "ep-hybridep"
+            if self.config.moe_flex_dispatcher_backend == "hybridep"
+            else "ep-deepep"
+        )
+        combine_gate = prepare_trace_scope("ep-alltoall-combine")
+        combine_context = (
+            ep_collective_trace_context(
+                self,
+                (hidden_states,),
+                comm_type=comm_type,
+                dispatcher_name="flex",
+                group=self.tp_ep_group,
+            )
+            if combine_gate is not None
+            else None
+        )
+        with open_trace_scope(combine_gate, "ep-alltoall-combine", attrs=combine_context):
+            return self._comm_manager.combine(hidden_states, async_finish, allocate_on_comm_stream)
+        # END MEGALENS OBSERVABILITY
 
     def combine_postprocess(self, hidden_states: torch.Tensor):
         """
@@ -1646,3 +1758,19 @@ class MoEFlexTokenDispatcher(MoETokenDispatcher):
         """Reset the accumulated over-budget flag on the communication manager."""
         if hasattr(self._comm_manager, 'over_budget'):
             self._comm_manager.over_budget.fill_(0)
+
+
+# BEGIN MEGALENS OBSERVABILITY
+setattr(
+    MoEAlltoAllTokenDispatcher.token_dispatch, "__megatron_trace_event__", "ep-alltoall-dispatch"
+)
+setattr(MoEAlltoAllTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-alltoall-combine")
+setattr(
+    MoEAllGatherTokenDispatcher.token_dispatch, "__megatron_trace_event__", "ep-allgather-dispatch"
+)
+setattr(
+    MoEAllGatherTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-allgather-combine"
+)
+setattr(MoEFlexTokenDispatcher.token_dispatch, "__megatron_trace_event__", "ep-alltoall-dispatch")
+setattr(MoEFlexTokenDispatcher.token_combine, "__megatron_trace_event__", "ep-alltoall-combine")
+# END MEGALENS OBSERVABILITY

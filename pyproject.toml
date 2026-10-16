@@ -11,11 +11,16 @@ include-package-data = true
 include = [
     "megatron.core",
     "megatron.core.*",
+    "megatron.megalens",
+    "megatron.megalens.*",
     "megatron.plugin",
     "megatron.plugin.*",
     "megatron.training",
     "megatron.training.*",
 ]
+
+[tool.setuptools.exclude-package-data]
+"megatron.megalens" = ["docs/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "megatron.core.package_info.__version__" }
@@ -78,6 +83,16 @@ training = [
     "transformers",
     "accelerate",
     "omegaconf",
+]
+
+megalens = [
+    "matplotlib",
+    "pandas",
+]
+
+megalens-monitor = [
+    "nvidia-ml-py",
+    "psutil",
 ]
 
 ### 'mlm' group is deprecated. please use 'training' instead ###
