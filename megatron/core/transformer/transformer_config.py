@@ -126,6 +126,10 @@ class TransformerConfig(ModelParallelConfig):
     - 'module-wise': loop the entire transformer layer sequence. ABCD → ABCDABCD.
     - 'block-wise': split the loop span into blocks of loop_block_size and repeat
       each block. E.g. ABCD with block_size=2 → ABABCDCD.
+    - 'layer-wise': repeat each layer in place. ABCD → AABBCCDD. Alias for
+      'block-wise' with loop_block_size=1, normalised to that in __post_init__.
+    - 'sdpa-wise': repeat only the SDPA layers in the span, in place; GDN layers
+      run once. Requires linear_attention_freq.
     Only used when loop_start_layer is not None."""
 
     loop_block_size: Optional[int] = None
@@ -1405,11 +1409,23 @@ class TransformerConfig(ModelParallelConfig):
                     f"loop_residual_scale must be None, a number, or a list, "
                     f"got {type(raw).__name__}."
                 )
-            _VALID_LOOP_TYPES = {"module-wise", "block-wise", "sdpa-wise"}
+            _VALID_LOOP_TYPES = {"module-wise", "block-wise", "sdpa-wise", "layer-wise"}
             if self.loop_type not in _VALID_LOOP_TYPES:
                 raise ValueError(
                     f"loop_type must be one of {_VALID_LOOP_TYPES}, got '{self.loop_type}'."
                 )
+            if self.loop_type == "layer-wise":
+                # Alias for block-wise with block_size=1: ABC -> AABBCC, each layer
+                # repeated in place. Normalised here so nothing downstream has to
+                # know about the alias.
+                if self.loop_block_size not in (None, 1):
+                    raise ValueError(
+                        f"loop_type='layer-wise' implies loop_block_size=1, but "
+                        f"loop_block_size={self.loop_block_size} was given. Either drop "
+                        f"loop_block_size or use loop_type='block-wise'."
+                    )
+                self.loop_type = "block-wise"
+                self.loop_block_size = 1
             if self.loop_type == "block-wise":
                 if self.loop_block_size is None:
                     raise ValueError(
