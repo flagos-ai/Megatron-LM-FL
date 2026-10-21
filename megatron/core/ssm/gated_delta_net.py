@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from typing import Optional, Union
@@ -33,6 +34,7 @@ from megatron.core.ssm.mamba_context_parallel import (
 )
 from megatron.core.ssm.utils import _split_tensor_factory
 from megatron.core.tensor_parallel import get_cuda_rng_tracker
+from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 from megatron.core.transformer import TransformerConfig
 from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import MegatronModule
@@ -71,6 +73,10 @@ class GatedDeltaNetSubmodules:
     in_proj: Union[ModuleSpec, type] = IdentityOp
     out_norm: Union[ModuleSpec, type] = IdentityOp
     out_proj: Union[ModuleSpec, type] = IdentityOp
+    # Used in place of in_proj when loop_gdn_key_lora_rank is set: the key LoRA has
+    # to consume the post-norm activation, which the fused layer keeps internal.
+    in_proj_norm: Union[ModuleSpec, type] = IdentityOp
+    in_proj_linear: Union[ModuleSpec, type] = IdentityOp
 
 
 class GatedDeltaNet(MegatronModule):
@@ -174,19 +180,53 @@ class GatedDeltaNet(MegatronModule):
                 "For FP8, the innermost dimension of the GDN layer "
                 "input projection output tensor must be a multiple of 16."
             )
-        self.in_proj = build_module(
-            submodules.in_proj,
-            self.hidden_size,
-            self.in_proj_dim,
-            config=self.config,
-            init_method=self.config.init_method,
-            gather_output=False,
-            bias=bias,
-            skip_bias_add=False,
-            is_expert=False,
-            tp_comm_buffer_name="fc1",
-            tp_group=self.pg_collection.tp,
+        # Per-loop-iteration key LoRA needs the post-norm activation, which the fused
+        # TELayerNormColumnParallelLinear keeps internal. Build norm and linear
+        # separately in that case; state-dict hooks below keep the checkpoint keys
+        # identical to the fused layout so conversion tooling is unaffected.
+        self.key_lora_rank = (
+            config.loop_gdn_key_lora_rank
+            if getattr(config, 'loop_gdn_key_lora_rank', None) and self._is_in_loop_range()
+            else None
         )
+        self.in_proj_is_split = self.key_lora_rank is not None
+        if self.in_proj_is_split:
+            self.in_proj = None
+            self.in_proj_norm = build_module(
+                submodules.in_proj_norm,
+                config=self.config,
+                hidden_size=self.hidden_size,
+                eps=self.config.layernorm_epsilon,
+            )
+            self.in_proj_linear = build_module(
+                submodules.in_proj_linear,
+                self.hidden_size,
+                self.in_proj_dim,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="fc1",
+                tp_group=self.pg_collection.tp,
+            )
+            self._init_key_lora()
+            self._register_in_proj_rename_hooks()
+        else:
+            self.in_proj = build_module(
+                submodules.in_proj,
+                self.hidden_size,
+                self.in_proj_dim,
+                config=self.config,
+                init_method=self.config.init_method,
+                gather_output=False,
+                bias=bias,
+                skip_bias_add=False,
+                is_expert=False,
+                tp_comm_buffer_name="fc1",
+                tp_group=self.pg_collection.tp,
+            )
 
         # Conv1d for QKV
         self.conv_dim = self.qk_dim * 2 + self.v_dim
@@ -241,19 +281,9 @@ class GatedDeltaNet(MegatronModule):
         # layers never receive a loop_iter, so their loop_dt_offset would never
         # participate in the computation graph, causing a DDP grad-buffer assertion
         # failure (unused parameter → backward hook never fires).
-        _in_loop_range = (
-            config.loop_start_layer is not None
-            and self.layer_number is not None
-            and config.loop_start_layer < self.layer_number <= config.loop_end_layer
-        )  # layer_number is 1-based, loop range is 0-based half-open [start, end)
-        # loop_type='sdpa-wise' repeats only SDPA layers, so a GDN layer never gets a
-        # loop_iter even when it sits inside the loop range — same unused-parameter
-        # hazard as a prelude/coda layer.
-        if getattr(config, 'loop_type', None) == "sdpa-wise":
-            _in_loop_range = False
         if (
             getattr(config, 'enable_loop_dt_offset', False)
-            and _in_loop_range
+            and self._is_in_loop_range()
             and config.num_loop_iterations >= 2
         ):
             self.loop_dt_offset = nn.Parameter(
@@ -321,6 +351,171 @@ class GatedDeltaNet(MegatronModule):
         self._chunkwise_cp_context_cache = {}
 
         self.reset_parameters()
+
+    # Std for the key-LoRA up-projection. Measured at rank=32, hidden=2048 with a
+    # down-projection at std 1/sqrt(hidden): this gives ||delta||/||base|| ~= 0.057,
+    # rotating each head's key by ~3.2 degrees and leaving the two iterations' keys
+    # ~4.6 degrees apart at init. Enough to break the "identical keys erase the same
+    # direction" degeneracy from step 0 without restructuring a pretrained
+    # projection (0.03 -> ~10 deg, 0.1 -> ~30 deg, which would).
+    _KEY_LORA_UP_STD = 0.01
+
+    def _is_in_loop_range(self) -> bool:
+        """Whether this layer is repeated by the Loop Transformer.
+
+        ``layer_number`` is 1-based while the loop range is 0-based half-open
+        ``[start, end)``. A layer inside the range is not necessarily looped:
+        ``loop_type='sdpa-wise'`` repeats only the SDPA layers, so a GDN layer
+        there runs exactly once and never receives a ``loop_iter`` — the same
+        unused-parameter hazard as a prelude/coda layer.
+        """
+        config = self.config
+        if config.loop_start_layer is None or self.layer_number is None:
+            return False
+        if getattr(config, 'loop_type', None) == "sdpa-wise":
+            return False
+        return config.loop_start_layer < self.layer_number <= config.loop_end_layer
+
+    def _init_key_lora(self):
+        """Per-loop-iteration low-rank delta on the key slice of in_proj.
+
+        ``down`` is [R, hidden, rank] and ``up`` is [R, rank, qk_dim_local_tp].
+        Only ``up`` is TP-sharded: it produces the key slice, which is split along
+        the output dimension.
+
+        Both are initialised randomly rather than the usual "one side zero". A zero
+        ``up`` makes the delta exactly zero at step 0, which is the cleaner starting
+        point, but then how far k^(2) departs from k^(1) is set purely by how fast
+        ``up`` grows under the base learning rate -- and the whole point of the delta
+        is that the two keys differ. Seeding ``up`` gives a small non-zero rotation
+        from the first step, at the cost of the run no longer being bit-identical to
+        one without key LoRA at init.
+
+        ``_KEY_LORA_UP_STD`` is deliberately small: the per-iteration deltas scale
+        the key by roughly ``sqrt(rank) * down_std * up_std`` relative to the base
+        projection, so this keeps the initial rotation to a few degrees rather than
+        restructuring a pretrained projection.
+        """
+        r = self.key_lora_rank
+        R = self.config.num_loop_iterations
+        self.key_lora_down = nn.Parameter(
+            torch.empty(
+                R,
+                self.hidden_size,
+                r,
+                dtype=self.config.params_dtype,
+                device=torch.cuda.current_device(),
+            )
+        )
+        self.key_lora_up = nn.Parameter(
+            torch.empty(
+                R,
+                r,
+                self.qk_dim_local_tp,
+                dtype=self.config.params_dtype,
+                device=torch.cuda.current_device(),
+            )
+        )
+        with torch.no_grad():
+            # Same scale as a standard LoRA down-projection.
+            self.key_lora_down.normal_(0.0, 1.0 / math.sqrt(self.hidden_size))
+            self.key_lora_up.normal_(0.0, self._KEY_LORA_UP_STD)
+            # Each loop iteration must get a *different* delta; identical draws would
+            # erase the same direction twice and defeat the purpose.
+            if R >= 2 and torch.allclose(self.key_lora_up[0], self.key_lora_up[1]):
+                raise RuntimeError(
+                    "key_lora_up initialised identically across loop iterations; "
+                    "the per-iteration deltas would not differ."
+                )
+        setattr(self.key_lora_up, "tensor_model_parallel", True)
+        setattr(self.key_lora_up, "partition_dim", 2)  # qk_dim is TP-sharded
+        setattr(self.key_lora_down, "tensor_model_parallel", False)
+
+    def _register_in_proj_rename_hooks(self):
+        """Keep checkpoint keys in the fused layout despite the split modules.
+
+        The split is an implementation detail: shapes are unchanged, so mapping
+        ``in_proj_linear.weight`` <-> ``in_proj.weight`` and ``in_proj_norm.weight``
+        <-> ``in_proj.layer_norm_weight`` is a pure rename. Doing it here means
+        checkpoints, and therefore the conversion tooling, see exactly what a run
+        without the split would have written.
+
+        Note: this covers the plain ``state_dict`` path used by
+        ``ckpt_format='torch'``. ``torch_dist`` goes through ``sharded_state_dict``,
+        which reads ``in_proj.weight`` directly; see the guard there.
+        """
+        pairs = (
+            ("in_proj_linear.weight", "in_proj.weight"),
+            ("in_proj_norm.weight", "in_proj.layer_norm_weight"),
+        )
+
+        def _save_hook(module, state_dict, prefix, local_metadata):
+            for split_name, fused_name in pairs:
+                key = f"{prefix}{split_name}"
+                if key in state_dict:
+                    state_dict[f"{prefix}{fused_name}"] = state_dict.pop(key)
+            # The fused layer exposes a single _extra_state; the split modules expose
+            # one each. With fp8 disabled these are empty, and config validation
+            # rejects fp8 + key LoRA, so dropping the extras keeps the key set exact.
+            for split_name, _ in pairs:
+                state_dict.pop(f"{prefix}{split_name.rsplit('.', 1)[0]}._extra_state", None)
+            return state_dict
+
+        def _load_hook(module, state_dict, prefix, *args):
+            for split_name, fused_name in pairs:
+                key = f"{prefix}{fused_name}"
+                if key in state_dict:
+                    state_dict[f"{prefix}{split_name}"] = state_dict.pop(key)
+
+        self._register_state_dict_hook(_save_hook)
+        self._register_load_state_dict_pre_hook(_load_hook, with_module=True)
+
+    def _apply_in_proj(self, hidden_states, loop_iter):
+        """Input projection, adding the per-iteration key delta when looping.
+
+        With the split in_proj the post-norm activation is available, so the delta
+        is a side branch on an activation rather than a change to the weight. That
+        matters twice over: TE bypasses autograd for the base weight gradient under
+        ``fuse_wgrad_accumulation`` (a weight-space delta would silently receive no
+        gradient), and a side branch on the post-norm activation is still equal to
+        folding ``(down @ up)^T`` into a copy of the weight, which is what lets each
+        loop iteration be exported as an ordinary layer.
+        """
+        if not self.in_proj_is_split:
+            qkvzba, _ = self.in_proj(hidden_states)
+            return qkvzba
+
+        normed = self.in_proj_norm(hidden_states)
+        qkvzba, _ = self.in_proj_linear(normed)
+        if loop_iter is not None and loop_iter >= 0:
+            # Under sequence parallelism the column-parallel linear all-gathers its
+            # input along the sequence dimension, so its output covers the full
+            # sequence while `normed` holds only this rank's shard. The delta has to
+            # be computed on the same activation the linear saw, otherwise the two
+            # disagree on dim 0 (seq/tp vs seq).
+            lora_input = normed
+            if self.config.sequence_parallel and self.tp_size > 1:
+                # tensor_parallel_output_grad=True makes the backward a
+                # reduce-scatter, which is what we want: key_lora_up is sharded
+                # along the key dimension, so the delta really is computed in the
+                # tensor-parallel region and each rank owns a slice of the grad.
+                lora_input = gather_from_sequence_parallel_region(
+                    normed, tensor_parallel_output_grad=True, group=self.pg_collection.tp
+                )
+            delta = (lora_input @ self.key_lora_down[loop_iter]) @ self.key_lora_up[
+                loop_iter
+            ]
+            # k occupies the second slice of the fused projection output.
+            start = self.qk_dim_local_tp
+            qkvzba = torch.cat(
+                [
+                    qkvzba[..., :start],
+                    qkvzba[..., start : 2 * start] + delta,
+                    qkvzba[..., 2 * start :],
+                ],
+                dim=-1,
+            )
+        return qkvzba
 
     def reset_parameters(self):
         """Reset the parameters."""
@@ -545,7 +740,7 @@ class GatedDeltaNet(MegatronModule):
         """
         # Input projection
         nvtx_range_push(suffix="in_proj")
-        qkvzba, _ = self.in_proj(hidden_states)
+        qkvzba = self._apply_in_proj(hidden_states, loop_iter)
         nvtx_range_pop(suffix="in_proj")
 
         # Chunkwise CP expects the contiguous-time chunk layout (rank r holds chunks
@@ -1062,6 +1257,18 @@ class GatedDeltaNet(MegatronModule):
 
     def sharded_state_dict(self, prefix="", sharded_offsets=(), metadata=None, tp_group=None):
         """Provide a sharded state dictionary for distributed checkpointing."""
+        if self.in_proj_is_split:
+            # This path (ckpt_format='torch_dist') reads `in_proj.weight` directly
+            # below to attach per-component TP sharding, so the plain-state_dict
+            # rename hooks are not enough: the split modules contribute
+            # `in_proj_linear.weight` instead. Supporting both would mean teaching
+            # _split_tensor_factory about the renamed key, which is untested, so
+            # refuse loudly rather than write a checkpoint with the wrong layout.
+            raise NotImplementedError(
+                "loop_gdn_key_lora_rank currently supports ckpt_format='torch' only; "
+                "the split in_proj has not been wired into sharded_state_dict used by "
+                "ckpt_format='torch_dist'."
+            )
         # Guard for cases metadata is not provided
         metadata = ensure_metadata_has_dp_cp_group(metadata)
 
@@ -1155,7 +1362,12 @@ class GatedDeltaNet(MegatronModule):
 
     def _backward_in_proj(self):
         """Computes weight gradients of input projection layer."""
-        self.in_proj.backward_dw()
+        # With key LoRA the fused layer is replaced by norm + linear; only the
+        # linear defers its weight gradient.
+        if self.in_proj_is_split:
+            self.in_proj_linear.backward_dw()
+        else:
+            self.in_proj.backward_dw()
 
     def _backward_out_proj(self):
         """Computes weight gradients of output projection layer."""

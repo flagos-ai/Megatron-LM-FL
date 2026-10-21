@@ -145,6 +145,26 @@ class TransformerConfig(ModelParallelConfig):
     backward-compatible with existing checkpoints.  Ignored when looping is disabled
     (loop_start_layer is None)."""
 
+    loop_gdn_key_lora_rank: Optional[int] = None
+    """When set, each looped GDN layer gains a per-loop-iteration low-rank delta on
+    the key part of its input projection, so k^(1) and k^(2) differ structurally
+    rather than only because the input differs.
+
+    Motivation: under weight tying a looped DPLR layer contributes the factor
+    (I - beta*k*k^T) at every iteration. If the keys are identical, every iteration
+    erases the same direction of recurrent memory and the loop adds no expressivity;
+    distinct keys grow the erasure subspace from rank-1 towards rank-T.
+
+    Enabling this splits the fused in_proj (TELayerNormColumnParallelLinear) into a
+    separate norm + linear so the post-norm activation is exposed, which is what the
+    delta must consume to stay mergeable into a weight copy. Checkpoint keys are
+    unchanged: state-dict hooks rename them back to the fused layout, so checkpoint
+    conversion tooling sees exactly the same tensors as before.
+
+    Parameters are [num_loop_iterations, hidden, rank] and [num_loop_iterations,
+    rank, qk_dim_local_tp], with the up-projection initialized to zero so the model
+    starts bit-identical to one without the delta."""
+
     gdn_spike_diag_threshold: Optional[float] = None
     """When set, enables GDN spike diagnostics.  Each step whose total grad norm
     exceeds this threshold triggers per-layer grad norm + GDN decay stats output.
@@ -1476,9 +1496,34 @@ class TransformerConfig(ModelParallelConfig):
                         f"loop_prelude_grad_scale must be positive, "
                         f"got {self.loop_prelude_grad_scale}."
                     )
+            # Validate loop_gdn_key_lora_rank
+            if self.loop_gdn_key_lora_rank is not None:
+                if self.loop_gdn_key_lora_rank <= 0:
+                    raise ValueError(
+                        f"loop_gdn_key_lora_rank must be positive, "
+                        f"got {self.loop_gdn_key_lora_rank}."
+                    )
+                if self.loop_type == "sdpa-wise":
+                    # GDN layers never receive a loop_iter under sdpa-wise, so every
+                    # delta would be an unused parameter: DDP's grad-buffer assertion
+                    # fires when a backward hook never runs.
+                    raise ValueError(
+                        "loop_gdn_key_lora_rank requires a loop_type that actually "
+                        "loops GDN layers ('module-wise', 'block-wise' or "
+                        "'layer-wise'); under 'sdpa-wise' the GDN layers run once and "
+                        "the per-iteration deltas would be unused parameters."
+                    )
+                if self.fp8 is not None:
+                    # Splitting the fused in_proj turns TE's single _extra_state into
+                    # two, and the quantiser state cannot be renamed one-to-one.
+                    raise ValueError(
+                        "loop_gdn_key_lora_rank is not supported together with fp8: "
+                        "splitting the fused in_proj changes TE's _extra_state layout, "
+                        "so checkpoint keys would no longer round-trip."
+                    )
         else:
             self._loop_residual_scales = None
-            # Looping is disabled; enable_loop_dt_offset has no effect.
+            # Looping is disabled; these flags have no effect.
             if self.enable_loop_dt_offset:
                 log_single_rank(
                     logger,
@@ -1486,6 +1531,14 @@ class TransformerConfig(ModelParallelConfig):
                     "enable_loop_dt_offset is set but looping is disabled "
                     "(loop_start_layer is None). The flag will be ignored.",
                 )
+            if self.loop_gdn_key_lora_rank is not None:
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "loop_gdn_key_lora_rank is set but looping is disabled "
+                    "(loop_start_layer is None). The flag will be ignored.",
+                )
+                self.loop_gdn_key_lora_rank = None
 
         # When fp32 residual connections are enabled, pipeline parallel communication must
         # use fp32 to match the dtype of the residual stream between pipeline stages.

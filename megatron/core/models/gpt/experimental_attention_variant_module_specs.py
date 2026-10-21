@@ -82,6 +82,10 @@ def get_gated_delta_net_module_spec(
             in_proj=backend.column_parallel_layer_norm_linear(),
             out_norm=backend.layer_norm(rms_norm=rms_norm, for_qk=False),
             out_proj=backend.row_parallel_linear(),
+            # Used instead of in_proj when loop_gdn_key_lora_rank is set: the key
+            # delta needs the post-norm activation, which the fused layer hides.
+            in_proj_norm=backend.layer_norm(rms_norm=rms_norm, for_qk=False),
+            in_proj_linear=backend.column_parallel_linear(),
         ),
         metainfo={"fuse_input_layernorm": True},
     )

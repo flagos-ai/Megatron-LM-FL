@@ -312,7 +312,12 @@ class MegatronOptimizer(ABC):
                             self._module_param_to_name[f32_param.data_ptr()] = name
 
     # Sub-module names unique to GatedDeltaNet (not present in SDPA).
-    _GDN_SUBMODULES = ('in_proj', 'conv1d', 'dt_bias', 'A_log', 'out_norm', 'out_proj')
+    # Matching is by substring, so 'in_proj' also covers the 'in_proj_norm' /
+    # 'in_proj_linear' pair used when loop_gdn_key_lora_rank splits the fused
+    # projection. 'key_lora' is listed for the per-iteration delta parameters.
+    _GDN_SUBMODULES = (
+        'in_proj', 'conv1d', 'dt_bias', 'A_log', 'out_norm', 'out_proj', 'key_lora',
+    )
 
     # All sub-category keys used by _classify_module.
     _MODULE_SUBCATEGORIES = (
