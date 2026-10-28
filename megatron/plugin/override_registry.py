@@ -62,6 +62,21 @@ register(
 # =============================================================================
 register(
     target="megatron.core.fusions.fused_bias_swiglu.swiglu",
+    impl="megatron.plugin.Ascend.fusions.fused_bias_swiglu.swiglu",
+    vendor="npu",
+)
+register(
+    target="megatron.core.fusions.fused_bias_swiglu.swiglu_back",
+    impl="megatron.plugin.Ascend.fusions.fused_bias_swiglu.swiglu_back",
+    vendor="npu",
+)
+register(
+    target="megatron.core.fusions.fused_bias_swiglu.weighted_swiglu_back",
+    impl="megatron.plugin.Ascend.fusions.fused_bias_swiglu.weighted_swiglu_back",
+    vendor="npu",
+)
+register(
+    target="megatron.core.fusions.fused_bias_swiglu.swiglu",
     impl="megatron.plugin.kunlunxin.fusions.fused_bias_swiglu.swiglu",
     vendor="kunlunxin",
 )
