@@ -2118,7 +2118,6 @@ def load_biencoder_checkpoint(model, only_query_model=False,
         iteration = int(f.read().strip())
 
     checkpoint_name = get_checkpoint_name(load_path, iteration,
-                                          args.use_distributed_optimizer,
                                           release=False)
 
     if mpu.get_data_parallel_rank() == 0:
