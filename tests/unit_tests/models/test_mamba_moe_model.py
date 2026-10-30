@@ -244,9 +244,10 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "multi_latent_attention": False,
     ######## FlagScale Begin ########
     "max_ngram_size": 1,
+    "mhc_fused_backend": "auto",
     "mhc_init_gating_factor": 0.01,
     "mhc_recompute_layer_num": None,
-    "mhc_sinkhorn_iterations": 10,
+    "mhc_sinkhorn_iterations": 20,
     "moe_mlp_glu_interleave_size": None,
     ######## FlagScale End ########
     "nccl_all_reduce_for_prefill": False,

@@ -23,7 +23,7 @@ try:
         version.parse(triton.__version__) < version.parse("3.4.0")
         and not cur_platform.is_available()
     ):
-    ######## FlagScale End ########
+        ######## FlagScale End ########
         HAVE_TRITON = False
     else:
         HAVE_TRITON = tl.constexpr(version.parse(triton.__version__) >= version.parse("2.0.0"))
@@ -885,3 +885,37 @@ def fused_mla_rope_kv_split(
 fused_apply_mla_rope_for_q = fused_mla_rope_inplace
 fused_apply_mla_rope_for_kv = fused_mla_rope_kv_split
 ######## FlagScale End ########
+
+
+def fused_mla_rope_out_of_place(
+    t: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    nope_dim: int,
+    emb_dim: int,
+    cu_seqlens_q: Optional[torch.Tensor] = None,
+    cp_rank: int = 0,
+    cp_size: int = 1,
+    rotary_interleaved: bool = False,
+    inverse: bool = False,
+    remove_interleaving: bool = False,
+) -> torch.Tensor:
+    """Apply the fused RoPE kernel without modifying the input tensor.
+
+    Use this wrapper when an upstream autograd function may have retained its
+    output for backward. The underlying kernel remains in-place, so a private
+    copy is required to keep the retained tensor unchanged.
+    """
+    return fused_mla_rope_inplace(
+        t.clone(),
+        cos,
+        sin,
+        nope_dim,
+        emb_dim,
+        cu_seqlens_q=cu_seqlens_q,
+        cp_rank=cp_rank,
+        cp_size=cp_size,
+        rotary_interleaved=rotary_interleaved,
+        inverse=inverse,
+        remove_interleaving=remove_interleaving,
+    )

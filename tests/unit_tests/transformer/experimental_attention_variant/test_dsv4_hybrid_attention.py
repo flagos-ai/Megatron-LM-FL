@@ -166,6 +166,33 @@ class TestDSv4HybridAttentionConstructor:
         assert hasattr(attn, 'q_layernorm')
         assert hasattr(attn, 'kv_layernorm')
 
+    @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+    def test_float16_wrapper_preserves_attention_fp32_parameters(self, compress_ratio):
+        """Model conversion must preserve sink/APE values as well as their dtype."""
+        from megatron.core.transformer.module import Float16Module
+
+        model_parallel_cuda_manual_seed(_SEED)
+        config = _make_config(num_layers=1, csa_compress_ratios=[compress_ratio])
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        attn = _build_attention(config, layer_number=1, pg_collection=pg).cuda()
+        protected = {
+            name: parameter
+            for name, parameter in attn.named_parameters()
+            if name.endswith("attn_sink") or name.endswith("ape")
+        }
+        assert len(protected) == {0: 1, 4: 3, 128: 2}[compress_ratio]
+        with torch.no_grad():
+            for parameter in protected.values():
+                parameter.fill_(0.1234567)
+        expected = {name: parameter.detach().clone() for name, parameter in protected.items()}
+        wrapped = Float16Module(config, attn)
+        for name, parameter in wrapped.module.named_parameters():
+            if name in expected:
+                assert parameter.dtype == torch.float32, name
+                torch.testing.assert_close(parameter, expected[name], rtol=0, atol=0)
+            else:
+                assert parameter.dtype == torch.bfloat16, name
+
     def test_q_head_dim_equals_v_head_dim(self):
         """q_head_dim must equal v_head_dim for DSv4 hybrid."""
         torch.manual_seed(_SEED)
@@ -228,6 +255,57 @@ class TestDSv4HybridAttentionForwardBackward:
 
         yield
         Utils.destroy_model_parallel()
+
+    @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
+    def test_deferred_weight_gradients_match_eager(self, compress_ratio, monkeypatch):
+        """Flushing delayed wgrads must include compressor and indexer projections."""
+        from megatron.core.transformer.experimental_attention_variant.dsa import (
+            DSAIndexerLossAutoScaler,
+            DSAIndexerLossLoggingHelper,
+        )
+        from megatron.core.transformer.module import Float16Module
+
+        monkeypatch.setattr(DSAIndexerLossLoggingHelper, "tracker", {})
+        monkeypatch.setattr(DSAIndexerLossAutoScaler, "main_loss_backward_scale", None)
+
+        def build(delayed):
+            config = _make_config(
+                num_layers=1,
+                csa_compress_ratios=[compress_ratio],
+                dsa_indexer_loss_coeff=0.1,
+                gradient_accumulation_fusion=False,
+                hidden_dropout=0.0,
+                attention_dropout=0.0,
+            )
+            # Exercise attention wgrad flushing in isolation, without an EP scheduler.
+            config.delay_wgrad_compute = delayed
+            return Float16Module(
+                config, _build_attention(config, layer_number=1, pg_collection=self.pg).cuda()
+            ).module
+
+        eager = build(False)
+        delayed = build(True)
+        delayed.load_state_dict(eager.state_dict())
+        hidden = torch.randn(256, 1, eager.config.hidden_size, device="cuda", dtype=torch.bfloat16)
+        DSAIndexerLossAutoScaler.set_loss_scale(torch.ones((), device="cuda"))
+        outputs = []
+        input_grads = []
+        for model in (eager, delayed):
+            inputs = hidden.detach().clone().requires_grad_()
+            output, _ = model(inputs, attention_mask=None)
+            output.float().square().mean().backward()
+            model.backward_dw()
+            outputs.append(output.detach())
+            input_grads.append(inputs.grad)
+        torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
+        torch.testing.assert_close(input_grads[0], input_grads[1], rtol=0, atol=0)
+        for (name, expected), (actual_name, actual) in zip(
+            eager.named_parameters(), delayed.named_parameters()
+        ):
+            assert name == actual_name
+            assert expected.grad is not None, name
+            assert actual.grad is not None, name
+            torch.testing.assert_close(actual.grad, expected.grad, rtol=1e-2, atol=1e-5, msg=name)
 
     @pytest.mark.parametrize("layer_number", [1, 2, 3, 4])
     def test_forward_output_shape(self, layer_number):
@@ -466,9 +544,7 @@ def _build_dsv4_moe_layer(config, layer_number, pg_collection):
     )
     from megatron.core.transformer.spec_utils import build_module
 
-    block_submodules = get_transformer_block_with_experimental_attention_variant_spec(
-        config=config
-    )
+    block_submodules = get_transformer_block_with_experimental_attention_variant_spec(config=config)
     return build_module(
         block_submodules.layer_specs[layer_number - 1],
         config=config,
@@ -664,5 +740,6 @@ class TestDSv4HybridRopeFusion:
         for name, param in attn_fused.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"No gradient for parameter {name}"
+
 
 pytestmark = pytest.mark.experimental
