@@ -762,7 +762,17 @@ class CheckpointWithoutOutputFunction(torch.autograd.Function):
         # This is to avoid double-reloading the inputs in CPU offloading scenario.
         inputs = ctx.inputs
         outputs = ctx.outputs
-        torch.autograd.backward(outputs, args)
+        # Recomputed tuples can include detached pass-through tensors (e.g. the
+        # gathered indexer input in MLA). Keep matching upstream gradients, but
+        # only differentiate outputs that have a recompute graph.
+        outputs_with_grad = []
+        args_with_grad = []
+        for output, grad in zip(outputs, args):
+            if output.requires_grad:
+                outputs_with_grad.append(output)
+                args_with_grad.append(grad)
+        if outputs_with_grad:
+            torch.autograd.backward(outputs_with_grad, args_with_grad)
         ctx.outputs = None
         ctx.inputs = None
         grads = tuple(inp.grad if isinstance(inp, torch.Tensor) else None for inp in inputs)
