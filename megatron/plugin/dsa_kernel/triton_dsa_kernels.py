@@ -25,25 +25,24 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
+from megatron.plugin.dsa_kernel.triton_indexer_kernels import (
+    dense_attn_score_recompute,
+    dense_indexer_score_recompute,
+    fused_dense_indexer_loss_and_backward,
+    fused_sparse_indexer_loss_and_backward,
+    indexer_topk_selection,
+    sparse_attn_score_recompute,
+    sparse_indexer_score_recompute,
+)
 from megatron.plugin.dsa_kernel.triton_sparse_attn import (
-    triton_sparse_attn_forward,
     triton_sparse_attn_backward,
+    triton_sparse_attn_forward,
 )
 from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
-    fused_dq,
     fused_dkv,
+    fused_dq,
     sorted_scatter_add,
 )
-from megatron.plugin.dsa_kernel.triton_indexer_kernels import (
-    sparse_indexer_score_recompute,
-    sparse_attn_score_recompute,
-    dense_indexer_score_recompute,
-    dense_attn_score_recompute,
-    indexer_topk_selection,
-    fused_sparse_indexer_loss_and_backward,
-    fused_dense_indexer_loss_and_backward,
-)
-
 
 logger = logging.getLogger(__name__)
 
@@ -170,10 +169,24 @@ def build_flat_topk_idxs(
 # ---------------------------------------------------------------------------
 
 
+def _score_bmm_fp32(query: Tensor, key_transposed: Tensor) -> Tensor:
+    """Keep score recomputation in FP32, including on the supported PyTorch 2.6 floor."""
+    if not query.is_cuda or query.dtype not in (torch.bfloat16, torch.float16):
+        return torch.bmm(query.float(), key_transposed.float())
+    try:
+        return torch.bmm(query, key_transposed, out_dtype=torch.float32)
+    except TypeError as error:
+        # PyTorch 2.6 does not expose bmm(out_dtype). Retain the numerical
+        # contract with FP32 operands instead of rounding a BF16 result.
+        if "out_dtype" not in str(error):
+            raise
+        return torch.bmm(query.float(), key_transposed.float())
+
+
 def _sbhd_to_bshd_indexer_inputs(
     q_indexer: Tensor,  # (sq, b, idx_nh, idx_hd)
     k_indexer: Tensor,  # (sk, b, idx_hd)
-    weights: Tensor,    # (sq, b, idx_nh)
+    weights: Tensor,  # (sq, b, idx_nh)
     indexer_softmax_scale: float,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
     """Transpose indexer inputs from SBHD to BSHD layout.
@@ -181,18 +194,18 @@ def _sbhd_to_bshd_indexer_inputs(
     Note: .contiguous() is omitted — downstream consumers (einsum, topk,
     elementwise ops) all handle strided tensors correctly.
     """
-    q_bshd = q_indexer.permute(1, 0, 2, 3)   # (b, sq, nh, hd)
-    k_bsd = k_indexer.permute(1, 0, 2)       # (b, sk, hd)
-    w_bsh = weights.permute(1, 0, 2)         # (b, sq, nh)
+    q_bshd = q_indexer.permute(1, 0, 2, 3)  # (b, sq, nh, hd)
+    k_bsd = k_indexer.permute(1, 0, 2)  # (b, sk, hd)
+    w_bsh = weights.permute(1, 0, 2)  # (b, sq, nh)
     # Scale weights
-    w_bsh_scaled = w_bsh * indexer_softmax_scale
+    w_bsh_scaled = w_bsh.float() * indexer_softmax_scale
     return q_bshd, k_bsd, w_bsh, w_bsh_scaled
 
 
 def _indexer_topk_bshd(
-    q_bshd: Tensor,    # (B, S_q, H_q, D)
-    k_bsd: Tensor,     # (B, S_k, D)
-    w_bsh: Tensor,     # (B, S_q, H_q) — already scaled
+    q_bshd: Tensor,  # (B, S_q, H_q, D)
+    k_bsd: Tensor,  # (B, S_k, D)
+    w_bsh: Tensor,  # (B, S_q, H_q) — already scaled
     topk: int,
     ratio: int,
 ) -> Tuple[Tensor, Tensor, Tensor]:
@@ -230,9 +243,9 @@ class _DSASparseAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        query: Tensor,     # (total_Sq, H, D)
-        kv: Tensor,        # (total_Skv, D_kv) where D_kv >= D
-        topk_idxs: Tensor, # (total_Sq, H, TopK) or (total_Sq, 1, TopK)
+        query: Tensor,  # (total_Sq, H, D)
+        kv: Tensor,  # (total_Skv, D_kv) where D_kv >= D
+        topk_idxs: Tensor,  # (total_Sq, H, TopK) or (total_Sq, 1, TopK)
         softmax_scale: float,
         d_v: int,
         attn_sink: Optional[Tensor],
@@ -246,17 +259,16 @@ class _DSASparseAttnFunc(torch.autograd.Function):
         # Backward needs this to select numerically consistent score recomputation.
         D = query.shape[-1]
         H = topk_idxs.shape[1]
-        shared = (topk_idxs.stride(1) == 0)
+        shared = topk_idxs.stride(1) == 0
 
-        ctx.used_hp_fwd = (
-            shared and H >= 16 and (H % 16 == 0)
-            and (D % 16 == 0) and (d_v % 16 == 0)
-        )
+        ctx.used_hp_fwd = shared and H >= 16 and (H % 16 == 0) and (D % 16 == 0) and (d_v % 16 == 0)
 
         logger.debug(
-            "_DSASparseAttnFunc.forward: total_Sq=%d, H=%d, TopK=%d, shared=%s, "
-            "fwd_path=%s",
-            topk_idxs.shape[0], H, topk_idxs.shape[-1], shared,
+            "_DSASparseAttnFunc.forward: total_Sq=%d, H=%d, TopK=%d, shared=%s, " "fwd_path=%s",
+            topk_idxs.shape[0],
+            H,
+            topk_idxs.shape[-1],
+            shared,
             "hp_wgmma" if ctx.used_hp_fwd else "triton_2d",
         )
 
@@ -292,15 +304,13 @@ class _DSASparseAttnFunc(torch.autograd.Function):
             # cuBLAS BMM with f16 inputs also does f16×f16→f32 accumulation,
             # so exp(scores_bwd - lse_fwd) is numerically consistent.
             dq, dkv, d_sink = _DSASparseAttnFunc._hp_bmm_backward(
-                grad_out, query, kv, topk_idxs, out, lse, attn_sink,
-                ctx.softmax_scale, ctx.d_v,
+                grad_out, query, kv, topk_idxs, out, lse, attn_sink, ctx.softmax_scale, ctx.d_v
             )
         else:
             # --- Triton backward: forward used 2D Triton kernel ---
             # Both fwd and bwd use tl.sum(q * k) → same dot product, consistent.
             bwd_result = triton_sparse_attn_backward(
-                grad_out, query, kv, out, lse, topk_idxs,
-                ctx.softmax_scale, ctx.d_v, attn_sink
+                grad_out, query, kv, out, lse, topk_idxs, ctx.softmax_scale, ctx.d_v, attn_sink
             )
             dq, dkv, d_sink = bwd_result["dq"], bwd_result["dkv"], bwd_result["d_sink"]
 
@@ -308,12 +318,12 @@ class _DSASparseAttnFunc(torch.autograd.Function):
 
     @staticmethod
     def _hp_bmm_backward(
-        grad_out: Tensor,   # (total_Sq, H, d_v) bf16
-        query: Tensor,      # (total_Sq, H, D) bf16
-        kv: Tensor,         # (total_Skv, D_full) bf16
+        grad_out: Tensor,  # (total_Sq, H, d_v) bf16
+        query: Tensor,  # (total_Sq, H, D) bf16
+        kv: Tensor,  # (total_Skv, D_full) bf16
         topk_idxs: Tensor,  # (total_Sq, H, TopK) int32, shared (stride(1)==0)
-        out: Tensor,        # (total_Sq, H, d_v) bf16
-        lse: Tensor,        # (total_Sq, H) f32
+        out: Tensor,  # (total_Sq, H, d_v) bf16
+        lse: Tensor,  # (total_Sq, H) f32
         attn_sink: Optional[Tensor],  # (H,) f32 or None
         softmax_scale: float,
         d_v: int,
@@ -337,7 +347,7 @@ class _DSASparseAttnFunc(torch.autograd.Function):
 
         # Shared indices: (total_Sq, H, TopK) with stride(1)==0 → use head 0
         idxs_shared = topk_idxs[:, 0, :]  # (total_Sq, TopK)
-        valid_shared = idxs_shared >= 0    # (total_Sq, TopK)
+        valid_shared = idxs_shared >= 0  # (total_Sq, TopK)
         safe_shared = idxs_shared.clamp(min=0).long()
 
         # Gather KV once in bf16
@@ -349,21 +359,18 @@ class _DSASparseAttnFunc(torch.autograd.Function):
 
         # Recompute scores via cuBLAS BMM in bf16 — matches HP WGMMA forward
         # (tl.dot(Q_bf16, K_bf16^T) → f32 accumulator, training dtype is bf16)
-        scores = torch.bmm(
-            query, kv_gathered[:, :, :D].transpose(1, 2)
-        ).float() * softmax_scale  # (S, H, TopK) f32
+        scores = (
+            _score_bmm_fp32(query, kv_gathered[:, :, :D].transpose(1, 2)) * softmax_scale
+        )  # (S, H, TopK) f32
 
         # --- Fused dQ: eliminates P, dov, dS materialization ---
         # dQ = sum_k( exp(scores-lse)*valid * (dO@K^T - Di) * scale ) @ K
-        dq = fused_dq(
-            scores, lse, Di, grad_out, kv_gathered[:, :, :D], valid_shared, softmax_scale
-        )
+        dq = fused_dq(scores, lse, Di, grad_out, kv_gathered[:, :, :D], valid_shared, softmax_scale)
 
         # --- Fused dKV: eliminates P, dov, dS materialization ---
         # dKV[q,k,:] = sum_h( dS[q,h,k]*Q[q,h,:] + P[q,h,k]*dO[q,h,:] )
         dkv_gathered = fused_dkv(
-            scores, lse, Di, grad_out, query, kv_gathered[:, :, :D],
-            valid_shared, softmax_scale
+            scores, lse, Di, grad_out, query, kv_gathered[:, :, :D], valid_shared, softmax_scale
         )
         del scores
 
@@ -426,9 +433,7 @@ def dsa_sparse_attn(
 
     if indexer_topk > 0:
         # Split computation: full attention + indexer-only LSE
-        out, lse = _DSASparseAttnFunc.apply(
-            query, kv, topk_idxs, softmax_scale, d_v, attn_sink
-        )
+        out, lse = _DSASparseAttnFunc.apply(query, kv, topk_idxs, softmax_scale, d_v, attn_sink)
         # Compute LSE for first indexer_topk positions
         TopK = topk_idxs.shape[-1]
         if indexer_topk >= TopK:
@@ -440,9 +445,7 @@ def dsa_sparse_attn(
             )
         return out, lse, lse_indexer
     else:
-        out, lse = _DSASparseAttnFunc.apply(
-            query, kv, topk_idxs, softmax_scale, d_v, attn_sink
-        )
+        out, lse = _DSASparseAttnFunc.apply(query, kv, topk_idxs, softmax_scale, d_v, attn_sink)
         return out, lse, None
 
 
@@ -543,11 +546,7 @@ def _kl_loss_from_target_predict(
     """KL(target || predict) reduced and scaled by loss_coeff."""
     # Keep inference/no-grad loss reporting identical to compute_dsa_indexer_loss.
     kl_per_row = (
-        target
-        * (
-            torch.log(target + _SPARSE_KL_EPS)
-            - torch.log(predict + _SPARSE_KL_EPS)
-        )
+        target * (torch.log(target + _SPARSE_KL_EPS) - torch.log(predict + _SPARSE_KL_EPS))
     ).sum(dim=-1)
 
     row_valid = (topk_indices >= 0).any(dim=-1)  # (B, S_q)
@@ -602,13 +601,13 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
     @staticmethod
     def forward(
         ctx,
-        query: Tensor,       # (sq, b, np, d)
-        kv_full: Tensor,     # (skv, b, d)
-        attn_sink: Tensor,   # (np,) f32
-        window_idxs: Tensor, # (b, sq, win_topk) int32
-        q_indexer: Tensor,   # (sq, b, idx_nh, idx_hd)
-        k_indexer: Tensor,   # (n_comp, b, idx_hd)
-        weights: Tensor,     # (sq, b, idx_nh) — raw
+        query: Tensor,  # (sq, b, np, d)
+        kv_full: Tensor,  # (skv, b, d)
+        attn_sink: Tensor,  # (np,) f32
+        window_idxs: Tensor,  # (b, sq, win_topk) int32
+        q_indexer: Tensor,  # (sq, b, idx_nh, idx_hd)
+        k_indexer: Tensor,  # (n_comp, b, idx_hd)
+        weights: Tensor,  # (sq, b, idx_nh) — raw
         indexer_topk: int,
         ratio: int,
         softmax_scale: float,
@@ -629,7 +628,15 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
             "FusedIndexerSparseAttnFunc.forward: sq=%d, b=%d, np=%d, d=%d, "
             "skv=%d, n_comp=%d, effective_topk=%d, sparse_loss=%s, "
             "loss_coeff=%.4g",
-            sq, b, np_, d, skv, n_comp, effective_topk, sparse_loss, loss_coeff,
+            sq,
+            b,
+            np_,
+            d,
+            skv,
+            n_comp,
+            effective_topk,
+            sparse_loss,
+            loss_coeff,
         )
 
         prof = _CudaProfiler(enabled=_DSA_PROFILE)
@@ -673,9 +680,7 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         global_idxs = combined_idxs.clone()
         valid_mask = global_idxs >= 0
         global_idxs = torch.where(
-            valid_mask,
-            global_idxs * b + batch_ids.view(b, 1, 1),
-            global_idxs,
+            valid_mask, global_idxs * b + batch_ids.view(b, 1, 1), global_idxs
         )  # (b, sq, total_topk)
         # Permute to SB order then flatten: (b, sq, topk) -> (sq, b, topk) -> (sq*b, topk)
         global_idxs = global_idxs.permute(1, 0, 2).reshape(sq * b, total_topk)
@@ -691,15 +696,20 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         # When sparse_loss is enabled, compute partial LSE for the first
         # effective_topk positions (compressed indices) in a single pass,
         # avoiding a redundant second forward call.
-        _indexer_topk_for_lse = effective_topk if sparse_loss else 0
+        _indexer_topk_for_lse = 0
         out_flat, lse, lse_indexer_raw = triton_sparse_attn_forward(
-            q_flat, kv_flat, global_idxs_expanded, softmax_scale, d, attn_sink,
+            q_flat,
+            kv_flat,
+            global_idxs_expanded,
+            softmax_scale,
+            d,
+            attn_sink,
             indexer_topk=_indexer_topk_for_lse,
         )
         prof.stop()
         # 6. Compute indexer loss
         # P3 optimization: skip step 6+7 entirely when loss_coeff == 0
-        if loss_coeff == 0:
+        if loss_coeff <= 0:
             indexer_loss = torch.zeros((), device=query.device, dtype=torch.float32)
             precomputed_grad_q_indexer = torch.zeros_like(q_indexer)
             precomputed_grad_k_indexer = torch.zeros_like(k_indexer)
@@ -707,8 +717,15 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
 
             # Save for backward
             ctx.save_for_backward(
-                q_flat, kv_flat, attn_sink, global_idxs, out_flat.clone(), lse,
-                precomputed_grad_q_indexer, precomputed_grad_k_indexer, precomputed_grad_weights,
+                q_flat,
+                kv_flat,
+                attn_sink,
+                global_idxs,
+                out_flat.clone(),
+                lse,
+                precomputed_grad_q_indexer,
+                precomputed_grad_k_indexer,
+                precomputed_grad_weights,
             )
             ctx.softmax_scale = softmax_scale
             ctx.sq = sq
@@ -733,29 +750,59 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         # Prepare attention tensors in BSHD layout (shared by both paths).
         # .contiguous() omitted: downstream einsum/indexing handle strided tensors.
         q_attn_bshd = query.permute(1, 0, 2, 3)  # (b, sq, np, d)
-        lse_indexer_bsh = lse_indexer_raw.reshape(sq, b, np_).permute(1, 0, 2) if sparse_loss else None
+        from megatron.core.transformer.experimental_attention_variant.csa_utils.fused_sparse_attention import (
+            _compute_full_csa_teacher_lse,
+        )
+        from megatron.core.transformer.experimental_attention_variant.csa_utils.fused_sparse_attention import (
+            local_to_global_flat as public_local_to_global_flat,
+        )
+
+        # The teacher sees every visible compressed key, window token and sink.
+        # Attention top-k selection must not change its head mixture weights.
+        teacher_lse = _compute_full_csa_teacher_lse(
+            q_attn_bshd,
+            q_flat,
+            kv_flat,
+            kv_full[kv_offset : kv_offset + n_comp, :, :d].permute(1, 0, 2),
+            attn_sink,
+            public_local_to_global_flat(window_idxs, b),
+            softmax_scale,
+            ratio,
+        )
+        lse_indexer_bsh = teacher_lse
 
         if sparse_loss:
             k_attn_bsd = kv_full[:, :, :d].permute(1, 0, 2)  # (b, skv, d)
 
             if needs_grad:
                 # Fused: loss + backward in one pass (single K gather + einsum)
-                indexer_loss, precomputed_grad_q_indexer, precomputed_grad_k_indexer, precomputed_grad_weights = (
-                    fused_sparse_indexer_loss_and_backward(
-                        q_idx_bshd, k_idx_bsd, w_bsh_scaled,
-                        topk_indices_cmp,
-                        q_attn_bshd, k_attn_bsd, lse_indexer_bsh,
-                        indexer_softmax_scale=indexer_softmax_scale,
-                        softmax_scale=softmax_scale,
-                        loss_coeff=loss_coeff,
-                        calculate_per_token_loss=calculate_per_token_loss,
-                        idx_nh=idx_nh,
-                        kv_offset=kv_offset,
-                    )
+                (
+                    indexer_loss,
+                    precomputed_grad_q_indexer,
+                    precomputed_grad_k_indexer,
+                    precomputed_grad_weights,
+                ) = fused_sparse_indexer_loss_and_backward(
+                    q_idx_bshd,
+                    k_idx_bsd,
+                    w_bsh_scaled,
+                    topk_indices_cmp,
+                    q_attn_bshd,
+                    k_attn_bsd,
+                    lse_indexer_bsh,
+                    indexer_softmax_scale=indexer_softmax_scale,
+                    softmax_scale=softmax_scale,
+                    loss_coeff=loss_coeff,
+                    calculate_per_token_loss=calculate_per_token_loss,
+                    idx_nh=idx_nh,
+                    kv_offset=kv_offset,
                 )
                 # BSHD -> SBHD (match input layout)
-                precomputed_grad_q_indexer = precomputed_grad_q_indexer.permute(1, 0, 2, 3).contiguous()
-                precomputed_grad_k_indexer = precomputed_grad_k_indexer.permute(1, 0, 2).contiguous()
+                precomputed_grad_q_indexer = precomputed_grad_q_indexer.permute(
+                    1, 0, 2, 3
+                ).contiguous()
+                precomputed_grad_k_indexer = precomputed_grad_k_indexer.permute(
+                    1, 0, 2
+                ).contiguous()
                 precomputed_grad_weights = precomputed_grad_weights.permute(1, 0, 2).contiguous()
                 # Chain rule: w_scaled = w_raw * indexer_softmax_scale (done in
                 # _sbhd_to_bshd_indexer_inputs). The fused function returns
@@ -764,68 +811,94 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
             else:
                 # Inference: only compute loss, no backward
                 predict_result = sparse_indexer_score_recompute(
-                    q_idx_bshd, k_idx_bsd, w_bsh_scaled, topk_indices_cmp,
-                    qhead_per_kv_head=idx_nh,
+                    q_idx_bshd, k_idx_bsd, w_bsh_scaled, topk_indices_cmp, qhead_per_kv_head=idx_nh
                 )
                 # Shift valid compressed indices by kv_offset, keep -1 as-is
                 topk_for_target = topk_indices_cmp.clone()
                 valid_cmp_mask = topk_for_target >= 0
                 topk_for_target[valid_cmp_mask] += kv_offset
                 target_result = sparse_attn_score_recompute(
-                    q_attn_bshd, k_attn_bsd, lse_indexer_bsh, topk_for_target,
-                    softmax_scale, qhead_per_kv_head=np_,
+                    q_attn_bshd,
+                    k_attn_bsd,
+                    lse_indexer_bsh,
+                    topk_for_target,
+                    softmax_scale,
+                    qhead_per_kv_head=np_,
                 )
                 indexer_loss = _kl_loss_from_target_predict(
-                    target_result["target"], predict_result["predict"],
-                    topk_indices_cmp, loss_coeff, calculate_per_token_loss
+                    target_result["target"],
+                    predict_result["predict"],
+                    topk_indices_cmp,
+                    loss_coeff,
+                    calculate_per_token_loss,
                 )
                 precomputed_grad_q_indexer = torch.zeros_like(q_indexer)
                 precomputed_grad_k_indexer = torch.zeros_like(k_indexer)
                 precomputed_grad_weights = torch.zeros_like(weights)
         else:
             # Dense path
-            k_attn_bsd = kv_full[kv_offset:kv_offset + n_comp, :, :d].permute(1, 0, 2)
-            lse_bsh = lse.reshape(sq, b, np_).permute(1, 0, 2)
+            k_attn_bsd = kv_full[kv_offset : kv_offset + n_comp, :, :d].permute(1, 0, 2)
+            lse_bsh = teacher_lse
 
             if needs_grad:
                 # Fused: loss + backward in one pass
-                indexer_loss, precomputed_grad_q_indexer, precomputed_grad_k_indexer, precomputed_grad_weights = (
-                    fused_dense_indexer_loss_and_backward(
-                        q_idx_bshd, k_idx_bsd, w_bsh_scaled,
-                        topk_indices_cmp,
-                        q_attn_bshd, k_attn_bsd, lse_bsh,
-                        indexer_softmax_scale=indexer_softmax_scale,
-                        softmax_scale=softmax_scale,
-                        loss_coeff=loss_coeff,
-                        ratio=ratio,
-                        calculate_per_token_loss=calculate_per_token_loss,
-                        idx_nh=idx_nh,
-                    )
+                (
+                    indexer_loss,
+                    precomputed_grad_q_indexer,
+                    precomputed_grad_k_indexer,
+                    precomputed_grad_weights,
+                ) = fused_dense_indexer_loss_and_backward(
+                    q_idx_bshd,
+                    k_idx_bsd,
+                    w_bsh_scaled,
+                    topk_indices_cmp,
+                    q_attn_bshd,
+                    k_attn_bsd,
+                    lse_bsh,
+                    indexer_softmax_scale=indexer_softmax_scale,
+                    softmax_scale=softmax_scale,
+                    loss_coeff=loss_coeff,
+                    ratio=ratio,
+                    calculate_per_token_loss=calculate_per_token_loss,
+                    idx_nh=idx_nh,
                 )
                 # BSHD -> SBHD (match input layout)
-                precomputed_grad_q_indexer = precomputed_grad_q_indexer.permute(1, 0, 2, 3).contiguous()
-                precomputed_grad_k_indexer = precomputed_grad_k_indexer.permute(1, 0, 2).contiguous()
+                precomputed_grad_q_indexer = precomputed_grad_q_indexer.permute(
+                    1, 0, 2, 3
+                ).contiguous()
+                precomputed_grad_k_indexer = precomputed_grad_k_indexer.permute(
+                    1, 0, 2
+                ).contiguous()
                 precomputed_grad_weights = precomputed_grad_weights.permute(1, 0, 2).contiguous()
                 # Chain rule: same as sparse path
                 precomputed_grad_weights = precomputed_grad_weights * indexer_softmax_scale
             else:
                 # Inference: only compute loss
                 dense_idx_result = dense_indexer_score_recompute(
-                    q_idx_bshd, k_idx_bsd, w_bsh_scaled,
-                    qhead_per_kv_head=idx_nh, sm_scale=1.0, ratio=ratio,
+                    q_idx_bshd,
+                    k_idx_bsd,
+                    w_bsh_scaled,
+                    qhead_per_kv_head=idx_nh,
+                    sm_scale=1.0,
+                    ratio=ratio,
                 )
-                # Pass lse=None so dense_attn_score_recompute uses self-contained
-                # softmax over compressed keys only (matching unfused reference).
-                # Using the full LSE (which includes window tokens in the
-                # denominator) would make compressed-token probabilities too small.
+                # Share the public full teacher denominator in no-grad reporting.
                 dense_attn_result = dense_attn_score_recompute(
-                    q_attn_bshd, k_attn_bsd, None,
-                    qhead_per_kv_head=np_, softmax_scale=softmax_scale, ratio=ratio,
+                    q_attn_bshd,
+                    k_attn_bsd,
+                    teacher_lse,
+                    qhead_per_kv_head=np_,
+                    softmax_scale=softmax_scale,
+                    ratio=ratio,
                 )
                 indexer_loss = _kl_loss_from_dense_scores(
-                    dense_attn_result["out"], dense_attn_result["denom"],
-                    dense_idx_result["out"], dense_idx_result["denom"],
-                    topk_indices_cmp, loss_coeff, calculate_per_token_loss,
+                    dense_attn_result["out"],
+                    dense_attn_result["denom"],
+                    dense_idx_result["out"],
+                    dense_idx_result["denom"],
+                    topk_indices_cmp,
+                    loss_coeff,
+                    calculate_per_token_loss,
                 )
                 precomputed_grad_q_indexer = torch.zeros_like(q_indexer)
                 precomputed_grad_k_indexer = torch.zeros_like(k_indexer)
@@ -834,8 +907,15 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         # Save for backward
         prof.stop()
         ctx.save_for_backward(
-            q_flat, kv_flat, attn_sink, global_idxs, out_flat.clone(), lse,
-            precomputed_grad_q_indexer, precomputed_grad_k_indexer, precomputed_grad_weights,
+            q_flat,
+            kv_flat,
+            attn_sink,
+            global_idxs,
+            out_flat.clone(),
+            lse,
+            precomputed_grad_q_indexer,
+            precomputed_grad_k_indexer,
+            precomputed_grad_weights,
         )
         ctx.softmax_scale = softmax_scale
         ctx.sq = sq
@@ -853,8 +933,15 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
     @staticmethod
     def backward(ctx, grad_output, grad_loss):
         (
-            q_flat, kv_flat, attn_sink, global_idxs, out_flat, lse,
-            precomputed_grad_q_indexer, precomputed_grad_k_indexer, precomputed_grad_weights,
+            q_flat,
+            kv_flat,
+            attn_sink,
+            global_idxs,
+            out_flat,
+            lse,
+            precomputed_grad_q_indexer,
+            precomputed_grad_k_indexer,
+            precomputed_grad_weights,
         ) = ctx.saved_tensors
 
         sq, b, np_, d = ctx.sq, ctx.b, ctx.np_, ctx.d
@@ -870,7 +957,11 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         logger.debug(
             "FusedIndexerSparseAttnFunc.backward: sq=%d, b=%d, np=%d, "
             "TopK=%d, d_kv=%d, bwd_path=fused_dq_dkv",
-            sq, b, np_, TopK, d_kv,
+            sq,
+            b,
+            np_,
+            TopK,
+            d_kv,
         )
 
         # --- Optimized path: bf16 BMM scores + Triton fused dQ/dKV ---
@@ -886,11 +977,11 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
 
         # Shared indices: (total_Sq, 1, TopK) -> squeeze to (total_Sq, TopK)
         idxs_shared = global_idxs.squeeze(1)  # (total_Sq, TopK)
-        valid_shared = idxs_shared >= 0       # (total_Sq, TopK)
+        valid_shared = idxs_shared >= 0  # (total_Sq, TopK)
         safe_shared = idxs_shared.clamp(min=0).long()
 
         # Gather KV once in bf16 — no f32 upcast! cuBLAS bf16 BMM does f32 accumulation.
-        flat_idxs = safe_shared.reshape(-1)   # (total_Sq * TopK)
+        flat_idxs = safe_shared.reshape(-1)  # (total_Sq * TopK)
         kv_gathered = kv_flat[flat_idxs].reshape(total_Sq, TopK, d_kv)  # bf16, 384MB
 
         # Di = sum(dO * O) per (query, head) — needed for dS
@@ -903,25 +994,30 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
         # cuBLAS bf16 BMM also does bf16×bf16→f32 accumulation internally,
         # ensuring exp(scores_bwd - lse_fwd) is numerically consistent.
         prof.start("bwd_scores")
-        scores = torch.bmm(
-            q_flat.reshape(total_Sq, np_, d),
-            kv_gathered[:, :, :d].transpose(1, 2)
-        ).float() * ctx.softmax_scale  # (S, H, TopK) f32
+        scores = (
+            _score_bmm_fp32(q_flat.reshape(total_Sq, np_, d), kv_gathered[:, :, :d].transpose(1, 2))
+            * ctx.softmax_scale
+        )  # (S, H, TopK) f32
         prof.stop()
 
         # --- Fused dQ: eliminates P, dov, dS materialization ---
         prof.start("bwd_dQ")
         dq = fused_dq(
-            scores, lse, Di, dO_flat, kv_gathered[:, :, :d],
-            valid_shared, ctx.softmax_scale
+            scores, lse, Di, dO_flat, kv_gathered[:, :, :d], valid_shared, ctx.softmax_scale
         )
         prof.stop()
 
         # --- Fused dKV: eliminates P, dov, dS materialization ---
         prof.start("bwd_dKV")
         dkv_gathered = fused_dkv(
-            scores, lse, Di, dO_flat, q_flat.reshape(total_Sq, np_, d),
-            kv_gathered[:, :, :d], valid_shared, ctx.softmax_scale
+            scores,
+            lse,
+            Di,
+            dO_flat,
+            q_flat.reshape(total_Sq, np_, d),
+            kv_gathered[:, :, :d],
+            valid_shared,
+            ctx.softmax_scale,
         )
         del scores
         prof.stop()
@@ -945,6 +1041,8 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
 
         prof.start("bwd_indexer_grads")
         # Scale pre-computed indexer grads by actual grad_loss
+        if grad_loss is None:
+            grad_loss = precomputed_grad_q_indexer.new_zeros(())
         grad_q_indexer = precomputed_grad_q_indexer * grad_loss
         grad_k_indexer = precomputed_grad_k_indexer * grad_loss
         grad_weights = precomputed_grad_weights * grad_loss
@@ -960,7 +1058,14 @@ class FusedIndexerSparseAttnFunc(torch.autograd.Function):
             grad_q_indexer,
             grad_k_indexer,
             grad_weights,
-            None, None, None, None, None, None, None, None,  # scalar args
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,  # scalar args
         )
 
 

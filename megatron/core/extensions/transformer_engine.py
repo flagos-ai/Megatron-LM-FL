@@ -56,7 +56,6 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.typed_torch import copy_signature
-from megatron.plugin.decorators import overridable  # FlagScale Modify
 from megatron.core.utils import (
     get_pg_rank,
     get_pg_size,
@@ -65,6 +64,7 @@ from megatron.core.utils import (
     is_te_min_version,
     is_torch_min_version,
 )
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 try:
     import transformer_engine as te
@@ -1821,6 +1821,8 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 super().set_context_parallel_group(None, None, None, self.cp_comm_type)
             self.kept_packed_seq_params.discard("cp_group")
             self.kept_packed_seq_params.discard("local_cp_size")
+            for internal_field in ("tokens_per_sample", "pad_between_seqs", "cp_scatter_cache"):
+                self.kept_packed_seq_params.discard(internal_field)
 
         # Default to constructor-provided num_splits unless explicitly overridden
         if num_splits is None:

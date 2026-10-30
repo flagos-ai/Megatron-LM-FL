@@ -8,14 +8,13 @@ from typing import Callable, List, Literal, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 
+from megatron.core._rank_utils import log_single_rank
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
+from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.quantization.quant_config import RecipeConfig
 from megatron.core.transformer.enums import AttnBackend, CudaGraphScope, LayerType
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
-
-from megatron.core._rank_utils import log_single_rank
-from megatron.core.fusions.fused_bias_geglu import quick_gelu
-from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.utils import (
     get_te_version,
     init_method_normal,
@@ -1670,27 +1669,11 @@ class NPUTransformerConfig(TransformerConfig):
                 "recompute_modules with selective recompute to reduce activation memory."
             )
 
-        # Validation for use_fused_mhc
+        # Backend validation is handled by super().__post_init__(); the fused
+        # dispatcher checks availability according to mhc_fused_backend.
         if self.use_fused_mhc:
             if not self.enable_hyper_connections:
                 raise ValueError("use_fused_mhc requires enable_hyper_connections=True.")
-            try:
-                from megatron.core.fusions.fused_mhc_kernels import is_cutile_available
-
-                if not is_cutile_available():
-                    warnings.warn(
-                        "use_fused_mhc is enabled but cuda.tile (cuTile) is not installed. "
-                        "Falling back to reference mHC implementations.",
-                        UserWarning,
-                    )
-                    self.use_fused_mhc = False
-            except ImportError:
-                warnings.warn(
-                    "use_fused_mhc is enabled but fused_mhc_kernels module could not be "
-                    "imported. Falling back to reference mHC implementations.",
-                    UserWarning,
-                )
-                self.use_fused_mhc = False
 
         if self.fine_grained_activation_offloading:
             assert (

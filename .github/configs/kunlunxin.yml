@@ -296,6 +296,8 @@ test_matrix:
       # RMSNorm backward + residual add); only rmsnorm_bwd is available.
       # ascend and metax also ignore this file for the same reason.
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton is incompatible.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
 
       # others

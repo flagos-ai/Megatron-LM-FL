@@ -24,16 +24,14 @@ from __future__ import annotations
 from typing import Dict, Optional, Tuple
 
 import torch
-from torch import Tensor
-
 import triton
 import triton.language as tl
+from torch import Tensor
 
 from megatron.plugin.dsa_kernel.triton_dsa_utils import (
     compute_ratio_causal_mask,
     topk_with_causal_mask,
 )
-
 
 # Block size for dense Q-tiling. Trades peak memory for kernel-launch overhead.
 # 64 is a good default; lower to 32 if D >= 512 and GPU memory is very tight.
@@ -722,7 +720,7 @@ def fused_dense_indexer_loss_and_backward(
     topk_indices_cmp: Tensor,
     q_attn_bshd: Tensor,
     k_attn_bsd: Tensor,
-    lse_bsh: Tensor,  # noqa: ARG001 — kept for API compat; dense uses self-contained softmax
+    lse_bsh: Tensor,  # Full CSA teacher denominator, including window and sink.
     indexer_softmax_scale: float,  # noqa: ARG001 — scale is embedded in w_bsh; kept for API compat
     softmax_scale: float,
     loss_coeff: float,
@@ -799,13 +797,12 @@ def fused_dense_indexer_loss_and_backward(
         index_score = combined  # keep for KL
 
         # --- Attention scores (target) ---
-        # For the dense path, compute self-contained softmax over compressed keys
-        # (matching unfused FusedDSAIndexerLoss which does softmax(Q@K_comp*scale+mask))
+        # Use the public teacher denominator, including window, sink and every
+        # visible compressed key, before summing probabilities across heads.
         attn_per_head = torch.einsum("bqhd,bkd->bqhk", q_attn_block, k_attn) * softmax_scale
         # (B, block, np, S_k) — apply causal mask before softmax
         attn_per_head = attn_per_head.masked_fill(~mask_block.unsqueeze(0).unsqueeze(2), float("-inf"))
-        # Self-contained softmax per head over S_k (no external LSE)
-        attn_probs = torch.softmax(attn_per_head, dim=-1)  # (B, block, np, S_k)
+        attn_probs = torch.exp(attn_per_head - lse_bsh[:, q_start:q_end].unsqueeze(-1))
         attn_probs = attn_probs.masked_fill(~mask_block.unsqueeze(0).unsqueeze(2), 0.0)
         attn_score = attn_probs.sum(dim=2)  # (B, block, S_k)
         attn_score = attn_score.masked_fill(~mask_block.unsqueeze(0), 0.0)

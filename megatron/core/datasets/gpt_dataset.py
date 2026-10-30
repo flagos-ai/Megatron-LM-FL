@@ -66,6 +66,12 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     data parallel size * context parallel size * sequence parallel size * 2.
     """
 
+    inter_document_masking: bool = False
+    """Emit document boundaries for packed pretraining."""
+
+    preserve_packed_sequence_lengths: bool = False
+    """Emit separate real and physical packed offsets for DSv4 SFT attention."""
+
     sequences_per_dataset: Optional[Dict[str, int]] = None
     """If provided, the sequence and document counts for each dataset. 
        Check --per-dataset-sequences-path
@@ -238,6 +244,21 @@ class GPTDataset(MegatronDataset):
         else:
             text, _ = self._query_document_sample_shuffle_indices(idx)
 
+        packed_document_lengths = None
+        if self.config.inter_document_masking:
+            sample_idx = self.shuffle_index[0 if idx is None else idx]
+            doc_beg, offset_beg = self.sample_index[sample_idx]
+            doc_end, offset_end = self.sample_index[sample_idx + 1]
+            packed_document_lengths = []
+            for doc in range(doc_beg, doc_end + 1):
+                start = int(offset_beg) if doc == doc_beg else 0
+                stop = (
+                    int(offset_end) + self.config.add_extra_token_to_sequence
+                    if doc == doc_end
+                    else int(self.dataset.sequence_lengths[self.document_index[doc]])
+                )
+                packed_document_lengths.append(stop - start)
+
         text = torch.from_numpy(text).long()
         if self.config.add_extra_token_to_sequence:
             tokens = text[:-1].contiguous()
@@ -279,6 +300,65 @@ class GPTDataset(MegatronDataset):
         # Batch padding sequence so we mask the loss
         if idx is None:
             loss_mask = torch.zeros_like(loss_mask)
+
+        if self.config.inter_document_masking:
+            # packed_document_lengths come from _query_document_sample_shuffle_indices
+            # which fetches sequence_length + add_extra_token_to_sequence tokens
+            # total. The extra token is appended to the last document part (used
+            # to produce the shifted labels), so subtract it before computing
+            # cu_seqlens which should index into the sequence_length-sized tokens
+            # tensor.
+            if self.config.add_extra_token_to_sequence:
+                packed_document_lengths[-1] -= 1
+                if packed_document_lengths[-1] == 0:
+                    packed_document_lengths.pop()
+            # If the sample was padded (e.g., the last validation sample),
+            # fold the padding into the last document so cu_seqlens[-1]
+            # equals sequence_length.
+            real_document_lengths = list(packed_document_lengths)
+            shortfall = self.config.sequence_length - sum(packed_document_lengths)
+            if shortfall > 0:
+                if packed_document_lengths:
+                    packed_document_lengths[-1] += shortfall
+                else:
+                    packed_document_lengths.append(shortfall)
+            cu_seqlens = torch.tensor(
+                numpy.cumsum([0] + packed_document_lengths), dtype=torch.int32
+            )
+
+            max_seqlen = (cu_seqlens[1:] - cu_seqlens[:-1]).max()
+
+            # Reset position IDs per document.
+            position_ids = position_ids.clone()
+            for i in range(1, cu_seqlens.numel()):
+                start = cu_seqlens[i - 1].item()
+                end = cu_seqlens[i].item()
+                position_ids[start:end] = torch.arange(end - start, dtype=torch.long)
+
+            # Pad cu_seqlens to a fixed length so that default_collate can
+            # stack samples with different numbers of documents. Trailing
+            # entries are filled with sequence_length; the merge helper
+            # strips them later.
+            padded_cu_seqlens = torch.full(
+                (self.config.sequence_length + 1,), self.config.sequence_length, dtype=torch.int32
+            )
+            padded_cu_seqlens[: cu_seqlens.numel()] = cu_seqlens
+
+            result = {
+                "tokens": tokens,
+                "labels": labels,
+                "loss_mask": loss_mask,
+                "position_ids": position_ids,
+                "cu_seqlens": padded_cu_seqlens,
+                "max_seqlen": max_seqlen,
+            }
+            if self.config.preserve_packed_sequence_lengths:
+                real_cu = torch.tensor(numpy.cumsum([0] + real_document_lengths), dtype=torch.int32)
+                logical = torch.full_like(padded_cu_seqlens, int(real_cu[-1]))
+                logical[: real_cu.numel()] = real_cu
+                result['cu_seqlens_padded'] = padded_cu_seqlens
+                result['cu_seqlens'] = logical
+            return result
 
         if self.config.create_attention_mask:
             return {
