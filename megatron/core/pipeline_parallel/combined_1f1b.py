@@ -9,6 +9,12 @@ import torch
 from megatron.core.distributed.fsdp.src.megatron_fsdp.utils import find_megatron_fsdp
 from megatron.core.enums import Fp8Recipe
 from megatron.core.fp8_utils import get_fp8_context
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import scoped_forward
+from megatron.megalens.probes import pipeline as pipeline_probes
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.pipeline_parallel.utils import (
     AbstractSchedulePlan,
     ScheduleNode,
@@ -86,6 +92,7 @@ def combined_1f1b_schedule_for_no_pipelining(
     with no_sync_func():
         for i in range(num_microbatches - 1):
             total_num_tokens += num_tokens
+            # BEGIN MEGALENS OBSERVABILITY
             output_tensor, num_tokens, _ = combined_forward_backward_step(
                 forward_step_func,
                 data_iterator,
@@ -102,11 +109,14 @@ def combined_1f1b_schedule_for_no_pipelining(
                 checkpoint_activations_microbatch=None,
                 is_first_microbatch=check_first_val_step((i + 1) == 0),
                 current_microbatch=(i + 1),
+                backward_microbatch=i,
                 fsdp_wrapper=fsdp_wrapper,
             )
+            # END MEGALENS OBSERVABILITY
     total_num_tokens += num_tokens
     # The backward step for the last microbatch is executed alone, no a2a overlapping
     # Run computation for last microbatch out of context handler (want to synchronize gradients).
+    # BEGIN MEGALENS OBSERVABILITY
     output_tensor, num_tokens, _ = combined_forward_backward_step(
         forward_step_func,
         data_iterator,
@@ -119,8 +129,10 @@ def combined_1f1b_schedule_for_no_pipelining(
         output_tensor,  # b_output_tensor
         output_tensor_grad,  # b_output_tensor_grad
         config,
+        backward_microbatch=num_microbatches - 1,
         fsdp_wrapper=fsdp_wrapper,
     )
+    # END MEGALENS OBSERVABILITY
     return forward_data_store, total_num_tokens
 
 
@@ -215,15 +227,22 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
         )
     # backward prepare
     b_model_chunk_id = None
+    # BEGIN MEGALENS OBSERVABILITY
+    b_microbatch_id = None
+    # END MEGALENS OBSERVABILITY
     b_input_tensor = None
     b_output_tensor = None
     b_output_tensor_grad = None
     if b_virtual_microbatch_id is not None:
+        # BEGIN MEGALENS OBSERVABILITY
+        b_microbatch_id = get_microbatch_id_in_model_chunk(b_virtual_microbatch_id, forward=False)
+        # END MEGALENS OBSERVABILITY
         b_model_chunk_id = get_model_chunk_id(b_virtual_microbatch_id, forward=False)
         b_input_tensor, b_output_tensor, b_output_tensor_grad = backward_step_helper_preprocess(
             b_virtual_microbatch_id, b_model_chunk_id
         )
     # Call combined forward and backward step to overlap the communication and computation
+    # BEGIN MEGALENS OBSERVABILITY
     output_tensor, num_tokens, input_tensor_grad = combined_forward_backward_step(
         forward_step_func,
         data_iterator[f_model_chunk_id] if f_model_chunk_id is not None else None,
@@ -249,7 +268,10 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
             else None
         ),
         current_microbatch=f_microbatch_id,
+        backward_microbatch=b_microbatch_id,
+        b_model_chunk_id=b_model_chunk_id,
     )
+    # END MEGALENS OBSERVABILITY
     # forward post process
     if f_model_chunk_id is not None:
         forward_step_helper_postprocess(f_model_chunk_id, output_tensor, num_tokens)
@@ -267,6 +289,11 @@ def combined_1f1b_schedule_for_interleaved_pipelining(
     return output_tensor, input_tensor_grad
 
 
+# BEGIN MEGALENS OBSERVABILITY
+@scoped_forward(
+    "combined-forward-backward-step", ctx_factory=pipeline_probes._combined_step_context
+)
+# END MEGALENS OBSERVABILITY
 def combined_forward_backward_step(
     forward_step_func,
     data_iterator,
@@ -290,6 +317,10 @@ def combined_forward_backward_step(
     current_microbatch=None,
     encoder_decoder_xattn=False,
     fsdp_wrapper=None,
+    # BEGIN MEGALENS OBSERVABILITY
+    backward_microbatch=None,
+    b_model_chunk_id=None,
+    # END MEGALENS OBSERVABILITY
 ):
     """Merged forward and backward step for combined 1f1b scheduler.
 

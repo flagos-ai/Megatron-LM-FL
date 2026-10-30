@@ -2,6 +2,10 @@
 
 import torch
 
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.megalens.probes import tp as tp_probes
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.parallel_state import get_global_memory_buffer
 from megatron.core.utils import get_tensor_model_parallel_group_if_none, is_torch_min_version
 
@@ -29,12 +33,16 @@ def _reduce(input_, group):
     """All-reduce the input tensor across model parallel group."""
     assert group is not None, "group should not be None"
 
-    # Bypass the function if we are using only 1 GPU.
-    if group.size() == 1:
-        return input_
+    # BEGIN MEGALENS OBSERVABILITY
+    group_size = int(group.size())
+    with tp_probes.all_reduce_scope("tp-allreduce", input_, group, group_size):
+        # Bypass the function if we are using only 1 GPU.
+        if group_size == 1:
+            return input_
 
-    # All-reduce.
-    torch.distributed.all_reduce(input_.contiguous(), group=group)
+        # All-reduce.
+        torch.distributed.all_reduce(input_.contiguous(), group=group)
+    # END MEGALENS OBSERVABILITY
 
     return input_
 
@@ -95,7 +103,10 @@ def _gather_along_last_dim(input_, group):
     dim_size[0] = dim_size[0] * world_size
 
     output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
-    dist_all_gather_func(output, input_.contiguous(), group=group)
+    # BEGIN MEGALENS OBSERVABILITY
+    with tp_probes.all_gather_scope("tp-all-gather-last", input_, group, world_size, "last"):
+        dist_all_gather_func(output, input_.contiguous(), group=group)
+    # END MEGALENS OBSERVABILITY
     tensor_list = output.chunk(world_size, dim=0)
     output = torch.cat(tensor_list, dim=-1).contiguous()
 
@@ -113,7 +124,12 @@ def _reduce_scatter_along_last_dim(input_, group):
         input_, split_size_or_sections=input_.shape[-1] // world_size, dim=1
     )
     concat_tensor = torch.cat(split_tensors, dim=0)
-    output = _reduce_scatter_along_first_dim(concat_tensor, group=group).reshape(target_shape)
+    # BEGIN MEGALENS OBSERVABILITY
+    with tp_probes.reduce_scatter_scope(
+        "tp-reduce-scatter-last", concat_tensor, group, world_size, "last"
+    ):
+        output = _reduce_scatter_along_first_dim(concat_tensor, group=group).reshape(target_shape)
+    # END MEGALENS OBSERVABILITY
     return output
 
 
@@ -145,7 +161,10 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
             output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
-        dist_all_gather_func(output, input_.contiguous(), group=group)
+        # BEGIN MEGALENS OBSERVABILITY
+        with tp_probes.all_gather_scope("tp-all-gather-first", input_, group, world_size, "first"):
+            dist_all_gather_func(output, input_.contiguous(), group=group)
+        # END MEGALENS OBSERVABILITY
     else:
         dim_size[0] = sum(output_split_sizes)
         if use_global_buffer:
@@ -153,7 +172,12 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
         else:
             output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
-        torch.distributed.all_gather(output_tensor_list, input_, group=group)
+        # BEGIN MEGALENS OBSERVABILITY
+        with tp_probes.all_gather_scope(
+            "tp-all-gather-first", input_, group, world_size, "first", output_split_sizes
+        ):
+            torch.distributed.all_gather(output_tensor_list, input_, group=group)
+        # END MEGALENS OBSERVABILITY
 
     return output
 
@@ -185,7 +209,12 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
             output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
-        dist_reduce_scatter_func(output, input_.contiguous(), group=group)
+        # BEGIN MEGALENS OBSERVABILITY
+        with tp_probes.reduce_scatter_scope(
+            "tp-reduce-scatter", input_, group, world_size, "first"
+        ):
+            dist_reduce_scatter_func(output, input_.contiguous(), group=group)
+        # END MEGALENS OBSERVABILITY
     else:
         rank = group.rank()
         input_tensor_list = list(torch.split(input_, input_split_sizes, dim=0))
@@ -196,7 +225,12 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
             )
         else:
             output = torch.empty_like(input_tensor_list[rank])
-        torch.distributed.reduce_scatter(output, input_tensor_list, group=group)
+        # BEGIN MEGALENS OBSERVABILITY
+        with tp_probes.reduce_scatter_scope(
+            "tp-reduce-scatter", input_, group, world_size, "first", input_split_sizes
+        ):
+            torch.distributed.reduce_scatter(output, input_tensor_list, group=group)
+        # END MEGALENS OBSERVABILITY
     return output
 
 

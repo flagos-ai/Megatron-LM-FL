@@ -1,0 +1,1124 @@
+{
+  "status": "passed",
+  "code_revision": "4b8892729ab924ddf8994649a8880f120fb7c094",
+  "code_tree": "2909995b8e71cdfc2ae48602c39d2daca6364f2b",
+  "upstream_main": "b471409ac414d760c42a4b159725c2acd2676166",
+  "before_refactor": "42acc56a8326a906f121cdecfab3b1018bc35c5d",
+  "mixedpara_baseline": "12fb7169ce30fdb62b50f86b41afa09336a523ea",
+  "acceptance": [
+    "G1.9",
+    "G1.10",
+    "G1.11"
+  ],
+  "main_diff": {
+    "megatron/core/pipeline_parallel/p2p_communication.py": {
+      "before": {
+        "added": 110,
+        "removed": 67
+      },
+      "after": {
+        "added": 78,
+        "removed": 18
+      }
+    },
+    "megatron/core/pipeline_parallel/schedules.py": {
+      "before": {
+        "added": 535,
+        "removed": 166
+      },
+      "after": {
+        "added": 443,
+        "removed": 167
+      }
+    },
+    "megatron/core/tensor_parallel/mappings.py": {
+      "before": {
+        "added": 130,
+        "removed": 16
+      },
+      "after": {
+        "added": 56,
+        "removed": 15
+      }
+    },
+    "megatron/training/training.py": {
+      "before": {
+        "added": 306,
+        "removed": 234
+      },
+      "after": {
+        "added": 275,
+        "removed": 234
+      }
+    }
+  },
+  "cpu": {
+    "runner": "tests/test_utils/runners/run_megalens_gate.py --profile cpu",
+    "passed": 711,
+    "warnings": 11,
+    "scanner_target_live": 47,
+    "scanner_target_dead": 0,
+    "final_tp_regression_passed": 54
+  },
+  "source_comparisons": {
+    "p2p": {
+      "signature": "identical",
+      "native_body_after_group_inlining": "identical",
+      "batch_and_shape_bodies": "identical"
+    },
+    "pipeline_moved_helpers": 8,
+    "preserved_schedule_functions": 17,
+    "training_pretrain_body": "identical",
+    "training_iteration_envelope": "identical",
+    "tp_moved_builders": 3,
+    "tp_native_functions_after_scope_removal": [
+      "_gather_along_first_dim",
+      "_gather_along_last_dim",
+      "_reduce_scatter_along_first_dim",
+      "_reduce_scatter_along_last_dim"
+    ],
+    "unchanged_files": [
+      "tests/megalens/fixtures/probe_scan_gate.json",
+      "megatron/core/observability.py",
+      "megatron/core/tensor_parallel/observability.py",
+      "megatron/core/transformer/moe/observability.py",
+      "megatron/core/distributed/param_and_grad_buffer.py"
+    ],
+    "paired_marker_files": 30,
+    "marker_pairs": 255
+  },
+  "packaging": {
+    "status": "passed",
+    "python_files": 602,
+    "wheel": "megatron_core-0.18.2-cp312-cp312-linux_x86_64.whl",
+    "sdist": "megatron_core-0.18.2.tar.gz",
+    "sha256": {
+      "megatron_core-0.18.2-cp312-cp312-linux_x86_64.whl": "ad5462464b3303725293d9cc75fc27462d41ee9f3786d9cc52c633369b6d4872",
+      "megatron_core-0.18.2.tar.gz": "f9bd0d00b91a8c7c13bb1920bfe08fe96a7a19495e39566e87c00a452e2becdc"
+    }
+  },
+  "isolated_wheel_import": "passed",
+  "wheel_origin": {
+    "status": "passed",
+    "loaded_modules": 349,
+    "origins_and_installed_bytes_match_wheel": true
+  },
+  "hardware": {
+    "image_id": "sha256:0e9fe710a4eb0850376e336c8ed5bb399da5732c6b7365ff14bc7559dd632bdd",
+    "cuda": "12.8",
+    "nccl": [
+      2,
+      27,
+      5
+    ],
+    "python": "3.12.12",
+    "torch": "2.9.0+cu128",
+    "transformer_engine": "2.9.0+acced6d7",
+    "triton": "3.5.0",
+    "gpus": [
+      "0, NVIDIA H800, 81559 MiB",
+      "1, NVIDIA H800, 81559 MiB",
+      "2, NVIDIA H800, 81559 MiB",
+      "3, NVIDIA H800, 81559 MiB",
+      "4, NVIDIA H800, 81559 MiB",
+      "5, NVIDIA H800, 81559 MiB",
+      "6, NVIDIA H800, 81559 MiB",
+      "7, NVIDIA H800, 81559 MiB"
+    ]
+  },
+  "training": [
+    {
+      "profile": "pp1",
+      "world_size": 1,
+      "status": "passed",
+      "iterations_per_run": 2,
+      "trace_modes": [
+        "off",
+        "on"
+      ],
+      "checkpoint_iteration": 2,
+      "training_arguments_equal": true,
+      "printed_loss_and_grad_norm_equal": true,
+      "baseline_event_counts_and_printed_metrics_equal": true,
+      "trace_shards": {
+        "off": 0,
+        "on": 1
+      },
+      "trace_records": {
+        "off": 0,
+        "on": 132
+      },
+      "audited_python_files_per_worker": 651,
+      "trace_contract": "validate_gpt_pp1_eager_phases",
+      "balanced_iterations_by_rank": {
+        "0": [
+          1,
+          2
+        ]
+      },
+      "metrics": {
+        "1": {
+          "loss": "6.935251E+00",
+          "grad_norm": "1.884"
+        },
+        "2": {
+          "loss": "6.939449E+00",
+          "grad_norm": "1.812"
+        }
+      }
+    },
+    {
+      "profile": "pp2",
+      "world_size": 2,
+      "status": "passed",
+      "iterations_per_run": 2,
+      "trace_modes": [
+        "off",
+        "on"
+      ],
+      "checkpoint_iteration": 2,
+      "training_arguments_equal": true,
+      "printed_loss_and_grad_norm_equal": true,
+      "baseline_event_counts_and_printed_metrics_equal": true,
+      "trace_shards": {
+        "off": 0,
+        "on": 2
+      },
+      "trace_records": {
+        "off": 0,
+        "on": 228
+      },
+      "audited_python_files_per_worker": 651,
+      "trace_contract": "validate_gpt_pp2_training_phases + validate_pp2_batched_route",
+      "balanced_iterations_by_rank": {
+        "0": [
+          1,
+          2
+        ],
+        "1": [
+          1,
+          2
+        ]
+      },
+      "metrics": {
+        "1": {
+          "loss": "6.932657E+00",
+          "grad_norm": "1.848"
+        },
+        "2": {
+          "loss": "6.943624E+00",
+          "grad_norm": "1.912"
+        }
+      }
+    },
+    {
+      "profile": "tp2-pp4",
+      "world_size": 8,
+      "status": "passed",
+      "iterations_per_run": 2,
+      "trace_modes": [
+        "off",
+        "on"
+      ],
+      "checkpoint_iteration": 2,
+      "training_arguments_equal": true,
+      "printed_loss_and_grad_norm_equal": true,
+      "baseline_event_counts_and_printed_metrics_equal": true,
+      "trace_shards": {
+        "off": 0,
+        "on": 8
+      },
+      "trace_records": {
+        "off": 0,
+        "on": 4864
+      },
+      "audited_python_files_per_worker": 651,
+      "trace_contract": "validate_tp2_pp4_multimicrobatch",
+      "balanced_iterations_by_rank": {
+        "0": [
+          1,
+          2
+        ],
+        "1": [
+          1,
+          2
+        ],
+        "2": [
+          1,
+          2
+        ],
+        "3": [
+          1,
+          2
+        ],
+        "4": [
+          1,
+          2
+        ],
+        "5": [
+          1,
+          2
+        ],
+        "6": [
+          1,
+          2
+        ],
+        "7": [
+          1,
+          2
+        ]
+      },
+      "metrics": {
+        "1": {
+          "loss": "6.966334E+00",
+          "grad_norm": "1.316"
+        },
+        "2": {
+          "loss": "6.965911E+00",
+          "grad_norm": "1.378"
+        }
+      }
+    }
+  ],
+  "p2p_order": [
+    {
+      "api_calls": [
+        {
+          "api": "isend",
+          "communicator": "primary",
+          "index": 0,
+          "operation": "send_next",
+          "peer_rank": 1
+        },
+        {
+          "api": "irecv",
+          "communicator": "world",
+          "index": 1,
+          "operation": "recv_next",
+          "peer_rank": 1
+        }
+      ],
+      "backend": "nccl",
+      "communicators": {
+        "alternate": "dist.group.WORLD",
+        "primary": "dist.new_group([0, 1])"
+      },
+      "order_scope": "rank_local_python_api_invocation",
+      "payload_elements": 8,
+      "payload_sum": 1628.0,
+      "primary_group_distinct_from_world": true,
+      "rank": 0,
+      "request_keys": [
+        "send_next",
+        "recv_next"
+      ],
+      "schema_version": "1.0.0",
+      "status": "passed",
+      "target_symbol": "megatron.core.pipeline_parallel.p2p_communication._p2p_ops",
+      "work_identity_preserved": true,
+      "work_types": [
+        "Work",
+        "Work"
+      ],
+      "world_size": 2
+    },
+    {
+      "api_calls": [
+        {
+          "api": "irecv",
+          "communicator": "primary",
+          "index": 0,
+          "operation": "recv_prev",
+          "peer_rank": 0
+        },
+        {
+          "api": "isend",
+          "communicator": "world",
+          "index": 1,
+          "operation": "send_prev",
+          "peer_rank": 0
+        }
+      ],
+      "backend": "nccl",
+      "communicators": {
+        "alternate": "dist.group.WORLD",
+        "primary": "dist.new_group([0, 1])"
+      },
+      "order_scope": "rank_local_python_api_invocation",
+      "payload_elements": 8,
+      "payload_sum": 828.0,
+      "primary_group_distinct_from_world": true,
+      "rank": 1,
+      "request_keys": [
+        "recv_prev",
+        "send_prev"
+      ],
+      "schema_version": "1.0.0",
+      "status": "passed",
+      "target_symbol": "megatron.core.pipeline_parallel.p2p_communication._p2p_ops",
+      "work_identity_preserved": true,
+      "work_types": [
+        "Work",
+        "Work"
+      ],
+      "world_size": 2
+    }
+  ],
+  "limits": [
+    "Native single-node two-step Megatron smoke; formal FlagScale training was not rerun.",
+    "Numerical comparison covers printed loss and gradient norm, not complete tensor equality, convergence or overhead.",
+    "Launch order means rank-local Python API invocation; it does not establish physical NCCL wire ordering or duration.",
+    "CP, EP, CUDA Graph/CUPTI, FSDP, other accelerators, multi-node and long-run paths were not rerun for this refactor."
+  ],
+  "cleanup": {
+    "status": "passed",
+    "code_revision": "4bd5ab8e07b435efb4e16aab2f8d5df9f3ffde40",
+    "code_tree": "a0a4491f3abed11ecff620f8d1920b7f604670e3",
+    "before_cleanup": "704533ec8fb40c0b8cfe82e250e3614775ff6d4c",
+    "acceptance": [
+      "G1.12",
+      "G1.13",
+      "G1.14",
+      "G1.15"
+    ],
+    "main_diff": {
+      "megatron/core/pipeline_parallel/combined_1f1b.py": {
+        "before": {
+          "added": 177,
+          "removed": 1
+        },
+        "after": {
+          "added": 31,
+          "removed": 0
+        }
+      },
+      "megatron/training/arguments.py": {
+        "before": {
+          "added": 122,
+          "removed": 23
+        },
+        "after": {
+          "added": 35,
+          "removed": 22
+        }
+      },
+      "megatron/core/transformer/moe/token_dispatcher.py": {
+        "before": {
+          "added": 182,
+          "removed": 54
+        },
+        "after": {
+          "added": 138,
+          "removed": 54
+        }
+      },
+      "megatron/core/transformer/moe/shared_experts.py": {
+        "before": {
+          "added": 108,
+          "removed": 73
+        },
+        "after": {
+          "added": 39,
+          "removed": 5
+        }
+      },
+      "megatron/core/transformer/moe/moe_layer.py": {
+        "before": {
+          "added": 195,
+          "removed": 42
+        },
+        "after": {
+          "added": 167,
+          "removed": 42
+        }
+      },
+      "megatron/core/distributed/finalize_model_grads.py": {
+        "before": {
+          "added": 127,
+          "removed": 13
+        },
+        "after": {
+          "added": 88,
+          "removed": 15
+        }
+      }
+    },
+    "cpu": {
+      "passed": 716,
+      "warnings": 11,
+      "source_target_scanner": "passed",
+      "target_live": 49,
+      "target_dead": 0,
+      "producer_inventory_change": "Two existing gradient events are now visible through explicit scope factories; runtime event sets and schemas are unchanged."
+    },
+    "source_comparisons": {
+      "passed": 82,
+      "relocated_helpers": [
+        "_combined_operation_id",
+        "_build_combined_step_context",
+        "_combined_step_context",
+        "_add_megalens_args",
+        "_validate_megalens_args"
+      ],
+      "native_combined_body_and_argument_positions_match_main": true,
+      "five_shared_stage_native_flows_match_main": true,
+      "EP_MoE_and_gradient_native_flows_match_before_cleanup": true,
+      "paired_Core_markers": "passed"
+    },
+    "committed_tree_checks": [
+      {
+        "acceptance": "G1.12",
+        "revision": "3b0565cd9",
+        "suites": [
+          "test_pipeline_schedule_observability.py"
+        ],
+        "returncode": 0,
+        "passed": 21
+      },
+      {
+        "acceptance": "G1.13",
+        "revision": "fc5d0b2dc",
+        "suites": [
+          "test_runtime_lifecycle.py",
+          "test_observability.py"
+        ],
+        "returncode": 0,
+        "passed": 75
+      },
+      {
+        "acceptance": "G1.15",
+        "revision": "42828c736",
+        "suites": [
+          "test_sp_layernorm_allreduce_observability.py",
+          "test_embedding_grads_allreduce_observability.py",
+          "test_all_grads_sync_observability.py",
+          "test_probe_contract_scan.py"
+        ],
+        "returncode": 0,
+        "passed": 57
+      },
+      {
+        "acceptance": "G1.14",
+        "revision": "4bd5ab8e0",
+        "suites": [
+          "test_ep_primitive_observability.py",
+          "test_moe_phase_observability.py",
+          "test_shared_expert_overlap_observability.py",
+          "test_probe_contract_scan.py"
+        ],
+        "returncode": 0,
+        "passed": 124
+      }
+    ],
+    "format": {
+      "black": "24.4.2",
+      "checked_python_files": 18,
+      "scope": "Whole probe files and changed regions of existing integration/test files; native arguments.py retains inherited formatting.",
+      "isort": "5.13.2",
+      "import_files": 16,
+      "container_check": "passed",
+      "git_diff_check": "passed"
+    },
+    "limits": [
+      "Combined GPU/FSDP training, EP allgather/Flex/HybridEP, CUDA Graph, the full FlagScale matrix, multi-node and other accelerators were not rerun.",
+      "No tensor equality, physical communication duration, convergence or trace-off overhead claim."
+    ],
+    "packaging": {
+      "status": "passed",
+      "python_files": 602,
+      "wheel": "megatron_core-0.18.2-cp312-cp312-linux_x86_64.whl",
+      "sdist": "megatron_core-0.18.2.tar.gz",
+      "sha256": {
+        "megatron_core-0.18.2-cp312-cp312-linux_x86_64.whl": "1bc85f1c77e866904a906c061086d5a674f979252ed3f71ef8e4a90c76b7c72f",
+        "megatron_core-0.18.2.tar.gz": "b8d5a9e590dc206ad18ff47291aad57b3f942ffd910a5919f08186f9d93f44c3"
+      }
+    },
+    "isolated_wheel_import": "passed",
+    "wheel_origin": {
+      "status": "passed",
+      "loaded_modules": 349,
+      "origins_and_installed_bytes_match_wheel": true
+    },
+    "hardware": {
+      "image_id": "sha256:0e9fe710a4eb0850376e336c8ed5bb399da5732c6b7365ff14bc7559dd632bdd",
+      "cuda": "12.8",
+      "nccl": [
+        2,
+        27,
+        5
+      ],
+      "python": "3.12.12",
+      "torch": "2.9.0+cu128",
+      "transformer_engine": "2.9.0+acced6d7",
+      "triton": "3.5.0",
+      "gpu_model": "NVIDIA H800",
+      "host_gpu_count": 8,
+      "driver": "580.105.08"
+    },
+    "training": [
+      {
+        "profile": "ep2-shared",
+        "world_size": 2,
+        "status": "passed",
+        "iterations_per_run": 2,
+        "trace_modes": [
+          "off",
+          "on"
+        ],
+        "checkpoint_iteration": 2,
+        "training_arguments_equal": true,
+        "printed_loss_and_grad_norm_equal": true,
+        "trace_shards": {
+          "off": 0,
+          "on": 2
+        },
+        "trace_records": {
+          "off": 0,
+          "on": 472
+        },
+        "audited_python_files_per_worker": 651,
+        "trace_contract": "Existing ep2-alltoall event/checkpoint requirements; shared-expert stages in order for both layers on every rank and iteration; balanced nested B/E.",
+        "balanced_iterations_by_rank": {
+          "0": [
+            1,
+            2
+          ],
+          "1": [
+            1,
+            2
+          ]
+        },
+        "metrics": {
+          "1": {
+            "loss": "6.944428E+00",
+            "grad_norm": "1.338"
+          },
+          "2": {
+            "loss": "6.958249E+00",
+            "grad_norm": "1.336"
+          }
+        },
+        "attempts": {
+          "off": [
+            {
+              "label": "ep2-shared-off",
+              "returncode": 0
+            }
+          ],
+          "on": [
+            {
+              "label": "ep2-shared-on",
+              "returncode": 0
+            }
+          ]
+        }
+      },
+      {
+        "profile": "tp2-pp2-tied",
+        "world_size": 4,
+        "status": "passed",
+        "iterations_per_run": 2,
+        "trace_modes": [
+          "off",
+          "on"
+        ],
+        "checkpoint_iteration": 2,
+        "training_arguments_equal": true,
+        "printed_loss_and_grad_norm_equal": true,
+        "trace_shards": {
+          "off": 0,
+          "on": 4
+        },
+        "trace_records": {
+          "off": 0,
+          "on": 3808
+        },
+        "audited_python_files_per_worker": 651,
+        "trace_contract": "Existing TP2/SP event/checkpoint requirements and _validate_final_grad_sync with actual TP/PP rank coordinates; SUM, SP and embedding peers, group slots and balanced nested B/E.",
+        "balanced_iterations_by_rank": {
+          "0": [
+            1,
+            2
+          ],
+          "1": [
+            1,
+            2
+          ],
+          "2": [
+            1,
+            2
+          ],
+          "3": [
+            1,
+            2
+          ]
+        },
+        "metrics": {
+          "1": {
+            "loss": "6.954717E+00",
+            "grad_norm": "1.294"
+          },
+          "2": {
+            "loss": "6.961879E+00",
+            "grad_norm": "1.265"
+          }
+        },
+        "attempts": {
+          "off": [
+            {
+              "label": "tp2-pp2-tied-off",
+              "returncode": 0
+            }
+          ],
+          "on": [
+            {
+              "label": "tp2-pp2-tied-on",
+              "returncode": 1
+            },
+            {
+              "label": "tp2-pp2-tied-on-retry",
+              "returncode": 0
+            }
+          ]
+        }
+      }
+    ],
+    "training_summary": {
+      "successful_runs": 4,
+      "successful_workers": 12,
+      "readonly_source_overlays": 16,
+      "audited_python_files_per_worker": 651,
+      "on_shards": 6,
+      "on_records": 4280,
+      "off_shards": 0,
+      "extra_HKR_instrumentation": false,
+      "hardware_monitoring": false,
+      "CUPTI": false,
+      "initialization_failure": {
+        "profile": "tp2-pp2-tied-on",
+        "stage": "torch.cuda.set_device before training",
+        "error": "CUDA out of memory",
+        "cause": "unknown",
+        "retry": "Passed with unchanged source, arguments and devices; both attempts retained. This does not establish a fix for the initialization failure."
+      }
+    },
+    "runtime_evidence_archive_sha256": "60e21539b2c9ef05585ad595bb4a1c0f068ec5a0fe08578bbb7c5d4cdc0e72d4"
+  },
+  "diff_review": {
+    "status": "passed",
+    "acceptance": [
+      "G1.16"
+    ],
+    "code_revision": "32483d69a2690cc1479407867e40687fcf41e518",
+    "code_tree": "901b6c03298c6515d47c68b01466b5bbce37c3e5",
+    "before_revision": "743cf0f4d824d3c960a22e91e503b8bdb33adda8",
+    "upstream_main": "b471409ac414d760c42a4b159725c2acd2676166",
+    "mixedpara_baseline": "12fb7169ce30fdb62b50f86b41afa09336a523ea",
+    "coverage": {
+      "reviewed_paths": 142,
+      "existing_files": 36,
+      "added_files": 106,
+      "adjusted_files": 10,
+      "added_python_files_parsed": 82,
+      "native_function_entries_checked": 959,
+      "upstream_identical_function_text": 864,
+      "native_definition_order": "preserved",
+      "default_diff_native_headers_aligned": [
+        "_p2p_ops",
+        "MoELayer.postprocess"
+      ],
+      "remaining_changed_signature": [
+        {
+          "path": "megatron/core/pipeline_parallel/schedules.py",
+          "declarations": [
+            "backward_step"
+          ],
+          "reason": "Existing observation keyword parameters require a multiline signature; not a helper alignment."
+        }
+      ]
+    },
+    "reviewed_existing_files": {
+      ".github/configs/cuda.yml": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "MANIFEST.in": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "README.md": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "docs/index.md": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "docs/user-guide/features/index.md": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/distributed/finalize_model_grads.py": "Remove observation markers from an unchanged native import.",
+      "megatron/core/distributed/param_and_grad_buffer.py": "Restore native import layout; format two observation calls normally.",
+      "megatron/core/models/bert/bert_model.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/models/gpt/fine_grained_callables.py": "Restore native imports and FlagScale comments.",
+      "megatron/core/models/gpt/gpt_model.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/optimizer/optimizer.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/pipeline_parallel/combined_1f1b.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/pipeline_parallel/hybrid_cp_schedule.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/pipeline_parallel/p2p_communication.py": "Place _p2p_groups after _p2p_ops; restore native imports and _communicate_shapes text.",
+      "megatron/core/pipeline_parallel/schedules.py": "Restore three native token-count allocation lines.",
+      "megatron/core/tensor_parallel/layers.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/tensor_parallel/mappings.py": "Restore native allocation layout and comments.",
+      "megatron/core/transformer/attention.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/transformer/mlp.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/transformer/moe/moe_layer.py": "Place five helpers after native class methods; restore postprocess docstring and FlagScale comment.",
+      "megatron/core/transformer/moe/paged_stash.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/transformer/moe/router.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/transformer/moe/shared_experts.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/transformer/moe/token_dispatcher.py": "Restore native _maybe_dtoh_and_synchronize text.",
+      "megatron/core/transformer/transformer_layer.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/core/utils.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/plugin/dualpipev/dualpipev_schedules.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/plugin/dualpipev/fb_overlap/overlap_funcs/fwdbwd.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/training/arguments.py": "Restore unrelated native imports and function text; retain only the observation import and two calls in the main diff.",
+      "megatron/training/global_vars.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "megatron/training/training.py": "Restore native imports and save_checkpoint_and_time text; isolate added runtime imports.",
+      "pyproject.toml": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "tests/unit_tests/a2a_overlap/test_schedule_dualpipev.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "tests/unit_tests/test_utils.py": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "tools/autoformat.sh": "Reviewed default main diff; existing MR changes retained without further edits.",
+      "uv.lock": "Reviewed default main diff; existing MR changes retained without further edits."
+    },
+    "main_diff": {
+      "megatron/core/distributed/finalize_model_grads.py": {
+        "before": {
+          "added": 88,
+          "removed": 15
+        },
+        "after": {
+          "added": 84,
+          "removed": 15
+        }
+      },
+      "megatron/core/distributed/param_and_grad_buffer.py": {
+        "before": {
+          "added": 127,
+          "removed": 56
+        },
+        "after": {
+          "added": 122,
+          "removed": 56
+        }
+      },
+      "megatron/core/models/gpt/fine_grained_callables.py": {
+        "before": {
+          "added": 36,
+          "removed": 8
+        },
+        "after": {
+          "added": 28,
+          "removed": 4
+        }
+      },
+      "megatron/core/pipeline_parallel/p2p_communication.py": {
+        "before": {
+          "added": 78,
+          "removed": 18
+        },
+        "after": {
+          "added": 73,
+          "removed": 17
+        }
+      },
+      "megatron/core/pipeline_parallel/schedules.py": {
+        "before": {
+          "added": 443,
+          "removed": 167
+        },
+        "after": {
+          "added": 434,
+          "removed": 164
+        }
+      },
+      "megatron/core/tensor_parallel/mappings.py": {
+        "before": {
+          "added": 56,
+          "removed": 15
+        },
+        "after": {
+          "added": 45,
+          "removed": 11
+        }
+      },
+      "megatron/core/transformer/moe/moe_layer.py": {
+        "before": {
+          "added": 167,
+          "removed": 42
+        },
+        "after": {
+          "added": 178,
+          "removed": 47
+        }
+      },
+      "megatron/core/transformer/moe/token_dispatcher.py": {
+        "before": {
+          "added": 138,
+          "removed": 54
+        },
+        "after": {
+          "added": 135,
+          "removed": 53
+        }
+      },
+      "megatron/training/arguments.py": {
+        "before": {
+          "added": 35,
+          "removed": 22
+        },
+        "after": {
+          "added": 12,
+          "removed": 0
+        }
+      },
+      "megatron/training/training.py": {
+        "before": {
+          "added": 275,
+          "removed": 234
+        },
+        "after": {
+          "added": 265,
+          "removed": 226
+        }
+      }
+    },
+    "source_comparisons": {
+      "adjusted_modules": 10,
+      "import_bindings": "identical to before_revision",
+      "non_import_AST": "Identical after normalizing only the relocated P2P/MoE helper positions and the restored MoELayer.postprocess docstring.",
+      "probe_implementation_and_scanner_fixture_bytes": "unchanged",
+      "source_sha256": {
+        "megatron/core/distributed/finalize_model_grads.py": "d94719091ff85f0fe582d85e10a5bf25ddac571fca86fdad0efae15f12ce9f77",
+        "megatron/core/distributed/param_and_grad_buffer.py": "a3d8fd16af2a15d096f8eeeb211b5da1c8e8b6f1421becc59ccb75d488fbd29c",
+        "megatron/core/models/gpt/fine_grained_callables.py": "33270232c86c9060178bcc6039f275b9bb1b2d552c8ab01cbcf71ffd4559a46b",
+        "megatron/core/pipeline_parallel/p2p_communication.py": "d84229397b6e4496b0ebcaf57feca67cdda05d3bac8633e01fc60e6a9c7ad663",
+        "megatron/core/pipeline_parallel/schedules.py": "6a9033861bf310f537075a7ddfc395670e3bc34e828816bdb0b5cb26835bce91",
+        "megatron/core/tensor_parallel/mappings.py": "7a16cecd2bcdb8baade70e50f63131cfa19c5a13ba74c4fb2df88ee810085e29",
+        "megatron/core/transformer/moe/moe_layer.py": "993a5204b1b75aa7b9930fe20328ee4d575a0487c979585856d3ac28ff32bbe4",
+        "megatron/core/transformer/moe/token_dispatcher.py": "5d13890a1afa93b129317bb742640f3f340fca36011ee63120c57d9449d9d823",
+        "megatron/training/arguments.py": "11d5ed3f4330ef0380880ee4cc88b1a39e3f3f1559bc95e04c71c75ec2f4b8b7",
+        "megatron/training/training.py": "9cc2f84ed96cb19fde7c098a29914b022a8203954222f4c04910dc2533befa68"
+      }
+    },
+    "cpu": {
+      "passed": 716,
+      "warnings": 11,
+      "source_target_scanner": "passed",
+      "target_live": 49,
+      "target_dead": 0
+    },
+    "format": {
+      "black": "24.4.2",
+      "black_regions": 8,
+      "isort": "5.13.2",
+      "observation_import_blocks": 14,
+      "full_file_isort_proposals_reviewed": 6,
+      "native_format_policy": "Inherited upstream imports, comments, whitespace and call layouts are preserved; full-file isort proposals are reviewed without applying native-only changes.",
+      "git_diff_check": "Passed against fixed upstream main for the ten adjusted source files; not a whole-MR whitespace check."
+    },
+    "limits": [
+      "GPU/NCCL training, packaging and performance were not rerun for this code revision; earlier evidence retains its original source identity.",
+      "Required local scopes, training iteration envelope, DP stream/coalescing and independent training fixes remain unchanged.",
+      "Existing whitespace issues in other MR files remain outside this formatting-only scope."
+    ]
+  },
+  "scope_cleanup": {
+    "status": "passed",
+    "acceptance": [
+      "G1.17",
+      "G1.18",
+      "E1.7"
+    ],
+    "code_revision": "b0807cd717f5f28cd56cdf890bde43eb4c67771b",
+    "code_tree": "57a76aa9456d66d5641cf0c02e1383723994b6b0",
+    "upstream_main": "bbc208e00f2a201783938ef549f5058d6047e4c0",
+    "before_revision": "a97f58f03250202f557e951f6b05743b332a8dab",
+    "merge_revision": "f9ca132943752844d1e280210e0aee4e8152b57a",
+    "native_removal_revision": "093d32f58029398b7505d8f1e3c3678c2a0c99cc",
+    "mixedpara_baseline": "12fb7169ce30fdb62b50f86b41afa09336a523ea",
+    "restored_upstream_files": {
+      "megatron/core/pipeline_parallel/hybrid_cp_schedule.py": "9530f89d5ed66c2c1291e8894c6ed718b421ed73d441c68649f8889ce1a90a82",
+      "megatron/core/transformer/moe/paged_stash.py": "5485c2b84f05c9ab5bd897fe7c9e6410cfed44b418097369f8530e531bb734b9",
+      "megatron/plugin/dualpipev/fb_overlap/overlap_funcs/fwdbwd.py": "d20246e1b6335efa067da4b89317cc6f606e26fa76204d22d065628107ddbdc2",
+      "tests/unit_tests/test_utils.py": "269ed1c1c988b4a90548aab28b97d45bdac42114fdafbcd6e4a257963ea02b1c"
+    },
+    "probe_fixture_and_shared_wait_source_bytes": "unchanged from before_revision",
+    "cpu": {
+      "passed": 715,
+      "warnings": 11,
+      "source_target_scanner": "passed",
+      "target_live": 49,
+      "target_dead": 0,
+      "retained_dualpipev_wait_routing_regression_passed": 1,
+      "merge_stage_tests_passed": 716,
+      "upstream_CI_runner_tests_passed": 20,
+      "environment": "Python 3.12, PyTorch 2.8.0+cpu and real Triton 3.4.0. An environment-only .pth shares the validation tools installation. No source shim, xfail or missing-Triton skip was added.",
+      "removed_assertion": "The dedicated missing-Triton assertion moved to #195; upstream imports now require installed Triton."
+    },
+    "external_payloads_removed": [
+      "docker/patches/deepep-cu128.patch",
+      "docker/patches/transformer-engine-fl-v0.2.0-layernorm-quantizer-dtype.patch",
+      "docker/patches/transformer-engine-fl-v0.2.0-userbuffer-ops.patch",
+      "flagscale-megalens.patch utils.py repair hunk"
+    ],
+    "work_image": {
+      "overlay": {
+        "baseline": "6d775cd01d5c822f9413b9952a81652c917d273e",
+        "overlay_sha256": "35d0a83f68b4e30497cf67c01a6a3e0fefc877534810103a7868991c6eb20059",
+        "files": [
+          {
+            "path": "flagscale/train/megatron/training/arguments.py",
+            "before": "913b47495a8e58ed4aac8d4c72cede063afbbaa79ed61ee900e90979e9441667",
+            "after": "92d165052a803b7cbdb0a07be4543677dd8d2485cb4e010cc0de623c90261f62"
+          },
+          {
+            "path": "flagscale/train/megatron/training/global_vars.py",
+            "before": "d7c73b0764c4b192cd2e5e3cc46fc2cffbdca3dc3beeef703139e8b3f9b9914e",
+            "after": "3cd4cc3c6cf1c48fd24a7cfb663a9795c1a82783e6b40b7bba61f4ac12053c4c"
+          },
+          {
+            "path": "flagscale/train/megatron/training/training.py",
+            "before": "d3eace40ed2bbc2e24e51f801201aaaa406a3d68cbde8614981c0643169a36a2",
+            "after": "9f0e179d3b3140f30ca017874d55efe99c80b5ccb55636f63e78815bb1cb7ebe"
+          }
+        ]
+      },
+      "docker_RUN_bash_syntax_passed": 6,
+      "final_contract_tests_passed": 7,
+      "wheel_hashes": "unchanged",
+      "historical_patch_hashes": "retained as prebuilt wheel provenance; Docker does not read the removed payloads",
+      "gate_source_limit": "Full gate passed before the final overlay EOF separator trim and repository-name comment correction; the resulting overlay apply/hash checks and all seven work-image contracts passed after the trim."
+    },
+    "related_MRs": [
+      {
+        "name": "megatron-triton",
+        "upstream": "bbc208e00f2a201783938ef549f5058d6047e4c0",
+        "paths": [
+          "megatron/core/transformer/moe/paged_stash.py",
+          "tests/unit_tests/transformer/moe/test_paged_stash_optional_triton.py"
+        ],
+        "head": "eae39b94478bb39a5e1a51de4e79d8845d45414d",
+        "tests": 1,
+        "branch": "fix/paged-stash-optional-triton",
+        "remote": "origin",
+        "remote_head_verified": true
+      },
+      {
+        "name": "megatron-hybrid-cp",
+        "upstream": "bbc208e00f2a201783938ef549f5058d6047e4c0",
+        "paths": [
+          "megatron/core/pipeline_parallel/hybrid_cp_schedule.py",
+          "tests/unit_tests/pipeline_parallel/test_hybrid_cp_schedule.py"
+        ],
+        "head": "f581bb9cf012c070770a0c9ad1e502abfec3e616",
+        "tests": 1,
+        "branch": "fix/hybrid-cp-helper-metadata",
+        "remote": "origin",
+        "remote_head_verified": true
+      },
+      {
+        "name": "megatron-dualpipev",
+        "upstream": "bbc208e00f2a201783938ef549f5058d6047e4c0",
+        "paths": [
+          "megatron/plugin/dualpipev/fb_overlap/overlap_funcs/fwdbwd.py",
+          "tests/unit_tests/a2a_overlap/test_fwdbwd_shared_experts.py"
+        ],
+        "head": "953487750c10f3adb2dde5edf54b2a160eed0243",
+        "tests": 2,
+        "branch": "fix/dualpipev-no-shared-expert",
+        "remote": "origin",
+        "remote_head_verified": true
+      },
+      {
+        "name": "flagscale",
+        "upstream": "eb9dc045a8aa343c127de4e2b9dd4ad113e6d1e0",
+        "paths": [
+          "flagscale/train/megatron/training/utils/common_utils.py",
+          "tests/unit_tests/train/megatron/test_dense_batch_metadata.py"
+        ],
+        "head": "fc8e063e9553d8791121d3dca5ab61a42157d38b",
+        "tests": 12,
+        "branch": "fix/dense-batch-packed-metadata",
+        "remote": "fork",
+        "remote_head_verified": true
+      },
+      {
+        "name": "flagscale-megalens",
+        "upstream": "eb9dc045a8aa343c127de4e2b9dd4ad113e6d1e0",
+        "paths": [
+          "docs/train/megalens.md",
+          "flagscale/train/megatron/training/arguments.py",
+          "flagscale/train/megatron/training/global_vars.py",
+          "flagscale/train/megatron/training/training.py",
+          "tests/unit_tests/train/megatron/test_megalens_runtime.py"
+        ],
+        "head": "ca5fa3a3404b1f55ec8fbdffcc90df43428001d0",
+        "tests": 24,
+        "branch": "feat/megalens-training-runtime",
+        "remote": "fork",
+        "remote_head_verified": true
+      },
+      {
+        "name": "transformer-engine",
+        "upstream": "6df49429794d18109f0d04d924a14e032cdc220b",
+        "paths": [
+          "tests/plugin/plugin/test_cuda_norm_quantizer_contract.py",
+          "transformer_engine/plugin/core/backends/vendor/cuda/cuda.py"
+        ],
+        "head": "9357d5668b64026d4007534e88d7263b0352f8f2",
+        "tests": 22,
+        "branch": "fix/cuda-norm-quantizer-dtype",
+        "remote": "fork",
+        "remote_head_verified": true
+      },
+      {
+        "name": "deepep-hybrid",
+        "upstream": "4e890fd19a3a52f23cc7bd38a0d9b0b1276f70d6",
+        "paths": [
+          "setup.py",
+          "tests/test_setup_cuda_toolkit.py"
+        ],
+        "head": "7e2b06df372f1a7d44ed85624b6ab9ea66a1662b",
+        "tests": 13,
+        "branch": "fix/cuda-toolkit-build-compat",
+        "remote": "fork",
+        "remote_head_verified": true
+      }
+    ],
+    "additional_native_checkpoint_MRs": [
+      {
+        "name": "megatron-modelopt",
+        "acceptance": "G1.19",
+        "head": "35d9631c6b69dd00383e3815459e74f89975a826",
+        "target": "bbc208e00f2a201783938ef549f5058d6047e4c0",
+        "paths": [
+          "megatron/post_training/checkpointing.py",
+          "tests/unit_tests/post_training/test_modelopt_checkpoint_contract.py"
+        ],
+        "passed": 13,
+        "before_failed": 9,
+        "mr": "https://github.com/flagos-ai/Megatron-LM-FL/pull/209"
+      },
+      {
+        "name": "megatron-biencoder",
+        "acceptance": "G1.20",
+        "head": "ae80dda50cde534a0588175138fa24fbf37ab495",
+        "target": "bbc208e00f2a201783938ef549f5058d6047e4c0",
+        "paths": [
+          "megatron/training/checkpointing.py",
+          "tests/unit_tests/test_biencoder_checkpoint_contract.py"
+        ],
+        "passed": 12,
+        "before_failed": 12,
+        "mr": "https://github.com/flagos-ai/Megatron-LM-FL/pull/210"
+      }
+    ],
+    "flagscale_native_AST": {
+      "functions": 120,
+      "paired_markers": 20,
+      "matches_latest_main_after_removing_observation": true,
+      "checkpoint_finalization_arguments": "preserved from latest main"
+    },
+    "format": "Scoped staged whitespace checks pass. Native call formatting and import layout are preserved; new checkpoint tests pass Black and isort.",
+    "limits": [
+      "Independent repair implementations and dedicated tests are absent from #104; related Hybrid-CP/DualPipeV, no-Triton and FlagScale dense/Graph paths require their owning repair builds.",
+      "No image rebuild, packaging, GPU/NCCL, CUDA Graph, native ModelOpt/TE bindings, FP8, DeepEP NVCC/JIT, full FlagScale training matrix or overhead measurement was performed. Earlier hardware and artifact records retain their source identities.",
+      "Autoresume FLOPs propagation and the DualPipeV nondefault activation-checkpoint argument path are recorded semantic follow-ups, not patched with zero or a discarded argument."
+    ]
+  }
+}

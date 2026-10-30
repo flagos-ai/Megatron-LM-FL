@@ -521,6 +521,10 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
         computations between attention and dispatch:
             pre mlp layernorm->router->dispatch preprocess
         """
+        # BEGIN MEGALENS OBSERVABILITY
+        dispatch_fields = None
+        node.layer_state.moe_dispatch_fields = None
+        # END MEGALENS OBSERVABILITY
 
         ######## FlagScale Begin ########
         if getattr(node.layer_state, "is_engram", False):
@@ -555,6 +559,9 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
                 input_ids: Optional[Tensor] = None,  # FlagScale Modify
                 mhc_recompute_manager: Optional[object] = None,  # FlagScale Modify
             ):
+                # BEGIN MEGALENS OBSERVABILITY
+                nonlocal dispatch_fields
+                # END MEGALENS OBSERVABILITY
                 ######## FlagScale Begin ########
                 fwd_attn_kwargs = {
                     "hidden_states": hidden_states,
@@ -624,7 +631,11 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
                     pre_mlp_layernorm_output, hidden_states = pre_mlp_layernorm_output
 
                 shared_expert_output = layer.mlp.shared_experts_compute(pre_mlp_layernorm_output)
-                probs, routing_map = layer.mlp.route(pre_mlp_layernorm_output, input_ids=input_ids)  # FlagScale Modify
+                # BEGIN MEGALENS OBSERVABILITY
+                probs, routing_map, dispatch_fields = layer.mlp._route_for_dispatch(
+                    pre_mlp_layernorm_output, input_ids=input_ids
+                )
+                # END MEGALENS OBSERVABILITY
                 local_tokens, probs = layer.mlp.preprocess(
                     pre_mlp_layernorm_output, probs, routing_map
                 )
@@ -644,6 +655,10 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
         )
         if not isinstance(layer.mlp, MoELayer):
             return hidden_states
+
+        # BEGIN MEGALENS OBSERVABILITY
+        node.layer_state.moe_dispatch_fields = dispatch_fields
+        # END MEGALENS OBSERVABILITY
 
         ######## FlagScale Begin ########
         # Detach here for mlp_bda residual connection. If enable_mhc, residual is saved before mlp_hyper_connection.
@@ -668,7 +683,15 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
             # backward graph from connecting to attn submodule
             token_dispatcher._comm_manager.token_probs = probs
 
-        dispatched_tokens, dispatched_probs = layer.mlp.dispatch(local_tokens, probs)
+        # BEGIN MEGALENS OBSERVABILITY
+        dispatch_fields = getattr(node.layer_state, "moe_dispatch_fields", None)
+        try:
+            dispatched_tokens, dispatched_probs = layer.mlp._dispatch_with_fields(
+                local_tokens, probs, dispatch_fields
+            )
+        finally:
+            node.layer_state.moe_dispatch_fields = None
+        # END MEGALENS OBSERVABILITY
 
         # `dispatched_probs` is needed by backward pass of swiglu, therefore it's
         # passed to moe_forward within `layer_state` to avoid the free_input process
@@ -718,8 +741,9 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
         """
         residual = node.layer_state.residual
         shared_expert_output = getattr(node.layer_state, 'shared_expert_output', None)
-        output = layer.mlp.combine(output)
-        output = layer.mlp.postprocess(output, shared_expert_output)
+        # BEGIN MEGALENS OBSERVABILITY
+        output = layer.mlp._combine_and_postprocess(output, shared_expert_output)
+        # END MEGALENS OBSERVABILITY
 
         mlp_output_with_bias = (output, None)
         if hasattr(layer, 'cuda_graphs') and layer.cuda_graphs:

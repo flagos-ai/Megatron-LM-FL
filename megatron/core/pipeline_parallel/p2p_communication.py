@@ -2,12 +2,22 @@
 
 
 from functools import partial  # FlagScale Modify
-from typing import List, Optional, Tuple, Union
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from typing import Any, List, Optional, Tuple, Union
+
+# END MEGALENS OBSERVABILITY  # isort: split
 
 import torch
 import torch.distributed as dist
 
 from megatron.core.model_parallel_config import ModelParallelConfig
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.megalens.probes import p2p as p2p_probes
+from megatron.megalens.probes.p2p import wait_p2p_request
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
 ######## FlagScale Begin ########
 from megatron.core.utils import get_pg_rank, get_pg_size, nvtx_decorator
@@ -80,18 +90,9 @@ def _p2p_ops(
     next_pipeline_rank: int,
 ):
     reqs = {}
-    even_send_odd_recv_group = group
-    if group.size() == 2 and torch.distributed.get_backend(group) != 'ucc':
-        # Use the global process group for one of the two p2p communications
-        # to allow the overlap of the independent communications.
-        # Using the global process group is compatible because the pipeline-parallel
-        # communications set the source and destination by global rank.
-        # The only exception occurs when using the ‘ucc’ backend.
-        # Because the global communicator always uses the ‘nccl’ backend,
-        # we must ensure the else path is followed for the ‘ucc’ backend.
-        even_recv_odd_send_group = torch.distributed.group.WORLD
-    else:
-        even_recv_odd_send_group = group
+    # BEGIN MEGALENS OBSERVABILITY
+    even_send_odd_recv_group, even_recv_odd_send_group = _p2p_groups(group)
+    # END MEGALENS OBSERVABILITY
 
     if group.rank() % 2 == 0:
         if tensor_send_next is not None:
@@ -145,6 +146,29 @@ def _p2p_ops(
     return reqs
 
 
+# BEGIN MEGALENS OBSERVABILITY
+def _p2p_groups(
+    group: torch.distributed.ProcessGroup,
+) -> tuple[torch.distributed.ProcessGroup, torch.distributed.ProcessGroup]:
+    """Share native group selection with observation without changing launch order."""
+    even_send_odd_recv_group = group
+    if group.size() == 2 and torch.distributed.get_backend(group) != 'ucc':
+        # Use the global process group for one of the two p2p communications
+        # to allow the overlap of the independent communications.
+        # Using the global process group is compatible because the pipeline-parallel
+        # communications set the source and destination by global rank.
+        # The only exception occurs when using the ‘ucc’ backend.
+        # Because the global communicator always uses the ‘nccl’ backend,
+        # we must ensure the else path is followed for the ‘ucc’ backend.
+        even_recv_odd_send_group = torch.distributed.group.WORLD
+    else:
+        even_recv_odd_send_group = group
+    return even_send_odd_recv_group, even_recv_odd_send_group
+
+
+# END MEGALENS OBSERVABILITY
+
+
 def is_single_shape(x) -> bool:
     """Check if the input is a single shape."""
     if isinstance(x, torch.Size):
@@ -165,6 +189,9 @@ class P2PCommunicator:
         # Basic attrs
         self.pp_group = pp_group
         self.config = config
+        # BEGIN MEGALENS OBSERVABILITY
+        p2p_probes.initialize_communicator(self)
+        # END MEGALENS OBSERVABILITY
         ######## FlagScale Begin ########
         if not isinstance(self.pp_group, list):
             world_size = self.pp_group.size()
@@ -181,6 +208,13 @@ class P2PCommunicator:
                 else None
             )
         ######## FlagScale End ########
+
+    # BEGIN MEGALENS OBSERVABILITY
+    def wait_p2p_request(self, request: Any, *args: Any, **kwargs: Any):
+        """Wait on the raw Work through its optional MegaLens observation."""
+        return p2p_probes.wait_registered_request(self, request, *args, **kwargs)
+
+    # END MEGALENS OBSERVABILITY
 
     @property
     def is_pp_first_stage(self) -> bool:
@@ -391,11 +425,20 @@ class P2PCommunicator:
                 return []
 
             p2p_func = _ring_exchange_wrapper
+            # BEGIN MEGALENS OBSERVABILITY
+            transport_api = "ring_exchange"
+            # END MEGALENS OBSERVABILITY
         elif config.batch_p2p_comm:
             assert wait_on_reqs
             p2p_func = _batched_p2p_ops
+            # BEGIN MEGALENS OBSERVABILITY
+            transport_api = "batch_isend_irecv"
+            # END MEGALENS OBSERVABILITY
         else:
             p2p_func = _p2p_ops
+            # BEGIN MEGALENS OBSERVABILITY
+            transport_api = "isend_irecv"
+            # END MEGALENS OBSERVABILITY
 
         ######## FlagScale Begin ########
         if group is not None:
@@ -427,7 +470,12 @@ class P2PCommunicator:
         if tensor_recv_next_func is not None:
             tensor_recv_next = tensor_recv_next_func()
 
-        p2p_reqs = p2p_func(
+        # BEGIN MEGALENS OBSERVABILITY
+        p2p_reqs, p2p_observation = p2p_probes.launch_p2p(
+            p2p_func,
+            transport_api=transport_api,
+            wait_on_reqs=wait_on_reqs,
+            group_resolver=_p2p_groups,
             tensor_send_prev=tensor_send_prev,
             tensor_recv_prev=tensor_recv_prev,
             tensor_send_next=tensor_send_next,
@@ -436,20 +484,28 @@ class P2PCommunicator:
             prev_pipeline_rank=prev_rank,
             next_pipeline_rank=next_rank,
         )
+        # END MEGALENS OBSERVABILITY
         if isinstance(p2p_reqs, list):
             reqs.extend(p2p_reqs)
         else:
             reqs.update(p2p_reqs)
 
         if wait_on_reqs and len(reqs) > 0:
-            for req in reqs if isinstance(reqs, list) else reqs.values():
-                req.wait()
+            # BEGIN MEGALENS OBSERVABILITY
+            p2p_observation.wait_requests(reqs)
+            # END MEGALENS OBSERVABILITY
             reqs = None
+        # BEGIN MEGALENS OBSERVABILITY
+        elif len(reqs) > 0:
+            p2p_observation.register_requests(self, reqs)
+        # END MEGALENS OBSERVABILITY
 
         if config.batch_p2p_comm and config.batch_p2p_sync:
             # To protect against race condition when using batch_isend_irecv().
             # User should assert that we have a modern enough PyTorch to not need this
-            cur_platform.synchronize()  # FlagScale Modify
+            # BEGIN MEGALENS OBSERVABILITY
+            p2p_observation.synchronize(cur_platform.synchronize)
+            # END MEGALENS OBSERVABILITY
 
         return tensor_recv_prev, tensor_recv_next, reqs
 

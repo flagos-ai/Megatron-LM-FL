@@ -46,6 +46,11 @@ from ..dist_checkpointing.optimizer import (
     optim_state_to_sharding_state,
 )
 from ..dist_checkpointing.utils import add_prefix_for_sharding
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from ..observability import trace_scope
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from ..transformer.module import param_is_not_shared
 from ..utils import log_single_rank
 from .clip_grads import clip_grad_by_total_norm_fp32, count_zeros_fp32, get_grad_norm_fp32
@@ -632,8 +637,11 @@ class MixedPrecisionOptimizer(MegatronOptimizer):
             timers('optimizer-inner-step', log_level=1).start(
                 barrier=self.config.barrier_with_L1_time
             )
-        if not self.is_stub_optimizer:
-            self.optimizer.step()
+        # BEGIN MEGALENS OBSERVABILITY
+        with trace_scope('optimizer-step'):
+            if not self.is_stub_optimizer:
+                self.optimizer.step()
+        # END MEGALENS OBSERVABILITY
         if timers is not None:
             timers('optimizer-inner-step').stop()
 
@@ -1031,7 +1039,10 @@ class FP32Optimizer(MegatronOptimizer):
             timers('optimizer-inner-step', log_level=1).start(
                 barrier=self.config.barrier_with_L1_time
             )
-        self.optimizer.step()
+        # BEGIN MEGALENS OBSERVABILITY
+        with trace_scope('optimizer-step'):
+            self.optimizer.step()
+        # END MEGALENS OBSERVABILITY
         if timers is not None:
             timers('optimizer-inner-step').stop()
 

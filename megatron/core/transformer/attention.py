@@ -19,6 +19,11 @@ from megatron.core.models.common.embeddings.rope_utils import (
     apply_rotary_pos_emb,
     apply_rotary_pos_emb_with_cos_sin,
 )
+
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.core.observability import scoped_forward
+
+# END MEGALENS OBSERVABILITY  # isort: split
 from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
     get_data_parallel_group,
@@ -1013,6 +1018,9 @@ class Attention(MegatronModule, ABC):
 
         return output_total
 
+    # BEGIN MEGALENS OBSERVABILITY
+    @scoped_forward("attention")
+    # END MEGALENS OBSERVABILITY
     def forward(
         self,
         hidden_states: Tensor,

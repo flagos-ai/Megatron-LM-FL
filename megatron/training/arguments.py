@@ -54,6 +54,12 @@ from megatron.core.quantization.utils import (
 
 from megatron.training.argument_utils import ArgumentGroupFactory, core_transformer_config_from_args
 
+# BEGIN MEGALENS OBSERVABILITY  # isort: split
+from megatron.megalens.probes.training import _add_megalens_args, _validate_megalens_args
+
+# END MEGALENS OBSERVABILITY  # isort: split
+
+
 def add_megatron_arguments(parser: argparse.ArgumentParser):
     """"Add Megatron-LM arguments to the given parser."""
 
@@ -90,6 +96,9 @@ def add_megatron_arguments(parser: argparse.ArgumentParser):
     parser = _add_msc_args(parser)
     parser = _add_kitchen_quantization_arguments(parser)
     parser = _add_sft_args(parser)
+    # BEGIN MEGALENS OBSERVABILITY
+    parser = _add_megalens_args(parser)
+    # END MEGALENS OBSERVABILITY
 
     parser = _add_fault_injector_args(parser)
 
@@ -398,6 +407,9 @@ def tuple_type(x):
 
 def validate_args(args, defaults={}):
 
+    # BEGIN MEGALENS OBSERVABILITY
+    _validate_megalens_args(args)
+    # END MEGALENS OBSERVABILITY
     # Prep for checkpoint conversion.
     if args.ckpt_convert_format is not None:
         assert args.ckpt_convert_save is not None
