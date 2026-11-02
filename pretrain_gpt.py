@@ -42,6 +42,7 @@ from megatron.core.transformer.multi_token_prediction import (
 )
 from megatron.core.utils import (
     StragglerDetector,
+    flatten_batch_for_packed_sequences,
     get_attr_wrapped_model,
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
@@ -87,11 +88,16 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
     cp_size = args.context_parallel_size
     tp_rank = mpu.get_tensor_model_parallel_rank()
     is_sft = args.sft
+    has_cu_seqlens = is_sft or args.dataloader_inter_document_masking
     create_attention_mask_in_dataloader = args.create_attention_mask_in_dataloader
     mtp_on_this_rank = mtp_on_this_rank_func(layout=config.pipeline_model_parallel_layout, mtp_num_layers=config.mtp_num_layers, ignore_virtual=False, vp_stage=vp_stage)
     is_hybrid_cp = args.hybrid_context_parallel
 
-    if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank and not is_sft:
+    if (
+        not is_first_or_last_pipeline_stage(vp_stage)
+        and not mtp_on_this_rank
+        and not has_cu_seqlens
+    ):
         return [None for _ in BATCH_KEYS]
 
     batch = {}
@@ -100,13 +106,37 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
         for key in BATCH_KEYS:
             batch[key] = batch[key].to(device, non_blocking=True) if key in batch and batch[key] is not None else None
 
-    batch = get_batch_on_this_tp_rank(batch, broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(), broadcast_group=mpu.get_tensor_model_parallel_group(), is_sft=is_sft, is_hybrid_cp=is_hybrid_cp, create_attention_mask_in_dataloader=create_attention_mask_in_dataloader, cp_size=cp_size, tp_rank=tp_rank, micro_batch_size=args.micro_batch_size, seq_length=args.seq_length, mtp_on_this_rank=mtp_on_this_rank, pipeline_model_parallel_size=args.pipeline_model_parallel_size, is_pipeline_first_stage=mpu.is_pipeline_first_stage(), is_pipeline_last_stage=mpu.is_pipeline_last_stage())
-    
+    if tp_rank == 0:
+        batch = flatten_batch_for_packed_sequences(batch)
+    batch = get_batch_on_this_tp_rank(
+        batch,
+        broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(),
+        broadcast_group=mpu.get_tensor_model_parallel_group(),
+        is_sft=has_cu_seqlens,
+        is_hybrid_cp=is_hybrid_cp,
+        create_attention_mask_in_dataloader=create_attention_mask_in_dataloader,
+        cp_size=cp_size,
+        tp_rank=tp_rank,
+        micro_batch_size=args.micro_batch_size,
+        seq_length=args.seq_length,
+        mtp_on_this_rank=mtp_on_this_rank,
+        pipeline_model_parallel_size=args.pipeline_model_parallel_size,
+        is_pipeline_first_stage=mpu.is_pipeline_first_stage(),
+        is_pipeline_last_stage=mpu.is_pipeline_last_stage(),
+    )
+
+    batch = flatten_batch_for_packed_sequences(batch)
     if not is_first_or_last_pipeline_stage(vp_stage) and not mtp_on_this_rank:
-        assert is_sft
+        assert has_cu_seqlens
         return None, batch['cu_seqlens'], batch['cu_seqlens_padded'], None, None, None, None, batch['max_seqlen'], None, None
-    
-    batch = get_batch_on_this_cp_rank(batch, is_hybrid_cp=is_hybrid_cp, cp_group=get_context_parallel_group(), hybrid_cp_group_func=get_hybrid_data_context_parallel_groups)
+
+    batch = get_batch_on_this_cp_rank(
+        batch,
+        is_hybrid_cp=is_hybrid_cp,
+        cp_group=get_context_parallel_group(),
+        hybrid_cp_group_func=get_hybrid_data_context_parallel_groups,
+        use_contiguous_cp=args.experimental_attention_variant == "dsv4_hybrid",
+    )
 
     # Return values in BATCH_KEYS order so callers can unpack into the fixed
     # names regardless of any provenance fields wrappers like BlendedDataset
@@ -222,7 +252,11 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
         # Use real (unpadded) cu_seqlens to feed the FLOPs accounting: varlen
         # attention only computes work for real tokens within each chunk.
         update_seqlen_stats_from_cu_seqlens(cu_seqlens)
-        cu_seqlens_for_params = cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens # TODO(asolergi-nv): Currently there is a bug forcing cu_seqlens to be cu_seqlens_padded
+        cu_seqlens_for_params = (
+            cu_seqlens
+            if args.experimental_attention_variant == "dsv4_hybrid"
+            else cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens
+        )
         packed_seq_params = PackedSeqParams(
             qkv_format="thd",
             cu_seqlens_q=cu_seqlens_for_params,
@@ -233,7 +267,21 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
             max_seqlen_kv=int(max_seqlen.item()),
             local_cp_size=int(local_cp_size.item()) if local_cp_size is not None else None,
             cp_group=hybrid_cp_group,
+            total_tokens=int(
+                (cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens)[-1].item()
+            ),
+            tokens_per_sample=args.seq_length,
         )
+
+    padding_mask = None
+    if packed_seq_params is not None:
+        from megatron.core.context_parallel.utils import get_packed_seq_padding_mask
+
+        if args.experimental_attention_variant == "dsv4_hybrid":
+            local_rows = args.seq_length * args.micro_batch_size // args.context_parallel_size
+            padding_mask = get_packed_seq_padding_mask(
+                packed_seq_params, get_context_parallel_group().rank() * local_rows, local_rows
+            ).view(1, -1)
 
     timers('batch-generator').stop()
 
@@ -242,12 +290,24 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
             assert args.overlap_moe_expert_parallel_comm, \
                 "overlap_moe_expert_parallel_comm must be enabled to return the schedule plan"
             schedule_plan = model.build_schedule_plan(
-                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask
+                tokens,
+                position_ids,
+                attention_mask,
+                labels=labels,
+                loss_mask=loss_mask,
+                packed_seq_params=packed_seq_params,
+                padding_mask=padding_mask,
             )
             return schedule_plan, partial(loss_func, loss_mask, model=model)
         else:
             output_tensor = model(
-                tokens, position_ids, attention_mask, labels=labels, loss_mask=loss_mask, packed_seq_params=packed_seq_params
+                tokens,
+                position_ids,
+                attention_mask,
+                labels=labels,
+                loss_mask=loss_mask,
+                packed_seq_params=packed_seq_params,
+                padding_mask=padding_mask,
             )
 
     # [ModelOpt]: model is needed to access ModelOpt distillation losses
@@ -259,7 +319,9 @@ def is_dataset_built_on_rank(vp_stage=None, is_packed_sequence=False):
     config = core_transformer_config_from_args(args)
     if mpu.get_tensor_model_parallel_rank() != 0:
         return False
-    elif is_packed_sequence:
+    elif is_packed_sequence or args.dataloader_inter_document_masking:
+        # Packed pretraining needs document metadata on intermediate PP/VPP
+        # stages too, even though those stages do not consume token payloads.
         return True
     return (
         is_first_or_last_pipeline_stage(vp_stage)
@@ -303,6 +365,8 @@ def core_gpt_dataset_config_from_args(args: Any) -> GPTDatasetConfig:
         "sequences_per_dataset": sequences_per_dataset,
         "defer_npy_index_mmap": args.dataloader_defer_npy_index_mmap,
         "context_parallel_size": args.context_parallel_size,
+        "inter_document_masking": args.dataloader_inter_document_masking,
+        "preserve_packed_sequence_lengths": args.experimental_attention_variant == "dsv4_hybrid",
         "data_parallel_size": args.data_parallel_size,
         "sequence_parallel_size": args.tensor_model_parallel_size * args.sequence_parallel,
         "hybrid_context_parallel": args.hybrid_context_parallel,

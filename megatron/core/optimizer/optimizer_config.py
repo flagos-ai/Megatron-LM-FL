@@ -1,7 +1,8 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 import fnmatch
-from dataclasses import dataclass, field
+import math
+from dataclasses import dataclass, field, replace
 from typing import Callable, Optional, Tuple, Union
 
 import torch
@@ -365,6 +366,22 @@ class OptimizerConfig:
     pin_cpu_params: bool = True
     """If True, pin the optimizer parameters to CPU memory."""
 
+    chunked_optimizer_state_offload: bool = False
+    """Keep selected optimizer tensor states and master weights on CPU between updates."""
+
+    optimizer_state_offload_chunk_size_mb: int = 0
+    """Target GPU staging-window size for optimizer tensor state, in MiB.
+
+    Zero restores all selected tensor state together. Master weights are restored in one full
+    window and are not bounded by this value.
+    """
+
+    optimizer_state_offload_fraction: float = 1.0
+    """Fraction of optimizer parameter bundles whose state and master weights are offloaded."""
+
+    offload_optimizer_states: bool = False
+    """Deprecated alias for :attr:`chunked_optimizer_state_offload`."""
+
     ################
     # Miscellaneous
     ################
@@ -392,8 +409,112 @@ class OptimizerConfig:
     optimizer_cuda_graph: bool = False
     """If true, enables CUDA graph for optimizer step."""
 
+    optimizer_state_offload_fraction_per_pipeline_stage: Optional[Tuple[float, ...]] = None
+    """Optional fractions indexed by physical PP rank, shared by all virtual chunks.
+    Overrides optimizer_state_offload_fraction without changing the caller's config.
+    """
+
+    def state_offload_fraction_for_pipeline_rank(
+        self, pipeline_size: int, pipeline_rank: int
+    ) -> float:
+        """Resolve the state offload fraction for a physical pipeline stage."""
+        if pipeline_size < 1 or not 0 <= pipeline_rank < pipeline_size:
+            raise ValueError("Physical pipeline rank is outside the configured pipeline size")
+        fractions = self.optimizer_state_offload_fraction_per_pipeline_stage
+        if fractions is None:
+            return self.optimizer_state_offload_fraction
+        if len(fractions) != pipeline_size:
+            raise ValueError(
+                "State offload fractions require one value per physical pipeline stage"
+            )
+        return float(fractions[pipeline_rank])
+
+    def for_pipeline_rank(self, pipeline_size: int, pipeline_rank: int) -> "OptimizerConfig":
+        """Return an effective config shared by all virtual chunks of a physical stage.
+
+        The stage vector belongs to the caller's global config. Optimizer wrappers receive
+        only the resolved scalar, including zero for a stage that keeps its state on GPU.
+        """
+        fraction = self.state_offload_fraction_for_pipeline_rank(pipeline_size, pipeline_rank)
+        return replace(
+            self,
+            optimizer_state_offload_fraction=fraction,
+            optimizer_state_offload_fraction_per_pipeline_stage=None,
+        )
+
     def __post_init__(self):
         """Check the validity of the config."""
+
+        if self.offload_optimizer_states:
+            warnings.warn(
+                "offload_optimizer_states is deprecated; use "
+                "chunked_optimizer_state_offload instead. The deprecated option now enables "
+                "the replacement with its legacy-equivalent defaults: chunk size 0 and "
+                "offload fraction 1.0 unless those settings were explicitly changed.",
+                FutureWarning,
+                stacklevel=2,
+            )
+            self.chunked_optimizer_state_offload = True
+            self.offload_optimizer_states = False
+
+        assert (
+            self.optimizer_state_offload_chunk_size_mb >= 0
+        ), "optimizer_state_offload_chunk_size_mb must be non-negative"
+        assert (
+            0.0 <= self.optimizer_state_offload_fraction <= 1.0
+        ), "optimizer_state_offload_fraction must be in [0.0, 1.0]"
+
+        fractions = self.optimizer_state_offload_fraction_per_pipeline_stage
+        if fractions is not None:
+            if not fractions or any(
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or not 0.0 <= value <= 1.0
+                for value in fractions
+            ):
+                raise ValueError(
+                    "Every pipeline state offload fraction must be a finite number in [0, 1]"
+                )
+            if not self.chunked_optimizer_state_offload:
+                raise ValueError("Per-stage fractions require chunked optimizer state offload")
+            self.optimizer_state_offload_fraction_per_pipeline_stage = tuple(fractions)
+        offload_fraction = (
+            max(fractions) if fractions is not None else self.optimizer_state_offload_fraction
+        )
+        if self.chunked_optimizer_state_offload and offload_fraction > 0.0:
+            assert self.optimizer == 'adam', (
+                "chunked optimizer state offload currently supports Adam only"
+            )
+
+            assert (
+                not self.optimizer_cpu_offload
+            ), "chunked_optimizer_state_offload and optimizer_cpu_offload are mutually exclusive"
+            assert (
+                not self.optimizer_cuda_graph
+            ), "chunked optimizer state offload does not support optimizer CUDA graphs"
+
+            if self.use_precision_aware_optimizer:
+                assert self.main_params_dtype == torch.float32, (
+                    "chunked optimizer state offload with precision-aware optimizer requires "
+                    "main_params_dtype=torch.float32"
+                )
+                supported_state_dtypes = (torch.float32, torch.bfloat16)
+                assert self.exp_avg_dtype in supported_state_dtypes, (
+                    "chunked optimizer state offload with precision-aware optimizer requires "
+                    "exp_avg_dtype to be torch.float32 or torch.bfloat16"
+                )
+                assert self.exp_avg_sq_dtype in supported_state_dtypes, (
+                    "chunked optimizer state offload with precision-aware optimizer requires "
+                    "exp_avg_sq_dtype to be torch.float32 or torch.bfloat16"
+                )
+
+            assert not self.use_layer_wise_distributed_optimizer, (
+                "Adam optimizer state offload does not support LayerWiseDistributedOptimizer"
+            )
+            assert self.use_distributed_optimizer, (
+                "Adam optimizer state offload requires use_distributed_optimizer"
+            )
 
         # The following condition is used to avoid repetition in distrib_optimizer.py.
         # This is because in distrib_optimizer.py, the process to handle parameters are

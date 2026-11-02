@@ -1,5 +1,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+import re
 from dataclasses import dataclass
 from typing import Dict, List, Union
 
@@ -46,13 +47,15 @@ class PromptConfig:
 class SFTTokenizer:
     """SFT Tokenizer."""
 
-    def __init__(self, tokenizer_path: str, prompt_format: str):
+    def __init__(self, tokenizer_path: str, prompt_format: str, assistant_only_loss: bool = True):
         """
         Note: Currently, only HuggingFaceTokenizer is supported as the underlying text tokenizer.
 
         Args:
             tokenizer_path (str): Underlying tokenizer path.
             prompt_format (str): Prompt format for the tokenizer.
+            assistant_only_loss (bool): Mask non-assistant targets for the default prompt
+                format, using the chat template generation spans. Other formats are unchanged.
         """
         if HAVE_TRANSFORMERS:
             # Currently, only HuggingFace tokenizers are supported.
@@ -107,6 +110,7 @@ class SFTTokenizer:
             raise NotImplementedError("unknown SFT prompt format", prompt_format)
 
         self._prompt_format = prompt_format
+        self._assistant_only_loss = assistant_only_loss
 
     @staticmethod
     def _extract_token_ids(result) -> np.ndarray:
@@ -140,31 +144,59 @@ class SFTTokenizer:
                     {"role": "user", "content": "something1"},
                     {"role": "assistant", "content": "something2"},
                 ]
-            return_target (bool): Return target tokens with system and assistant masked.
+            return_target (bool): Return target tokens with prompt tokens masked according
+                to the prompt format and assistant_only_loss setting.
             add_generation_prompt (bool): Add assistant prefix to the end.
         """
         # Skip system message if the tokenizer doesn't have a system role.
         if not self._prompt_config.has_system_role and conversation[0]["role"] == "system":
             conversation = conversation[1:]
 
-        tokens = self._extract_token_ids(
-            self._tokenizer.apply_chat_template(
-                conversation,
-                tokenize=True,
-                add_generation_prompt=add_generation_prompt,
-                return_assistant_token_mask=False,
-                return_tensors="np",
-                chat_template=self._prompt_config.custom_chat_template,
-            )
+        assistant_only_loss = (
+            return_target and self._prompt_format == "default" and self._assistant_only_loss
         )
+        if assistant_only_loss and not re.search(
+            r"\{%-?\s*generation\b", self._prompt_config.custom_chat_template or ""
+        ):
+            raise ValueError(
+                "Default SFT assistant-only loss requires {% generation %} spans in the "
+                "chat template. Mark assistant outputs (including EOS) with generation spans, "
+                "or disable masking with --no-sft-assistant-only-loss."
+            )
+
+        encoded = self._tokenizer.apply_chat_template(
+            conversation,
+            tokenize=True,
+            add_generation_prompt=add_generation_prompt,
+            return_assistant_tokens_mask=assistant_only_loss,
+            return_dict=assistant_only_loss,
+            return_tensors="np",
+            chat_template=self._prompt_config.custom_chat_template,
+        )
+        tokens = self._extract_token_ids(encoded)
 
         if not return_target:
             return tokens
 
         target = tokens.copy()
 
-        # When using the default prompt format, we do not replace any tokens with IGNORE_INDEX.
-        # Instead, all token losses will be used for simplicity.
+        if assistant_only_loss:
+            if "assistant_masks" not in encoded:
+                raise ValueError("The tokenizer did not return the requested assistant mask.")
+            assistant_mask = self._extract_token_ids({"input_ids": encoded["assistant_masks"]})
+            if assistant_mask.shape != tokens.shape or not np.isin(assistant_mask, [0, 1]).all():
+                raise ValueError("The assistant mask must be binary and match the token shape.")
+            if not assistant_mask.any() and any(
+                turn["role"] == "assistant" for turn in conversation
+            ):
+                raise ValueError(
+                    "The chat template produced no assistant tokens for an assistant turn. "
+                    "Check its generation spans and tokenizer character alignment."
+                )
+            target[assistant_mask == 0] = IGNORE_INDEX
+            return tokens, target
+
+        # Identity and explicitly disabled default masking retain all-token targets.
         if self._prompt_format in ["default", "identity"]:
             return tokens, target
 

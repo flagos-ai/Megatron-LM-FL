@@ -84,6 +84,7 @@ def build_tokenizer(args, **kwargs):
         tokenizer_library = 'sft'
         tokenizer_path = args.tokenizer_model
         kwargs['prompt_format'] = args.sft_tokenizer_prompt_format
+        kwargs['assistant_only_loss'] = getattr(args, 'sft_assistant_only_loss', True)
     elif args.tokenizer_type in ['NullTokenizer', 'NullMultimodalTokenizer']:
         tokenizer_library = (
             'null-text' if args.tokenizer_type == 'NullTokenizer' else 'null-multimodal'

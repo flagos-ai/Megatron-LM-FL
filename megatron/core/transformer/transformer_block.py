@@ -22,13 +22,19 @@ from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.pipeline_parallel.utils import is_vp_first_stage, is_vp_last_stage
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.recompute import checkpointed_forward
-from megatron.core.tensor_parallel.random import CheckpointManager  # FlagScale Modify
+from megatron.core.tensor_parallel.random import CheckpointWithoutOutputManager  # FlagScale Modify
 from megatron.core.transformer.enums import InferenceCudaGraphScope, LayerType
 from megatron.core.transformer.hyper_connection import (  # FlagScale Modify
     HyperConnectionModule,
+    build_mhc_recompute_layer_plan,
+    finalize_mhc_recompute_layer,
     learned_output_contract,
 )
-from megatron.core.transformer.module import GraphableMegatronModule, MegatronModule
+from megatron.core.transformer.module import (
+    GraphableMegatronModule,
+    MegatronModule,
+    mark_keep_in_fp32,
+)
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -439,9 +445,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             if self.config.enable_hyper_connections:
                 hc_mult = self.config.num_residual_streams
                 hc_dim = self.config.hidden_size * hc_mult
-                self.hc_head_fn = nn.Parameter(torch.randn(hc_mult, hc_dim))
-                self.hc_head_base = nn.Parameter(torch.zeros(hc_mult))
-                self.hc_head_scale = nn.Parameter(torch.ones(1))
+                self.hc_head_fn = mark_keep_in_fp32(nn.Parameter(torch.randn(hc_mult, hc_dim)))
+                self.hc_head_base = mark_keep_in_fp32(nn.Parameter(torch.zeros(hc_mult)))
+                self.hc_head_scale = mark_keep_in_fp32(nn.Parameter(torch.ones(1)))
                 nn.init.xavier_uniform_(self.hc_head_fn)
                 if self.config.sequence_parallel:
                     setattr(self.hc_head_fn, 'sequence_parallel', True)
@@ -554,43 +560,20 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
     def _build_mhc_recompute_layer_plan(
         self, use_mhc_recompute: bool
-    ) -> Tuple[List[Optional[CheckpointManager]], List[bool]]:
-        """Pre-build per-layer MHC recompute managers and block-end markers."""
-        num_layers = len(self.layers)
-        layer_managers: List[Optional[CheckpointManager]] = [None] * num_layers
-        is_recompute_block_end: List[bool] = [False] * num_layers
-
-        if not use_mhc_recompute or num_layers == 0:
-            return layer_managers, is_recompute_block_end
-
-        mhc_recompute_layer_num = self.config.mhc_recompute_layer_num
-        mhc_manager = CheckpointManager()
-
-        for l_no in range(num_layers):
-            is_last_in_transformer_block = l_no == num_layers - 1
-            is_last_in_recompute_block = is_last_in_transformer_block
-            if mhc_recompute_layer_num is not None:
-                is_last_in_recompute_block = is_last_in_transformer_block or (
-                    (l_no + 1) % mhc_recompute_layer_num == 0
-                )
-
-            layer_managers[l_no] = mhc_manager
-            is_recompute_block_end[l_no] = is_last_in_recompute_block
-
-            if is_last_in_recompute_block and not is_last_in_transformer_block:
-                mhc_manager = CheckpointManager()
-
-        return layer_managers, is_recompute_block_end
+    ) -> Tuple[List[Optional[CheckpointWithoutOutputManager]], List[bool]]:
+        """Build per-layer managers using the shared mHC recompute contract."""
+        return build_mhc_recompute_layer_plan(
+            len(self.layers), self.config.mhc_recompute_layer_num, use_mhc_recompute
+        )
 
     @staticmethod
     def _finalize_mhc_recompute_layer(
-        mhc_manager: Optional[CheckpointManager],
+        mhc_manager: Optional[CheckpointWithoutOutputManager],
         hidden_states: Tensor,
         is_last_in_recompute_block: bool,
     ) -> None:
-        """Finalize MHC recompute state for the current layer when block ends."""
-        if mhc_manager is not None and is_last_in_recompute_block:
-            mhc_manager.discard_all_outputs_and_register_unified_recompute(hidden_states)
+        """Finalize the manager at a recompute block boundary."""
+        finalize_mhc_recompute_layer(mhc_manager, hidden_states, is_last_in_recompute_block)
 
     def forward(
         self,
@@ -768,7 +751,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 ):
                     self.config.recompute_method = 'block'
                 else:
-                    raise ValueError("the item of recompute_method_per_stage_micro_batch must be '0' or '1' ")
+                    raise ValueError(
+                        "the item of recompute_method_per_stage_micro_batch must be '0' or '1' "
+                    )
             else:
                 if (
                     self.config.recompute_method_per_stage_micro_batch[
@@ -785,18 +770,24 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 ):
                     self.config.recompute_method = 'block'
                 else:
-                    raise ValueError("the item of recompute_method_per_stage_micro_batch must be '0' or '1' ")
+                    raise ValueError(
+                        "the item of recompute_method_per_stage_micro_batch must be '0' or '1' "
+                    )
         if self.config.recompute_num_layers_per_stage_micro_batch != None:
             if self.config.virtual_pipeline_model_parallel_size != None:
-                self.config.recompute_num_layers = self.config.recompute_num_layers_per_stage_micro_batch[
-                    parallel_state.get_virtual_pipeline_model_parallel_rank()
-                    * self.config.pipeline_model_parallel_size
-                    + parallel_state.get_pipeline_model_parallel_rank()
-                ][self.current_microbatch]
+                self.config.recompute_num_layers = (
+                    self.config.recompute_num_layers_per_stage_micro_batch[
+                        parallel_state.get_virtual_pipeline_model_parallel_rank()
+                        * self.config.pipeline_model_parallel_size
+                        + parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                )
             else:
-                self.config.recompute_num_layers = self.config.recompute_num_layers_per_stage_micro_batch[
-                    parallel_state.get_pipeline_model_parallel_rank()
-                ][self.current_microbatch]
+                self.config.recompute_num_layers = (
+                    self.config.recompute_num_layers_per_stage_micro_batch[
+                        parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                )
             if self.config.recompute_num_layers == 0:
                 self.config.recompute_method = None
                 self.config.recompute_granularity = None
@@ -825,7 +816,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         )
 
         with rng_context, outer_quantization_context:
-            engram_hash_input_ids = decoder_extra_block_kwargs.get("engram_hash_input_ids")  # FlagScale Modify
+            engram_hash_input_ids = decoder_extra_block_kwargs.get(
+                "engram_hash_input_ids"
+            )  # FlagScale Modify
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
                 assert engram_hash_input_ids is None  # FlagScale Modify

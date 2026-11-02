@@ -27,9 +27,70 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_fa_min_version, is_te_min_version
 from tests.unit_tests.test_utilities import Utils, get_current_device
+
+
+@pytest.mark.parametrize("explicit_decoder_input", [False, True])
+@pytest.mark.parametrize("tp", [1, 2])
+def test_pipeline_preprocess_router_padding_mask(tp, explicit_decoder_input):
+    """Every GPT input path supplies an SP mask matching router tokens."""
+    if Utils.world_size < 2 * tp:
+        pytest.skip(f"requires {2 * tp} ranks")
+    Utils.initialize_model_parallel(tp, 2)
+    try:
+        model_parallel_cuda_manual_seed(123)
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        first_stage = parallel_state.is_pipeline_first_stage()
+        config = TransformerConfig(
+            num_layers=2,
+            hidden_size=8,
+            num_attention_heads=2,
+            use_cpu_initialization=True,
+            tensor_model_parallel_size=tp,
+            pipeline_model_parallel_size=2,
+            pipeline_dtype=torch.float32,
+            sequence_parallel=tp > 1,
+            add_bias_linear=False,
+            num_moe_experts=4,
+            moe_router_topk=2,
+            moe_aux_loss_coeff=0.01,
+        )
+        model = GPTModel(
+            config=config,
+            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(),
+            vocab_size=16,
+            max_sequence_length=8,
+            pre_process=first_stage,
+            post_process=not first_stage,
+            position_embedding_type="learned_absolute",
+            pg_collection=pg,
+        ).cuda()
+        ids = torch.tensor([[1, 2, 3, 4, 5, 6, 0, 0]], device="cuda")
+        positions = torch.arange(8, device="cuda")[None]
+        full_mask = ids.eq(0)
+        hidden = torch.randn(8 // tp, 1, 8, device="cuda", requires_grad=True)
+        decoder_input = hidden if explicit_decoder_input else None
+        if not first_stage:
+            model.set_input_tensor(hidden)
+        processed = model._preprocess(
+            ids if not explicit_decoder_input else None,
+            positions if not explicit_decoder_input else None,
+            decoder_input=decoder_input,
+            padding_mask=full_mask,
+        )[-1]
+        rows = slice(pg.tp.rank() * 8 // tp, (pg.tp.rank() + 1) * 8 // tp)
+        assert torch.equal(processed, full_mask[:, rows])
+
+        router = TopKRouter(config, pg_collection=pg).cuda()
+        probabilities, _ = router(hidden, padding_mask=processed.T.contiguous())
+        assert probabilities.shape[0] == hidden.shape[0]
+        assert torch.isfinite(probabilities).all()
+        assert torch.equal(full_mask, ids.eq(0))
+    finally:
+        Utils.destroy_model_parallel()
 
 
 class TestGPTModel:
@@ -100,8 +161,16 @@ class TestGPTModel:
         self.gpt_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -124,9 +193,17 @@ class TestGPTModel:
         self.gpt_model.eval()
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         labels = (input_ids + 1) % self.gpt_model.vocab_size
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -182,9 +259,21 @@ class TestGPTModel:
         self.gpt_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        labels = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        labels = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -302,8 +391,16 @@ class TestGPTWithFusedOps:
         self.gpt_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -359,8 +456,12 @@ def test_gpt_with_te_activation_func(num_experts, gated_linear_unit):
     gpt_model.to(get_current_device())
 
     data = list(range(sequence_length))
-    input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-    position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+    input_ids = (
+        torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+    )
+    position_ids = (
+        torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+    )
     attention_mask = torch.ones(
         (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
     ).to(get_current_device())
@@ -443,7 +544,9 @@ class TestGPTModelWithCustomPG:
 
         self.gpt_model.to(get_current_device())
 
-        input_ids = torch.ones(micro_batch_size, sequence_length, dtype=torch.int64, device=get_current_device())
+        input_ids = torch.ones(
+            micro_batch_size, sequence_length, dtype=torch.int64, device=get_current_device()
+        )
         position_ids = torch.ones(
             micro_batch_size, sequence_length, dtype=torch.int64, device=get_current_device()
         )

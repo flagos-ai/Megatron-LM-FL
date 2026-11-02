@@ -78,7 +78,10 @@ class TestFinalizeModelGradsMoEExpertBias:
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_finalize_model_grads_updates_router_expert_bias_with_custom_group(self):
+    @pytest.mark.parametrize("has_hash_router", [False, True])
+    def test_finalize_model_grads_updates_router_expert_bias_with_custom_group(
+        self, has_hash_router
+    ):
         assert not parallel_state.model_parallel_is_initialized()
 
         config = _router_expert_bias_config()
@@ -87,6 +90,10 @@ class TestFinalizeModelGradsMoEExpertBias:
             [0.0, 2.0] if dist.get_rank() == 0 else [0.0, 0.0], device=device
         )
         model = _RouterExpertBiasModel(config, local_tokens)
+        if has_hash_router:
+            model.hash_router = torch.nn.Module()
+            model.hash_router.expert_bias = None
+            model.hash_router.local_tokens_per_expert = None
 
         finalize_model_grads(
             [model], pg_collection=_router_bias_pg_collection(tp_dp_cp=dist.group.WORLD)
@@ -98,6 +105,9 @@ class TestFinalizeModelGradsMoEExpertBias:
             model.router.local_tokens_per_expert, torch.zeros_like(local_tokens)
         )
         assert model.finish_grad_sync_calls == 1
+        if has_hash_router:
+            assert model.hash_router.expert_bias is None
+            assert model.hash_router.local_tokens_per_expert is None
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_finalize_model_grads_requires_custom_group_before_grad_sync(self):

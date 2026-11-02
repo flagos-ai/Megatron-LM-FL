@@ -11,6 +11,7 @@ from megatron.core.tensor_parallel.random import (
     get_cuda_rng_tracker,
     model_parallel_cuda_manual_seed,
 )
+from megatron.core.transformer.moe import moe_utils
 from megatron.core.transformer.moe.moe_utils import (
     clear_aux_losses_tracker,
     get_default_pg_collection,
@@ -760,3 +761,111 @@ class TestPaddingMaskAuxLoss:
         finally:
             # Always cleanup model parallel
             Utils.destroy_model_parallel()
+
+
+@pytest.mark.parametrize('device', ['cpu', 'cuda'])
+@pytest.mark.parametrize('fused', [False, True])
+@pytest.mark.parametrize('device_count', [False, True])
+@pytest.mark.parametrize('history', [False, True])
+@pytest.mark.parametrize('valid_tokens', [0, 3])
+def test_aux_loss_safe_normalization(fused, device_count, history, valid_tokens, device):
+    if device == 'cpu' and (fused or device_count):
+        pytest.skip('TE fused and device-count rescaling require CUDA')
+    if device == 'cuda' and not torch.cuda.is_available():
+        pytest.skip('requires CUDA')
+    if fused and moe_utils.fused_moe_aux_loss is None:
+        pytest.skip('TE fused aux-loss kernel unavailable')
+    probs = torch.tensor([[0.1, 0.2, 0.3, 0.4]] * 4, device=device, requires_grad=True)
+    mask = torch.arange(4, device=device) < valid_tokens
+    counts = (
+        torch.tensor([1, 2, 2, 1], device=device) if valid_tokens else torch.zeros(4, device=device)
+    )
+    total = valid_tokens
+    if history:
+        counts = counts + torch.tensor([3, 2, 1, 2], device=device)
+        total += 4
+    count = torch.tensor(total, device=device) if device_count else total
+    before = count.clone() if device_count else count
+    loss = moe_utils.switch_load_balancing_loss_func(probs, counts, count, 2, 4, 0.1, fused, mask)
+    # Count and accumulated history are external state; empty local probabilities yield zero.
+    expected = (probs.detach() * mask[:, None]).sum(0).dot(counts.float()) * (
+        0.4 / (2 * max(total, 1) ** 2)
+    )
+    torch.testing.assert_close(loss, expected, rtol=1e-5, atol=1e-7)
+    loss.backward()
+    expected_grad = mask[:, None] * counts.float()[None, :] * (0.4 / (2 * max(total, 1) ** 2))
+    torch.testing.assert_close(probs.grad, expected_grad, rtol=1e-5, atol=1e-7)
+    if device_count:
+        torch.testing.assert_close(count, before)
+    else:
+        assert count == before
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason='requires CUDA')
+@pytest.mark.parametrize('loss_type', ['aux_loss', 'seq_aux_loss', 'global_aux_loss'])
+@pytest.mark.parametrize('fused', [False, True])
+@pytest.mark.parametrize('with_history', [False, True])
+def test_empty_router_aux_loss_and_history(monkeypatch, loss_type, fused, with_history):
+    from megatron.core.process_groups_config import ProcessGroupCollection
+    from megatron.core.transformer.moe import router as router_mod
+    from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
+    from megatron.core.transformer.moe.router import TopKRouter
+    from megatron.core.transformer.transformer_config import TransformerConfig
+    from tests.unit_tests.test_utilities import Utils
+
+    if fused and (
+        moe_utils.fused_moe_aux_loss is None
+        or moe_utils.fused_compute_score_for_moe_aux_loss is None
+    ):
+        pytest.skip('TE fused auxiliary operators unavailable')
+    Utils.initialize_model_parallel()
+    try:
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=16,
+            num_attention_heads=2,
+            num_moe_experts=4,
+            moe_router_topk=2,
+            moe_router_load_balancing_type=loss_type,
+            moe_aux_loss_coeff=0.001,
+            moe_router_fusion=fused,
+            moe_router_dtype='fp32',
+            params_dtype=torch.float32,
+            add_bias_linear=False,
+        )
+        losses = []
+        original = router_mod.switch_load_balancing_loss_func
+
+        def capture(*args, **kwargs):
+            loss = original(*args, **kwargs)
+            losses.append(loss.detach())
+            return loss
+
+        monkeypatch.setattr(router_mod, 'switch_load_balancing_loss_func', capture)
+        router = TopKRouter(
+            config, pg_collection=ProcessGroupCollection.use_mpu_process_groups()
+        ).cuda()
+        MoEAuxLossAutoScaler.set_loss_scale(torch.ones((), device='cuda'))
+        hidden = torch.randn(8, 2, 16, device='cuda', requires_grad=True)
+        if with_history:
+            probs, _ = router(hidden)
+            (probs.sum() * 0).backward()
+            assert torch.isfinite(router.weight.grad).all()
+            assert torch.count_nonzero(router.weight.grad) > 0
+            router.zero_grad(set_to_none=True)
+            hidden.grad = None
+        counters = (
+            router.global_tokens_per_expert.clone() if loss_type == 'global_aux_loss' else None
+        )
+        mask = torch.ones(8, 2, dtype=torch.bool, device='cuda')
+        probs, _ = router(hidden, padding_mask=mask)
+        (probs.sum() * 0).backward()
+        assert len(losses) == (2 if with_history else 1)
+        torch.testing.assert_close(losses[-1], torch.zeros_like(losses[-1]))
+        torch.testing.assert_close(router.weight.grad, torch.zeros_like(router.weight.grad))
+        torch.testing.assert_close(hidden.grad, torch.zeros_like(hidden.grad))
+        assert mask.all()
+        if counters is not None:
+            torch.testing.assert_close(router.global_tokens_per_expert, counters)
+    finally:
+        Utils.destroy_model_parallel()
