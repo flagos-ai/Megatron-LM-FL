@@ -1,8 +1,8 @@
 # Iluvatar uses the same platform contract and shared pipeline as Hygon.
 # TODO: replace ci_image and runner_labels with provisioned infrastructure.
-# TODO: confirm device_types, nproc_per_node, host asset paths, and container
-# device/driver options with the Iluvatar runner owner. Eight ranks and the asset
-# layout below follow the existing platform convention; they are not verified.
+# TODO: confirm device_types, nproc_per_node, and container
+# device/driver options with the Iluvatar runner owner. Eight ranks and device
+# settings below follow the existing platform convention; they are not verified.
 # Functional cases use the existing lightweight mode until native golden values
 # are captured. Do not reuse another platform's golden values or failure skips.
 hardware_name: iluvatar
@@ -12,10 +12,11 @@ ci_image: TODO_ILUVATAR_CI_IMAGE
 runner_labels:
   - TODO_ILUVATAR_RUNNER_LABEL
 container_volumes:
-  - /home/gitlab-runner/data:/home/gitlab-runner/data
-  - /home/gitlab-runner/tokenizers:/home/gitlab-runner/tokenizers
-  - /home/gitlab-runner/data:/opt/data/datasets
-  - /home/gitlab-runner/tokenizers:/opt/data/tokenizers
+  # Shared assets; keep the container paths used by existing tests.
+  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data
+  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_datasets:/opt/data/datasets
+  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_tokenizers:/opt/data/tokenizers
 container_options: >-
   --privileged
   --ipc=host
