@@ -610,7 +610,7 @@ def _get_megatron_optimizer_based_on_param_groups(
                                 opt.state[p]['exp_avg'] = torch.zeros_like(p.data)
                                 opt.state[p]['exp_avg_sq'] = torch.zeros_like(p.data)
                             else:
-                                opt.initialize_state(p)
+                                opt.initialize_state(p, config.store_param_remainders)
 
         elif config.optimizer == 'lion':
             if not HAVE_EMERGING_OPTIMIZERS:
@@ -1016,6 +1016,14 @@ def get_megatron_optimizer(
     Returns:
         Instance of MegatronOptimizer.
     """
+
+    if config.optimizer_state_offload_fraction_per_pipeline_stage is not None:
+        if pg_collection is not None:
+            pp_group = pg_collection.pp
+        else:
+            # Compatibility for callers that have not supplied explicit process groups.
+            pp_group = parallel_state.get_pipeline_model_parallel_group()
+        config = config.for_pipeline_rank(pp_group.size(), pp_group.rank())
 
     # None → apply standard defaults. To extend defaults with custom overrides,
     # start from get_standard_config_overrides(config) and merge yours in.
