@@ -64,6 +64,12 @@ test_matrix:
     unsupported_groups:
       transformer: Transformer unit tests currently run only on CUDA.
     ignored_tests:
+      # These CUDA monitoring contracts require NVIDIA pynvml/NVML, unavailable
+      # on this Iluvatar runtime. Same four-test boundary as Enflame.
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_clock_rate_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_power_draw_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_temperature_returns_numeric
+      - megatron/plugin/tests/test_platform.py::TestAllRegisteredPlatformsContract::test_utilization_returns_numeric
       # IXTE 5.0.0/CoreX 4.5 lacks rmsnorm_bwd_add; all six variants fail.
       # Same test boundary as Hygon/MetaX/Ascend; restore after native support.
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py::test_rmsnorm_residual_fusion
