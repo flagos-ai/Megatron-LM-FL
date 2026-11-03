@@ -32,14 +32,16 @@ from megatron.core.transformer.cuda_graph_config import (
     normalize_inference_cuda_graph_scope,
     validate_deprecated_cuda_graph_modules_migration_inputs,
 )
+from megatron.core.transformer.enums import LayerType  # FlagScale Modify
 from megatron.core.transformer.enums import (
     AttnBackend,
     CudaGraphModule,
     CudaGraphScope,
     InferenceCudaGraphScope,
-    LayerType,  # FlagScale Modify
 )
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
+from megatron.plugin.decorators import overridable  # FlagScale Modify
+from megatron.plugin.platform import get_platform  # FlagScale Modify
 
 from .._rank_utils import log_single_rank
 from ..fusions.fused_bias_geglu import quick_gelu
@@ -52,7 +54,7 @@ from ..utils import (
     mup_scaled_init_method_normal,
     scaled_init_method_normal,
 )
-from megatron.plugin.decorators import overridable  # FlagScale Modify
+
 logger = logging.getLogger(__name__)
 
 try:
@@ -311,24 +313,19 @@ class TransformerConfig(ModelParallelConfig):
     """Number of residual branches for hyper connections.
     Only used when enable_hyper_connections is True."""
 
-    mhc_sinkhorn_iterations: int = 10
+    mhc_sinkhorn_iterations: int = 20
     """Number of Sinkhorn-Knopp iterations for doubly stochastic projection."""
 
     mhc_init_gating_factor: float = 0.01
     """Initial value of Gating Factor (alpha in paper)."""
 
     use_fused_mhc: bool = False
-    """Use unified fused kernels for mHC operations.
+    """Use unified fused kernels for mHC operations."""
 
-    When True, attempts to replace the reference mHC modules (SinkhornKnopp,
-    H_aggregate, H_post_bda, ProjRms) with fused/autograd implementations for
-    better performance on supported GPUs.  Backend selection is internal and
-    op-specific: Triton for Sinkhorn and H_post_bda backward when available,
-    cuTile for the remaining fused kernels when available, then native torch
-    fallback. If every mHC operation uses the native torch fallback,
-    use_fused_mhc remains enabled and a rank-0 warning is emitted. The all-native
-    fallback is functionally equivalent, but may not provide fused backend
-    performance benefits.
+    mhc_fused_backend: Literal["auto", "native", "triton", "cutile"] = "auto"
+    """Backend policy for fused mHC operations; auto selects per operation.
+
+    Explicit backends fail if unavailable instead of silently falling back.
     """
 
     mhc_recompute_layer_num: Optional[int] = None
@@ -1946,6 +1943,25 @@ class TransformerConfig(ModelParallelConfig):
                 self.recompute_modules.append("moe")
 
         ######## FlagScale Begin ########
+        if self.mhc_fused_backend not in ("auto", "native", "triton", "cutile"):
+            raise ValueError("mhc_fused_backend must be auto, native, triton, or cutile")
+        if self.use_fused_mhc and self.mhc_fused_backend in ("auto", "triton"):
+            platform_name = get_platform().platform_name()
+            # MetaX exposes the CUDA API rather than a separate platform.
+            if platform_name == "cuda" and getattr(torch.version, "maca", None):
+                platform_name = "metax"
+            if platform_name in ("kunlunxin", "metax"):
+                raise ValueError(
+                    f"Triton fused mHC kernels are incompatible with {platform_name} "
+                    f"(mhc_fused_backend={self.mhc_fused_backend!r}). "
+                    "Set mhc_fused_backend='native' or use_fused_mhc=False."
+                )
+            if platform_name in ("npu", "enflame"):
+                warnings.warn(
+                    f"Triton fused mHC kernels have known compilation timeouts on {platform_name} "
+                    f"(mhc_fused_backend={self.mhc_fused_backend!r}). "
+                    "Set mhc_fused_backend='native' or use_fused_mhc=False to avoid this path."
+                )
         # Validation for "mhc" in recompute_modules
         if self.recompute_granularity == "selective" and "mhc" in self.recompute_modules:
             if not self.enable_hyper_connections:

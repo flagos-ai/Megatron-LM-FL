@@ -294,3 +294,30 @@ def test_float16_module_cpu_forward_and_state_paths(monkeypatch):
     }
     assert fp16_module.sharded_state_dict(prefix="s.") == {"sharded": "s."}
     fp16_module.load_state_dict(wrapped.state_dict())
+
+
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_float16_module_preserves_marked_parameters_and_buffers(dtype):
+    """Conversion keeps marked values exact and preserves normal conversion behavior."""
+    from megatron.core.transformer.module import mark_keep_in_fp32
+
+    config = _cpu_transformer_config(fp16=dtype == torch.float16, bf16=dtype == torch.bfloat16)
+    model = DummyModule(config)
+    model.register_parameter(
+        "precise", mark_keep_in_fp32(torch.nn.Parameter(torch.tensor([0.1234567])))
+    )
+    model.register_buffer("precise_buffer", mark_keep_in_fp32(torch.tensor([0.7654321])))
+    model.register_buffer("ordinary_buffer", torch.ones(1))
+    model.register_buffer("integer_buffer", torch.ones(1, dtype=torch.int64))
+    parameter = model.precise
+    expected_parameter = parameter.detach().clone()
+    expected_buffer = model.precise_buffer.clone()
+    wrapped = Float16Module(config, model)
+    assert wrapped.module.precise is parameter
+    torch.testing.assert_close(model.precise, expected_parameter, rtol=0, atol=0)
+    torch.testing.assert_close(model.precise_buffer, expected_buffer, rtol=0, atol=0)
+    assert model.linear.weight.dtype == dtype
+    assert model.ordinary_buffer.dtype == dtype
+    assert model.integer_buffer.dtype == torch.int64
+    model.precise.sum().backward()
+    torch.testing.assert_close(model.precise.grad, torch.ones_like(model.precise))

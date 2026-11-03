@@ -207,6 +207,8 @@ test_matrix:
       - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
       # TE fused residual RMSNorm hits an aliasing/in-place view limitation on Metax C500.
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton is incompatible.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
       #9.post training
       # ModelOpt is optional on Metax; model_provider does not export the ModelOpt builder when unavailable.

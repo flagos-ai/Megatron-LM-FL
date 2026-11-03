@@ -575,10 +575,10 @@ def build_transformer_layer_callables(layer: TransformerLayer | HyperConnectionT
                 # Preprocess mhc for moe layers. Because these op are moved away layer._forward_mlp, we have to do it here.
                 if enable_mhc:
                     # Save hidden_states and mhc scalar for later use.
-                    node.layer_state.residual = node.detach(hidden_states)
-                    hidden_states, mlp_h_res, mlp_h_post = layer.mlp_hyper_connection(
-                        hidden_states, mhc_recompute_manager=mhc_recompute_manager
+                    hidden_states, mlp_h_res, mlp_h_post, residual = layer.mlp_hyper_connection(
+                        hidden_states, mhc_recompute_manager=mhc_recompute_manager, return_residual=True
                     )
+                    node.layer_state.residual = node.detach(residual)
                     node.layer_state.mlp_h_res = node.detach(mlp_h_res)
                     node.layer_state.mlp_h_post = node.detach(mlp_h_post)
                 # Save bda_manager to register backward hook for moe forward output. If not enable_mhc, it is None and does not affect anything.

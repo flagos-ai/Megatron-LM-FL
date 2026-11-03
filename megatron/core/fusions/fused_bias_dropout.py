@@ -7,7 +7,7 @@ from megatron.core.jit import jit_fuser
 
 ######## FlagScale Begin ########
 if TYPE_CHECKING:
-    from megatron.core.tensor_parallel.random import CheckpointManager
+    from megatron.core.tensor_parallel.random import CheckpointWithoutOutputManager
 ######## FlagScale End ########
 
 # pylint: disable=missing-function-docstring
@@ -87,7 +87,7 @@ def bias_dropout_add_fused_inference(
 
 ######## FlagScale Begin ########
 def get_bias_dropout_add(
-    training, fused, mhc_recompute_manager: Optional['CheckpointManager'] = None
+    training, fused, mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None
 ):
     """
     Get the bias-dropout-add function.
@@ -95,7 +95,7 @@ def get_bias_dropout_add(
     Args:
         training: Whether in training mode.
         fused: Whether to use fused implementation.
-        mhc_recompute_manager: Optional CheckpointManager for checkpoint management.
+        mhc_recompute_manager: Optional CheckpointWithoutOutputManager for checkpoint management.
             When provided, the returned function will wrap the BDA operation with
             CheckpointWithoutOutput for memory-efficient recomputation.
 
@@ -119,19 +119,19 @@ def get_bias_dropout_add(
         return bias_dropout_add_unfused(training)
 
 
-def _get_checkpointed_bda(training, fused, mhc_recompute_manager: 'CheckpointManager'):
+def _get_checkpointed_bda(training, fused, mhc_recompute_manager: 'CheckpointWithoutOutputManager'):
     """
     Create a checkpointed bias-dropout-add function.
 
     This function handles:
     1. Tuple unpacking for x_with_bias (required because save_for_backward can't save tuples)
     2. Non-tensor arguments like dropout probability (handled by CheckpointWithoutOutput)
-    3. Auto-registration to the CheckpointManager
+    3. Auto-registration to the CheckpointWithoutOutputManager
 
     Args:
         training: Whether in training mode.
         fused: Whether to use fused implementation.
-        mhc_recompute_manager: CheckpointManager for checkpoint management.
+        mhc_recompute_manager: CheckpointWithoutOutputManager for checkpoint management.
 
     Returns:
         A callable that performs checkpointed bias-dropout-add operation.
@@ -182,4 +182,6 @@ def _get_checkpointed_bda(training, fused, mhc_recompute_manager: 'CheckpointMan
         return result
 
     return _checkpointed_bda
+
+
 ######## FlagScale End ########
