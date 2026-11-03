@@ -1,12 +1,10 @@
 # Iluvatar uses the same platform contract and shared pipeline as Hygon.
-# TODO: confirm the chip model and container device/driver options on the runner.
-# Eight ranks are configured; device exposure still needs runtime validation.
-# Functional cases use the existing lightweight mode until native golden values
-# are captured. Do not reuse another platform's golden values or failure skips.
+# Validated on BI-V150/CoreX 4.5 with eight ranks. Functional cases retain the
+# shared lightweight mode; the single-card Qwen baseline was captured locally.
 hardware_name: iluvatar
 display_name: Iluvatar Tests
 setup_script: .github/scripts/set_env_iluvatar.sh
-ci_image: harbor.baai.ac.cn/flagos-dev/transformerengine-fl:f886262-iluvatar-dev
+ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:1dc1e01-iluvatar-dev
 runner_labels:
   - ts-8g-cicd-megatron
 container_volumes:
@@ -172,14 +170,15 @@ te_fl:
     environment:
       TE_FL_SKIP_CUDA: '1'
       TE_FL_PREFER: flagos
-      # Same per-op routing contract as MetaX; these ops require native IXTE.
-      # The image must provide both symbols; this does not fix missing symbols.
-      TE_FL_PER_OP: "rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar"
+      # IXTE-specific ops retain native routing. SGD uses the image's validated
+      # PyTorch reference fix; routing does not supply missing native symbols.
+      TE_FL_PER_OP: "rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar;multi_tensor_sgd=impl:reference.torch"
     install_pip_args: []
     pip_packages:
       - flag-gems
       - sqlalchemy
 paths_watch:
+  - docker/iluvatar/
   - .github/configs/iluvatar.yml
   - .github/scripts/set_env_iluvatar.sh
   - .github/workflows/all_tests_iluvatar.yml

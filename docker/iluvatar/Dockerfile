@@ -8,7 +8,7 @@ ARG ILUVATAR_BASE_IMAGE
 ARG BUILD_DATE=unknown
 ARG VCS_REF=unknown
 ARG IMAGE_VERSION=unknown
-ARG SOURCE_URL=https://github.com/BrianPei/Megatron-LM-FL
+ARG SOURCE_URL=https://github.com/flagos-ai/Megatron-LM-FL
 ARG PIP_INDEX_URL=https://pypi.org/simple
 ARG YQ_DOWNLOAD_URL=https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
 LABEL org.opencontainers.image.title="megatron-lm-fl" \
