@@ -6,11 +6,11 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/set_env_common.sh"
 
 configure_iluvatar_runtime() {
-  # Use the prebuilt vendor stack and TE-FL's shared FlagOS backend.
-  # Driver paths and device exposure belong in the existing container fields
-  # once the runner configuration is available.
+  # Keep FlagOS as the default and route IXTE-specific ops to the native backend.
+  # Routing does not supply symbols missing from the installed IXTE extension.
   ci_export_env TE_FL_SKIP_CUDA 1
   ci_export_env TE_FL_PREFER flagos
+  ci_export_env TE_FL_PER_OP 'rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar'
   ci_export_env CUDA_DEVICE_MAX_CONNECTIONS 1
   ci_export_env NCCL_DEBUG WARN
 }
