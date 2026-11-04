@@ -239,8 +239,8 @@ class HybridCPDataLoaderWrapper:
             send_tensor = _pack_sample_by_key(key)
             recv_tensor = torch.empty(
                 sum(recv_lens_split),
-                device=cur_platform.current_device(),
-                dtype=send_tensor.dtype,  # FlagScale Modify
+                device=cur_platform.current_device(),  # FlagScale Modify
+                dtype=send_tensor.dtype,
             )
             torch.distributed.all_to_all_single(
                 output=recv_tensor,

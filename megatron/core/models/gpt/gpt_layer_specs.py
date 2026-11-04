@@ -759,7 +759,7 @@ def get_gpt_mtp_block_spec(
     use_transformer_engine: bool,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    dualpipev_stage: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Modify
 ) -> MultiTokenPredictionBlockSubmodules:
     """GPT Multi-Token Prediction (MTP) block spec."""
     if use_transformer_engine:
@@ -788,7 +788,7 @@ def get_gpt_mtp_block_spec(
         backend=backend,
         vp_stage=vp_stage,
         pp_rank=pp_rank,
-        dualpipev_stage=dualpipev_stage,
+        dualpipev_stage=dualpipev_stage,  # FlagScale Modify
     )
 
 
@@ -798,7 +798,7 @@ def get_gpt_mtp_block_spec_for_backend(
     backend: BackendSpecProvider,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    dualpipev_stage: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Modify
 ) -> MultiTokenPredictionBlockSubmodules:
     """GPT Multi-Token Prediction (MTP) block spec."""
     num_layers_to_build = get_mtp_num_layers_to_build(
