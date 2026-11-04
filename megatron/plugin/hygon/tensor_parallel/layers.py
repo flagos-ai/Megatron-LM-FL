@@ -18,6 +18,12 @@ from megatron.core.tensor_parallel import layers
 
 # Measured for the shapes admitted below; this is a maximum, not a divisibility requirement.
 _VOCAB_FORWARD_CHUNK_SIZE = 16384
+# Rows are counted after sequence-parallel all-gather. Keep the measured model
+# shapes paired: admitting the Cartesian product would enable unmeasured GEMMs.
+_VOCAB_ROWS_BY_WEIGHT_SHAPE = {
+    (124160, 5120): (8192, 16384),  # Qwen3.5-27B, 8K, MBS1/2.
+    (124160, 2048): (32768, 65536),  # Qwen3.5-35B-A3B, 32K, MBS1/2.
+}
 
 
 @lru_cache(maxsize=None)
@@ -44,7 +50,7 @@ def _supports_vocab_gemm(
         or input.dtype != torch.bfloat16
         or weight.dtype != torch.bfloat16
         or input.ndim not in (2, 3)
-        or weight.shape != (124160, 5120)
+        or tuple(weight.shape) not in _VOCAB_ROWS_BY_WEIGHT_SHAPE
         or input.shape[-1] != weight.shape[1]
         or not input.is_contiguous()
         or not weight.is_contiguous()
@@ -57,7 +63,10 @@ def _supports_vocab_gemm(
         if tp_group is None:
             return False
         rows *= tp_group.size()
-    if rows not in (8192, 16384) or torch.cuda.is_current_stream_capturing():
+    if (
+        rows not in _VOCAB_ROWS_BY_WEIGHT_SHAPE[tuple(weight.shape)]
+        or torch.cuda.is_current_stream_capturing()
+    ):
         return False
     return _is_bw1100(weight.device.index)
 

@@ -13,8 +13,15 @@ configuration keeps `TE_FL_PREFER=vendor`.
 
 The optimized path is limited to BW1100-family devices reporting `BW11*` and
 `gfx938`, contiguous BF16 inputs and weights, and the measured vocabulary
-projection shapes: weight `[124160, 5120]` and 8192 or 16384 input rows after
-sequence-parallel all-gather. Inputs can be `[S, B, K]` or `[M, K]`; sequence
+projection shapes below. Row counts are measured after sequence-parallel
+all-gather and are paired with the corresponding weight shape:
+
+| Model | Local weight | Rows (MBS1 / MBS2) |
+| --- | --- | --- |
+| Qwen3.5-27B | `[124160, 5120]` | 8192 / 16384 |
+| Qwen3.5-35B-A3B | `[124160, 2048]` | 32768 / 65536 |
+
+Inputs can be `[S, B, K]` or `[M, K]`; sequence
 and batch dimensions are restored after the GEMM.
 
 - Forward splits output channels into blocks of 16384, including the final
@@ -41,3 +48,11 @@ Megatron-FSDP parameters, `torch.compile` and CUDA graph capture also fall back.
 Set `MEGATRON_HYGON_VOCAB_GEMM=0` to disable both optimized GEMMs while retaining
 the plugin selection. This plugin makes no changes to cross-entropy fusion or
 its validation guards.
+
+The 35B shape policy is based on the external `gemm004` TP2/SP+DP2,
+32K MBS1/2 distributed-Adam check of the same two GEMM expressions. That
+experiment used a runtime adapter on a pinned Megatron version, rather than
+this plugin integration. The 20-step `v037` model result also includes expert
+GEMM and pipeline changes; its MFU is not an isolated result for this plugin.
+Rerun distributed numerical and performance checks on this exact plugin
+revision before using it as the validated production replacement.
