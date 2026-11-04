@@ -1736,12 +1736,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         padding_mask=None,
         input_ids=None,
         mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
+        is_last_layer_in_recompute_block: Optional[bool] = None,
     ):
         """Forward MLP with hyper connection pre/post processing."""
-        is_last_in_recompute_block = bool(
-            mhc_recompute_manager is not None
-            and getattr(mhc_recompute_manager, "is_last_layer_in_recompute_block", False)
-        )
+        is_last_in_recompute_block = is_last_layer_in_recompute_block
+        if is_last_in_recompute_block is None:
+            is_last_in_recompute_block = bool(
+                mhc_recompute_manager is not None
+                and getattr(mhc_recompute_manager, "is_last_layer_in_recompute_block", False)
+            )
         mhc_mlp_bda_manager = None if is_last_in_recompute_block else mhc_recompute_manager
 
         nvtx_range_push(suffix="mlp_hyper_connection")

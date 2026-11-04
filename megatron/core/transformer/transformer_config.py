@@ -2801,6 +2801,20 @@ class TransformerConfig(ModelParallelConfig):
                 raise ValueError("fused permutation is not available. Please install TE >= 2.1.0.")
 
         if self.overlap_moe_expert_parallel_comm:
+            if self.pipeline_model_parallel_layout is not None:
+                for stages in self.pipeline_model_parallel_layout.layout:
+                    for stage in stages:
+                        if LayerType.mtp in stage and LayerType.decoder not in stage:
+                            raise ValueError(
+                                "overlap_moe_expert_parallel_comm requires MTP to share a "
+                                "pipeline stage (and virtual stage) with decoder layers; "
+                                "a standalone MTP stage is not supported."
+                            )
+            if self.enable_hyper_connections and self.cuda_graph_impl != "none":
+                raise NotImplementedError(
+                    "mHC EP overlap currently requires cuda_graph_impl='none'; "
+                    "CUDA graph replay does not yet carry the per-microbatch mHC state."
+                )
             # TODO: remove this after we fix the hang issue with torch version < 2.6.0
             assert is_torch_min_version(
                 "2.6.0"
