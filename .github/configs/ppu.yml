@@ -74,6 +74,8 @@ test_matrix:
     # Re-enable after the matching dependency fix passes the affected tests.
     # Unknown timeouts and missing test assets must remain visible failures.
     # Node IDs (including parameter prefixes) become --deselect in the common runner.
+    unsupported_groups:
+      transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # Core: TE-FL FusedSGD passes 11 arguments to an 8-argument implementation.
       # Both functions use FusedSGD as their reference even at 100% CPU offload.
@@ -261,3 +263,13 @@ te_fl:
       TE_FL_PREFER: flagos
     install_pip_args: []
     pip_packages: [sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/ppu.yml
+  - .github/scripts/set_env_ppu.sh
+  - .github/workflows/all_tests_ppu.yml
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_ppu/
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark_ppu/
+
+test_retry: {transient_retries: 1}

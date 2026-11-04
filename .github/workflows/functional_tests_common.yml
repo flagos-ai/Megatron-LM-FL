@@ -3,6 +3,16 @@ name: Common Functional Tests - Training
 on:
   workflow_call:
     inputs:
+      te_fl_artifact: {required: true, type: string}
+      test_retries:
+        required: false
+        type: number
+        default: 0
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: Optional immutable Megatron source SHA for requested tests
       platform:
         required: true
         type: string
@@ -31,21 +41,6 @@ on:
         required: true
         type: string
         description: JSON array of test configurations
-      te_fl_prepare:
-        required: true
-        type: boolean
-      te_fl_cache_key:
-        required: false
-        type: string
-        default: ''
-      te_fl_cache_directory:
-        required: false
-        type: string
-        default: ''
-      te_fl_local_cache_key:
-        required: false
-        type: string
-        default: ''
       te_fl_runtime_environment:
         required: true
         type: string
@@ -80,6 +75,8 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 0
           set-safe-directory: true
 
@@ -89,6 +86,8 @@ jobs:
         uses: actions/checkout@v4
         continue-on-error: true
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 0
           set-safe-directory: true
 
@@ -97,6 +96,8 @@ jobs:
         if: steps.checkout2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 0
           set-safe-directory: true
 
@@ -136,74 +137,22 @@ jobs:
           source "$GITHUB_WORKSPACE/.github/scripts/set_env_common.sh"
           ci_install_runtime_packages
 
-      - name: Restore TE-FL wheel (attempt 1)
-        if: inputs.te_fl_prepare
-        id: te_fl_cache_1
-        continue-on-error: true
-        uses: actions/cache/restore@v4
+      - name: Download prepared TE-FL wheel
+        uses: actions/download-artifact@v4
         with:
+          name: ${{ inputs.te_fl_artifact }}
           path: te-fl-wheel
-          key: ${{ inputs.te_fl_cache_key }}
-
-      - name: Wait before restoring TE-FL wheel (attempt 2)
-        if: inputs.te_fl_prepare && steps.te_fl_cache_1.outputs.cache-hit != 'true'
-        run: sleep 5
-
-      - name: Restore TE-FL wheel (attempt 2)
-        if: inputs.te_fl_prepare && steps.te_fl_cache_1.outputs.cache-hit != 'true'
-        id: te_fl_cache_2
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: te-fl-wheel
-          key: ${{ inputs.te_fl_cache_key }}
-
-      - name: Wait before restoring TE-FL wheel (attempt 3)
-        if: inputs.te_fl_prepare && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true'
-        run: sleep 15
-
-      - name: Restore TE-FL wheel (attempt 3)
-        if: inputs.te_fl_prepare && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true'
-        id: te_fl_cache_3
-        continue-on-error: true
-        uses: actions/cache/restore@v4
-        with:
-          path: te-fl-wheel
-          key: ${{ inputs.te_fl_cache_key }}
-
-      - name: Restore local TE-FL wheel fallback
-        if: inputs.te_fl_prepare && inputs.te_fl_cache_directory != '' && inputs.te_fl_local_cache_key != '' && steps.te_fl_cache_1.outputs.cache-hit != 'true' && steps.te_fl_cache_2.outputs.cache-hit != 'true' && steps.te_fl_cache_3.outputs.cache-hit != 'true'
-        id: local_cache
-        timeout-minutes: 5
-        env:
-          TE_FL_CACHE_DIRECTORY: ${{ inputs.te_fl_cache_directory }}
-          TE_FL_CACHE_KEY: ${{ inputs.te_fl_local_cache_key }}
-          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel-fallback
-        run: python3 .github/scripts/te_fl_local_cache.py restore --required
-
-      - name: Check TE-FL wheel cache
-        if: inputs.te_fl_prepare
-        env:
-          CACHE_HIT_1: ${{ steps.te_fl_cache_1.outputs.cache-hit }}
-          CACHE_HIT_2: ${{ steps.te_fl_cache_2.outputs.cache-hit }}
-          CACHE_HIT_3: ${{ steps.te_fl_cache_3.outputs.cache-hit }}
-          LOCAL_CACHE_HIT: ${{ steps.local_cache.outputs.cache-hit }}
-        run: |
-          set -euo pipefail
-          if [ "$CACHE_HIT_1" != true ] && [ "$CACHE_HIT_2" != true ] && [ "$CACHE_HIT_3" != true ] && [ "$LOCAL_CACHE_HIT" != true ]; then
-            echo "::error::TE-FL wheel cache was not restored" >&2
-            exit 1
-          fi
 
       - name: Install TE-FL wheel
-        if: inputs.te_fl_prepare
         env:
-          TE_FL_WHEEL_DIR: ${{ github.workspace }}/${{ steps.local_cache.outputs.cache-hit == 'true' && 'te-fl-wheel-fallback' || 'te-fl-wheel' }}
+          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel
           TE_FL_INSTALL_PIP_ARGS_JSON: ${{ inputs.te_fl_install_pip_args }}
         run: .github/scripts/install_te_fl_runtime.sh
 
       - name: Run functional tests
-        id: functional_test
+        env:
+          CI_TEST_RETRIES: ${{ inputs.test_retries }}
+          CI_TEST_CONFIG: ${{ toJson(matrix.test_config) }}
         working-directory: ${{ github.workspace }}
         run: |
           set -euo pipefail
@@ -266,7 +215,10 @@ jobs:
 
           ARGUMENTS+=("GPUS_PER_NODE=${GPUS_PER_NODE}")
 
-          bash ./tests/functional_tests/shell_test_utils/run_ci_test.sh "${ARGUMENTS[@]}"
+          set +e
+          python3 .github/scripts/run_unit_groups.py \
+            --logs ".retry-logs/functional-${TEST_CASE}" --cleanup-dir "$OUTPUT_DIR" \
+            --timeout 3600 -- bash ./tests/functional_tests/shell_test_utils/run_ci_test.sh "${ARGUMENTS[@]}"
           exit_code=$?
 
           if [ $exit_code -eq 0 ]; then
@@ -275,9 +227,8 @@ jobs:
             echo "❌ Functional test failed: ${MODEL}/${TEST_CASE} (exit code: $exit_code)"
           fi
 
-          echo "exit_code=$exit_code" >> $GITHUB_OUTPUT
           exit $exit_code
-        timeout-minutes: 60
+        timeout-minutes: 125
 
       - name: Upload Functional Test Logs
         if: always()
@@ -287,3 +238,13 @@ jobs:
           path: ${{ github.workspace }}/test_output/${{ matrix.test_config.test_case }}/logs/
           retention-days: 7
           if-no-files-found: warn
+
+      - name: Upload functional retry attempts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: functional-retry-${{ inputs.platform }}-${{ inputs.device }}-${{ matrix.test_config.test_case }}
+          path: .retry-logs/
+          include-hidden-files: true
+          overwrite: true
+          if-no-files-found: ignore

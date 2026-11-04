@@ -8,6 +8,7 @@ Uses the PyGithub SDK to interact with the GitHub API.
 
 import logging
 import tarfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -29,6 +30,30 @@ ASSETS = [
 ]
 
 
+def _download_asset(url: str, destination: Path) -> None:
+    """Retry a transient download once, replacing any partial archive."""
+    for attempt in range(2):
+        try:
+            with requests.get(url, stream=True, timeout=(10, 60)) as response:
+                response.raise_for_status()
+                with destination.open('wb') as stream:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        stream.write(chunk)
+            return
+        except (
+            requests.Timeout,
+            requests.ConnectionError,
+            requests.HTTPError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as error:
+            destination.unlink(missing_ok=True)
+            status = error.response.status_code if error.response is not None else None
+            if attempt or (isinstance(error, requests.HTTPError) and status not in (502, 503, 504)):
+                raise
+            logger.warning("Transient download failure; retrying once: %s", error)
+            time.sleep(2)
+
+
 def download_and_extract_asset(assets_dir: Path) -> bool:
     """
     Download and extract an asset to the assets directory.
@@ -46,14 +71,8 @@ def download_and_extract_asset(assets_dir: Path) -> bool:
         try:
             # Download the asset
             logger.info(f"  Downloading {asset_name}...")
-            response = requests.get(asset_url, stream=True)
-            response.raise_for_status()
-
-            # Save to temporary file
             temp_file = assets_dir / asset_name
-            with open(temp_file, 'wb') as f:
-                for chunk in response.iter_content(chunk_size=8192):
-                    f.write(chunk)
+            _download_asset(asset_url, temp_file)
 
             logger.info(f"  Extracting {asset_name} to {assets_dir}...")
 

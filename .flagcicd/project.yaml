@@ -1,0 +1,314 @@
+schema_version: flagcicd.project/v1
+repository: Megatron-LM-FL
+plan_schema: 1
+stages:
+  pr:
+    selection: affected
+    default_level: L1
+  branch:
+    selection: configured
+    default_level: L2
+    fixed_level: true
+  nightly:
+    selection: configured
+    default_level: L2
+    fixed_level: true
+  manual:
+    selection: requested
+    default_level: L2
+levels:
+  L1:
+    purpose: PR affected-group routing with core required
+    required_groups:
+    - core
+  L2:
+    purpose: configured or requested groups with core and models required
+    required_groups:
+    - core
+    - models
+global:
+  documentation_paths:
+  - docs/
+  documentation_suffixes:
+  - .md
+  - .rst
+  shared_paths:
+  - .flagcicd/
+  - .github/
+  - .pre-commit-config.yaml
+  - docker/
+  - uv.lock
+  - pyproject.toml
+  - setup.py
+  - setup.cfg
+  - MANIFEST.in
+  - codecov.yml
+  - tests/test_utils/
+  - tests/functional_tests/
+  # File ownership stays with core; these changes also affect its consumers.
+  impact_paths:
+  - megatron/core/*.py
+coverage:
+  sources:
+  - megatron/plugin/
+  - megatron/core/
+test_groups:
+- name: core
+  description: Model-parallel configuration, process groups, and root unit tests.
+  status: active
+  paths:
+  - tests/unit_tests/test_*.py
+  - megatron/core/__init__.py
+  - megatron/core/_rank_utils.py
+  - megatron/core/_slurm_utils.py
+  - megatron/core/activations.py
+  - megatron/core/config.py
+  - megatron/core/config_logger.py
+  - megatron/core/energy_monitor.py
+  - megatron/core/enums.py
+  - megatron/core/fault_injector.py
+  - megatron/core/fp4_utils.py
+  - megatron/core/fp8_utils.py
+  - megatron/core/full_cuda_graph.py
+  - megatron/core/hyper_comm_grid.py
+  - megatron/core/inference_params.py
+  - megatron/core/jit.py
+  - megatron/core/model_parallel_config.py
+  - megatron/core/msc_utils.py
+  - megatron/core/nccl_allocator.py
+  - megatron/core/num_microbatches_calculator.py
+  - megatron/core/optimizer_param_scheduler.py
+  - megatron/core/package_info.py
+  - megatron/core/packed_seq_params.py
+  - megatron/core/parallel_state.py
+  - megatron/core/process_groups_config.py
+  - megatron/core/quantization/
+  - megatron/core/recompute.py
+  - megatron/core/rerun_state_machine.py
+  - megatron/core/safe_globals.py
+  - megatron/core/timers.py
+  - megatron/core/typed_torch.py
+  - megatron/core/utils.py
+  depends_on: []
+- name: models
+  description: Model construction, configuration, and forward paths.
+  status: active
+  paths:
+  - megatron/core/models/
+  - tests/unit_tests/models/
+  depends_on:
+  - core
+- name: transformer
+  description: Transformer blocks, attention, and layer specifications.
+  status: active
+  paths:
+  - megatron/core/transformer/
+  - tests/unit_tests/transformer/
+  depends_on:
+  - models
+- name: distributed
+  description: Distributed data parallel, gradient sync, and communication state.
+  status: active
+  paths:
+  - megatron/core/distributed/
+  - tests/unit_tests/distributed/
+  depends_on:
+  - pipeline_parallel
+  - tensor_parallel
+- name: tensor_parallel
+  description: Tensor-parallel mappings and parameter sharding.
+  status: active
+  paths:
+  - megatron/core/tensor_parallel/
+  - tests/unit_tests/tensor_parallel/
+  depends_on:
+  - models
+- name: pipeline_parallel
+  description: Pipeline schedules, rank layout, and microbatch flow.
+  status: active
+  paths:
+  - megatron/core/pipeline_parallel/
+  - tests/unit_tests/pipeline_parallel/
+  depends_on:
+  - models
+- name: dist_checkpointing
+  description: Distributed checkpoint serialization and loading.
+  status: active
+  paths:
+  - megatron/core/dist_checkpointing/
+  - tests/unit_tests/dist_checkpointing/
+  depends_on: []
+- name: data
+  description: Dataset construction and data loading.
+  status: active
+  paths:
+  - megatron/core/datasets/
+  - megatron/training/datasets/
+  - tests/unit_tests/data/
+  depends_on:
+  - core
+- name: fusions
+  description: Fused operators and fused layer paths.
+  status: active
+  paths:
+  - megatron/core/fusions/
+  - tests/unit_tests/fusions/
+  depends_on:
+  - transformer
+  - models
+- name: others
+  description: Post-training, tokenizer, and utility tests grouped by the platform
+    configs.
+  status: active
+  paths:
+  - megatron/core/post_training/
+  - megatron/core/tokenizers/
+  - megatron/post_training/
+  - megatron/training/utils/
+  - tests/unit_tests/post_training/
+  - tests/unit_tests/tokenizers/
+  - tests/unit_tests/utils/
+  depends_on:
+  - core
+- name: optimizer
+  description: Optimizer implementations and parameter schedulers.
+  status: planned
+  reason: No platform declares an optimizer execution group yet.
+  paths:
+  - megatron/core/optimizer/
+  - tests/unit_tests/optimizer/
+  depends_on:
+  - core
+- name: inference
+  description: Inference engine, inference parameters, and serving entry points.
+  status: planned
+  reason: No platform declares an inference execution group yet.
+  paths:
+  - megatron/core/inference/
+  - megatron/inference/
+  - tests/unit_tests/inference/
+  depends_on:
+  - models
+- name: rl
+  description: Reinforcement-learning agents, rollout, and serving paths.
+  status: planned
+  reason: No platform declares an RL execution group yet.
+  paths:
+  - megatron/rl/
+  - tests/unit_tests/rl/
+  depends_on:
+  - core
+- name: training
+  description: Training loop, checkpointing, initialization, and argument parsing.
+  status: planned
+  reason: No platform declares a training-loop execution group yet.
+  paths:
+  - megatron/training/*.py
+  - megatron/training/config/
+  - megatron/training/models/
+  - tests/unit_tests/training/
+  depends_on:
+  - core
+  - models
+- name: ssm
+  description: State-space model layers.
+  status: planned
+  reason: No platform declares an SSM execution group yet.
+  paths:
+  - megatron/core/ssm/
+  - tests/unit_tests/ssm/
+  depends_on:
+  - models
+  - transformer
+- name: resharding
+  description: Checkpoint resharding between parallel layouts.
+  status: planned
+  reason: No platform declares a resharding execution group yet.
+  paths:
+  - megatron/core/resharding/
+  - tests/unit_tests/resharding/
+  depends_on:
+  - dist_checkpointing
+  - distributed
+- name: export
+  description: Model export paths.
+  status: planned
+  reason: No platform declares a model-export execution group yet.
+  paths:
+  - megatron/core/export/
+  - tests/unit_tests/export/
+  depends_on:
+  - models
+- name: extensions
+  description: Transformer Engine and third-party extension interfaces.
+  status: planned
+  reason: No platform declares an extensions execution group yet.
+  paths:
+  - megatron/core/extensions/
+  - tests/unit_tests/extension/
+  depends_on:
+  - core
+  - models
+- name: a2a_overlap
+  description: All-to-all overlap tests.
+  status: planned
+  reason: No platform declares an all-to-all overlap execution group yet.
+  paths:
+  - tests/unit_tests/a2a_overlap/
+  depends_on:
+  - distributed
+- name: elastification
+  description: Elastic training orchestration.
+  status: planned
+  reason: No platform declares an elastic-training execution group yet.
+  paths:
+  - megatron/elastification/
+  - tests/unit_tests/elastification/
+  depends_on:
+  - core
+- name: plugin
+  description: Plugin framework and vendor plugin code.
+  status: active
+  execution_group: core
+  paths:
+  - megatron/plugin/
+  - megatron/plugin/tests/
+  depends_on:
+  - core
+- name: dsa_kernel
+  description: DSA fused-kernel accuracy and performance tests under the plugin test
+    tree.
+  status: planned
+  reason: CUDA/SM90-only DSA kernel tests need a dedicated execution group and runtime
+    budget.
+  paths:
+  - tests/unit_tests/plugin/
+  depends_on:
+  - core
+  - transformer
+- name: tools
+  description: Repository tooling tests.
+  status: planned
+  reason: No platform declares a CPU-only tools execution group yet.
+  paths:
+  - tests/unit_tests/tools/
+  depends_on:
+  - core
+gate_policy:
+  pr:
+    required_plan_status:
+    - ready
+    - partial
+    allow_catalog_partial: true
+  branch:
+    required_plan_status:
+    - ready
+    allow_catalog_partial: true
+  nightly:
+    required_plan_status:
+    - ready
+    allow_catalog_partial: true
+  manual:
+    required_plan_status:
+    - ready
+    allow_catalog_partial: true

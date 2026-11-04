@@ -11,38 +11,14 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  te_fl_prepare:
-    name: prepare-te-fl-ppu
-    uses: ./.github/workflows/prepare_te_fl.yml
-    with:
-      platform: ppu
+  lint:
+    name: Common CI checks
+    uses: ./.github/workflows/lint_common.yml
 
   run_tests:
-    name: run-tests
-    needs: te_fl_prepare
-    # TE-FL is prepared once and restored by the common test jobs.
-    uses: ./.github/workflows/all_tests_common.yml
+    needs: lint
+    uses: ./.github/workflows/_platform_pipeline.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ppu
-      run_unit_tests: true
-      run_functional_tests: true
-      te_fl_prepare: true
-      te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
-      te_fl_local_cache_key: ${{ needs.te_fl_prepare.outputs.local_cache_key }}
-
-  all_tests:
-    needs: run_tests
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Verify PPU test workflow status
-        env:
-          TEST_STATUS: ${{ needs.run_tests.result }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [ "$TEST_STATUS" != success ]; then
-            echo "::error::PPU test workflow failed: $TEST_STATUS"
-            exit 1
-          fi
-          echo "PPU CI passed for the configured unit-test and functional scope."

@@ -71,6 +71,8 @@ test_matrix:
       - name: others
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
+    unsupported_groups:
+      transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # Flash Attention GCU: undefined symbol (_ZN3c1013MessageLoggerC1EPKcii)
       # flash_attn_gcu.so compiled against incompatible PyTorch version; causes ImportError
@@ -351,6 +353,8 @@ test_matrix:
       - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
       # TE-FL vendor.enflame missing rmsnorm_bwd_add operator
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton compiles out of time.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
 
       # others
@@ -399,3 +403,14 @@ te_fl:
       TE_FL_PREFER: flagos
     install_pip_args: [--break-system-packages]
     pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/enflame.yml
+  - .github/scripts/set_env_enflame.sh
+  - .github/workflows/all_tests_enflame.yml
+  - megatron/plugin/platform/platform_enflame.py
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp1_pp1_s60/
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark_s60/
+
+test_retry: {transient_retries: 1}

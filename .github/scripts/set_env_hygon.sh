@@ -176,9 +176,9 @@ setup_unit_environment() {
 
   echo "Preserving the PyTorch and DTK packages supplied by the BW1000 image."
   echo "Skipping NVIDIA CUPTI, NVRx, and Emerging Optimizers dependencies."
-  python3 -m pip install multi-storage-client \
-    --index-url https://pypi.tuna.tsinghua.edu.cn/simple \
-    --no-cache-dir
+  # MSC is optional and the Hygon unit configuration excludes the MSC/data
+  # cases. Do not install an unbounded release here: its transitive
+  # OpenTelemetry dependency can replace the image's tested package set.
   remove_broken_hygon_cupy
   verify_hygon_software_stack
   validate_hygon_capacity

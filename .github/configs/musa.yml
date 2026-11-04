@@ -72,6 +72,9 @@ test_matrix:
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
     # Start with a conservative MUSA smoke set while validating runtime and TE plugin coverage.
+    unsupported_groups:
+      plugin: "The MUSA smoke configuration does not include the plugin test directory yet."
+      transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # ── Core tests that genuinely require CUDA/NCCL/Apex/TE GPU paths ──────────
       - tests/unit_tests/test_fp8_param.py          # FP8 training with TE + CUDA graphs
@@ -353,3 +356,15 @@ te_fl:
       TE_FL_PREFER: flagos
     install_pip_args: [--ignore-requires-python]
     pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/musa.yml
+  - .github/scripts/set_env_musa.sh
+  - .github/workflows/all_tests_musa.yml
+  - megatron/plugin/mthreads/
+  - megatron/plugin/platform/platform_musa.py
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp1_pp1_s5000/
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark_musa/
+
+test_retry: {transient_retries: 1}
