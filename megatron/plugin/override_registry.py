@@ -236,3 +236,9 @@ register(
     impl="megatron.plugin.Ascend.ssm.causal_conv1d.gated_delta_net_conv1d",
     vendor="npu",
 )
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._apply_gated_norm",
+    impl="megatron.plugin.Ascend.ssm.gated_norm.apply_gated_norm",
+    vendor="npu",
+)

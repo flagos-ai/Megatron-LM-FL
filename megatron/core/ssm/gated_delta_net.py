@@ -510,6 +510,7 @@ class GatedDeltaNet(MegatronModule):
 
         return out, out_bias
 
+    @overridable
     @jit_fuser
     def _apply_gated_norm(self, x, gate):
         # Output Norm

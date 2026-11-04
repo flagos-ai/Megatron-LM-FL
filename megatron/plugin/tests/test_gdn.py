@@ -24,6 +24,7 @@ def isolate_dispatch(monkeypatch):
         monkeypatch.setattr(decorators, name, {})
     monkeypatch.setattr(decorators, "_original_impl_cache", set())
     for method, module, impl in (
+        ("_apply_gated_norm", "gated_norm", "apply_gated_norm"),
         ("_normalize_qk", "chunk_gated_delta_rule", "normalize_qk"),
         ("_gated_delta_rule", "chunk_gated_delta_rule", "gated_delta_rule"),
         ("_causal_conv1d", "causal_conv1d", "gated_delta_net_conv1d"),
@@ -329,3 +330,44 @@ def test_npu_recurrence_gradients(dtype, length, normalize, record_property, mon
         record_property(name + "_relative_l2", error.item())
         assert torch.isfinite(actual).all()
         assert error.item() < tolerance, error.item()
+
+
+@pytest.mark.parametrize("activation", [torch.nn.functional.silu, torch.sigmoid])
+def test_gated_norm_cpu_fallback(activation):
+    from megatron.core.ssm.gated_delta_net import GatedDeltaNet
+
+    layer = SimpleNamespace(out_norm=torch.nn.LayerNorm(7), act_fn=activation)
+    x, gate = torch.randn(2, 7), torch.randn(2, 7)
+    actual = GatedDeltaNet._apply_gated_norm(layer, x, gate)
+    expected = (layer.out_norm(x) * activation(gate.float())).to(x.dtype)
+    torch.testing.assert_close(actual, expected)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+def test_npu_gated_norm_gradients(dtype, monkeypatch):
+    if not hasattr(torch, "npu") or not torch.npu.is_available():
+        pytest.skip("Ascend NPU required")
+    from megatron.core.ssm.gated_delta_net import GatedDeltaNet
+    from megatron.plugin.Ascend.ssm import gated_norm_kernels as kernels
+
+    forward, backward = Mock(wraps=kernels.gate_forward), Mock(wraps=kernels.gate_backward)
+    monkeypatch.setattr(kernels, "gate_forward", forward)
+    monkeypatch.setattr(kernels, "gate_backward", backward)
+    torch.manual_seed(153)
+    norm = torch.nn.LayerNorm(37, device="npu", dtype=dtype)
+    layer = SimpleNamespace(out_norm=norm, act_fn=torch.nn.functional.silu)
+    x = torch.randn(2, 17, 37, device="npu", dtype=dtype, requires_grad=True)
+    gate = torch.randn(2, 37, 17, device="npu", dtype=dtype).transpose(1, 2).requires_grad_()
+    actual = GatedDeltaNet._apply_gated_norm(layer, x, gate)
+    expected = (
+        norm(x.reshape(-1, 37)) * torch.nn.functional.silu(gate.reshape(-1, 37).float())
+    ).to(dtype)
+    gradient = torch.randn_like(actual)
+    inputs = (x, gate, norm.weight, norm.bias)
+    grads = torch.autograd.grad(actual, inputs, gradient)
+    reference = torch.autograd.grad(expected, inputs, gradient)
+    tolerance = 1e-5 if dtype == torch.float32 else (0.003 if dtype == torch.float16 else 0.03)
+    for result, ref in zip((actual, *grads), (expected, *reference)):
+        torch.testing.assert_close(result, ref, atol=tolerance, rtol=tolerance)
+    forward.assert_called_once()
+    backward.assert_called_once()
