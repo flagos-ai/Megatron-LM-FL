@@ -2,7 +2,6 @@
 
 import logging
 from abc import ABC, abstractmethod
-from re import M  # FlagScale Modify
 from typing import List, Optional, Tuple
 
 import torch

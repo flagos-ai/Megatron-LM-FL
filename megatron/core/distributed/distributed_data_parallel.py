@@ -131,7 +131,7 @@ class DistributedDataParallel(_BaseDataParallel):
             param_to_name[param] = name
             all_params.append(param)
 
-        # Group parameters by (param_dtype, grad_dtype, is_expert_parallel, is_engram_parallel).  # FlagScale Modify
+        # Group by dtype and expert/Engram parallelism.  # FlagScale Modify
         buffer_groups = group_params_for_buffers(all_params, self.ddp_config.grad_reduce_in_fp32)
 
         # Auto-compute layouts when using distributed optimizer but no layout was provided.
@@ -180,6 +180,7 @@ class DistributedDataParallel(_BaseDataParallel):
         self.full_param_layout = full_param_layout
 
         # Compute gradient scaling factors.
+        engram_embedding_gradient_scaling_factor = None
         if config.calculate_per_token_loss:
             assert (
                 not self.ddp_config.average_in_collective
@@ -237,6 +238,8 @@ class DistributedDataParallel(_BaseDataParallel):
                 scaling_factor = expert_gradient_scaling_factor
             ######## FlagScale Begin ########
             elif buffer_key.is_engram_parallel:
+                if self.engram_dp_group is None:
+                    raise ValueError("Engram parameters require an Engram data parallel group")
                 data_parallel_group = self.engram_dp_group
                 scaling_factor = engram_embedding_gradient_scaling_factor
             ######## FlagScale End ########

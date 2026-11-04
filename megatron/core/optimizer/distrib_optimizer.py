@@ -469,7 +469,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '  # FlagScale Modify
+                        'accelerator FloatTensor, HalfTensor, '
+                        'or BFloat16Tensor. '  # FlagScale Modify
                         'Received {}'.format(model_param.type())
                     )
 

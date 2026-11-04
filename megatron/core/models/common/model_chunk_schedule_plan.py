@@ -3,7 +3,6 @@
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
-import torch
 from torch import Tensor
 
 from megatron.core.enums import Fp8Recipe
@@ -14,7 +13,6 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
-from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
@@ -425,7 +423,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             and decoder.config.recompute_granularity == 'selective'
             and "mhc" in decoder.config.recompute_modules
         )
-        # If not enable_hyper_connections, the mhc_layer_managers will be all None and mhc_is_last_in_recompute_block will be all False, so it won't have effect on execution.
+        # If not enable_hyper_connections, the mhc_layer_managers will be all None and
+        # mhc_is_last_in_recompute_block will be all False, so it won't have effect on execution.
         self.mhc_layer_managers, self.mhc_is_last_in_recompute_block = (
             decoder._build_mhc_recompute_layer_plan(use_mhc_recompute)
         )

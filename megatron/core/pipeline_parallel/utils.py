@@ -8,14 +8,7 @@ from typing import Callable, Optional
 import torch
 from torch.autograd import Variable
 
-from megatron.core.utils import (
-    get_pg_rank,
-    get_pg_size,
-    log_single_rank,
-    make_viewless_tensor,
-    nvtx_range_pop,
-    nvtx_range_push,
-)
+from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_viewless_tensor
 
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
@@ -59,6 +52,7 @@ def is_vp_last_stage(vp_stage: int, vp_size: int | None):
 
 
 def is_dualpipev_first_stage(dualpipev_stage: int, dualpipev_size: int | None):
+    """Return whether this is the first DualPipeV virtual pipeline stage."""
     if dualpipev_size is None or dualpipev_size <= 1:
         assert dualpipev_stage is None or dualpipev_stage == 0, (
             f"Expected dualpipev_stage to be 0 or None when dualpipev_size is <= 1 or None, "

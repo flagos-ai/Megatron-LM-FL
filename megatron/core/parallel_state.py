@@ -151,7 +151,8 @@ _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = None
 _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = None
 _ENGRAM_ENABLE = False
 
-# Parallel group of engram model parallel, which contain pipeline + embed, used to allreduce grad and param norm.
+# Engram model parallel group (pipeline + embedding).
+# Used to all-reduce gradient and parameter norms.
 _ENGRAM_MODEL_PARALLEL_GROUP = None
 _ENGRAM_MODEL_PARALLEL_GROUP_RANKS = None
 
@@ -2677,6 +2678,7 @@ def get_engram_data_parallel_group():
 
 
 def get_engram_data_parallel_world_size():
+    """Return the Engram data parallel group size, or one if unavailable."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         engram_group = get_engram_data_parallel_group()
         return engram_group.size() if engram_group is not None else 1

@@ -1,7 +1,7 @@
 # Copyright (c) 2026, FlagScale CORPORATION. All rights reserved.
 
 ## built-in
-import copy
+import logging
 import math
 from typing import Callable, Optional, Tuple
 
@@ -34,6 +34,7 @@ from megatron.core.utils import (
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
+logger = logging.getLogger(__name__)
 ######## FlagScale End ########
 
 
@@ -63,9 +64,12 @@ class EngramEmbedding(nn.Module):
 
     This is mainly adapted from torch.nn.Embedding and all the default values are kept.
 
-    Unlike to the MCore VocabParallelEmbedding, the embedding parallel use parallelism like expert parallel.
-    The parallel group is the subset of data parallel, which is given as the engram_model_parallel_size.
-    Input of each rank is different, when forwarding, the input will be transmit to other rank using an All2All operator.
+    Unlike to the MCore VocabParallelEmbedding, the embedding parallel use parallelism like expert
+    parallel.
+    The parallel group is the subset of data parallel, which is given as the
+    engram_model_parallel_size.
+    Input of each rank is different, when forwarding, the input will be transmit to other rank using
+    an All2All operator.
 
     Args:
         num_embeddings: vocabulary size.
@@ -148,11 +152,13 @@ class EngramEmbedding(nn.Module):
                 )
 
     def enable_parallel(self):
+        """Mark partitioned embedding weights for Engram gradient reduction."""
         if self.embedding_parallel_size > 1:
             setattr(self.weight, "is_engram_embedding", True)
             setattr(self.weight, "allreduce", False)
 
     def enable_offloading(self):
+        """Mark embedding weights as eligible for optimizer-state offloading."""
         setattr(self.weight, "is_offloading_candidate", True)
 
     def _dispatch(self, input_ids):
@@ -160,7 +166,8 @@ class EngramEmbedding(nn.Module):
         self.hidden_shape = input_ids.shape
         input_ids = input_ids.view(-1)
         routing_map = input_ids // self.num_embeddings_per_partition
-        # [num_partitions], number of tokens assigned to each partition from the current rank's input.
+        # [num_partitions], number of tokens assigned to each partition from the current rank's
+        # input.
         num_tokens_per_partition = torch.bincount(
             routing_map, minlength=self.embedding_parallel_size
         ).to(dtype=torch.int64)
@@ -255,6 +262,7 @@ class EngramEmbedding(nn.Module):
         metadata: Optional[dict] = None,
         **kwargs,
     ):
+        """Describe the vocabulary partition and data parallel checkpoint replica."""
         state_dict = self.state_dict(prefix="", keep_vars=True)
         weight_prefix = f"{prefix}weight"
         prepend_axis_num = len(sharded_offsets)
@@ -279,6 +287,8 @@ class EngramEmbedding(nn.Module):
 
 
 class MultiHeadEmbedding(nn.Module):
+    """Combine head-specific vocabularies in one offset-indexed embedding table."""
+
     def __init__(self, config, list_of_N: list[int], D: int):
         super().__init__()
         self.config = config
@@ -302,7 +312,9 @@ class MultiHeadEmbedding(nn.Module):
             self.tp_group = get_tensor_model_parallel_group_if_none(tp_group=None)
 
             padded_total_N = _vocab_size_with_padding(total_N, get_pg_size(self.tp_group))
-            print(f"Engram multi-head embedding: pad total_n from {total_N} to {padded_total_N}")
+            logger.info(
+                "Engram multi-head embedding: pad total_n from %s to %s", total_N, padded_total_N
+            )
 
             self.embedding = tensor_parallel.VocabParallelEmbedding(
                 num_embeddings=padded_total_N,
@@ -317,7 +329,9 @@ class MultiHeadEmbedding(nn.Module):
             padded_total_N = _vocab_size_with_padding(
                 total_N, get_pg_size(self.embedding_parallel_group)
             )
-            print(f"Engram multi-head embedding: pad total_n from {total_N} to {padded_total_N}")
+            logger.info(
+                "Engram multi-head embedding: pad total_n from %s to %s", total_N, padded_total_N
+            )
             self.embedding = EngramEmbedding(
                 num_embeddings=padded_total_N,
                 embedding_dim=D,
@@ -332,10 +346,12 @@ class MultiHeadEmbedding(nn.Module):
                     self.embedding.enable_offloading()
             else:
                 raise ValueError(
-                    f"Unsupported engram_embedding_parallel_method: {self.config.engram_embedding_parallel_method}"
+                    "Unsupported engram_embedding_parallel_method: "
+                    f"{self.config.engram_embedding_parallel_method}"
                 )
 
     def forward(self, input_ids: torch.Tensor) -> torch.Tensor:
+        """Look up embeddings for each head using its vocabulary offset."""
         shifted_input_ids = input_ids + self.offsets
         output = self.embedding(shifted_input_ids)
 
@@ -346,6 +362,7 @@ class MultiHeadEmbedding(nn.Module):
     def sharded_state_dict(
         self, prefix: str = "", sharded_offsets: tuple = (), metadata: dict | None = None
     ):
+        """Collect the memory submodule sharded checkpoint state."""
         sharded_dict = {}
         memory_prefix = f"{prefix}memory."
         memory_sharded_dict = self.memory.sharded_state_dict(
@@ -369,6 +386,7 @@ def get_or_create_hash_mapping(
     pad_id,
     seed,
 ):
+    """Reuse an n-gram hash mapping for an identical tokenizer configuration."""
     cache_key = (
         tuple(engram_vocab_size),
         max_ngram_size,
@@ -396,6 +414,8 @@ def get_or_create_hash_mapping(
 
 
 class CompressedTokenizer:
+    """Map token IDs onto a vocabulary of normalized token strings."""
+
     def __init__(self, tokenizer_name_or_path):
         self.tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name_or_path, trust_remote_code=True
@@ -429,7 +449,7 @@ class CompressedTokenizer:
 
         args = get_args()
         vocab_size = args.vocab_size
-        print(f"CompressedTokenizer: vocab_size: {vocab_size}")
+        logger.info("CompressedTokenizer: vocab_size: %s", vocab_size)
         # vocab_size = len(self.tokenizer)
         for tid in range(vocab_size):
             text = self.tokenizer.decode([tid], skip_special_tokens=False)
@@ -476,6 +496,7 @@ class CompressedTokenizer:
 
 
 def find_next_prime(start, seen_primes):
+    """Return the first prime above start that is not in seen_primes."""
     candidate = start + 1
     while True:
         if isprime(candidate) and candidate not in seen_primes:
@@ -484,6 +505,8 @@ def find_next_prime(start, seen_primes):
 
 
 class NgramHashMapping:
+    """Build deterministic layer-specific n-gram hashes for embedding lookup."""
+
     def __init__(
         self,
         engram_vocab_size,
@@ -531,6 +554,7 @@ class NgramHashMapping:
         self.vocab_size_across_layers = self.calculate_vocab_size_across_layers()
 
     def calculate_vocab_size_across_layers(self):
+        """Assign distinct prime vocabulary sizes to n-gram heads across layers."""
         seen_primes = set()
         vocab_size_across_layers = {}
 
@@ -600,6 +624,7 @@ class NgramHashMapping:
         return hashes
 
     def hash(self, input_ids):
+        """Compress input tokens and compute n-gram hash IDs for each layer."""
         input_ids = self.compressed_tokenizer(input_ids)
         hash_ids_for_all_layers = {}
         for layer_id in self.layer_ids:
@@ -608,6 +633,8 @@ class NgramHashMapping:
 
 
 class ShortConv(nn.Module):
+    """Apply normalized causal depthwise convolution to each residual stream."""
+
     def __init__(
         self,
         hidden_size: int,
@@ -665,6 +692,8 @@ class ShortConv(nn.Module):
 
 
 class EngramModule(nn.Module):
+    """Fuse hashed n-gram memory embeddings with transformer hidden states."""
+
     def __init__(self, config: TransformerConfig, layer_id):
         super().__init__()
         self.config = config
@@ -804,7 +833,8 @@ class EngramModule(nn.Module):
         This can be called before the forward pass to warm up the embedding cache.
         """
         assert input_ids is not None, "Input ids can not be None for EngramModel"
-        self.embedding_stream.synchronize()  # Ensure previous computations on the stream are finished
+        # Ensure previous computations on the stream are finished.
+        self.embedding_stream.synchronize()
         with torch.cuda.stream(self.embedding_stream):
             embedding_result = self.multi_head_embedding(input_ids).flatten(start_dim=-2)
         embedding_event = torch.cuda.Event()
@@ -814,6 +844,7 @@ class EngramModule(nn.Module):
     def sharded_state_dict(
         self, prefix: str = "", sharded_offsets: tuple = (), metadata: dict | None = None
     ):
+        """Collect sharded checkpoint entries for embeddings, projections, and norms."""
         sharded_dict = {}
         memory_prefix = f"{prefix}memory."
         sharded_dict.update(

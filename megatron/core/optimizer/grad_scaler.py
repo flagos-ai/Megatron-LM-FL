@@ -32,22 +32,27 @@ class MegatronGradScaler(ABC):
 
     @property
     def scale(self):
+        """Return the current loss-scale tensor."""
         return self._scale
 
     @property
     def inv_scale(self):
+        """Return the reciprocal loss scale computed in double precision."""
         return self._scale.double().reciprocal().float()
 
     @abstractmethod
     def update(self, found_inf: bool):
+        """Update the loss scale after checking gradients for non-finite values."""
         pass
 
     @abstractmethod
     def state_dict(self):
+        """Return the gradient scaler state for checkpointing."""
         pass
 
     @abstractmethod
     def load_state_dict(self, state_dict: Dict):
+        """Restore the gradient scaler from a checkpoint state."""
         pass
 
 
@@ -107,12 +112,16 @@ class DynamicGradScaler(MegatronGradScaler):
         Args:
             initial_scale (float): Initial loss scale value.
             min_scale (float): Minimum loss scale value.
-            growth_factor (float): Factor to grow loss scale by if NaNs are not seen in `growth_interval`
+            growth_factor (float): Factor to grow loss scale by if NaNs are not seen in
+            `growth_interval`
                 training iterations. Must be greater than 1.
-            backoff_factor (float): Factor to decrease loss scale by if NaNs are seen in `hysteresis`
+            backoff_factor (float): Factor to decrease loss scale by if NaNs are seen in
+            `hysteresis`
                 consecutive training iterations. Must be between 0 and 1.
-            growth_interval (int): Number of training iterations of no NaNs before loss scale is increased.
-            hysteresis (int): Number of training iterations of consecutive NaNs before loss scale is decreased.
+            growth_interval (int): Number of training iterations of no NaNs before loss scale is
+            increased.
+            hysteresis (int): Number of training iterations of consecutive NaNs before loss scale is
+            decreased.
         """
         super(DynamicGradScaler, self).__init__(initial_scale)
 

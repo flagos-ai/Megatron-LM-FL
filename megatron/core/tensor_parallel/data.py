@@ -1,6 +1,5 @@
 # Copyright (c) 2022, NVIDIA CORPORATION. All rights reserved.
 
-from gettext import ngettext  # FlagScale Modify
 
 import torch
 

@@ -27,7 +27,7 @@ from megatron.core.transformer.transformer_layer import (
 )
 from megatron.core.transformer.transformer_layer import TransformerLayer, make_viewless_tensor
 from megatron.core.typed_torch import apply_module, copy_signature
-from megatron.core.utils import internal_api, nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import internal_api
 
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
