@@ -247,37 +247,49 @@ def test_npu_normalization_gradients(dtype, rows, record_property):
         assert error < 0.006
 
 
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("activation", [None, "silu"])
 @pytest.mark.parametrize("residual", [False, True])
-def test_npu_convolution_gradients(activation, residual, monkeypatch):
+def test_npu_convolution_gradients(dtype, activation, residual, monkeypatch):
     if not hasattr(torch, "npu") or not torch.npu.is_available():
         pytest.skip("Ascend NPU required")
     monkeypatch.setattr(torch.npu.conv, "allow_hf32", False)
     torch.manual_seed(153)
-    x = torch.randn((1, 17, 8), device="npu", requires_grad=True)
-    weight = torch.randn((8, 4), device="npu", requires_grad=True)
-    bias = torch.randn((8,), device="npu", requires_grad=True)
+    from megatron.plugin.Ascend.ssm import causal_conv1d_kernels as kernels
+
+    forward, backward = Mock(wraps=kernels.forward), Mock(wraps=kernels.backward)
+    monkeypatch.setattr(kernels, "forward", forward)
+    monkeypatch.setattr(kernels, "backward", backward)
+    x = torch.randn((1, 8, 17), device="npu", dtype=dtype).transpose(1, 2).requires_grad_()
+    weight = torch.randn((8, 4), device="npu", dtype=dtype, requires_grad=True)
+    bias = None if residual else torch.randn((8,), device="npu", dtype=dtype, requires_grad=True)
     skip = torch.randn_like(x) if residual else None
     actual, state = C.causal_conv1d(x, weight, bias, residual=skip, activation=activation)
     outputs = []
     for i in range(x.shape[1]):
-        value = bias.expand(x.shape[0], -1)
+        value = torch.zeros_like(x[:, 0], dtype=torch.float32)
+        if bias is not None:
+            value = value + bias.float()
         for j in range(weight.shape[1]):
             position = i + j - weight.shape[1] + 1
             if position >= 0:
-                value = value + x[:, position] * weight[:, j]
+                value = value + x[:, position].float() * weight[:, j].float()
         outputs.append(value)
-    expected = torch.stack(outputs, dim=1)
+    expected = torch.stack(outputs, dim=1).to(dtype)
     if activation == "silu":
         expected = torch.nn.functional.silu(expected)
     if skip is not None:
         expected = expected + skip
     assert state is None
     gradient = torch.randn_like(actual)
-    grads = torch.autograd.grad(actual, (x, weight, bias), gradient)
-    ref_grads = torch.autograd.grad(expected, (x, weight, bias), gradient)
+    inputs = (x, weight) if bias is None else (x, weight, bias)
+    grads = torch.autograd.grad(actual, inputs, gradient)
+    ref_grads = torch.autograd.grad(expected, inputs, gradient)
+    tolerance = 1e-5 if dtype == torch.float32 else (0.003 if dtype == torch.float16 else 0.03)
     for result, ref in zip((actual, *grads), (expected, *ref_grads)):
-        torch.testing.assert_close(result, ref, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(result, ref, atol=tolerance, rtol=tolerance)
+    forward.assert_called_once()
+    backward.assert_called_once()
 
 
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
