@@ -1463,7 +1463,7 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
     def __call__(self, *args, **kwargs):
         # Extract mhc_recompute_manager before CUDA graph manager processes kwargs,
-        # since CheckpointManager is not a CUDA-graph-supported type.
+        # since CheckpointWithoutOutputManager is not a CUDA-graph-supported type.
         self._mhc_recompute_manager = kwargs.pop("mhc_recompute_manager", None)
         kwargs.pop("is_last_layer_in_recompute_block", None)
 
@@ -1635,7 +1635,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         sequence_len_offset: Optional[Tensor] = None,
         padding_mask: Optional[Tensor] = None,
         input_ids: Optional[Tensor] = None,
-        mhc_recompute_manager: Optional['CheckpointManager'] = None,
+        mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
         *,
         inference_params: Optional[Any] = None,
     ):
@@ -1645,7 +1645,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         nvtx_range_push(suffix="self_attention_hyper_connection")
         hidden_states, self_attn_h_res, self_attn_hc_h_post, residual = (
             self.self_attention_hyper_connection(
-                hidden_states, mhc_recompute_manager=mhc_recompute_manager
+                hidden_states, mhc_recompute_manager=mhc_recompute_manager, return_residual=True
             )
         )
         nvtx_range_pop(suffix="self_attention_hyper_connection")
@@ -1735,18 +1735,21 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         inference_context=None,
         padding_mask=None,
         input_ids=None,
-        mhc_recompute_manager: Optional['CheckpointManager'] = None,
+        mhc_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
+        is_last_layer_in_recompute_block: Optional[bool] = None,
     ):
         """Forward MLP with hyper connection pre/post processing."""
-        is_last_in_recompute_block = bool(
-            mhc_recompute_manager is not None
-            and getattr(mhc_recompute_manager, "is_last_layer_in_recompute_block", False)
-        )
+        is_last_in_recompute_block = is_last_layer_in_recompute_block
+        if is_last_in_recompute_block is None:
+            is_last_in_recompute_block = bool(
+                mhc_recompute_manager is not None
+                and getattr(mhc_recompute_manager, "is_last_layer_in_recompute_block", False)
+            )
         mhc_mlp_bda_manager = None if is_last_in_recompute_block else mhc_recompute_manager
 
         nvtx_range_push(suffix="mlp_hyper_connection")
         hidden_states, mlp_h_res, mlp_hc_h_post, residual = self.mlp_hyper_connection(
-            hidden_states, mhc_recompute_manager=mhc_recompute_manager
+            hidden_states, mhc_recompute_manager=mhc_recompute_manager, return_residual=True
         )
         nvtx_range_pop(suffix="mlp_hyper_connection")
 
@@ -1841,7 +1844,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         mlp_h_res,
         residual,
         mlp_hc_h_post,
-        mhc_mlp_bda_recompute_manager: Optional['CheckpointManager'] = None,
+        mhc_mlp_bda_recompute_manager: Optional['CheckpointWithoutOutputManager'] = None,
     ):
         """
         Perform operations after the MLP computation with fused hyper connection kernel.
@@ -1853,7 +1856,7 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             mlp_h_res (Tensor): [s, b, n, n] - residual mixing matrix from hyper connection.
             residual (Tensor): [s, b, n*C] - original residual (n-stream hidden states).
             mlp_hc_h_post (Tensor): [s, b, n] - expansion weights from hyper connection.
-            mhc_recompute_manager: Optional CheckpointManager for checkpoint management.
+            mhc_recompute_manager: Optional CheckpointWithoutOutputManager for checkpoint management.
 
         Returns:
             output (Tensor): Transformed hidden states of shape [s, b, h].

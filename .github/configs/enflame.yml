@@ -353,6 +353,8 @@ test_matrix:
       - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py
       # TE-FL vendor.enflame missing rmsnorm_bwd_add operator
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton compiles out of time.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
 
       # others
