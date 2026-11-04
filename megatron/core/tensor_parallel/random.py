@@ -129,6 +129,7 @@ def _get_cuda_rng_state(
         return default_generator.clone_state()
     return default_generator.graphsafe_get_state()
 
+
 @overridable
 def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: bool = False):
     """Sets the random number generator state of the current GPU.
@@ -159,11 +160,11 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
 
         def cb():
             idx = device.index
+            ######## FlagScale Begin ########
             if idx is None:
-                ######## FlagScale Begin ########
                 idx = cur_platform.current_device()
             default_generator = cur_platform.default_generators[idx]
-                ######## FlagScale End ########
+            ######## FlagScale End ########
 
             # if graph capturing, set the rng state in a cudagraphable way
             if graph_safe:

@@ -187,7 +187,11 @@ def _reduce_scatter_along_second_dim(global_t):
 
     # Create output tensor for reduce_scatter_tensor
     local_t = torch.empty(
-        tensor_list[0].shape, device=global_t.device, dtype=global_t.dtype
+        global_t.shape[0],
+        samples_per_rank,
+        *global_t.shape[2:],
+        device=global_t.device,
+        dtype=global_t.dtype,
     )
 
     torch.distributed.reduce_scatter_tensor(

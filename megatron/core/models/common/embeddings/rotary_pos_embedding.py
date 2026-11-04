@@ -26,6 +26,7 @@ from megatron.core.models.common.embeddings.rope_utils import (  # for backward 
     get_pos_emb_on_this_cp_rank,
 )
 from megatron.core.utils import deprecate_inference_params, internal_api
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
@@ -80,7 +81,9 @@ class RotaryEmbedding(nn.Module):
         self.rotary_interleaved = rotary_interleaved
 
         self.seq_len_interpolation_factor = seq_len_interpolation_factor
-        device = 'cpu' if use_cpu_initialization else cur_platform.current_device()  # FlagScale Modify
+        device = (
+            'cpu' if use_cpu_initialization else cur_platform.current_device()
+        )  # FlagScale Modify
         self.inv_freq = 1.0 / (
             rotary_base ** (torch.arange(0, dim, 2, dtype=torch.float32, device=device) / dim)
         )
@@ -164,7 +167,9 @@ class RotaryEmbedding(nn.Module):
         """
         if self.inv_freq.device.type == 'cpu':
             # move `inv_freq` to GPU once at the first micro-batch forward pass
-            self.inv_freq = self.inv_freq.to(device=cur_platform.current_device())  # FlagScale Modify
+            self.inv_freq = self.inv_freq.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Modify
 
         freqs = self.get_freqs_non_repeated(max_seq_len, offset)
         # first part even vector components, second part odd vector components,
@@ -251,6 +256,7 @@ class RotaryEmbedding(nn.Module):
         ):
             self._set_cos_sin_cache(seq_len, offset, dtype, packed_seq, cp_group)
         return (self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...])
+
     ######## FlagScale End ########
 
     def _load_from_state_dict(self, state_dict, prefix, *args, **kwargs):
@@ -304,7 +310,9 @@ class RotaryEmbedding(nn.Module):
                 rotary_seq_len = transformer_input.size(0)
 
             if transformer_config.sequence_parallel:
-                rotary_seq_len *= parallel_state.get_tensor_model_parallel_world_size()  # FlagScale Modify
+                rotary_seq_len *= (
+                    parallel_state.get_tensor_model_parallel_world_size()
+                )  # FlagScale Modify
 
         rotary_seq_len *= transformer_config.context_parallel_size
 
@@ -390,6 +398,7 @@ class MultimodalRotaryEmbedding(nn.Module):
             idx = slice(offset, length, 3)
             freqs_out[..., idx] = freqs[dim_idx, ..., idx]
         return freqs_out
+
     ######## FlagScale End ########
 
     def forward(

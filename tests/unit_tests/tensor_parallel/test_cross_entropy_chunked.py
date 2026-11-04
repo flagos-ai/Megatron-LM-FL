@@ -56,9 +56,9 @@ def _generate_inputs(
     # Both implementations consume this same shard. Generating only the local
     # partition avoids replicating the full vocabulary tensor on every CPU rank.
     logits_gen = torch.Generator(device="cpu").manual_seed(seed + tp_rank)
-    logits = torch.randn(
-        seq_len, batch_size, partition_size, generator=logits_gen, dtype=dtype
-    ).to(get_current_device())
+    logits = torch.randn(seq_len, batch_size, partition_size, generator=logits_gen, dtype=dtype).to(
+        get_current_device()
+    )
 
     # Targets must match across TP ranks regardless of their logits RNG state.
     target_gen = torch.Generator(device="cpu").manual_seed(seed)
@@ -69,12 +69,7 @@ def _generate_inputs(
     return logits, target
 
 
-def _measure_peak_memory(
-    fn,
-    *args,
-    warmup: int = 2,
-    **kwargs,
-) -> Tuple[torch.Tensor, float]:
+def _measure_peak_memory(fn, *args, warmup: int = 2, **kwargs) -> Tuple[torch.Tensor, float]:
     """Run fn and measure peak GPU memory allocated during execution.
 
     Returns:
@@ -105,11 +100,7 @@ def _measure_peak_memory(
 
 
 def _measure_time(
-    fn,
-    *args,
-    warmup: int = 3,
-    repeats: int = 10,
-    **kwargs,
+    fn, *args, warmup: int = 3, repeats: int = 10, **kwargs
 ) -> Tuple[torch.Tensor, float]:
     """Measure average execution time (forward + backward) in milliseconds.
 
@@ -141,6 +132,7 @@ def _measure_time(
 # Test 1: Correctness — chunked output matches baseline
 # ---------------------------------------------------------------------------
 
+
 def test_chunked_cross_entropy_correctness():
     """Verify chunked cross entropy produces identical results to baseline."""
     tp_size = 4
@@ -157,9 +149,7 @@ def test_chunked_cross_entropy_correctness():
     logits_chunked = logits.clone().requires_grad_(True)
 
     loss_baseline = vocab_parallel_cross_entropy(logits_baseline, target)
-    loss_chunked = vocab_parallel_cross_entropy_chunked(
-        logits_chunked, target, chunk_size=2048
-    )
+    loss_chunked = vocab_parallel_cross_entropy_chunked(logits_chunked, target, chunk_size=2048)
 
     # Check forward outputs match
     forward_max_diff = (loss_baseline - loss_chunked).abs().max().item()
@@ -180,10 +170,14 @@ def test_chunked_cross_entropy_correctness():
         print("\n" + "=" * 70)
         print("TEST 1: Correctness")
         print("=" * 70)
-        print(f"  Forward  max diff: {forward_max_diff:.2e}  "
-              f"{'PASSED' if forward_passed else 'FAILED'}")
-        print(f"  Backward max diff: {backward_max_diff:.2e}  "
-              f"{'PASSED' if backward_passed else 'FAILED'}")
+        print(
+            f"  Forward  max diff: {forward_max_diff:.2e}  "
+            f"{'PASSED' if forward_passed else 'FAILED'}"
+        )
+        print(
+            f"  Backward max diff: {backward_max_diff:.2e}  "
+            f"{'PASSED' if backward_passed else 'FAILED'}"
+        )
         print("=" * 70)
 
     assert forward_passed, f"Forward mismatch: max_diff={forward_max_diff}"
@@ -195,6 +189,7 @@ def test_chunked_cross_entropy_correctness():
 # ---------------------------------------------------------------------------
 # Test 2: Correctness with label smoothing
 # ---------------------------------------------------------------------------
+
 
 def test_chunked_cross_entropy_label_smoothing():
     """Verify chunked cross entropy matches baseline with label smoothing."""
@@ -232,10 +227,14 @@ def test_chunked_cross_entropy_label_smoothing():
         print("\n" + "=" * 70)
         print("TEST 2: Correctness with label smoothing")
         print("=" * 70)
-        print(f"  Forward  max diff: {forward_max_diff:.2e}  "
-              f"{'PASSED' if forward_passed else 'FAILED'}")
-        print(f"  Backward max diff: {backward_max_diff:.2e}  "
-              f"{'PASSED' if backward_passed else 'FAILED'}")
+        print(
+            f"  Forward  max diff: {forward_max_diff:.2e}  "
+            f"{'PASSED' if forward_passed else 'FAILED'}"
+        )
+        print(
+            f"  Backward max diff: {backward_max_diff:.2e}  "
+            f"{'PASSED' if backward_passed else 'FAILED'}"
+        )
         print("=" * 70)
 
     assert forward_passed, f"Forward mismatch: max_diff={forward_max_diff}"
@@ -247,6 +246,7 @@ def test_chunked_cross_entropy_label_smoothing():
 # ---------------------------------------------------------------------------
 # Test 3: Correctness with different chunk sizes
 # ---------------------------------------------------------------------------
+
 
 def test_chunked_cross_entropy_various_chunk_sizes():
     """Verify different chunk sizes all produce correct results."""
@@ -285,8 +285,10 @@ def test_chunked_cross_entropy_various_chunk_sizes():
 
         if rank == 0:
             status = "PASSED" if passed else "FAILED"
-            print(f"  chunk_size={chunk_size:5d}: "
-                  f"fwd_diff={fwd_diff:.2e}, bwd_diff={bwd_diff:.2e}  {status}")
+            print(
+                f"  chunk_size={chunk_size:5d}: "
+                f"fwd_diff={fwd_diff:.2e}, bwd_diff={bwd_diff:.2e}  {status}"
+            )
 
         all_passed = all_passed and passed
 
@@ -302,6 +304,7 @@ def test_chunked_cross_entropy_various_chunk_sizes():
 # Test 4: Performance — execution time comparison
 # ---------------------------------------------------------------------------
 
+
 def test_chunked_cross_entropy_performance():
     """Compare execution time of baseline vs chunked implementations."""
     tp_size = 4
@@ -316,9 +319,7 @@ def test_chunked_cross_entropy_performance():
     # Baseline timing
     logits_baseline = logits.clone().requires_grad_(True)
     _, baseline_time = _measure_time(
-        vocab_parallel_cross_entropy,
-        logits_baseline, target,
-        warmup=3, repeats=10,
+        vocab_parallel_cross_entropy, logits_baseline, target, warmup=3, repeats=10
     )
 
     # Chunked timing (various chunk sizes)
@@ -329,23 +330,29 @@ def test_chunked_cross_entropy_performance():
         print("\n" + "=" * 70)
         print("TEST 4: Performance (forward + backward)")
         print("=" * 70)
-        print(f"  Config: seq_len={seq_len}, batch={batch_size}, "
-              f"vocab/TP={vocab_size // tp_size}, TP={tp_size}")
+        print(
+            f"  Config: seq_len={seq_len}, batch={batch_size}, "
+            f"vocab/TP={vocab_size // tp_size}, TP={tp_size}"
+        )
         print(f"  Baseline:               {baseline_time:8.2f} ms")
 
     for chunk_size in chunk_sizes:
         logits_chunked = logits.clone().requires_grad_(True)
         _, chunked_time = _measure_time(
             vocab_parallel_cross_entropy_chunked,
-            logits_chunked, target,
-            warmup=3, repeats=10,
+            logits_chunked,
+            target,
+            warmup=3,
+            repeats=10,
             chunk_size=chunk_size,
         )
         slowdown = chunked_time / baseline_time
 
         if rank == 0:
-            print(f"  Chunked (chunk={chunk_size:5d}): {chunked_time:8.2f} ms  "
-                  f"(slowdown: {slowdown:.2f}x)")
+            print(
+                f"  Chunked (chunk={chunk_size:5d}): {chunked_time:8.2f} ms  "
+                f"(slowdown: {slowdown:.2f}x)"
+            )
 
     if rank == 0:
         print("=" * 70)
@@ -356,6 +363,7 @@ def test_chunked_cross_entropy_performance():
 # ---------------------------------------------------------------------------
 # Test 5: Memory — peak memory comparison
 # ---------------------------------------------------------------------------
+
 
 def test_chunked_cross_entropy_memory():
     """Compare peak memory usage of baseline vs chunked implementations."""
@@ -376,9 +384,7 @@ def test_chunked_cross_entropy_memory():
     # Baseline memory
     logits_baseline = logits.clone().requires_grad_(True)
     _, baseline_peak_mib = _measure_peak_memory(
-        vocab_parallel_cross_entropy,
-        logits_baseline, target,
-        warmup=2,
+        vocab_parallel_cross_entropy, logits_baseline, target, warmup=2
     )
 
     # Chunked memory (various chunk sizes)
@@ -389,17 +395,22 @@ def test_chunked_cross_entropy_memory():
         print("\n" + "=" * 70)
         print("TEST 5: Peak Memory (forward + backward)")
         print("=" * 70)
-        print(f"  Config: seq_len={seq_len}, batch={batch_size}, "
-              f"vocab/TP={partition_vocab_size}, TP={tp_size}")
-        print(f"  Reference: bf16 input = {bf16_input_mib:.1f} MiB, "
-              f"fp32 full = {fp32_full_mib:.1f} MiB")
+        print(
+            f"  Config: seq_len={seq_len}, batch={batch_size}, "
+            f"vocab/TP={partition_vocab_size}, TP={tp_size}"
+        )
+        print(
+            f"  Reference: bf16 input = {bf16_input_mib:.1f} MiB, "
+            f"fp32 full = {fp32_full_mib:.1f} MiB"
+        )
         print(f"  Baseline:               {baseline_peak_mib:10.1f} MiB")
 
     for chunk_size in chunk_sizes:
         logits_chunked = logits.clone().requires_grad_(True)
         _, chunked_peak_mib = _measure_peak_memory(
             vocab_parallel_cross_entropy_chunked,
-            logits_chunked, target,
+            logits_chunked,
+            target,
             warmup=2,
             chunk_size=chunk_size,
         )
@@ -407,8 +418,10 @@ def test_chunked_cross_entropy_memory():
         saved_pct = (saved_mib / baseline_peak_mib * 100) if baseline_peak_mib > 0 else 0
 
         if rank == 0:
-            print(f"  Chunked (chunk={chunk_size:5d}): {chunked_peak_mib:10.1f} MiB  "
-                  f"(saved {saved_mib:.1f} MiB / {saved_pct:.1f}%)")
+            print(
+                f"  Chunked (chunk={chunk_size:5d}): {chunked_peak_mib:10.1f} MiB  "
+                f"(saved {saved_mib:.1f} MiB / {saved_pct:.1f}%)"
+            )
 
     if rank == 0:
         print("=" * 70)
@@ -419,6 +432,7 @@ def test_chunked_cross_entropy_memory():
 # ---------------------------------------------------------------------------
 # Test 6: Edge cases
 # ---------------------------------------------------------------------------
+
 
 def test_chunked_cross_entropy_edge_cases():
     """Test edge cases: seq_len not divisible by chunk_size, chunk > seq_len."""

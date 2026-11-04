@@ -165,6 +165,7 @@ def _apply_rotary_pos_emb_bshd(
 
     return torch.cat((t, t_pass), dim=-1)
 
+
 ######## FlagScale End ########
 
 
@@ -302,6 +303,7 @@ def _apply_rotary_pos_emb_thd(
             mla_output_remove_interleaving=mla_output_remove_interleaving,
         ).squeeze(1)
 
+
 ######## FlagScale End ########
 
 
@@ -392,6 +394,7 @@ def apply_rotary_pos_emb(
             inverse=inverse,
             mla_output_remove_interleaving=mla_output_remove_interleaving,
         )
+
 
 ######## FlagScale End ########
 

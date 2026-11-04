@@ -928,7 +928,9 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         if not self.drop_and_pad:
             if point == self.cuda_dtoh_point:
                 # Move all possible GPU tensors to CPU at self.cuda_dtoh_point.
-                on_side_stream = cur_platform.current_stream() != self.cuda_dtoh_stream  # FlagScale Modify
+                on_side_stream = (
+                    cur_platform.current_stream() != self.cuda_dtoh_stream
+                )  # FlagScale Modify
                 if on_side_stream:
                     ######## FlagScale Begin ########
                     self.cuda_dtoh_stream.wait_stream(cur_platform.current_stream())

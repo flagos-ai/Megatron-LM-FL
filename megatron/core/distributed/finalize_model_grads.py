@@ -34,6 +34,7 @@ except ImportError:
         """Fallback: return current platform device name for communication."""
         return cur_platform.device_name()
 
+
 ######## FlagScale End ########
 
 

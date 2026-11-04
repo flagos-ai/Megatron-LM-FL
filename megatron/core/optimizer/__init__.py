@@ -355,9 +355,7 @@ def _get_param_groups(
 
             is_expert_parallel = not getattr(param, 'allreduce', True)
             ######## FlagScale Begin ########
-            is_engram_parallel = getattr(
-                param, 'is_engram_embedding', False
-            )
+            is_engram_parallel = getattr(param, 'is_engram_embedding', False)
             ######## FlagScale End ########
 
             # Create config_tuple that is hash-able, and has a consistent ordering of the keys.
@@ -808,10 +806,7 @@ def _get_megatron_emerging_optimizer(
     # Layer-wise distributed optimizer handles expert params internally so we skip that split.
     all_param_groups = _get_param_groups(model_chunks, config, config_overrides)
     ######## FlagScale Begin ########
-    if any(
-        group.get('is_engram_parallel', False)
-        for group in all_param_groups
-    ):
+    if any(group.get('is_engram_parallel', False) for group in all_param_groups):
         raise ValueError(
             "Engram parameters are not supported with emerging optimizers. "
             "Use a standard optimizer such as Adam instead."
@@ -1141,7 +1136,8 @@ def get_megatron_optimizer(
             model_chunk_offset=model_chunk_offset,
             config=config,
             config_overrides=config_overrides,
-            filter_fn=lambda g: not g['is_expert_parallel'] and not g['is_engram_parallel'],  # FlagScale Modify
+            filter_fn=lambda g: not g['is_expert_parallel']
+            and not g['is_engram_parallel'],  # FlagScale Modify
             buffer_name='buffers',
         )
         for model_chunk in dense_model_chunks:
@@ -1178,7 +1174,8 @@ def get_megatron_optimizer(
         model_chunk_offset=0,
         config=config,
         config_overrides=config_overrides,
-        filter_fn=lambda g: g['is_expert_parallel'] and not g['is_engram_parallel'],  # FlagScale Modify
+        filter_fn=lambda g: g['is_expert_parallel']
+        and not g['is_engram_parallel'],  # FlagScale Modify
         buffer_name='expert_parallel_buffers',
     )
     if dump_param_to_param_group_map is not None:

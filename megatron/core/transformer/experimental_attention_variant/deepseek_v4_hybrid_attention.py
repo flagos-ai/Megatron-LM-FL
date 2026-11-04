@@ -395,7 +395,9 @@ class DSv4HybridAttention(Attention):
             output, bias = self.linear_proj(core_attn_out)
         # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) -> group_offload(latest)
         if self.offload_attn_proj:
-            output = attn_proj_manager.group_commit(output, name="attn_proj", forced_released_tensors=[core_attn_out])
+            output = attn_proj_manager.group_commit(
+                output, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
 
         return output, bias
 

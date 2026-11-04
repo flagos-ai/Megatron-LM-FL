@@ -67,6 +67,7 @@ def is_dualpipev_first_stage(dualpipev_stage: int, dualpipev_size: int | None):
         return True
     return dualpipev_stage == 0
 
+
 def is_dualpipev_last_stage(dualpipev_stage: int, dualpipev_size: int | None):
     """Return True if in the last virtual pipeline model-parallel stage, False otherwise."""
     if dualpipev_size is None or dualpipev_size <= 1:
@@ -372,9 +373,7 @@ def set_streams(comm_stream=None, high_priority=False):
             ######## FlagScale Begin ########
             if high_priority:
                 _, high = cur_platform.Stream.priority_range()
-                comm_stream = cur_platform.Stream(
-                    device=cur_platform.device_name(), priority=high
-                )
+                comm_stream = cur_platform.Stream(device=cur_platform.device_name(), priority=high)
             else:
                 comm_stream = cur_platform.Stream(device=cur_platform.device_name())
             ######## FlagScale End ########

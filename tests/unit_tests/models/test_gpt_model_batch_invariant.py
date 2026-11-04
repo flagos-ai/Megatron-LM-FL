@@ -181,7 +181,9 @@ class TestGPTModelBatchInvariant:
         seq_len = 48
         vocab_size = 96
         base_model = _build_flash_attn_bik_model(seq_len, vocab_size)
-        inference_model = Float16Module(base_model.config, base_model).to(get_current_device()).eval()
+        inference_model = (
+            Float16Module(base_model.config, base_model).to(get_current_device()).eval()
+        )
 
         ctx = DynamicInferenceContext(
             model_config=base_model.config,
@@ -258,7 +260,9 @@ class TestGPTModelBatchInvariant:
         seq_len = 48
         vocab_size = 96
         base_model = _build_flash_attn_bik_model(seq_len, vocab_size)
-        inference_model = Float16Module(base_model.config, base_model).to(get_current_device()).eval()
+        inference_model = (
+            Float16Module(base_model.config, base_model).to(get_current_device()).eval()
+        )
 
         def _run_engine_with_order(order):
             ctx = DynamicInferenceContext(

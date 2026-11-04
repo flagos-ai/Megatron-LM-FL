@@ -45,26 +45,22 @@ class TestDualpipevSchedule:
             'interleaved_backward',
             'cooldown',
         ]
-        assert set(schedule.keys()) == set(expected_keys), (
-            f"Schedule keys mismatch: got {set(schedule.keys())}, expected {set(expected_keys)}"
-        )
+        assert set(schedule.keys()) == set(
+            expected_keys
+        ), f"Schedule keys mismatch: got {set(schedule.keys())}, expected {set(expected_keys)}"
 
         for key in expected_keys:
-            assert len(schedule[key]) == pp_size, (
-                f"Stage '{key}' has {len(schedule[key])} entries, expected {pp_size}"
-            )
+            assert (
+                len(schedule[key]) == pp_size
+            ), f"Stage '{key}' has {len(schedule[key])} entries, expected {pp_size}"
 
         for key in expected_keys:
             for rank, value in enumerate(schedule[key]):
                 if isinstance(value, list):
                     for v in value:
-                        assert v >= 0, (
-                            f"Stage '{key}' rank {rank} has negative value {v}"
-                        )
+                        assert v >= 0, f"Stage '{key}' rank {rank} has negative value {v}"
                 else:
-                    assert value >= 0, (
-                        f"Stage '{key}' rank {rank} has negative value {value}"
-                    )
+                    assert value >= 0, f"Stage '{key}' rank {rank} has negative value {value}"
 
     @pytest.mark.parametrize("pp_size,num_microbatches", valid_params())
     def test_schedule_warmup_decreasing(self, pp_size, num_microbatches):
@@ -77,9 +73,9 @@ class TestDualpipevSchedule:
         warmup = schedule['warmup']
         for i in range(pp_size):
             expected = pp_size * 2 - 2 - i * 2
-            assert warmup[i] == expected, (
-                f"Warmup for rank {i}: got {warmup[i]}, expected {expected}"
-            )
+            assert (
+                warmup[i] == expected
+            ), f"Warmup for rank {i}: got {warmup[i]}, expected {expected}"
 
     @pytest.mark.parametrize("pp_size,num_microbatches", valid_params())
     def test_schedule_interleaved_forward_increasing(self, pp_size, num_microbatches):
@@ -92,9 +88,9 @@ class TestDualpipevSchedule:
         interleaved_forward = schedule['interleaved_forward']
         for i in range(pp_size):
             expected = i + 1
-            assert interleaved_forward[i] == expected, (
-                f"Interleaved forward for rank {i}: got {interleaved_forward[i]}, expected {expected}"
-            )
+            assert (
+                interleaved_forward[i] == expected
+            ), f"Interleaved forward for rank {i}: got {interleaved_forward[i]}, expected {expected}"
 
     @pytest.mark.parametrize("pp_size,num_microbatches", valid_params())
     def test_schedule_1b1w1f_decreasing(self, pp_size, num_microbatches):
@@ -108,9 +104,9 @@ class TestDualpipevSchedule:
         one_b1w1f = schedule['1b1w1f']
         for i in range(pp_size):
             expected = pp_size - i - 1
-            assert one_b1w1f[i] == expected, (
-                f"1b1w1f for rank {i}: got {one_b1w1f[i]}, expected {expected}"
-            )
+            assert (
+                one_b1w1f[i] == expected
+            ), f"1b1w1f for rank {i}: got {one_b1w1f[i]}, expected {expected}"
 
     @pytest.mark.parametrize("pp_size,num_microbatches", valid_params())
     def test_schedule_overlap_count(self, pp_size, num_microbatches):
@@ -125,9 +121,9 @@ class TestDualpipevSchedule:
         doubled_micro = num_microbatches * 2
         for i in range(pp_size):
             expected = doubled_micro - doubled_pp * 2 + i * 2 + 2
-            assert overlap[i] == expected, (
-                f"Overlap for rank {i}: got {overlap[i]}, expected {expected}"
-            )
+            assert (
+                overlap[i] == expected
+            ), f"Overlap for rank {i}: got {overlap[i]}, expected {expected}"
 
     @pytest.mark.parametrize("pp_size,num_microbatches", valid_params())
     def test_schedule_1b1overlap_count(self, pp_size, num_microbatches):
@@ -141,9 +137,9 @@ class TestDualpipevSchedule:
         one_b1overlap = schedule['1b1overlap']
         for i in range(pp_size):
             expected = (pp_size - i - 1) * 2
-            assert one_b1overlap[i] == expected, (
-                f"1b1overlap for rank {i}: got {one_b1overlap[i]}, expected {expected}"
-            )
+            assert (
+                one_b1overlap[i] == expected
+            ), f"1b1overlap for rank {i}: got {one_b1overlap[i]}, expected {expected}"
 
     @pytest.mark.parametrize("pp_size,num_microbatches", valid_params())
     def test_schedule_total_forward_ops(self, pp_size, num_microbatches):
@@ -163,9 +159,9 @@ class TestDualpipevSchedule:
             overlap = schedule['overlap'][rank]
 
             master_fwd = warmup + interleaved_fwd + one_b1w1f + overlap
-            assert master_fwd == expected_total, (
-                f"Rank {rank}: master chunk forward count {master_fwd} != {expected_total}"
-            )
+            assert (
+                master_fwd == expected_total
+            ), f"Rank {rank}: master chunk forward count {master_fwd} != {expected_total}"
 
     def test_schedule_minimum_valid_microbatches(self):
         """
@@ -177,9 +173,9 @@ class TestDualpipevSchedule:
             schedule = generate_dualpipev_schedule(pp_size, min_microbatches)
             # The last rank should have minimum overlap = 2*(min_micro) - 4*pp + 0 + 2
             # = 4*pp - 4*pp + 2 = 2
-            assert schedule['overlap'][0] == 2, (
-                f"pp_size={pp_size}: first rank overlap should be 2 at minimum microbatches"
-            )
+            assert (
+                schedule['overlap'][0] == 2
+            ), f"pp_size={pp_size}: first rank overlap should be 2 at minimum microbatches"
 
     def test_schedule_invalid_microbatches(self):
         """
@@ -194,8 +190,6 @@ class TestDualpipevSchedule:
             schedule = generate_dualpipev_schedule(pp_size, num_microbatches)
             # If no exception, verify that overlap has negative values
             has_negative = any(v < 0 for v in schedule['overlap'])
-            assert has_negative, (
-                "Expected negative overlap values for invalid microbatch count"
-            )
+            assert has_negative, "Expected negative overlap values for invalid microbatch count"
         except (AssertionError, ValueError):
             pass  # Expected behavior

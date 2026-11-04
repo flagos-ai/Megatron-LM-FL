@@ -8,6 +8,7 @@ from typing import Callable, List, Optional, Tuple
 import torch
 
 from megatron.core import parallel_state
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 

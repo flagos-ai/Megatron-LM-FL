@@ -106,7 +106,9 @@ def _get_empty_tensor_for_exchange(
         else:
             tensor = sh_ten.data
             if tensor.device.type == "cpu":
-                tensor = torch.empty_like(tensor, device=cur_platform.device_name())  # FlagScale Modify
+                tensor = torch.empty_like(
+                    tensor, device=cur_platform.device_name()
+                )  # FlagScale Modify
     else:
         local_unloaded_sh_ten.init_data(cur_platform.device_name())  # FlagScale Modify
         orig_device = local_unloaded_sh_ten.data.device
@@ -332,7 +334,9 @@ def exchange_loaded_tensors_gather_rounds(
                 for rank, shard_id in enumerate(round_shard_ids):
                     if shard_id is None:
                         # if no more useful data, the given rank will exchange empty tensor
-                        local_ten = torch.empty(0, dtype=dtype, device=cur_platform.device_name())  # FlagScale Modify
+                        local_ten = torch.empty(
+                            0, dtype=dtype, device=cur_platform.device_name()
+                        )  # FlagScale Modify
                         orig_device = None
                     else:
                         assert isinstance(shard_id, tuple), type(shard_id)

@@ -638,7 +638,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
             b_layer = b_schedule_plan.pop_layer()
-            cur_platform.range_push(f"layer_{b_schedule_plan.num_layers()}b")  # FlagScale Modify
+            nvtx_msg = f"layer_{b_schedule_plan.num_layers()}b"
+            cur_platform.range_push(nvtx_msg)  # FlagScale Modify
             _, b_grad = TransformerLayerSchedulePlan.run(
                 None, b_layer, b_grad=b_grad, is_last_layer_in_bwd=(i == b_num_layers - 1)
             )
@@ -649,9 +650,11 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            cur_platform.range_push(f"layer_{i}f")  # FlagScale Modify
+            nvtx_msg = f"layer_{i}f"
+            cur_platform.range_push(nvtx_msg)  # FlagScale Modify
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
             cur_platform.range_pop()  # FlagScale Modify
+
             ######## FlagScale Begin ########
             TransformerBlock._finalize_mhc_recompute_layer(
                 mhc_manager=f_layer.layer_state.mhc_recompute_manager,
