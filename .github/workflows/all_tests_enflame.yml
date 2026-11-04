@@ -19,33 +19,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  te_fl_prepare:
-    name: prepare-te-fl-enflame
-    uses: ./.github/workflows/prepare_te_fl.yml
-    with:
-      platform: enflame
+  lint:
+    name: Common CI checks
+    uses: ./.github/workflows/lint_common.yml
 
   run_tests:
-    name: run-tests
-    needs: te_fl_prepare
-    # Package manager and environment settings are read from .github/configs/enflame.yml
-    uses: ./.github/workflows/all_tests_common.yml
+    needs: lint
+    uses: ./.github/workflows/_platform_pipeline.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: enflame
-      run_unit_tests: ${{ github.event.inputs.run_unit_tests != 'false' }}
-      run_functional_tests: ${{ github.event.inputs.run_functional_tests != 'false' }}
-      te_fl_prepare: true
-      te_fl_cache_key: ${{ needs.te_fl_prepare.outputs.cache_key }}
-
-  all_tests:
-    needs: run_tests
-    runs-on: ubuntu-latest
-    if: always() && !cancelled()
-    steps:
-      - name: Verify workflow status
-        run: |
-          if [ "${{ needs.run_tests.result }}" != "success" ]; then
-            echo "❌ Tests workflow failed"
-            exit 1
-          fi
-          echo "✅ All tests passed!"
+      run_unit_tests: ${{ inputs.run_unit_tests }}
+      run_functional_tests: ${{ inputs.run_functional_tests }}

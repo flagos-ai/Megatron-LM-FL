@@ -14,26 +14,38 @@ Each hardware platform has three entry points:
 | Platform config | `.github/configs/<platform>.yml` | Image, runner labels, container settings, process count, and test matrix |
 | Platform setup | `.github/scripts/set_env_<platform>.sh` | Runtime variables, dependencies, device validation, and project installation |
 
-The platform workflow calls `.github/workflows/all_tests_common.yml`, which
-loads the platform config and dispatches the reusable unit and functional
+The automatic and requested entrypoints generate a plan and call
+`_platform_pipeline.yml`. Manual platform wrappers also reuse that pipeline.
+It prepares TE-FL and calls `all_tests_common.yml`, which loads the platform
+config and dispatches the reusable unit and functional
 workflows. Platform-specific behavior belongs in the config or setup script;
 the common workflows should not need a new hardware conditional.
+
+The project-facing contract is `.flagcicd/project.yaml`. It owns stage, level,
+logical-group and gate-policy semantics. The planner and validators read this
+file directly; there is no generated catalog to maintain. After editing it, run
+`python .github/scripts/ci/validate_flagcicd_contract.py` and
+`python .github/scripts/ci/validate_unit_group_catalog.py`.
 
 The execution path is:
 
 ```text
-all_tests_<platform>.yml
-  -> all_tests_common.yml
-     -> lint_common.yml
-     -> unit_tests_common.yml
-        -> checkout + set_env_<platform>.sh once per device
-        -> install runtime packages + restore/install TE-FL once
-        -> run_unit_groups.py, in configured group order
-           -> set_env_<platform>.sh (unit_group, no installation)
-           -> tests/test_utils/runners/run_ci_unit_tests.sh
-     -> functional_tests_common.yml
-        -> set_env_<platform>.sh
-        -> tests/functional_tests/shell_test_utils/run_ci_test.sh
+ci.yml / ci-requested.yml
+  -> lint_common.yml
+  -> generate_test_plan.py
+  -> _platform_pipeline.yml (also used by manual platform wrappers)
+     -> prepare TE-FL wheel artifact
+     -> all_tests_common.yml: verify configuration identity and load config
+        -> unit_tests_common.yml
+           -> checkout + set_env_<platform>.sh once per device
+           -> install runtime packages + restore/install TE-FL once
+           -> run_unit_groups.py, in configured group order
+              -> set_env_<platform>.sh (unit_group, no installation)
+              -> tests/test_utils/runners/run_ci_unit_tests.sh
+        -> functional_tests_common.yml
+           -> set_env_<platform>.sh
+           -> tests/functional_tests/shell_test_utils/run_ci_test.sh
+  -> flagcicd_gate.py: verify plan, matrix and platform/device evidence
 ```
 
 Unit tests run before functional tests when both suites are enabled. A failed
@@ -68,7 +80,8 @@ run are skipped; failed, timed-out and unfinished groups run again. Each complet
 group updates the checkpoint, and the workflow attempts to cache it even after a
 failure or cancellation. Missing, evicted or invalid checkpoints fall back to
 running all groups. A hard runner shutdown may prevent saving the checkpoint.
-Checkpoints are scoped to the run, commit, platform/device and test configuration;
+Only successes with valid per-rank JUnit evidence can be reused; older checkpoints
+without it rerun those groups. Checkpoints are scoped to the run, commit, platform/device and test configuration;
 they are never reused by a new workflow run. Multiple reruns retain prior successes.
 **Re-run all jobs** also reuses successful unit groups; start a new workflow run to
 force all groups to execute again.
@@ -77,9 +90,18 @@ Environment setup still runs normally on every attempt. Dependencies may change
 between attempts: this is result reuse, not a frozen environment or container
 snapshot. No automatic test retries are added.
 
-Coverage data is isolated per group. The coverage artifact retains each completed
-group's JSON and `unit-results.json`; a combined `coverage-<platform>-<device>-all.json`
-is sent to FlagCICD. Available reports are uploaded even after test failures.
+Coverage data is isolated per group. Coverage measures `megatron/plugin/*` and
+`megatron/core/*`; it is core/plugin coverage, not full unit-group coverage. The
+coverage artifact retains each completed group's JSON and `unit-results.json`.
+That attestation records `plan_hash`, `expected_groups`, `executed_groups`,
+`missing_groups`, `unexpected_groups`, `status`, and per-group results; the
+platform workflow and final CI gate verify it. Each selected group must provide
+JUnit reports for all configured ranks and phases, consistent testcase counts,
+no failures/errors, and at least one passing test across the group. A normal or
+experimental phase may be empty, but a wholly empty or skipped group cannot pass,
+even when pytest exits zero. A combined
+`coverage-<platform>-<device>-all.json` is sent to FlagCICD. Available reports
+are uploaded even after test failures.
 Each completed group prints `PASS`, `FAIL` or `TIMEOUT` outside its collapsible log
 section, so its result remains visible without expanding test output. The Actions
 summary lists the same status and exit code. Interrupted groups are marked
@@ -190,14 +212,23 @@ No workflow edit is needed in that case. The common directory mapping is:
 | `tests/unit_tests/pipeline_parallel/` | `pipeline_parallel` |
 | `tests/unit_tests/data/` | `data` |
 | `tests/unit_tests/fusions/` | `fusions` |
-| `export/`, `post_training/`, `tokenizers/`, `utils/` | `others` |
+| `tests/unit_tests/transformer/` | `transformer` (CUDA only today) |
+| `post_training/`, `tokenizers/`, `utils/` | `others` |
+
+Other directories under `tests/unit_tests/` have logical groups in the routing
+catalog but are not executed by any platform yet. They are marked
+`status: planned`; a change that directly matches one of them blocks the plan
+until a platform config adds the execution group. When a planned group is
+reached only through a shared-path fallback, the platform expands to every
+active group it can execute and records the rest under `fallback_excluded`.
 
 The platform config remains authoritative. A platform may omit a complete
 group when its runtime cannot execute that boundary. A root glob such as
 `tests/unit_tests/test_*.py` also does not include tests in subdirectories.
 
-If a new top-level directory is not covered, add a unique group to every
-platform config that should run it:
+If a new top-level directory is not covered, add it to
+`.flagcicd/project.yaml` and register an execution group in every platform
+config that should run it. Then run both validators listed above:
 
 ```yaml
 test_matrix:
@@ -222,6 +253,102 @@ Before submitting a new test:
 
 Running only `pytest <node>` proves the test can execute, but does not prove CI
 selects it. The group run is the final collection check.
+
+### Logical groups and diff routing
+
+`.flagcicd/project.yaml` owns logical routing and is read directly. Each
+group declares `status: active|planned|unsupported`, and may declare an
+`execution_group` alias (for example, `plugin` executes as `core`). An alias
+must target an existing active group, and required levels are checked through
+that effective execution group. Platform
+configs remain authoritative for execution: a platform runs a group only when
+it declares a matching unit group. For every other active group it must declare
+`unsupported_groups` with a reason; the validator rejects an active group that
+has no platform owner. A platform may also declare a group unsupported when the
+execution group exists but does not collect every test path of that group; the
+declaration is rejected only when all test paths are already covered.
+
+`.github/scripts/ci/generate_test_plan.py` runs in the `generate-matrix` job. It
+combines the catalog, the platform router, and the selected platform configs,
+then publishes `unit-test-plan.json` and an Actions summary. Its execution
+matrix is passed to `ci.yml`, so only the selected execution groups run.
+
+Routing rules:
+
+- Unknown and shared paths expand to every logical group. Shared inputs include
+  `.github/`, `docker/`, `uv.lock`, `pyproject.toml`, `setup.py`, and test
+  infrastructure such as `tests/unit_tests/conftest.py`.
+- Unknown paths produce a diagnostic full fallback plan, but the plan is
+  `blocked` and the fallback is not executed until catalog onboarding is
+  completed. A changed path that matches more than one logical group is a route
+  conflict and also blocks the plan. Catalog paths must be disjoint; the
+  validator rejects any tracked path owned by multiple logical groups.
+- A blocked plan's platform table is labeled diagnostic only. Its rows describe
+  how the fallback would materialize and are not executed.
+- Required groups are resolved through `execution_group` aliases. For example, a
+  level requiring `plugin` is satisfied when the platform provides `core`, and
+  fails when the alias target is missing or the group is declared unsupported.
+- The plan records `plan_status=ready|partial|blocked`. `ready` means every
+  selected platform executes every configured execution group with no required
+  group missing. `partial` means the run relied on a shared/fallback selection,
+  a selected planned group, a non-required unresolved group, or a
+  fallback-excluded group. `selection=all` is a diagnostic full-catalog scope;
+  scheduled nightly runs use `selection=configured` and ignore the diff.
+  `blocked` emits no unit matrix and fails `generate-matrix`.
+- `catalog_completeness` is separate from `plan_status`. Planned catalog groups
+  are reported in `unwired_planned_groups` and do not enter the configured
+  matrix, so they do not block nightly. The Summary distinguishes
+  `Configured matrix: complete|incomplete` from
+  `Logical catalog completeness: full|partial`.
+- The repository contract enables PR `L1`, branch/nightly `L2`, and manual `L2`
+  planning. These levels select required groups, not separate acceptance
+  pipelines or device counts. L0/L3/L4 and release acceptance remain future
+  design work outside runtime configuration until execution and gates exist.
+- Documentation-only changes produce no platform jobs, even when a
+  `platform:<name>` label is present. Labels override routing only for PRs that
+  contain at least one code change; a mixed documentation and code change is
+  routed by its code paths.
+- Renames include both the old and new paths.
+- An active group selected on a platform executes, is explicitly declared
+  unsupported there, or is reported as unresolved. An unresolved required group
+  blocks the plan; any other unresolved group makes it `partial`. A selected
+  group is never silently skipped.
+- A directly affected group that is `planned` or declared unsupported on every
+  selected platform blocks the plan. Planned fallback is allowed only when the
+  planned group is not a direct match.
+- A selected planned group does not execute when it is reached through `all` or
+  an affected fallback. The platform runs every active group it can execute, so
+  a known gap cannot narrow coverage; excluded groups are reported in
+  `fallback_excluded`.
+- A missing required group, or a required group that is planned/unsupported,
+  blocks the plan. A non-required unresolved group makes the plan `partial`. A
+  platform with no executable groups blocks the plan.
+- `plan_hash` and `expected_unit_groups` are propagated through the platform
+  workflows. The runner attests them in `coverage-report/unit-results.json`, and
+  the final CI gate verifies one hash across all platforms plus exact
+  expected/executed group equality. The `plan_hash` is stable for identical
+  source/base SHAs, configs, and changed files.
+- Managed DooD runners guarantee one job per physical machine. Different
+  machines may run platform/device jobs concurrently. Within a unit job, groups
+  execute sequentially with a runner-enforced 3600-second timeout per attempt.
+  Platform setup verifies available device capacity against `nproc_per_node`.
+  The catalog does not expose resource locks, group parallelism, or inert timeout
+  overrides. Runner deployment must preserve physical-machine exclusivity.
+
+Unit coverage is scoped to `megatron/plugin/` and `megatron/core/` in the
+catalog and the runner. It is core/plugin-line coverage, not full unit-group
+coverage.
+
+Validate the catalog after changing a test directory or a platform unit group:
+
+```bash
+python .github/scripts/ci/validate_unit_group_catalog.py
+```
+
+The validator checks path existence against the git index, dependency
+acyclicity, platform group names, owner and unsupported declarations,
+required-group execution through aliases, tracked-path overlaps between logical
+groups, and that every `tests/unit_tests/` directory has a logical group.
 
 ### Distributed test requirements
 

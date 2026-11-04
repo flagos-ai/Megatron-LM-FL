@@ -1,0 +1,231 @@
+name: CI Requested Tests
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+    inputs:
+      pr_number: {required: true, type: string, description: Open PR number}
+      head_sha: {required: true, type: string, description: Exact PR head SHA}
+      platform: {required: true, type: string, description: Comma-separated platform names or all}
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.issue.pull_request &&
+       (startsWith(github.event.comment.body, '/ci ') || startsWith(github.event.comment.body, '/test ')))
+    concurrency:
+      group: ci-request-validate-${{ github.event.issue.number || inputs.pr_number }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+      actions: write
+    outputs:
+      pr_number: ${{ steps.request.outputs.pr_number }}
+      platforms: ${{ steps.request.outputs.platforms }}
+      source_ref: ${{ steps.request.outputs.source_ref }}
+      check_id: ${{ steps.request.outputs.check_id }}
+      base_ref: ${{ steps.request.outputs.base_ref }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet PyYAML==6.0.3
+      - name: Validate current PR and create supplemental check
+        id: request
+        env:
+          OPERATION: ${{ github.event_name == 'issue_comment' && 'comment' || 'prepare' }}
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.head_sha }}
+          PLATFORM: ${{ inputs.platform }}
+        run: python .github/scripts/ci/commands.py "$OPERATION"
+
+  lint:
+    needs: validate
+    if: needs.validate.outputs.platforms != ''
+    permissions:
+      contents: read
+    uses: ./.github/workflows/lint_common.yml
+    with:
+      source_ref: ${{ needs.validate.outputs.source_ref }}
+      base_ref: ${{ needs.validate.outputs.base_ref }}
+
+  plan:
+    name: Generate requested test plan
+    needs: [validate, lint]
+    if: needs.validate.outputs.platforms != '' && needs.lint.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      unit_matrix: ${{ steps.plan.outputs.unit_matrix }}
+      plan_hash: ${{ steps.plan.outputs.plan_hash }}
+      plan_status: ${{ steps.plan.outputs.plan_status }}
+      required_plan_status: ${{ steps.plan.outputs.required_plan_status }}
+      allow_catalog_partial: ${{ steps.plan.outputs.allow_catalog_partial }}
+      catalog_completeness: ${{ steps.plan.outputs.catalog_completeness }}
+      expected_unit_groups: ${{ steps.plan.outputs.expected_unit_groups }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Checkout candidate configuration data
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.validate.outputs.source_ref }}
+          path: .flagcicd-candidate
+          persist-credentials: false
+      - name: Install planner dependencies
+        run: python -m pip install --quiet PyYAML==6.0.3
+      - name: Generate trusted requested plan
+        id: plan
+        env:
+          REQUEST_EVENT: ${{ github.event_name }}
+          BASE_REF: ${{ needs.validate.outputs.base_ref }}
+          SOURCE_SHA: ${{ needs.validate.outputs.source_ref }}
+          PLATFORMS: ${{ needs.validate.outputs.platforms }}
+        run: |
+          python .github/scripts/ci/generate_test_plan.py \
+            --event-name "$REQUEST_EVENT" \
+            --stage manual \
+            --config-root .flagcicd-candidate \
+            --selection requested \
+            --base-ref "$BASE_REF" \
+            --source-sha "$SOURCE_SHA" \
+            --platforms "$PLATFORMS" \
+            --output unit-test-plan.json \
+            --summary "$GITHUB_STEP_SUMMARY" \
+            --github-output "$GITHUB_OUTPUT"
+      - name: Upload requested unit plan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: requested-unit-test-plan
+          overwrite: true
+          path: unit-test-plan.json
+          if-no-files-found: error
+          retention-days: 7
+
+  platform-pipeline:
+    name: Requested platform (${{ matrix.platform }})
+    needs: [validate, lint, plan]
+    if: needs.validate.outputs.platforms != '' && needs.plan.result == 'success'
+    permissions:
+      contents: read
+    concurrency:
+      group: ci-requested-${{ needs.validate.outputs.pr_number }}-${{ needs.validate.outputs.source_ref }}-${{ matrix.platform }}
+      cancel-in-progress: false
+      queue: max
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.plan.outputs.unit_matrix) }}
+    uses: ./.github/workflows/_platform_pipeline.yml
+    with:
+      platform: ${{ matrix.platform }}
+      source_ref: ${{ needs.validate.outputs.source_ref }}
+      expected_unit_groups: ${{ toJson(matrix.groups) }}
+      config_identity: ${{ toJson(matrix.config_identity) }}
+      plan_hash: ${{ needs.plan.outputs.plan_hash }}
+
+  report:
+    if: always() && needs.validate.outputs.check_id != ''
+    needs: [validate, lint, plan, platform-pipeline]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      checks: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: python -m pip install --quiet PyYAML==6.0.3
+      - name: Download requested unit plan
+        if: needs.plan.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: requested-unit-test-plan
+          path: requested-unit-test-plan
+      - name: Download requested unit evidence
+        if: needs.plan.result == 'success'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          pattern: coverage-*
+          path: requested-unit-results
+      - name: Resolve requested gate result
+        id: gate
+        env:
+          PLAN_HASH: ${{ needs.plan.outputs.plan_hash }}
+          EXPECTED_UNIT_GROUPS: ${{ needs.plan.outputs.expected_unit_groups }}
+          UNIT_MATRIX: ${{ needs.plan.outputs.unit_matrix }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_STATUS: ${{ needs.plan.outputs.plan_status }}
+          REQUIRED_PLAN_STATUS: ${{ needs.plan.outputs.required_plan_status }}
+          ALLOW_CATALOG_PARTIAL: ${{ needs.plan.outputs.allow_catalog_partial }}
+          CATALOG_COMPLETENESS: ${{ needs.plan.outputs.catalog_completeness }}
+          PIPELINE_RESULT: ${{ needs.platform-pipeline.result }}
+        run: |
+          set -euo pipefail
+          if [ "$PIPELINE_RESULT" = cancelled ]; then
+            result=cancelled
+          elif [ "$PLAN_RESULT" != success ]; then
+            result=failure
+          else
+            catalog_flag=()
+            if [ "$ALLOW_CATALOG_PARTIAL" = true ]; then
+              catalog_flag+=(--allow-catalog-partial)
+            fi
+            if python3 .github/scripts/ci/flagcicd_gate.py \
+              --plan requested-unit-test-plan/unit-test-plan.json \
+              --attestation-root requested-unit-results \
+              --expected-hash "$PLAN_HASH" \
+              --expected-groups "$EXPECTED_UNIT_GROUPS" \
+              --matrix "$UNIT_MATRIX" \
+              --required-status "$REQUIRED_PLAN_STATUS" \
+              "${catalog_flag[@]}"; then
+              result=success
+            else
+              result=failure
+            fi
+            if [ "$PIPELINE_RESULT" != success ]; then
+              result=failure
+            fi
+          fi
+          echo "Requested gate result: $result"
+          echo "result=$result" >> "$GITHUB_OUTPUT"
+      - name: Report supplemental result on the tested SHA
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ needs.validate.outputs.pr_number }}
+          HEAD_SHA: ${{ needs.validate.outputs.source_ref }}
+          CHECK_ID: ${{ needs.validate.outputs.check_id }}
+          PIPELINE_RESULT: ${{ steps.gate.outputs.result }}
+          PLAN_RESULT: ${{ needs.plan.result }}
+          PLAN_STATUS: ${{ needs.plan.outputs.plan_status }}
+        run: python .github/scripts/ci/commands.py report

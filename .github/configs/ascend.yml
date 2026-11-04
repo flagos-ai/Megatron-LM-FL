@@ -87,6 +87,8 @@ test_matrix:
         description: post-training, tokenizer, and utility tests
     # Ignored test files/cases for unit tests.
     # These are skipped when running pytest on Ascend NPU.
+    unsupported_groups:
+      transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
       - tests/unit_tests/test_layer_wise_optimizer.py
@@ -349,6 +351,8 @@ test_matrix:
       # TE-FL exposes rmsnorm_fwd/rmsnorm_bwd but not the fused residual
       # backward operator rmsnorm_bwd_add used by this test's six variants.
       - tests/unit_tests/fusions/test_rmsnorm_residual_fusion.py
+      # Triton compiles out of time.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py
 
       ## 15. others - unavailable NVIDIA components or test assets
       # ModelOpt is not installed in the Ascend image. Preserve the pure
@@ -393,3 +397,15 @@ te_fl:
       TE_FL_PREFER: flagos
     install_pip_args: []
     pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/ascend.yml
+  - .github/scripts/set_env_ascend.sh
+  - .github/workflows/all_tests_ascend.yml
+  - megatron/plugin/Ascend/
+  - megatron/plugin/platform/platform_npu.py
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_ascend/
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark_ascend/
+
+test_retry: {transient_retries: 1}

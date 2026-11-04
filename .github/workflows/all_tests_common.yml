@@ -2,7 +2,16 @@ name: Common All Tests
 
 on:
   workflow_call:
+    secrets:
+      FLAGCICD_API_TOKEN:
+        required: false
     inputs:
+      te_fl_artifact: {required: true, type: string}
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: Optional immutable Megatron source SHA for requested tests
       platform:
         required: true
         type: string
@@ -17,26 +26,22 @@ on:
         type: boolean
         default: true
         description: Whether to run functional tests in this workflow
-      te_fl_prepare:
-        required: false
-        type: boolean
-        default: false
-        description: Whether the caller prepared a TE-FL wheel for test jobs
-      te_fl_cache_key:
-        required: false
-        type: string
-        default: ''
-        description: Cache key for the caller-prepared TE-FL wheel
       image_override:
         required: false
         type: string
         default: ''
         description: Optional image override for this run
-      te_fl_local_cache_key:
+      expected_unit_groups:
+        required: false
+        type: string
+        default: '[]'
+        description: JSON array of execution group names expected by the routing plan
+      config_identity: {required: false, type: string, default: ''}
+      plan_hash:
         required: false
         type: string
         default: ''
-        description: Local backup identity returned by the preparation job
+        description: Stable routing-plan hash shared by every selected platform
 
 jobs:
   checkout_and_config:
@@ -46,6 +51,7 @@ jobs:
         shell: bash
     runs-on: ubuntu-latest
     outputs:
+      test_retries: ${{ steps.config.outputs.test_retries }}
       image: ${{ steps.config.outputs.image }}
       runs_on: ${{ steps.config.outputs.runs_on }}
       container_volumes: ${{ steps.config.outputs.container_volumes }}
@@ -61,16 +67,44 @@ jobs:
       te_fl_runtime_environment: ${{ steps.config.outputs.te_fl_runtime_environment }}
       te_fl_install_pip_args: ${{ steps.config.outputs.te_fl_install_pip_args }}
       te_fl_runtime_pip_packages: ${{ steps.config.outputs.te_fl_runtime_pip_packages }}
-      te_fl_cache_directory: ${{ steps.config.outputs.te_fl_cache_directory }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
+
+      - name: Verify planned configuration identity
+        if: inputs.config_identity != ''
+        env:
+          CONFIG_IDENTITY: ${{ inputs.config_identity }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          python3 - <<'PYCODE'
+          import hashlib
+          import json
+          import os
+          import pathlib
+          import subprocess
+
+          identity = json.loads(os.environ["CONFIG_IDENTITY"])
+          actual_sha = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True, timeout=10).strip()
+          if actual_sha != identity["source_sha"]:
+              raise SystemExit("Execution source SHA differs from the plan")
+          for key, path in (
+              ("project_hash", ".flagcicd/project.yaml"),
+              ("platform_hash", f".github/configs/{os.environ['PLATFORM']}.yml"),
+          ):
+              actual = "sha256:" + hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+              if actual != identity[key]:
+                  raise SystemExit(f"Execution configuration differs from plan: {path}")
+          PYCODE
 
       - name: Install yq
         run: |
           set -euo pipefail
           if ! command -v yq >/dev/null 2>&1; then
-            sudo wget -qO /usr/local/bin/yq \
+            sudo wget --tries=2 --timeout=60 -qO /usr/local/bin/yq \
               https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
             sudo chmod 0755 /usr/local/bin/yq
           fi
@@ -83,14 +117,28 @@ jobs:
           IMAGE_OVERRIDE: ${{ inputs.image_override }}
           RUN_UNIT_TESTS: ${{ inputs.run_unit_tests }}
           RUN_FUNCTIONAL_TESTS: ${{ inputs.run_functional_tests }}
+          TE_FL_ARTIFACT: ${{ inputs.te_fl_artifact }}
+          EXPECTED_UNIT_GROUPS: ${{ inputs.expected_unit_groups }}
         run: |
           set -euo pipefail
+
+          if [ -z "$TE_FL_ARTIFACT" ]; then
+            echo "::error::Required TE-FL wheel artifact is missing" >&2
+            exit 1
+          fi
 
           config_file=".github/configs/${PLATFORM}.yml"
           if [ ! -f "$config_file" ]; then
             echo "::error::Platform configuration not found: $config_file" >&2
             exit 1
           fi
+
+          test_retries=$(yq -r '.test_retry.transient_retries // 0' "$config_file")
+          if ! [[ "$test_retries" =~ ^[01]$ ]]; then
+            echo "::error::test_retry.transient_retries must be 0 or 1" >&2
+            exit 1
+          fi
+          echo "test_retries=$test_retries" >> "$GITHUB_OUTPUT"
 
           image=$(yq -r '.ci_image // ""' "$config_file")
           if [ -n "$IMAGE_OVERRIDE" ]; then
@@ -108,6 +156,35 @@ jobs:
           setup_script=$(yq -r '.setup_script // ""' "$config_file")
           unit_nproc=$(yq -r '.test_matrix.unit.nproc_per_node // ""' "$config_file")
           unit_groups=$(yq -o=json -I=0 '.test_matrix.unit.groups // []' "$config_file")
+          if [ -n "$EXPECTED_UNIT_GROUPS" ] && [ "$EXPECTED_UNIT_GROUPS" != "[]" ]; then
+            unit_groups=$(EXPECTED_UNIT_GROUPS="$EXPECTED_UNIT_GROUPS" python3 - "$unit_groups" <<'PY'
+          import json
+          import os
+          import sys
+
+          groups = json.loads(sys.argv[1])
+          selected = json.loads(os.environ["EXPECTED_UNIT_GROUPS"])
+          if not isinstance(selected, list) or any(
+              not isinstance(name, str) or not name for name in selected
+          ):
+              raise SystemExit(
+                  "expected_unit_groups must be a JSON array of non-empty strings"
+              )
+          names = {group["name"] for group in groups}
+          selected_names = set(selected)
+          missing = sorted(selected_names - names)
+          if missing:
+              raise SystemExit(
+                  "Expected unit groups are absent from the platform config: "
+                  + ", ".join(missing)
+              )
+          filtered = [group for group in groups if group["name"] in selected_names]
+          if not filtered:
+              raise SystemExit("No configured unit group matches the routing plan")
+          print(json.dumps(filtered, separators=(",", ":")))
+          PY
+            )
+          fi
           unit_extra=$(yq -o=json -I=0 '.test_matrix.unit.pytest_extra_args // []' "$config_file")
           unit_experimental_extra=$(yq -o=json -I=0 '.test_matrix.unit.experimental_pytest_extra_args // []' "$config_file")
           ignored=$(yq -o=json -I=0 '.test_matrix.unit.ignored_tests // []' "$config_file")
@@ -115,16 +192,6 @@ jobs:
           runtime_environment=$(yq -o=json -I=0 '.te_fl.runtime.environment // {}' "$config_file")
           install_pip_args=$(yq -o=json -I=0 '.te_fl.runtime.install_pip_args // []' "$config_file")
           runtime_packages=$(yq -o=json -I=0 '.te_fl.runtime.pip_packages // []' "$config_file")
-          cache_directory=$(yq -r '.te_fl.cache_directory // ""' "$config_file")
-
-          if [ -n "$cache_directory" ]; then
-            if ! [[ "$cache_directory" =~ ^/[a-zA-Z0-9_/-]+$ ]] || [[ "$cache_directory" = / || "$cache_directory" = */ ]]; then
-              echo "::error::te_fl.cache_directory must be a dedicated absolute path without a trailing slash" >&2
-              exit 1
-            fi
-            volumes=$(CACHE_DIRECTORY="$cache_directory" yq -o=json -I=0 \
-              '(.container_volumes // []) + [strenv(CACHE_DIRECTORY) + ":" + strenv(CACHE_DIRECTORY) + ":ro"]' "$config_file")
-          fi
 
           if [ -z "$setup_script" ] || [ "$setup_script" = "null" ]; then
             echo "::error::setup_script is required" >&2
@@ -165,16 +232,10 @@ jobs:
             echo "te_fl_runtime_environment=$runtime_environment"
             echo "te_fl_install_pip_args=$install_pip_args"
             echo "te_fl_runtime_pip_packages=$runtime_packages"
-            echo "te_fl_cache_directory=$cache_directory"
           } >> "$GITHUB_OUTPUT"
 
           echo "Platform: $PLATFORM"
           echo "Image: $image"
-
-  lint:
-    name: lint
-    needs: checkout_and_config
-    uses: ./.github/workflows/lint_common.yml
 
   unit_tests:
     name: unit_tests
@@ -182,18 +243,20 @@ jobs:
       always() &&
       !cancelled() &&
       inputs.run_unit_tests &&
-      needs.checkout_and_config.result == 'success' &&
-      needs.lint.result == 'success'
+      needs.checkout_and_config.result == 'success'
     needs:
       - checkout_and_config
-      - lint
     strategy:
       fail-fast: false
       matrix:
         device: ${{ fromJson(needs.checkout_and_config.outputs.device_types) }}
     uses: ./.github/workflows/unit_tests_common.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: ${{ inputs.platform }}
+      source_ref: ${{ inputs.source_ref }}
+      test_retries: ${{ fromJson(needs.checkout_and_config.outputs.test_retries) }}
       device: ${{ matrix.device }}
       image: ${{ needs.checkout_and_config.outputs.image }}
       runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
@@ -201,14 +264,13 @@ jobs:
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
       setup_script: ${{ needs.checkout_and_config.outputs.setup_script }}
       test_groups: ${{ needs.checkout_and_config.outputs.unit_test_groups }}
+      expected_unit_groups: ${{ inputs.expected_unit_groups }}
+      plan_hash: ${{ inputs.plan_hash }}
       nproc_per_node: ${{ needs.checkout_and_config.outputs.unit_nproc_per_node }}
       pytest_extra_args: ${{ needs.checkout_and_config.outputs.unit_pytest_extra_args }}
       experimental_pytest_extra_args: ${{ needs.checkout_and_config.outputs.unit_experimental_pytest_extra_args }}
       ignored_tests: ${{ needs.checkout_and_config.outputs.ignored_tests }}
-      te_fl_prepare: ${{ inputs.te_fl_prepare }}
-      te_fl_cache_key: ${{ inputs.te_fl_cache_key }}
-      te_fl_cache_directory: ${{ needs.checkout_and_config.outputs.te_fl_cache_directory }}
-      te_fl_local_cache_key: ${{ inputs.te_fl_local_cache_key }}
+      te_fl_artifact: ${{ inputs.te_fl_artifact }}
       te_fl_runtime_environment: ${{ needs.checkout_and_config.outputs.te_fl_runtime_environment }}
       te_fl_install_pip_args: ${{ needs.checkout_and_config.outputs.te_fl_install_pip_args }}
       te_fl_runtime_pip_packages: ${{ needs.checkout_and_config.outputs.te_fl_runtime_pip_packages }}
@@ -220,11 +282,9 @@ jobs:
       !cancelled() &&
       inputs.run_functional_tests &&
       needs.checkout_and_config.result == 'success' &&
-      needs.lint.result == 'success' &&
       (!inputs.run_unit_tests || needs.unit_tests.result == 'success')
     needs:
       - checkout_and_config
-      - lint
       - unit_tests
     strategy:
       fail-fast: false
@@ -233,6 +293,8 @@ jobs:
     uses: ./.github/workflows/functional_tests_common.yml
     with:
       platform: ${{ inputs.platform }}
+      source_ref: ${{ inputs.source_ref }}
+      test_retries: ${{ fromJson(needs.checkout_and_config.outputs.test_retries) }}
       device: ${{ matrix.device }}
       image: ${{ needs.checkout_and_config.outputs.image }}
       runs_on: ${{ needs.checkout_and_config.outputs.runs_on }}
@@ -240,20 +302,16 @@ jobs:
       container_options: ${{ needs.checkout_and_config.outputs.container_options }}
       setup_script: ${{ needs.checkout_and_config.outputs.setup_script }}
       test_matrix: ${{ needs.checkout_and_config.outputs.train_test_matrix }}
-      te_fl_prepare: ${{ inputs.te_fl_prepare }}
-      te_fl_cache_key: ${{ inputs.te_fl_cache_key }}
-      te_fl_cache_directory: ${{ needs.checkout_and_config.outputs.te_fl_cache_directory }}
-      te_fl_local_cache_key: ${{ inputs.te_fl_local_cache_key }}
+      te_fl_artifact: ${{ inputs.te_fl_artifact }}
       te_fl_runtime_environment: ${{ needs.checkout_and_config.outputs.te_fl_runtime_environment }}
       te_fl_install_pip_args: ${{ needs.checkout_and_config.outputs.te_fl_install_pip_args }}
       te_fl_runtime_pip_packages: ${{ needs.checkout_and_config.outputs.te_fl_runtime_pip_packages }}
 
   all_tests_complete:
     name: all_tests_complete
-    if: always() && !cancelled()
+    if: always()
     needs:
       - checkout_and_config
-      - lint
       - unit_tests
       - functional_tests
     runs-on: ubuntu-latest
@@ -261,9 +319,7 @@ jobs:
       - name: Verify workflow status
         env:
           CHECKOUT_RESULT: ${{ needs.checkout_and_config.result }}
-          TE_FL_PREPARE: ${{ inputs.te_fl_prepare }}
-          TE_FL_CACHE_KEY: ${{ inputs.te_fl_cache_key }}
-          LINT_RESULT: ${{ needs.lint.result }}
+          TE_FL_ARTIFACT: ${{ inputs.te_fl_artifact }}
           RUN_UNIT_TESTS: ${{ inputs.run_unit_tests }}
           UNIT_RESULT: ${{ needs.unit_tests.result }}
           RUN_FUNCTIONAL_TESTS: ${{ inputs.run_functional_tests }}
@@ -277,15 +333,11 @@ jobs:
             failed=true
           fi
 
-          if [ "$TE_FL_PREPARE" = true ] && [ -z "$TE_FL_CACHE_KEY" ]; then
-            echo "::error::TE-FL preparation was requested but no cache key was provided" >&2
+          if [ -z "$TE_FL_ARTIFACT" ]; then
+            echo "::error::Required TE-FL wheel artifact is missing" >&2
             failed=true
           fi
 
-          if [ "$LINT_RESULT" != success ]; then
-            echo "::error::Lint failed: $LINT_RESULT" >&2
-            failed=true
-          fi
           if [ "$RUN_UNIT_TESTS" = true ] && [ "$UNIT_RESULT" != success ]; then
             echo "::error::Unit test gate failed: $UNIT_RESULT" >&2
             failed=true

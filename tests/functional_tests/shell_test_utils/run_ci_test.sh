@@ -29,6 +29,18 @@ for ARGUMENT in "$@"; do
 done
 set -x
 
+# Keep a separate report for each golden/checkpoint validation invocation.
+CI_PYTEST_INDEX=0
+ci_pytest() {
+    local report_args=()
+    if [ -n "${CI_JUNIT_DIRECTORY:-}" ]; then
+        CI_PYTEST_INDEX=$((CI_PYTEST_INDEX + 1))
+        mkdir -p "$CI_JUNIT_DIRECTORY"
+        report_args+=("--junitxml=$CI_JUNIT_DIRECTORY/functional-$CI_PYTEST_INDEX.xml")
+    fi
+    uv run --no-sync pytest "${report_args[@]}" "$@"
+}
+
 # Check that mandatory vars are set
 MANDATORY_VARS=(
     "TRAINING_SCRIPT_PATH"
@@ -435,12 +447,12 @@ for i in $(seq 1 $N_REPEAT); do
                 echo "Running checkpoint consistency check"
                 uv run --no-sync python $ROOT_DIR/tests/functional_tests/python_test_utils/test_optimizer_grads_match.py "${ITER_CHECKPOINT_DIRS[@]}"
             elif [[ "${BENCHMARK_TEST:-0}" == 1 ]]; then
-                uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_benchmark_pipeline.py \
+                ci_pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_benchmark_pipeline.py \
                     --golden-values-path $GOLDEN_VALUES_PATH \
                     --logs-dir ${OUTPUT_PATH}/logs \
                     --model-config-path ${TRAINING_PARAMS_PATH}
             else
-                uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_regular_pipeline.py \
+                ci_pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_regular_pipeline.py \
                     --golden-values-path $GOLDEN_VALUES_PATH \
                     --actual-values-path ${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH) \
                     --train-iters $TRAIN_ITERS \
@@ -455,7 +467,7 @@ for i in $(seq 1 $N_REPEAT); do
                         "${EXTRACT_ARGS[@]}"
                             
                     echo "Running pytest 1st vs 2nd run comparison"
-                    uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_resume_checkpoint_pipeline.py \
+                    ci_pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_pretraining_resume_checkpoint_pipeline.py \
                         --actual-values-first-run-path ${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH) \
                         --actual-values-second-run-path "${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH .json)_2nd.json" \
                         --train-iters $TRAIN_ITERS \
@@ -468,7 +480,7 @@ for i in $(seq 1 $N_REPEAT); do
         # For inference jobs
         if [[ "$MODE" == "inference" && ("$TRAINING_EXIT_CODE" -eq 0 || "$TEST_TYPE" == "release") ]]; then
             if [[ "$TEST_TYPE" == "frozen-start" ]]; then
-                uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_inference_regular_pipeline.py \
+                ci_pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_inference_regular_pipeline.py \
                     --golden-values-path $GOLDEN_VALUES_PATH \
                     --test-values-path $INFERENCE_OUTPUT_PATH \
                     --model-config-path ${TRAINING_PARAMS_PATH} \
@@ -486,7 +498,7 @@ for i in $(seq 1 $N_REPEAT); do
                     --train-iters $TRAIN_ITERS \
                     --output-path ${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH) \
                     "${EXTRACT_ARGS[@]}"
-                uv run --no-sync pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_grpo_training_loop.py \
+                ci_pytest -s -o log_cli=true --log-cli-level=info $ROOT_DIR/tests/functional_tests/python_test_utils/test_grpo_training_loop.py \
                     --golden-values-path $GOLDEN_VALUES_PATH \
                     --test-values-path ${OUTPUT_PATH}/$(basename $GOLDEN_VALUES_PATH) \
                     --model-config-path ${TRAINING_PARAMS_PATH} \

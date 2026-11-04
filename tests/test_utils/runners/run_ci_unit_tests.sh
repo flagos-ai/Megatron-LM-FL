@@ -131,14 +131,14 @@ printf ' %q' "${TEST_PATHS[@]}"
 printf '\n'
 
 COVERAGE_DIR="${CI_COVERAGE_DIRECTORY:-$GITHUB_WORKSPACE/coverage-report}"
-COVERAGE_TRAINING_SOURCE="$GITHUB_WORKSPACE/megatron/training"
 COVERAGE_PLUGIN_SOURCE="$GITHUB_WORKSPACE/megatron/plugin"
-COVERAGE_INCLUDE="megatron/training/*,megatron/plugin/*"
+COVERAGE_CORE_SOURCE="$GITHUB_WORKSPACE/megatron/core"
+COVERAGE_INCLUDE="megatron/plugin/*,megatron/core/*"
 COVERAGE_JSON="$COVERAGE_DIR/coverage-$CI_PLATFORM-$CI_DEVICE-$CI_TEST_GROUP.json"
 mkdir -p "$COVERAGE_DIR"
 printf '[run]\nparallel = true\ndynamic_context = test_function\nsource =\n    %s\n    %s\ndata_file = %s/.coverage\n' \
-  "$COVERAGE_TRAINING_SOURCE" \
   "$COVERAGE_PLUGIN_SOURCE" \
+  "$COVERAGE_CORE_SOURCE" \
   "$COVERAGE_DIR" \
   > "$COVERAGE_DIR/.coveragerc"
 
@@ -157,24 +157,27 @@ PYTEST_ARGS+=(
   addopts="--durations=15 -s -rA"
 )
 
+export CI_COVERAGE_DIRECTORY="$COVERAGE_DIR"
+export CI_JUNIT_DIRECTORY="${CI_JUNIT_DIRECTORY:-$COVERAGE_DIR/junit}"
+mkdir -p "$CI_JUNIT_DIRECTORY"
+
 run_pytest() {
   "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node="$CI_NPROC_PER_NODE" \
     --master_port="${MASTER_PORT:-29500}" \
-    -m coverage run \
-    --rcfile="$COVERAGE_DIR/.coveragerc" \
+    "$GITHUB_WORKSPACE/.github/scripts/run_unit_groups.py" pytest-worker \
     "$PYTEST_BIN" \
     "${PYTEST_ARGS[@]}" \
     "$@"
 }
 
 set +e
-run_pytest "${EXTRA_ARGS[@]}"
+CI_JUNIT_PHASE=normal run_pytest "${EXTRA_ARGS[@]}"
 normal_exit_code=$?
 
 experimental_exit_code=0
 if [ "${#EXPERIMENTAL_ARGS[@]}" -gt 0 ]; then
   echo "Running experimental unit tests: $CI_TEST_GROUP"
-  run_pytest "${EXPERIMENTAL_ARGS[@]}"
+  CI_JUNIT_PHASE=experimental run_pytest "${EXPERIMENTAL_ARGS[@]}"
   experimental_exit_code=$?
 fi
 set -e

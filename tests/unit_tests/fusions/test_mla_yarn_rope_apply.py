@@ -13,7 +13,6 @@ from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_torch_min_version
 from tests.unit_tests.test_utilities import Utils
 
-
 try:
     from megatron.core.fusions.fused_mla_yarn_rope_apply import (
         fused_mla_rope_inplace,
@@ -365,3 +364,43 @@ class TestApplyRotaryPosEmbMlaFusionConflict:
             call_kw = unfused_spy.call_args[1]
             assert call_kw["mla_rotary_interleaved"] is True
         assert out.shape == t.shape
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+@pytest.mark.parametrize("inverse", [False, True])
+def test_out_of_place_rope_preserves_saved_output(inverse):
+    """A retained upstream output must survive RoPE until its backward uses it."""
+    from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_out_of_place
+
+    class RetainOutput(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, inputs):
+            output = inputs.clone()
+            ctx.save_for_backward(output)
+            return output
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            (saved_output,) = ctx.saved_tensors
+            return grad_output * saved_output
+
+    torch.manual_seed(42)
+    inputs = torch.randn(16, 1, 2, 64, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    retained = RetainOutput.apply(inputs)
+    original = retained.detach().clone()
+    freqs = torch.randn(16, 1, 1, 32, device="cuda")
+    cos, sin = freqs.cos().to(inputs.dtype), freqs.sin().to(inputs.dtype)
+    output = fused_mla_rope_out_of_place(
+        retained, cos, sin, 32, 32, inverse=inverse, remove_interleaving=True
+    )
+    torch.testing.assert_close(retained, original, rtol=0, atol=0)
+    reference_input = original.clone().requires_grad_()
+    reference = fused_mla_rope_inplace(
+        reference_input.clone(), cos, sin, 32, 32, inverse=inverse, remove_interleaving=True
+    )
+    torch.testing.assert_close(output, reference, rtol=0, atol=0)
+    grad = torch.randn_like(output)
+    # The existing fused backward rotates its incoming gradient in place.
+    output.backward(grad.clone())
+    reference.backward(grad.clone())
+    torch.testing.assert_close(inputs.grad, reference_input.grad * original, rtol=0, atol=0)

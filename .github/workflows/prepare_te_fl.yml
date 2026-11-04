@@ -3,13 +3,16 @@ name: Prepare TE-FL Wheel
 on:
   workflow_call:
     inputs:
+      source_ref:
+        required: false
+        type: string
+        default: ''
+        description: Optional immutable Megatron source SHA for requested tests
       platform: {required: true, type: string}
       image_override: {required: false, type: string, default: ''}
     outputs:
-      cache_key:
-        value: ${{ jobs.prepare.outputs.cache_key }}
-      local_cache_key:
-        value: ${{ jobs.prepare.outputs.local_cache_key }}
+      wheel_artifact:
+        value: ${{ jobs.prepare.outputs.wheel_artifact }}
 
 jobs:
   resolve:
@@ -23,17 +26,19 @@ jobs:
       setup_script: ${{ steps.config.outputs.setup_script }}
       nproc_per_node: ${{ steps.config.outputs.nproc_per_node }}
       build_environment: ${{ steps.config.outputs.build_environment }}
-      cache_directory: ${{ steps.config.outputs.cache_directory }}
       skip_prepare: ${{ steps.config.outputs.skip_prepare }}
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
 
       - name: Install yq
         run: |
           set -euo pipefail
           if ! command -v yq >/dev/null 2>&1; then
-            sudo wget -qO /usr/local/bin/yq \
+            sudo wget --tries=2 --timeout=60 -qO /usr/local/bin/yq \
               https://github.com/mikefarah/yq/releases/download/v4.45.1/yq_linux_amd64
             sudo chmod 0755 /usr/local/bin/yq
           fi
@@ -65,17 +70,6 @@ jobs:
           prepare=$(yq -r '.te_fl.prepare // false' "$config_file")
           build_mode=$(yq -r '.te_fl.build_mode // ""' "$config_file")
           build_environment=$(yq -o=json -I=0 '.te_fl.build_environment // {}' "$config_file")
-          cache_directory=$(yq -r '.te_fl.cache_directory // ""' "$config_file")
-
-          if [ -n "$cache_directory" ]; then
-            if ! [[ "$cache_directory" =~ ^/[a-zA-Z0-9_/-]+$ ]] || [[ "$cache_directory" = / || "$cache_directory" = */ ]]; then
-              echo "::error::te_fl.cache_directory must be a dedicated absolute path without a trailing slash" >&2
-              exit 1
-            fi
-            volumes=$(CACHE_DIRECTORY="$cache_directory" yq -o=json -I=0 \
-              '(.container_volumes // []) + [strenv(CACHE_DIRECTORY) + ":" + strenv(CACHE_DIRECTORY)]' "$config_file")
-          fi
-          echo "cache_directory=$cache_directory" >> "$GITHUB_OUTPUT"
 
           if [ -z "$image" ]; then
             echo "::error::ci_image is required in $config_file" >&2
@@ -143,14 +137,15 @@ jobs:
       volumes: ${{ fromJson(needs.resolve.outputs.container_volumes) }}
       options: ${{ needs.resolve.outputs.container_options }}
     outputs:
-      cache_key: ${{ steps.cache_key.outputs.key }}
-      local_cache_key: ${{ steps.cache_key.outputs.local_key }}
+      wheel_artifact: te-fl-wheel-${{ inputs.platform }}-${{ github.run_attempt }}
     steps:
       - name: Checkout Megatron source (attempt 1)
         id: checkout_megatron_1
         continue-on-error: true
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Checkout Megatron source (attempt 2)
@@ -159,6 +154,8 @@ jobs:
         continue-on-error: true
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Checkout Megatron source (attempt 3)
@@ -166,6 +163,8 @@ jobs:
         if: steps.checkout_megatron_2.outcome == 'failure'
         uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.source_ref || github.sha }}
+          persist-credentials: false
           fetch-depth: 1
 
       - name: Checkout TransformerEngine-FL (attempt 1)
@@ -207,7 +206,6 @@ jobs:
         env:
           PLATFORM: ${{ inputs.platform }}
           IMAGE: ${{ needs.resolve.outputs.image }}
-          CACHE_DIRECTORY: ${{ needs.resolve.outputs.cache_directory }}
         run: |
           set -euo pipefail
           commit=$(git -C "$GITHUB_WORKSPACE/te-fl" rev-parse HEAD)
@@ -220,10 +218,6 @@ jobs:
           key="te-fl-${PLATFORM}-${commit}-${image_key}"
           echo "key=$key" >> "$GITHUB_OUTPUT"
           echo "TE-FL wheel cache key: $key"
-          if [ -n "$CACHE_DIRECTORY" ]; then
-            identity=$(printf '%s\n' "$GITHUB_REPOSITORY" "$GITHUB_REF" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$key" | sha256sum | awk '{print $1}')
-            echo "local_key=te-fl-backup-$identity" >> "$GITHUB_OUTPUT"
-          fi
 
       - name: Restore TE-FL wheel cache
         id: cache
@@ -284,12 +278,10 @@ jobs:
           path: te-fl-wheel
           key: ${{ steps.cache_key.outputs.key }}
 
-      - name: Publish local TE-FL wheel fallback
-        if: needs.resolve.outputs.cache_directory != ''
-        continue-on-error: true
-        timeout-minutes: 5
-        env:
-          TE_FL_CACHE_DIRECTORY: ${{ needs.resolve.outputs.cache_directory }}
-          TE_FL_CACHE_KEY: ${{ steps.cache_key.outputs.local_key }}
-          TE_FL_WHEEL_DIR: ${{ github.workspace }}/te-fl-wheel
-        run: python3 .github/scripts/te_fl_local_cache.py publish
+      - name: Upload prepared TE-FL wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: te-fl-wheel-${{ inputs.platform }}-${{ github.run_attempt }}
+          path: te-fl-wheel/*.whl
+          if-no-files-found: error
+          retention-days: 7
