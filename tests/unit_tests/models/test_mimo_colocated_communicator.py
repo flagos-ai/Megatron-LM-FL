@@ -41,15 +41,11 @@ def make_comm(*args, **kwargs):
 
 def destroy_all_grids():
     if dist.is_initialized():
-        # Device collectives can outlive the Python call, and a rank that failed
-        # inside the test body would otherwise reach the next test case while its
-        # peers are still blocked in this one's traffic. A rank that already died
-        # makes the barrier raise, in which case the cleanup below still has to run.
-        try:
-            get_platform().synchronize()
-            dist.barrier()
-        except Exception:
-            pass
+        # Drain the device before dropping the process groups: a queued collective
+        # that outlives the Python call would otherwise reference a freed group.
+        # Kept rank-local on purpose - see test_mimo_1f1b_schedule.destroy_all_grids
+        # for why a WORLD barrier here deadlocks on multi-grid suites.
+        get_platform().synchronize()
     # Destroy communicators first so their NCCL subgroups are freed before we
     # tear down the parent grids. NCCL caps concurrent communicators at ~500;
     # leaked PGs from per-test fixtures blow that budget quickly.
@@ -59,12 +55,6 @@ def destroy_all_grids():
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
-    if dist.is_initialized():
-        # Do not let fast ranks create the next test's groups during teardown.
-        try:
-            dist.barrier()
-        except Exception:
-            pass
 
 
 # ── Test 1: Rank mappings ──────────────────────────────────────────────────────

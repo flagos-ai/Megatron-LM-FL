@@ -109,15 +109,13 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
 def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
     if dist.is_initialized():
-        # Device collectives can outlive the Python call, and a rank that failed
-        # inside the test body would otherwise reach the next test case while its
-        # peers are still blocked in this one's traffic. A rank that already died
-        # makes the barrier raise, in which case the cleanup below still has to run.
-        try:
-            get_platform().synchronize()
-            dist.barrier()
-        except Exception:
-            pass
+        # Drain the device before dropping the process groups: a queued collective
+        # that outlives the Python call would otherwise reference a freed group.
+        # This is rank-local on purpose. A WORLD barrier here deadlocks instead:
+        # the ranks of a MIMO grid finish a test case at different times, so the
+        # ones that arrive first would block while their peers are still issuing
+        # p2p traffic to them from inside the test body.
+        get_platform().synchronize()
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
@@ -129,12 +127,6 @@ def destroy_all_grids():
                 dist.destroy_process_group(group)
     _embedding_pg_cache.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
-    if dist.is_initialized():
-        # Do not let fast ranks create the next test's groups during teardown.
-        try:
-            dist.barrier()
-        except Exception:
-            pass
 
 
 def get_pg_collection(grid):
