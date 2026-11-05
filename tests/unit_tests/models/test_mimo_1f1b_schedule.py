@@ -38,7 +38,10 @@ from megatron.core.process_groups_config import (
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
+
+cur_platform = get_platform()
 
 try:
     from megatron.core.extensions.transformer_engine import (
@@ -144,22 +147,21 @@ def create_all_embedding_groups(grids):
         grids: List of all HyperCommGrids that need embedding groups.
     """
     for grid in grids:
-        pp_group = grid.get_pg("pp")
-        if not pp_group:
-            continue
+        for pp_group_ranks in grid.get_rank_enum("pp"):
+            # get_rank_enum does not promise ascending order, so sort before
+            # picking the first and last pipeline stage.
+            pp_ranks = sorted(pp_group_ranks)
+            cache_key = tuple(pp_ranks)
 
-        pp_ranks = sorted(dist.get_process_group_ranks(pp_group))
-        cache_key = tuple(pp_ranks)
-
-        if cache_key not in _embedding_pg_cache:
-            pos_embd_ranks = [pp_ranks[0]]
-            embd_ranks = [pp_ranks[0]]
-            if pp_ranks[-1] != pp_ranks[0]:
-                embd_ranks.append(pp_ranks[-1])
-            _embedding_pg_cache[cache_key] = (
-                dist.new_group(ranks=pos_embd_ranks),
-                dist.new_group(ranks=embd_ranks),
-            )
+            if cache_key not in _embedding_pg_cache:
+                pos_embd_ranks = [pp_ranks[0]]
+                embd_ranks = [pp_ranks[0]]
+                if pp_ranks[-1] != pp_ranks[0]:
+                    embd_ranks.append(pp_ranks[-1])
+                _embedding_pg_cache[cache_key] = (
+                    dist.new_group(ranks=pos_embd_ranks),
+                    dist.new_group(ranks=embd_ranks),
+                )
 
 
 def add_embedding_groups(pg_collection, is_language_model=False):
@@ -760,6 +762,17 @@ class TestMimo1F1BSchedule:
         Utils.destroy_model_parallel()
 
     def teardown_method(self):
+        # Synchronize before dropping the process groups: without it a rank that
+        # failed inside the test body tears down and enters the next test case
+        # while the remaining ranks are still blocked in this one's p2p traffic.
+        # A rank that already died makes the barrier itself raise, in which case
+        # the local cleanup below still has to run.
+        if dist.is_available() and dist.is_initialized():
+            try:
+                cur_platform.synchronize()
+                dist.barrier()
+            except Exception:
+                pass
         destroy_all_grids()
 
     def test_baseline_2gpu(self):
