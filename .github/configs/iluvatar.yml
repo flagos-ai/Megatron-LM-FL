@@ -77,6 +77,18 @@ test_matrix:
       # Use the same function boundaries as Hygon/MetaX/Ascend/MUSA/KunLunXin.
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      # FlagGems' Triton attention backward kernel fails to compile under the
+      # Triton 3.2.0 in this image: tl.static_assert raises "Did you forget to
+      # add @triton.jit ? (_builder argument must be provided outside of JIT
+      # functions.)" from flag_gems/ops/attention.py. Only the two 8-GPU cases
+      # reach that kernel; ranks 6-7 (the LLM grid's last PP stage) die while
+      # the others stay in the test body's collectives, so the group hangs.
+      # Reproduces identically at base 0c9b09e59, and both cases pass on CUDA
+      # A100 (run 41931866368). The 2-GPU cases are world-size gated and the
+      # remaining modules in this directory are unaffected, so quarantine the
+      # two cases only. Hand-off: FlagGems / Iluvatar Triton backend.
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
       # Mamba kernels are absent; HybridMoE/MambaMoE also fail the NVIDIA
       # compute-capability gate. Same model boundaries as CUDA/Hygon/MUSA.
       - tests/unit_tests/models/test_hybrid_model.py
@@ -99,10 +111,15 @@ test_matrix:
       # Captured distributed-resume-stacks: rank 0 register_mem_pool, others
       # teardown barrier. Preserve the non-manual-registration parameters.
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestFullyShardedDataParallel::test_fsdp_user_buffer_registration[8-True-True-True]
-      # Dependency recheck: rank 0 all_gather_object during the second local
-      # save, ranks 1-7 teardown barrier; 1800s timeout. Quarantine this exact
-      # case pending diagnosis, not all checkpoint tests or the nvrx import.
+      # Upstream test_local.py byte-compares pickle streams with filecmp.cmp. The
+      # intervening load deepcopies param_groups, so the interned keys min_lr/lr/
+      # weight_decay lose their pickle memo references and are re-emitted as
+      # literals: +35 raw bytes, +64 after zip, while the deserialized objects and
+      # all 58 sharded tensors stay identical. Ranks 1-7 fail the comparison here.
+      # Both parameters pass on CUDA A100 (run 41931866368); that platform
+      # asymmetry is still unexplained, so quarantine these two parameters only.
       - tests/unit_tests/dist_checkpointing/test_local.py::TestLocalCheckpointing::test_basic_save_load_scenarios[atomic-False-True-2-4]
+      - tests/unit_tests/dist_checkpointing/test_local.py::TestLocalCheckpointing::test_basic_save_load_scenarios[fully_parallel-False-True-1-1]
       # TEScalingMode duplicate registration in the five recorded FP8 cases.
       # Other platforms exclude test_fp8.py; retain its unaffected parameters.
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_simple_broadcast[0-fp8]
@@ -110,37 +127,6 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_fp8_save_load[True-src_tp_pp0-dest_tp_pp0-broadcast]
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_fp8_save_load[True-src_tp_pp1-dest_tp_pp1-gather_rounds]
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_fp8_save_load[False-src_tp_pp2-dest_tp_pp2-None]
-      # Torch LayerNorm rejects sequence_parallel in these 28 parameters.
-      # Keep Muon-dependent cases: Emerging Optimizers was installed, so its
-      # earlier ImportError is not a reason to exclude the entire optimizer suite.
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_layer_wise_optimizer_with_moe[2-1-2]
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_layer_wise_optimizer_with_moe[2-1-4]
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_layer_wise_optimizer_with_moe[2-2-2]
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py::TestLayerWiseOptimizer::test_layer_wise_optimizer_with_moe[4-1-2]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-False-False-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-False-False-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-False-True-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-False-True-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-True-False-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-True-False-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-True-True-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp0-dest_tp_pp_exp0-False-True-True-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-False-False-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-False-False-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-False-True-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-False-True-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-True-False-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-True-False-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-True-True-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp1-dest_tp_pp_exp1-False-True-True-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-False-False-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-False-False-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-False-True-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-False-True-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-True-False-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-True-False-True]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-True-True-False]
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py::TestOptimizerResharding::test_chained_optimizer_resharding[src_tp_pp_exp3-dest_tp_pp_exp3-False-True-True-True]
   functional:
     train:
       - model: gpt

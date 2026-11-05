@@ -38,6 +38,7 @@ from megatron.core.process_groups_config import (
 from megatron.core.transformer.mlp import MLP, MLPSubmodules
 from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 try:
@@ -107,6 +108,16 @@ def create_hypercomm_grid(offset=0, tp=1, cp=1, pp=1, dp=1):
 
 def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
+    if dist.is_initialized():
+        # Device collectives can outlive the Python call, and a rank that failed
+        # inside the test body would otherwise reach the next test case while its
+        # peers are still blocked in this one's traffic. A rank that already died
+        # makes the barrier raise, in which case the cleanup below still has to run.
+        try:
+            get_platform().synchronize()
+            dist.barrier()
+        except Exception:
+            pass
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
@@ -118,6 +129,12 @@ def destroy_all_grids():
                 dist.destroy_process_group(group)
     _embedding_pg_cache.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
+    if dist.is_initialized():
+        # Do not let fast ranks create the next test's groups during teardown.
+        try:
+            dist.barrier()
+        except Exception:
+            pass
 
 
 def get_pg_collection(grid):
@@ -144,22 +161,21 @@ def create_all_embedding_groups(grids):
         grids: List of all HyperCommGrids that need embedding groups.
     """
     for grid in grids:
-        pp_group = grid.get_pg("pp")
-        if not pp_group:
-            continue
+        for pp_group_ranks in grid.get_rank_enum("pp"):
+            # get_rank_enum does not promise ascending order, so sort before
+            # picking the first and last pipeline stage.
+            pp_ranks = sorted(pp_group_ranks)
+            cache_key = tuple(pp_ranks)
 
-        pp_ranks = sorted(dist.get_process_group_ranks(pp_group))
-        cache_key = tuple(pp_ranks)
-
-        if cache_key not in _embedding_pg_cache:
-            pos_embd_ranks = [pp_ranks[0]]
-            embd_ranks = [pp_ranks[0]]
-            if pp_ranks[-1] != pp_ranks[0]:
-                embd_ranks.append(pp_ranks[-1])
-            _embedding_pg_cache[cache_key] = (
-                dist.new_group(ranks=pos_embd_ranks),
-                dist.new_group(ranks=embd_ranks),
-            )
+            if cache_key not in _embedding_pg_cache:
+                pos_embd_ranks = [pp_ranks[0]]
+                embd_ranks = [pp_ranks[0]]
+                if pp_ranks[-1] != pp_ranks[0]:
+                    embd_ranks.append(pp_ranks[-1])
+                _embedding_pg_cache[cache_key] = (
+                    dist.new_group(ranks=pos_embd_ranks),
+                    dist.new_group(ranks=embd_ranks),
+                )
 
 
 def add_embedding_groups(pg_collection, is_language_model=False):

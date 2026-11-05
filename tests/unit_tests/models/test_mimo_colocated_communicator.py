@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from megatron.core.hyper_comm_grid import HyperCommGrid
 from megatron.core.models.mimo.comm.colocated_communicator import ColocatedBridgeCommunicator
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
@@ -39,6 +40,16 @@ def make_comm(*args, **kwargs):
 
 
 def destroy_all_grids():
+    if dist.is_initialized():
+        # Device collectives can outlive the Python call, and a rank that failed
+        # inside the test body would otherwise reach the next test case while its
+        # peers are still blocked in this one's traffic. A rank that already died
+        # makes the barrier raise, in which case the cleanup below still has to run.
+        try:
+            get_platform().synchronize()
+            dist.barrier()
+        except Exception:
+            pass
     # Destroy communicators first so their NCCL subgroups are freed before we
     # tear down the parent grids. NCCL caps concurrent communicators at ~500;
     # leaked PGs from per-test fixtures blow that budget quickly.
@@ -48,6 +59,12 @@ def destroy_all_grids():
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
+    if dist.is_initialized():
+        # Do not let fast ranks create the next test's groups during teardown.
+        try:
+            dist.barrier()
+        except Exception:
+            pass
 
 
 # ── Test 1: Rank mappings ──────────────────────────────────────────────────────
