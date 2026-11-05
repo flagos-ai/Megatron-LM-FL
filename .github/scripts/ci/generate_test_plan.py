@@ -199,24 +199,29 @@ def build_plan(
                     group_name = group["name"]
                     if group_name in required:
                         continue
-                    paths = sorted({
-                        path for path in changed
-                        if path.startswith("tests/unit_tests/")
-                        and pathlib.PurePosixPath(path).match("test_*.py")
-                        and catalog.matches_all(path) == [group_name]
-                        and (source_root / path).is_file()
-                    })
+                    paths = sorted(
+                        {
+                            path
+                            for path in changed
+                            if path.startswith("tests/unit_tests/")
+                            and pathlib.PurePosixPath(path).match("test_*.py")
+                            and catalog.matches_all(path) == [group_name]
+                            and (source_root / path).is_file()
+                        }
+                    )
                     if not paths:
                         continue
                     execution_name = f"planned-{group_name}"
                     if execution_name in platform.groups:
                         raise ValueError(f"Reserved temporary execution group: {execution_name}")
                     planned_execution.append({"name": execution_name, "paths": paths})
-                    materialized["selected_groups"].append({
-                        **group,
-                        "execution_group": execution_name,
-                        "reason": "Changed planned test files execute for this PR only",
-                    })
+                    materialized["selected_groups"].append(
+                        {
+                            **group,
+                            "execution_group": execution_name,
+                            "reason": "Changed planned test files execute for this PR only",
+                        }
+                    )
                 materialized["selected_groups"].sort(key=lambda group: group["name"])
             platform_plans.append(
                 {
@@ -431,8 +436,14 @@ def write_summary(path: pathlib.Path, plan: dict[str, Any]) -> None:
                     f"{_escape(detail['reason'])}"
                 )
         if any(gap["status"] == "planned" for gap in plan["direct_gaps"]):
-            lines.extend(["", "Directly affected planned groups were not executed. Existing configured tests continue; "
-                "these coverage gaps are advisory and do not fail CI.", ""])
+            lines.extend(
+                [
+                    "",
+                    "Directly affected planned groups were not executed. Existing configured tests continue; "
+                    "these coverage gaps are advisory and do not fail CI.",
+                    "",
+                ]
+            )
         lines.append("")
     if global_groups["route_conflicts"]:
         lines.extend(["**Route conflicts (blocked):**", ""])

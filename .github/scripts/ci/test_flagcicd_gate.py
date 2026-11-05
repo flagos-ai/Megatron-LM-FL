@@ -90,18 +90,26 @@ class GateTests(unittest.TestCase):
         platform["config_identity"]["planned_execution"] = [
             {"name": "planned-inference", "paths": ["tests/unit_tests/inference/test_new.py"]}
         ]
-        evidence = {"schema_version": 1, "reports": {
-            name: {"tests": 1, "passed": 1, "skipped": 0, "failures": 0, "errors": 0}
-            for name in platform["junit_reports"]
-        }}
+        evidence = {
+            "schema_version": 1,
+            "reports": {
+                name: {"tests": 1, "passed": 1, "skipped": 0, "failures": 0, "errors": 0}
+                for name in platform["junit_reports"]
+            },
+        }
         report = {
-            "plan_hash": plan["plan_hash"], "platform": "cuda", "device": "a100",
+            "plan_hash": plan["plan_hash"],
+            "platform": "cuda",
+            "device": "a100",
             "executed_groups": ["planned-inference"],
             "groups": [{"name": "planned-inference", "exit_code": 0, "evidence": evidence}],
         }
         summary = flagcicd_gate.planned_onboarding_summary(plan, [report])
         self.assertIn("Pending permanent onboarding", summary)
-        self.assertIn("| `inference` | `tests/unit_tests/inference/test_new.py` | `cuda` | `a100` | Passed |", summary)
+        self.assertIn(
+            "| `inference` | `tests/unit_tests/inference/test_new.py` | `cuda` | `a100` | Passed |",
+            summary,
+        )
         self.assertIn("Missing result", flagcicd_gate.planned_onboarding_summary(plan, []))
         report["groups"][0]["exit_code"] = 1
         self.assertIn("| Failed |", flagcicd_gate.planned_onboarding_summary(plan, [report]))
@@ -110,10 +118,16 @@ class GateTests(unittest.TestCase):
             counts.update(passed=0, skipped=1)
         self.assertIn("all-skipped", flagcicd_gate.planned_onboarding_summary(plan, [report]))
         report["plan_hash"] = "wrong"
-        self.assertIn("plan hash mismatch", flagcicd_gate.planned_onboarding_summary(plan, [report]))
-        self.assertIn("duplicate results", flagcicd_gate.planned_onboarding_summary(plan, [report, report]))
+        self.assertIn(
+            "plan hash mismatch", flagcicd_gate.planned_onboarding_summary(plan, [report])
+        )
+        self.assertIn(
+            "duplicate results", flagcicd_gate.planned_onboarding_summary(plan, [report, report])
+        )
         platform["devices"].append("h100")
-        self.assertIn("| `h100` | Missing result |", flagcicd_gate.planned_onboarding_summary(plan, [report]))
+        self.assertIn(
+            "| `h100` | Missing result |", flagcicd_gate.planned_onboarding_summary(plan, [report])
+        )
         self.assertEqual(flagcicd_gate.planned_onboarding_summary(self.plan, []), "")
 
     def test_plan_policy_and_hash_are_checked(self) -> None:

@@ -458,7 +458,8 @@ class SelectionTests(unittest.TestCase):
         platform = platform_plan(plan, "cuda")
         self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
         self.assertEqual(
-            execution_names(plan, "cuda"), set(platform["configured_groups"]) | {"planned-inference"}
+            execution_names(plan, "cuda"),
+            set(platform["configured_groups"]) | {"planned-inference"},
         )
         self.assertEqual(plan["direct_gaps"], [])
 
@@ -475,15 +476,21 @@ class SelectionTests(unittest.TestCase):
         )
         plan = build_plan(
             ["tests/unit_tests/inference/test_common_inference_params.py"],
-            platforms=["cuda"], units=units,
+            platforms=["cuda"],
+            units=units,
         )
         self.assertEqual(plan["plan_status"], "partial")
         self.assertIn("planned-inference", execution_names(plan, "cuda"))
         self.assertEqual(plan["direct_gaps"], [])
-        self.assertEqual(plan["platforms"][0]["config_identity"]["planned_execution"], [
-            {"name": "planned-inference",
-             "paths": ["tests/unit_tests/inference/test_common_inference_params.py"]}
-        ])
+        self.assertEqual(
+            plan["platforms"][0]["config_identity"]["planned_execution"],
+            [
+                {
+                    "name": "planned-inference",
+                    "paths": ["tests/unit_tests/inference/test_common_inference_params.py"],
+                }
+            ],
+        )
 
     def test_dsa_kernel_tests_are_executable_on_cuda(self):
         self.assertEqual(
@@ -499,13 +506,15 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["plan_status"], "ready")
 
     def test_newly_onboarded_groups_execute_for_mixed_pr_changes(self):
-        plan = build_plan([
-            "tests/unit_tests/conftest.py",
-            "megatron/core/optimizer/distrib_optimizer.py",
-            "megatron/core/extensions/transformer_engine.py",
-            "tests/unit_tests/a2a_overlap/test_schedule_dualpipev.py",
-            "tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py",
-        ])
+        plan = build_plan(
+            [
+                "tests/unit_tests/conftest.py",
+                "megatron/core/optimizer/distrib_optimizer.py",
+                "megatron/core/extensions/transformer_engine.py",
+                "tests/unit_tests/a2a_overlap/test_schedule_dualpipev.py",
+                "tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py",
+            ]
+        )
         self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual(plan["direct_gaps"], [])
         self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
@@ -592,9 +601,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["direct_groups"], [])
 
     def test_direct_planned_group_is_advisory(self):
-        plan = build_plan(
-            ["megatron/core/inference/engine.py"], platforms=["cuda"]
-        )
+        plan = build_plan(["megatron/core/inference/engine.py"], platforms=["cuda"])
         self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual(plan["direct_groups"], ["inference"])
         self.assertEqual(plan["global_groups"]["direct_groups"], ["inference"])
@@ -633,9 +640,7 @@ class SelectionTests(unittest.TestCase):
         plans = {
             "ready": build_plan(["megatron/core/config.py"], platforms=["cuda"]),
             "partial": build_plan([".github/workflows/ci.yml"], platforms=["cuda"]),
-            "blocked": build_plan(
-                ["unknown_file.py"], platforms=["cuda"]
-            ),
+            "blocked": build_plan(["unknown_file.py"], platforms=["cuda"]),
         }
         for status, plan in plans.items():
             with self.subTest(status=status), tempfile.TemporaryDirectory() as directory:

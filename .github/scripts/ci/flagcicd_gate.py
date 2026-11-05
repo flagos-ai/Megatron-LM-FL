@@ -216,27 +216,39 @@ def verify_attestations(plan: dict[str, Any], attestations: Iterable[dict[str, A
     return errors
 
 
-
 def planned_onboarding_summary(plan: dict[str, Any], attestations: list[dict[str, Any]]) -> str:
     """Report temporary groups and per-device results for permanent onboarding."""
+
     def cell(value: str) -> str:
-        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace(
-            "|", "&#124;"
-        ).replace("\n", " ")
+        return (
+            value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("|", "&#124;")
+            .replace("\n", " ")
+        )
 
     rows = []
     for platform in plan.get("platforms", []):
         for group in platform.get("config_identity", {}).get("planned_execution", []):
             for device in platform["devices"]:
-                matches = [item for item in attestations if isinstance(item, dict)
-                           and item.get("platform") == platform["name"] and item.get("device") == device]
+                matches = [
+                    item
+                    for item in attestations
+                    if isinstance(item, dict)
+                    and item.get("platform") == platform["name"]
+                    and item.get("device") == device
+                ]
                 result = "Missing result"
                 if len(matches) > 1:
                     result = "Invalid evidence (duplicate results)"
                 elif matches:
                     report = matches[0]
-                    details = [item for item in report.get("groups", []) if isinstance(item, dict)
-                               and item.get("name") == group["name"]]
+                    details = [
+                        item
+                        for item in report.get("groups", [])
+                        if isinstance(item, dict) and item.get("name") == group["name"]
+                    ]
                     if report.get("plan_hash") != plan["plan_hash"]:
                         result = "Invalid evidence (plan hash mismatch)"
                     elif len(details) > 1:
@@ -247,25 +259,36 @@ def planned_onboarding_summary(plan: dict[str, Any], attestations: list[dict[str
                             result = "Failed"
                         elif group["name"] not in report.get("executed_groups", []):
                             result = "Invalid evidence (group not executed)"
-                        elif flagcicd_evidence.validate(detail.get("evidence"), platform["junit_reports"]):
+                        elif flagcicd_evidence.validate(
+                            detail.get("evidence"), platform["junit_reports"]
+                        ):
                             result = "Failed (invalid, incomplete, or all-skipped test evidence)"
                         else:
                             result = "Passed"
                 files = "<br>".join(f"`{cell(path)}`" for path in group["paths"])
                 logical_name = group["name"].removeprefix("planned-")
-                rows.append(f"| `{cell(logical_name)}` | {files} | `{cell(platform['name'])}` "
-                            f"| `{cell(device)}` | {result} |")
+                rows.append(
+                    f"| `{cell(logical_name)}` | {files} | `{cell(platform['name'])}` "
+                    f"| `{cell(device)}` | {result} |"
+                )
     if not rows:
         return ""
-    return "\n".join([
-        "### Pending permanent onboarding", "",
-        "Temporary planned tests below need CI maintainer review for permanent onboarding. "
-        "Passing these files does not activate the group or validate the full suite.", "",
-        "| Group | Changed test files | Platform | Device | Execution result |",
-        "| --- | --- | --- | --- | --- |", *rows, "",
-        "Next: validate the full group and runtime requirements, add permanent platform "
-        "mappings, then change the catalog status to `active`.", "",
-    ])
+    return "\n".join(
+        [
+            "### Pending permanent onboarding",
+            "",
+            "Temporary planned tests below need CI maintainer review for permanent onboarding. "
+            "Passing these files does not activate the group or validate the full suite.",
+            "",
+            "| Group | Changed test files | Platform | Device | Execution result |",
+            "| --- | --- | --- | --- | --- |",
+            *rows,
+            "",
+            "Next: validate the full group and runtime requirements, add permanent platform "
+            "mappings, then change the catalog status to `active`.",
+            "",
+        ]
+    )
 
 
 def main() -> int:
