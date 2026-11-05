@@ -96,23 +96,38 @@ def get_pg_collection(grid):
 _embedding_pg_cache: dict = {}
 
 
+def create_all_embedding_groups(grid):
+    """Create the embedding PGs derived from a grid's PP groups.
+
+    dist.new_group is a collective — ALL ranks must call it, even ranks that do
+    not belong to the grid. Deriving the membership from grid.get_rank_enum
+    instead of the caller's own PP subgroup keeps the call arguments and their
+    order identical on every rank, which asymmetric calls would deadlock on.
+    """
+    for pp_group_ranks in grid.get_rank_enum("pp"):
+        # get_rank_enum does not promise ascending order, so sort before picking
+        # the first and last pipeline stage.
+        pp_ranks = sorted(pp_group_ranks)
+        cache_key = tuple(pp_ranks)
+
+        if cache_key not in _embedding_pg_cache:
+            pos_embd_ranks = [pp_ranks[0]]
+            embd_ranks = [pp_ranks[0]]
+            if pp_ranks[-1] != pp_ranks[0]:
+                embd_ranks.append(pp_ranks[-1])
+            _embedding_pg_cache[cache_key] = (
+                dist.new_group(ranks=pos_embd_ranks),
+                dist.new_group(ranks=embd_ranks),
+            )
+
+
 def add_embedding_groups(pg_collection):
-    """Add embedding groups to process group collection."""
+    """Attach the cached embedding groups. Call create_all_embedding_groups first."""
     if not pg_collection.pp:
         return pg_collection
 
     pp_ranks = sorted(dist.get_process_group_ranks(pg_collection.pp))
     cache_key = tuple(pp_ranks)
-
-    if cache_key not in _embedding_pg_cache:
-        pos_embd_ranks = [pp_ranks[0]]
-        embd_ranks = [pp_ranks[0]]
-        if pp_ranks[-1] != pp_ranks[0]:
-            embd_ranks.append(pp_ranks[-1])
-        _embedding_pg_cache[cache_key] = (
-            dist.new_group(ranks=pos_embd_ranks),
-            dist.new_group(ranks=embd_ranks),
-        )
 
     pos_embd_pg, embd_pg = _embedding_pg_cache[cache_key]
 
@@ -174,6 +189,10 @@ def create_module_with_grid(tp, pp, dp, grid_offset, hidden_size):
     """Create a module (transformer block) with its grid."""
     rank = dist.get_rank()
     grid = create_hypercomm_grid(offset=grid_offset, tp=tp, pp=pp, dp=dp)
+
+    # Outside the membership check on purpose: dist.new_group is a collective and
+    # every rank has to issue the same calls, members and non-members alike.
+    create_all_embedding_groups(grid)
 
     if grid.rank_offset <= rank < grid.rank_offset + grid.size:
         pg_collection = add_embedding_groups(get_pg_collection(grid))
