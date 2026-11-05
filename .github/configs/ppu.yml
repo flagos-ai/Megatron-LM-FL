@@ -75,6 +75,10 @@ test_matrix:
     # Unknown timeouts and missing test assets must remain visible failures.
     # Node IDs (including parameter prefixes) become --deselect in the common runner.
     unsupported_groups:
+      optimizer: "Optimizer tests are not onboarded or validated in the ppu CI runtime; CUDA provides execution coverage."
+      extensions: "Extension tests are not onboarded or validated in the ppu CI runtime; CUDA provides execution coverage."
+      a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the ppu CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "Plugin kernel tests are not onboarded or validated in the ppu CI runtime; CUDA provides execution coverage."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # Core: TE-FL FusedSGD passes 11 arguments to an 8-argument implementation.

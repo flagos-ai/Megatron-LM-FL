@@ -82,6 +82,18 @@ test_matrix:
       - name: others
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
+      - name: optimizer
+        path: tests/unit_tests/optimizer/
+        description: Optimizer tests
+      - name: extensions
+        path: tests/unit_tests/extension/
+        description: Third-party extension tests
+      - name: a2a_overlap
+        path: tests/unit_tests/a2a_overlap/
+        description: All-to-all overlap tests
+      - name: dsa_kernel
+        path: tests/unit_tests/plugin/
+        description: Plugin kernel tests
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:

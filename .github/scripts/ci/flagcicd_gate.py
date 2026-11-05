@@ -216,6 +216,93 @@ def verify_attestations(plan: dict[str, Any], attestations: Iterable[dict[str, A
     return errors
 
 
+def planned_onboarding_summary(plan: dict[str, Any], attestations: list[dict[str, Any]]) -> str:
+    """Report temporary groups and per-device results for permanent onboarding."""
+
+    def cell(value: str) -> str:
+        return (
+            value.replace("&", "&amp;")
+            .replace("<", "&lt;")
+            .replace(">", "&gt;")
+            .replace("|", "&#124;")
+            .replace("\n", " ")
+        )
+
+    rows = []
+    for platform in plan.get("platforms", []):
+        groups = platform.get("config_identity", {}).get("planned_execution", []) + platform.get(
+            "planned_skipped", []
+        )
+        for group in groups:
+            for device in platform["devices"]:
+                if "skip_reason" in group:
+                    files = "<br>".join(f"`{cell(path)}`" for path in group["paths"])
+                    logical_name = group["name"].removeprefix("planned-")
+                    result = f"Skipped (unsupported on {cell(platform['name'])}): {cell(group['skip_reason'])}"
+                    rows.append(
+                        f"| `{cell(logical_name)}` | {files} | `{cell(platform['name'])}` "
+                        f"| `{cell(device)}` | {result} |"
+                    )
+                    continue
+                matches = [
+                    item
+                    for item in attestations
+                    if isinstance(item, dict)
+                    and item.get("platform") == platform["name"]
+                    and item.get("device") == device
+                ]
+                result = "Missing result"
+                if len(matches) > 1:
+                    result = "Invalid evidence (duplicate results)"
+                elif matches:
+                    report = matches[0]
+                    details = [
+                        item
+                        for item in report.get("groups", [])
+                        if isinstance(item, dict) and item.get("name") == group["name"]
+                    ]
+                    if report.get("plan_hash") != plan["plan_hash"]:
+                        result = "Invalid evidence (plan hash mismatch)"
+                    elif len(details) > 1:
+                        result = "Invalid evidence (duplicate groups)"
+                    elif details:
+                        detail = details[0]
+                        if detail.get("exit_code") != 0:
+                            result = "Failed"
+                        elif group["name"] not in report.get("executed_groups", []):
+                            result = "Invalid evidence (group not executed)"
+                        elif flagcicd_evidence.validate(
+                            detail.get("evidence"), platform["junit_reports"]
+                        ):
+                            result = "Failed (invalid, incomplete, or all-skipped test evidence)"
+                        else:
+                            result = "Passed"
+                files = "<br>".join(f"`{cell(path)}`" for path in group["paths"])
+                logical_name = group["name"].removeprefix("planned-")
+                rows.append(
+                    f"| `{cell(logical_name)}` | {files} | `{cell(platform['name'])}` "
+                    f"| `{cell(device)}` | {result} |"
+                )
+    if not rows:
+        return ""
+    return "\n".join(
+        [
+            "### Pending permanent onboarding",
+            "",
+            "Temporary planned tests below need CI maintainer review for permanent onboarding. "
+            "Passing these files does not activate the group or validate the full suite.",
+            "",
+            "| Group | Changed test files | Platform | Device | Execution result |",
+            "| --- | --- | --- | --- | --- |",
+            *rows,
+            "",
+            "Next: validate the full group and runtime requirements, add permanent platform "
+            "mappings, then change the catalog status to `active`.",
+            "",
+        ]
+    )
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=pathlib.Path, required=True)
@@ -225,6 +312,7 @@ def main() -> int:
     parser.add_argument("--attestation-root", type=pathlib.Path, required=True)
     parser.add_argument("--required-status", default='["ready"]')
     parser.add_argument("--allow-catalog-partial", action="store_true")
+    parser.add_argument("--summary", type=pathlib.Path)
     args = parser.parse_args()
     try:
         plan = _read_json(args.plan)
@@ -243,6 +331,9 @@ def main() -> int:
         attestations = [
             _read_json(path) for path in args.attestation_root.rglob("unit-results.json")
         ]
+        if args.summary:
+            with args.summary.open("a") as summary:
+                summary.write(planned_onboarding_summary(plan, attestations))
         errors.extend(verify_attestations(plan, attestations))
     except (OSError, ValueError, TypeError) as error:
         print(f"::error::{error}")

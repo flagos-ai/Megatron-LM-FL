@@ -73,6 +73,10 @@ test_matrix:
         description: post-training, tokenizer, and utility tests
     # Start with a conservative MUSA smoke set while validating runtime and TE plugin coverage.
     unsupported_groups:
+      optimizer: "Optimizer tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
+      extensions: "Extension tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
+      a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "Plugin kernel tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
       plugin: "The MUSA smoke configuration does not include the plugin test directory yet."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
