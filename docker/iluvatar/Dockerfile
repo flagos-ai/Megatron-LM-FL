@@ -196,3 +196,32 @@ RUN if [ -n "$GPT2_CACHE_URL" ]; then \
       python3 -c 'from huggingface_hub import snapshot_download; snapshot_download("gpt2", revision="607a30d783dfa663caf39e06633721c8d4cfcd7e", allow_patterns=["config.json","tokenizer.json","tokenizer_config.json","vocab.json","merges.txt"])'; \
     fi
 WORKDIR /workspace/Megatron-LM-FL
+
+# Apex is included for Iluvatar adaptation diagnostics. The LayerNorm extension
+# compiles, but its forward/backward numerical checks currently fail on BI-V150.
+# Keep the existing sequence_parallel test exclusions until this is resolved.
+ARG APEX_SOURCE_URL=https://codeload.github.com/NVIDIA/apex/tar.gz/575968bc1f9127ccd61003a681472a83af4ff1a1
+ARG APEX_SOURCE_SHA256=3bed9320c5811afaef780fbd2eca024229f340c207a13abb091d132cd9df17dc
+RUN mkdir -p /opt/megatron-image/apex-source \
+    && curl --fail --location --retry 2 --connect-timeout 15 --max-time 180 \
+       "$APEX_SOURCE_URL" -o /opt/megatron-image/apex-source.tar.gz \
+    && test -n "$APEX_SOURCE_SHA256" \
+    && echo "$APEX_SOURCE_SHA256  /opt/megatron-image/apex-source.tar.gz" | sha256sum -c - \
+    && tar -xzf /opt/megatron-image/apex-source.tar.gz --strip-components=1 \
+       -C /opt/megatron-image/apex-source \
+    && cd /opt/megatron-image/apex-source \
+    && env -u APEX_CPP_EXT -u APEX_CUDA_EXT CUDA_HOME=/usr/local/corex \
+       python3 -m pip install --no-cache-dir --no-deps --no-build-isolation --no-index . \
+    && printf '%s\n' \
+       'from setuptools import setup' \
+       'from torch.utils.cpp_extension import BuildExtension, CUDAExtension' \
+       'setup(name="apex-norm-probe", ext_modules=[CUDAExtension(name="fused_layer_norm_cuda", sources=["csrc/layer_norm_cuda.cpp", "csrc/layer_norm_cuda_kernel.cu"], extra_compile_args={"cxx": ["-O3"], "nvcc": ["-O3", "-x", "ivcore"]})], cmdclass={"build_ext": BuildExtension})' \
+       > setup_norm_probe.py \
+    && CUDA_HOME=/usr/local/corex MAX_JOBS=2 python3 setup_norm_probe.py build_ext --inplace \
+    && python3 -c 'import glob, shutil, sysconfig; artifacts=glob.glob("fused_layer_norm_cuda*.so"); assert len(artifacts)==1, artifacts; shutil.copy2(artifacts[0], sysconfig.get_path("platlib"))' \
+    && cd /workspace/Megatron-LM-FL \
+    && python3 -c 'import apex, fused_layer_norm_cuda; from apex.normalization import FusedLayerNorm; print("Apex import validated; Iluvatar LayerNorm numerical validation remains failing")' \
+    && python3 -m pip check \
+    && rm -rf /opt/megatron-image/apex-source/build
+LABEL io.flagos.apex.revision="575968bc1f9127ccd61003a681472a83af4ff1a1" \
+      io.flagos.apex.layernorm.numerical-validation="failed"
