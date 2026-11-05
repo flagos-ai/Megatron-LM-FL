@@ -41,6 +41,46 @@ class RoutingIntegrityTests(unittest.TestCase):
             self.assertEqual(plan["global_groups"]["unmapped_paths"], ["unknown_file.py"])
             self.assertEqual([item["group"] for item in plan["direct_gaps"]], ["inference"])
 
+    def test_changed_planned_tests_reach_executor_and_final_gate(self) -> None:
+        test_path = "tests/unit_tests/inference/test_common_inference_params.py"
+        plan = build_plan([test_path], platforms=["cuda"])
+        self.assertEqual(plan["plan_status"], "partial")
+        self.assertEqual(plan["direct_gaps"], [])
+        platform = plan["platforms"][0]
+        self.assertEqual(platform["config_identity"]["planned_execution"], [
+            {"name": "planned-inference", "paths": [test_path]}
+        ])
+        plan["gate_policy"] = {"required_plan_status": ["ready", "partial"], "allow_catalog_partial": True}
+        plan["plan_hash"] = contract.plan_hash(plan)
+        self.assertEqual(gate.verify_plan(
+            plan, expected_hash=plan["plan_hash"], expected_groups=plan["expected_unit_groups"],
+            required_statuses=["ready", "partial"], allow_catalog_partial=True,
+            matrix=planner.execution_matrix(plan),
+        ), [])
+        workflow = yaml.safe_load((ROOT / ".github/workflows/all_tests_common.yml").read_text())
+        step = next(step for step in workflow["jobs"]["checkout_and_config"]["steps"]
+                    if step.get("id") == "config")
+        script = step["run"].split("<<'PY'\n")[1].split("\nPY")[0]
+        config = yaml.safe_load((ROOT / ".github/configs/cuda.yml").read_text())
+        run = subprocess.run(
+            [sys.executable, "-c", script, json.dumps(config["test_matrix"]["unit"]["groups"])],
+            cwd=ROOT, env={**os.environ,
+                "CONFIG_IDENTITY": json.dumps(platform["config_identity"]),
+                "EXPECTED_UNIT_GROUPS": json.dumps(plan["expected_unit_groups"]["cuda"])},
+            capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(run.returncode, 0, run.stderr)
+        self.assertIn({"name": "planned-inference", "path": test_path}, json.loads(run.stdout))
+        # A successful report that omits the temporary group must still fail.
+        expected = plan["expected_unit_groups"]["cuda"]
+        errors = gate.verify_attestations(plan, [{
+            "plan_hash": plan["plan_hash"], "platform": "cuda", "device": "a100",
+            "expected_groups": expected,
+            "executed_groups": [name for name in expected if name != "planned-inference"],
+            "status": "passed", "groups": [],
+        }])
+        self.assertTrue(any("executed group mismatch" in error for error in errors))
+
     def test_core_changes_include_known_consumers(self) -> None:
         for path in ("utils.py", "parallel_state.py", "activations.py"):
             plan = build_plan([f"megatron/core/{path}"], platforms=["cuda"], level="L2")

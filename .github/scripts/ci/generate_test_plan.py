@@ -136,7 +136,9 @@ def _plan_status(
     direct_gaps: list[dict[str, Any]],
 ) -> str:
     blocking = bool(
-        direct_gaps or group_selection["route_conflicts"] or group_selection["unmapped_paths"]
+        any(gap["status"] != "planned" for gap in direct_gaps)
+        or group_selection["route_conflicts"]
+        or group_selection["unmapped_paths"]
     )
     if not group_selection["documentation_only"]:
         if not platform_plans:
@@ -187,6 +189,35 @@ def build_plan(
             materialized = unit_group_routing.materialize_groups(
                 catalog, platform, group_selection["selected"], group_selection["reasons"], required
             )
+            # Changed planned test files get an ephemeral execution group. Their
+            # catalog status remains planned; ordinary configured/nightly runs
+            # do not acquire these groups.
+            planned_execution = []
+            if selection == "affected":
+                source_root = catalog.path.parent.parent
+                for group in materialized["planned"]:
+                    group_name = group["name"]
+                    if group_name in required:
+                        continue
+                    paths = sorted({
+                        path for path in changed
+                        if path.startswith("tests/unit_tests/")
+                        and pathlib.PurePosixPath(path).match("test_*.py")
+                        and catalog.matches_all(path) == [group_name]
+                        and (source_root / path).is_file()
+                    })
+                    if not paths:
+                        continue
+                    execution_name = f"planned-{group_name}"
+                    if execution_name in platform.groups:
+                        raise ValueError(f"Reserved temporary execution group: {execution_name}")
+                    planned_execution.append({"name": execution_name, "paths": paths})
+                    materialized["selected_groups"].append({
+                        **group,
+                        "execution_group": execution_name,
+                        "reason": "Changed planned test files execute for this PR only",
+                    })
+                materialized["selected_groups"].sort(key=lambda group: group["name"])
             platform_plans.append(
                 {
                     "name": name,
@@ -195,6 +226,7 @@ def build_plan(
                         "source_sha": source_sha,
                         "project_hash": project_hash,
                         "platform_hash": platform.digest,
+                        **({"planned_execution": planned_execution} if planned_execution else {}),
                     },
                     "nproc_per_node": platform.nproc_per_node,
                     "junit_reports": flagcicd_evidence.report_names(
@@ -360,7 +392,8 @@ def write_summary(path: pathlib.Path, plan: dict[str, Any]) -> None:
     elif plan["plan_status"] == "partial":
         lines.extend(
             [
-                "**Plan status `partial`: this plan is not proof of a complete "
+                "**Plan status `partial`: changed planned tests may execute as temporary groups, "
+                "but this plan is not proof of a complete "
                 "logical-group regression.**",
                 "",
             ]
@@ -398,7 +431,8 @@ def write_summary(path: pathlib.Path, plan: dict[str, Any]) -> None:
                     f"{_escape(detail['reason'])}"
                 )
         if any(gap["status"] == "planned" for gap in plan["direct_gaps"]):
-            lines.extend(["", "The directly affected group is planned and was not executed.", ""])
+            lines.extend(["", "Directly affected planned groups were not executed. Existing configured tests continue; "
+                "these coverage gaps are advisory and do not fail CI.", ""])
         lines.append("")
     if global_groups["route_conflicts"]:
         lines.extend(["**Route conflicts (blocked):**", ""])

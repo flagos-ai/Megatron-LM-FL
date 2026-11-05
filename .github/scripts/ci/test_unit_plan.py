@@ -447,6 +447,44 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(selected_names(plan, "cuda"), ["core", "plugin"])
         self.assertEqual(execution_names(plan, "cuda"), {"core"})
 
+    def test_changed_planned_inference_executes_without_activating_catalog(self):
+        self.assertEqual(
+            self.catalog.matches("tests/unit_tests/inference/test_common_inference_params.py"),
+            "inference",
+        )
+        plan = build_plan(
+            ["tests/unit_tests/inference/test_common_inference_params.py"], platforms=["cuda"]
+        )
+        platform = platform_plan(plan, "cuda")
+        self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
+        self.assertEqual(
+            execution_names(plan, "cuda"), set(platform["configured_groups"]) | {"planned-inference"}
+        )
+        self.assertEqual(plan["direct_gaps"], [])
+
+    def test_deleted_planned_test_is_reported_without_execution(self):
+        plan = build_plan(["tests/unit_tests/inference/test_deleted.py"], platforms=["cuda"])
+        self.assertEqual(plan["plan_status"], "partial")
+        self.assertNotIn("planned-inference", execution_names(plan, "cuda"))
+        self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["inference"])
+
+    def test_changed_planned_test_executes_despite_platform_exclusion(self):
+        units = load_platforms()
+        units["cuda"] = dataclasses.replace(
+            units["cuda"], unsupported_groups={"inference": "not supported"}
+        )
+        plan = build_plan(
+            ["tests/unit_tests/inference/test_common_inference_params.py"],
+            platforms=["cuda"], units=units,
+        )
+        self.assertEqual(plan["plan_status"], "partial")
+        self.assertIn("planned-inference", execution_names(plan, "cuda"))
+        self.assertEqual(plan["direct_gaps"], [])
+        self.assertEqual(plan["platforms"][0]["config_identity"]["planned_execution"], [
+            {"name": "planned-inference",
+             "paths": ["tests/unit_tests/inference/test_common_inference_params.py"]}
+        ])
+
     def test_dsa_kernel_tests_are_executable_on_cuda(self):
         self.assertEqual(
             self.catalog.matches("tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py"),
@@ -459,12 +497,6 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(platform["planned"], [])
         self.assertIn("dsa_kernel", execution_names(plan, "cuda"))
         self.assertEqual(plan["plan_status"], "ready")
-
-    def test_shared_unit_conftest_has_no_unmapped_paths(self):
-        plan = build_plan(["tests/unit_tests/conftest.py"], platforms=["cuda"])
-        self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
-        self.assertEqual(plan["plan_status"], "partial")
-        self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
 
     def test_newly_onboarded_groups_execute_for_mixed_pr_changes(self):
         plan = build_plan([
@@ -483,6 +515,12 @@ class SelectionTests(unittest.TestCase):
             if platform["name"] != "cuda":
                 unsupported = {group["name"] for group in platform["unsupported"]}
                 self.assertTrue(groups <= unsupported)
+
+    def test_shared_unit_conftest_has_no_unmapped_paths(self):
+        plan = build_plan(["tests/unit_tests/conftest.py"], platforms=["cuda"])
+        self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
+        self.assertEqual(plan["plan_status"], "partial")
+        self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
 
     def test_onboarded_group_still_blocks_without_selected_executor(self):
         plan = build_plan(
@@ -553,11 +591,11 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(plan["global_groups"]["fallback"])
         self.assertEqual(plan["direct_groups"], [])
 
-    def test_direct_planned_group_blocks_the_plan(self):
+    def test_direct_planned_group_is_advisory(self):
         plan = build_plan(
-            ["tests/unit_tests/inference/test_example.py"], platforms=["cuda"]
+            ["megatron/core/inference/engine.py"], platforms=["cuda"]
         )
-        self.assertEqual(plan["plan_status"], "blocked")
+        self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual(plan["direct_groups"], ["inference"])
         self.assertEqual(plan["global_groups"]["direct_groups"], ["inference"])
         gap = plan["direct_gaps"][0]
@@ -571,11 +609,10 @@ class SelectionTests(unittest.TestCase):
             summary = pathlib.Path(directory) / "summary.md"
             planner.write_summary(summary, plan)
             text = summary.read_text()
-        self.assertIn("The directly affected group is planned and was not executed.", text)
-        self.assertIn("**Plan blocked: no unit matrix was emitted", text)
-        self.assertIn("**Diagnostic fallback materialization (not executed):**", text)
-        self.assertIn("| Platform | Configured | Executable (diagnostic) |", text)
-        self.assertIn("Diagnostic fallback reasons (not executed):", text)
+        self.assertIn("Directly affected planned groups were not executed.", text)
+        self.assertIn("these coverage gaps are advisory and do not fail CI", text)
+        self.assertNotIn("**Plan blocked:", text)
+        self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
 
     def test_direct_unsupported_group_blocks_the_plan(self):
         plan = build_plan(["megatron/plugin/Ascend/ascend_plugin.py"], platforms=["musa"])
@@ -597,7 +634,7 @@ class SelectionTests(unittest.TestCase):
             "ready": build_plan(["megatron/core/config.py"], platforms=["cuda"]),
             "partial": build_plan([".github/workflows/ci.yml"], platforms=["cuda"]),
             "blocked": build_plan(
-                ["tests/unit_tests/inference/test_example.py"], platforms=["cuda"]
+                ["unknown_file.py"], platforms=["cuda"]
             ),
         }
         for status, plan in plans.items():
@@ -862,7 +899,7 @@ class MaterializationTests(unittest.TestCase):
         self.assertEqual(excluded["plugin"]["platform"], "musa")
         self.assertIn("MUSA smoke", excluded["plugin"]["reason"])
         self.assertIn("CUDA", excluded["transformer"]["reason"])
-        self.assertEqual(plan["plan_status"], "blocked")
+        self.assertEqual(plan["plan_status"], "partial")
         with tempfile.TemporaryDirectory() as directory:
             summary = pathlib.Path(directory) / "summary.md"
             planner.write_summary(summary, plan)
