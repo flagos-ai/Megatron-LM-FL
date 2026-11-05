@@ -26,6 +26,7 @@ from megatron.core.process_groups_config import (
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 # ============================================================================
@@ -59,14 +60,24 @@ def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
     if dist.is_initialized():
         # Keep all ranks on the same test before tearing down shared NCCL groups.
-        dist.barrier()
+        # Device collectives can outlive the Python call, so drain them first. A
+        # rank that already died makes the barrier raise, in which case the
+        # cleanup below still has to run.
+        try:
+            get_platform().synchronize()
+            dist.barrier()
+        except Exception:
+            pass
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
     if dist.is_initialized():
         # Do not let fast ranks create the next test's groups during teardown.
-        dist.barrier()
+        try:
+            dist.barrier()
+        except Exception:
+            pass
 
 
 def get_pg_collection(grid):
