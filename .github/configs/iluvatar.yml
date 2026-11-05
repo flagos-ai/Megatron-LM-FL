@@ -77,6 +77,18 @@ test_matrix:
       # Use the same function boundaries as Hygon/MetaX/Ascend/MUSA/KunLunXin.
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_gpt_fine_grained_activation_offloading_correctness_and_memory
       - tests/unit_tests/pipeline_parallel/test_fine_grained_activation_offloading.py::test_fine_grained_activation_offload_with_ep_a2a_overlap_compatibility
+      # FlagGems' Triton attention backward kernel fails to compile under the
+      # Triton 3.2.0 in this image: tl.static_assert raises "Did you forget to
+      # add @triton.jit ? (_builder argument must be provided outside of JIT
+      # functions.)" from flag_gems/ops/attention.py. Only the two 8-GPU cases
+      # reach that kernel; ranks 6-7 (the LLM grid's last PP stage) die while
+      # the others stay in the test body's collectives, so the group hangs.
+      # Reproduces identically at base 0c9b09e59, and both cases pass on CUDA
+      # A100 (run 41931866368). The 2-GPU cases are world-size gated and the
+      # remaining modules in this directory are unaffected, so quarantine the
+      # two cases only. Hand-off: FlagGems / Iluvatar Triton backend.
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_single_encoder_8gpu
+      - tests/unit_tests/pipeline_parallel/test_multimodule_schedules.py::TestMultimoduleSchedules::test_dual_encoder_8gpu
       # Mamba kernels are absent; HybridMoE/MambaMoE also fail the NVIDIA
       # compute-capability gate. Same model boundaries as CUDA/Hygon/MUSA.
       - tests/unit_tests/models/test_hybrid_model.py
