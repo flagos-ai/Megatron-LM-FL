@@ -99,10 +99,15 @@ test_matrix:
       # Captured distributed-resume-stacks: rank 0 register_mem_pool, others
       # teardown barrier. Preserve the non-manual-registration parameters.
       - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestFullyShardedDataParallel::test_fsdp_user_buffer_registration[8-True-True-True]
-      # Dependency recheck: rank 0 all_gather_object during the second local
-      # save, ranks 1-7 teardown barrier; 1800s timeout. Quarantine this exact
-      # case pending diagnosis, not all checkpoint tests or the nvrx import.
+      # Upstream test_local.py byte-compares pickle streams with filecmp.cmp. The
+      # intervening load deepcopies param_groups, so the interned keys min_lr/lr/
+      # weight_decay lose their pickle memo references and are re-emitted as
+      # literals: +35 raw bytes, +64 after zip, while the deserialized objects and
+      # all 58 sharded tensors stay identical. Ranks 1-7 fail the comparison here.
+      # Both parameters pass on CUDA A100 (run 41931866368); that platform
+      # asymmetry is still unexplained, so quarantine these two parameters only.
       - tests/unit_tests/dist_checkpointing/test_local.py::TestLocalCheckpointing::test_basic_save_load_scenarios[atomic-False-True-2-4]
+      - tests/unit_tests/dist_checkpointing/test_local.py::TestLocalCheckpointing::test_basic_save_load_scenarios[fully_parallel-False-True-1-1]
       # TEScalingMode duplicate registration in the five recorded FP8 cases.
       # Other platforms exclude test_fp8.py; retain its unaffected parameters.
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_simple_broadcast[0-fp8]
