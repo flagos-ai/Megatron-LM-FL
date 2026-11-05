@@ -29,7 +29,7 @@ class RoutingIntegrityTests(unittest.TestCase):
         paths = [
             ".github/workflows/ci.yml",
             "unknown_file.py",
-            "megatron/core/optimizer/optimizer.py",
+            "megatron/core/inference/engine.py",
         ]
         plans = [
             build_plan(list(order), platforms=["cuda"]) for order in itertools.permutations(paths)
@@ -37,9 +37,9 @@ class RoutingIntegrityTests(unittest.TestCase):
         self.assertEqual(len({plan["plan_hash"] for plan in plans}), 1)
         for plan in plans:
             self.assertEqual(plan["plan_status"], "blocked")
-            self.assertEqual(plan["direct_groups"], ["optimizer"])
+            self.assertEqual(plan["direct_groups"], ["inference"])
             self.assertEqual(plan["global_groups"]["unmapped_paths"], ["unknown_file.py"])
-            self.assertEqual([item["group"] for item in plan["direct_gaps"]], ["optimizer"])
+            self.assertEqual([item["group"] for item in plan["direct_gaps"]], ["inference"])
 
     def test_core_changes_include_known_consumers(self) -> None:
         for path in ("utils.py", "parallel_state.py", "activations.py"):
@@ -76,7 +76,7 @@ class RoutingIntegrityTests(unittest.TestCase):
         plan = build_plan([], selection="configured", level="L2", event="schedule")
         self.assertEqual(plan["plan_status"], "ready")
         self.assertEqual(len(plan["platforms"]), 8)
-        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 71)
+        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 75)
         for platform in plan["platforms"]:
             self.assertEqual(
                 plan["expected_unit_groups"][platform["name"]], platform["configured_groups"]
@@ -209,14 +209,14 @@ class CandidateConfigTests(unittest.TestCase):
                 "allow_catalog_partial"
             ]
             for group in project["test_groups"]:
-                if group["name"] == "optimizer":
+                if group["name"] == "inference":
                     group["status"] = "active"
                     group.pop("reason", None)
             project_path.write_text(yaml.safe_dump(project))
             config_path = root / ".github/configs/cuda.yml"
             config = yaml.safe_load(config_path.read_text())
             config["test_matrix"]["unit"]["groups"].append(
-                {"name": "optimizer", "path": "tests/unit_tests/optimizer/"}
+                {"name": "inference", "path": "tests/unit_tests/inference/"}
             )
             config_path.write_text(yaml.safe_dump(config))
             for args in (
@@ -268,8 +268,8 @@ class CandidateConfigTests(unittest.TestCase):
             self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
             plan = json.loads(output.read_text())
             self.assertEqual(plan["gate_policy"], trusted_policy)
-            self.assertIn("optimizer", plan["expected_unit_groups"]["cuda"])
-            self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 11)
+            self.assertIn("inference", plan["expected_unit_groups"]["cuda"])
+            self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 15)
             identity = planner.execution_matrix(plan)[0]["config_identity"]
             workflow = yaml.safe_load((ROOT / ".github/workflows/all_tests_common.yml").read_text())
             step = next(
