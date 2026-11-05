@@ -89,7 +89,7 @@ jobs:
       # configured selection: every active logical group each enabled platform
       # can execute, ignoring the diff. Planned catalog groups are reported
       # separately and never enter the nightly matrix. A directly affected
-      # planned group or unknown path still blocks PR execution.
+      # planned group is advisory; unknown paths and active execution gaps still block.
       - name: Generate unit test plan
         id: plan
         env:
@@ -194,21 +194,45 @@ jobs:
           PY
 
       - name: Download unit test plan
-        if: needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
+        if: always() && needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
         uses: actions/download-artifact@v4
         with:
           name: unit-test-plan
           path: unit-test-plan
 
+      - name: Report planned coverage gaps
+        if: always() && needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import pathlib
+
+          plan_path = pathlib.Path("unit-test-plan/unit-test-plan.json")
+          if not plan_path.is_file():
+              print("::notice::Skipping planned coverage report: unit test plan is unavailable; check the download step.")
+              raise SystemExit(0)
+          plan = json.loads(plan_path.read_text())
+          gaps = [gap for gap in plan["direct_gaps"] if gap["status"] == "planned"]
+          if gaps:
+              lines = ["### Planned test coverage (advisory)", "",
+                       "These directly affected groups were not executed. Configured tests execute separately; "
+                       "these coverage gaps do not fail CI.", ""]
+              for gap in gaps:
+                  lines.append(f"- `{gap['group']}`: planned, not executed")
+              with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+                  summary.write("\n".join(lines) + "\n")
+          PY
+
       - name: Download unit execution attestations
-        if: needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
+        if: always() && needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
         uses: actions/download-artifact@v4
         with:
           pattern: coverage-*
           path: unit-results
 
       - name: Verify unit plan across platforms
-        if: needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
+        if: always() && needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
         env:
           PLAN_HASH: ${{ needs.generate-matrix.outputs.plan_hash }}
           EXPECTED_UNIT_GROUPS: ${{ needs.generate-matrix.outputs.expected_unit_groups }}
@@ -224,6 +248,7 @@ jobs:
           python3 .github/scripts/ci/flagcicd_gate.py \
             --plan unit-test-plan/unit-test-plan.json \
             --attestation-root unit-results \
+            --summary "$GITHUB_STEP_SUMMARY" \
             --expected-hash "$PLAN_HASH" \
             --expected-groups "$EXPECTED_UNIT_GROUPS" \
             --matrix "$UNIT_MATRIX" \

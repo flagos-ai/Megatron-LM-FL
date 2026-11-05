@@ -70,6 +70,10 @@ test_matrix:
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
     unsupported_groups:
+      optimizer: "Optimizer tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
+      extensions: "Extension tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
+      a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "Plugin kernel tests are not onboarded or validated in the kunlunxin CI runtime; CUDA provides execution coverage."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
