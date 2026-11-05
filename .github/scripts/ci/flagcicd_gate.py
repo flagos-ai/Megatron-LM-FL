@@ -230,8 +230,20 @@ def planned_onboarding_summary(plan: dict[str, Any], attestations: list[dict[str
 
     rows = []
     for platform in plan.get("platforms", []):
-        for group in platform.get("config_identity", {}).get("planned_execution", []):
+        groups = platform.get("config_identity", {}).get("planned_execution", []) + platform.get(
+            "planned_skipped", []
+        )
+        for group in groups:
             for device in platform["devices"]:
+                if "skip_reason" in group:
+                    files = "<br>".join(f"`{cell(path)}`" for path in group["paths"])
+                    logical_name = group["name"].removeprefix("planned-")
+                    result = f"Skipped (unsupported on {cell(platform['name'])}): {cell(group['skip_reason'])}"
+                    rows.append(
+                        f"| `{cell(logical_name)}` | {files} | `{cell(platform['name'])}` "
+                        f"| `{cell(device)}` | {result} |"
+                    )
+                    continue
                 matches = [
                     item
                     for item in attestations

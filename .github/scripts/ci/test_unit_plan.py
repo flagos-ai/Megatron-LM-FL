@@ -188,6 +188,17 @@ class CatalogTests(unittest.TestCase):
             validator.collect_errors(ROOT, CONFIGS, self.catalog, self.platforms, "L1"), []
         )
 
+    def test_validator_accepts_planned_platform_exclusion(self):
+        platform = dataclasses.replace(
+            self.platforms["cuda"], unsupported_groups={"inference": "runtime not adapted"}
+        )
+        self.assertEqual(
+            validator.collect_errors(
+                ROOT, CONFIGS, self.catalog, {**self.platforms, "cuda": platform}, "L1"
+            ),
+            [],
+        )
+
     def test_validator_rejects_fully_covered_unsupported_declaration(self):
         platform = dataclasses.replace(
             self.platforms["cuda"], unsupported_groups={"models": "temporarily disabled"}
@@ -469,28 +480,35 @@ class SelectionTests(unittest.TestCase):
         self.assertNotIn("planned-inference", execution_names(plan, "cuda"))
         self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["inference"])
 
-    def test_changed_planned_test_executes_despite_platform_exclusion(self):
+    def test_changed_planned_test_skips_explicit_platform_exclusion(self):
         units = load_platforms()
         units["cuda"] = dataclasses.replace(
-            units["cuda"], unsupported_groups={"inference": "not supported"}
+            units["cuda"], unsupported_groups={"inference": "missing runtime dependency"}
         )
-        plan = build_plan(
-            ["tests/unit_tests/inference/test_common_inference_params.py"],
-            platforms=["cuda"],
-            units=units,
-        )
+        path = "tests/unit_tests/inference/test_common_inference_params.py"
+        plan = build_plan([path], platforms=["cuda"], units=units)
         self.assertEqual(plan["plan_status"], "partial")
-        self.assertIn("planned-inference", execution_names(plan, "cuda"))
-        self.assertEqual(plan["direct_gaps"], [])
+        self.assertNotIn("planned-inference", execution_names(plan, "cuda"))
+        self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["inference"])
+        platform = plan["platforms"][0]
         self.assertEqual(
-            plan["platforms"][0]["config_identity"]["planned_execution"],
+            platform["planned_skipped"],
             [
                 {
                     "name": "planned-inference",
-                    "paths": ["tests/unit_tests/inference/test_common_inference_params.py"],
+                    "paths": [path],
+                    "skip_reason": "missing runtime dependency",
                 }
             ],
         )
+        self.assertEqual(platform["planned"], [])
+        self.assertIn("inference", {group["name"] for group in platform["unsupported"]})
+        self.assertEqual(execution_names(plan, "cuda"), set(units["cuda"].groups))
+        # Another selected platform still executes the temporary group.
+        mixed = build_plan([path], platforms=["cuda", "ascend"], units=units)
+        self.assertEqual(mixed["direct_gaps"], [])
+        self.assertIn("planned-inference", execution_names(mixed, "ascend"))
+        self.assertNotIn("planned-inference", execution_names(mixed, "cuda"))
 
     def test_dsa_kernel_tests_are_executable_on_cuda(self):
         self.assertEqual(

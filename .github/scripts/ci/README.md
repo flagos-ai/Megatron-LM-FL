@@ -115,9 +115,13 @@ the executor validates the paths and includes these groups in normal JUnit and
 execution attestations. Their failures, missing results, and all-skipped results
 fail the final gate just like configured groups. They use each selected
 platform's existing image, process count, pytest options, and ignored tests;
-temporary planned groups execute even when listed in the platform
-`unsupported_groups`. Actual execution results determine success. Exclusions
-for regular active groups remain unchanged. No special hardware is provisioned.
+temporary planned groups respect platform `unsupported_groups`. A skipped
+planned group is listed in the onboarding table as `Skipped (unsupported on
+<platform>)`, with its reason, and is not required execution evidence. Planned
+groups may declare these platform exclusions before permanent activation.
+If every selected platform excludes the group, configured tests continue and
+the missing planned coverage remains advisory. Exclusions for regular active
+groups remain unchanged. No special hardware is provisioned.
 
 Source-only changes, deleted test files, and helper/conftest-only changes do not
 create temporary tests. Configured tests continue and the unexecuted planned

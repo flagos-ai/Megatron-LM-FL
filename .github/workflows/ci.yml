@@ -208,7 +208,11 @@ jobs:
           import os
           import pathlib
 
-          plan = json.loads(pathlib.Path("unit-test-plan/unit-test-plan.json").read_text())
+          plan_path = pathlib.Path("unit-test-plan/unit-test-plan.json")
+          if not plan_path.is_file():
+              print("::notice::Skipping planned coverage report: unit test plan is unavailable; check the download step.")
+              raise SystemExit(0)
+          plan = json.loads(plan_path.read_text())
           gaps = [gap for gap in plan["direct_gaps"] if gap["status"] == "planned"]
           if gaps:
               lines = ["### Planned test coverage (advisory)", "",

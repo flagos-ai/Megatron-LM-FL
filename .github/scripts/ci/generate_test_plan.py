@@ -151,6 +151,7 @@ def _plan_status(
 
     partial = bool(
         group_selection["fallback"]
+        or direct_gaps
         or any(
             platform["planned"] or platform["unresolved"] or platform["fallback_excluded"]
             for platform in platform_plans
@@ -193,10 +194,13 @@ def build_plan(
             # catalog status remains planned; ordinary configured/nightly runs
             # do not acquire these groups.
             planned_execution = []
+            planned_skipped = []
             if selection == "affected":
                 source_root = catalog.path.parent.parent
-                for group in materialized["planned"]:
+                for group in materialized["planned"] + materialized["unsupported"]:
                     group_name = group["name"]
+                    if catalog.groups[group_name].status != "planned":
+                        continue
                     if group_name in required:
                         continue
                     paths = sorted(
@@ -212,6 +216,15 @@ def build_plan(
                     if not paths:
                         continue
                     execution_name = f"planned-{group_name}"
+                    if group_name in platform.unsupported_groups:
+                        planned_skipped.append(
+                            {
+                                "name": execution_name,
+                                "paths": paths,
+                                "skip_reason": platform.unsupported_groups[group_name],
+                            }
+                        )
+                        continue
                     if execution_name in platform.groups:
                         raise ValueError(f"Reserved temporary execution group: {execution_name}")
                     planned_execution.append({"name": execution_name, "paths": paths})
@@ -227,6 +240,7 @@ def build_plan(
                 {
                     "name": name,
                     "devices": list(platform.device_types),
+                    **({"planned_skipped": planned_skipped} if planned_skipped else {}),
                     "config_identity": {
                         "source_sha": source_sha,
                         "project_hash": project_hash,

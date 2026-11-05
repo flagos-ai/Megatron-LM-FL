@@ -130,6 +130,21 @@ class GateTests(unittest.TestCase):
         )
         self.assertEqual(flagcicd_gate.planned_onboarding_summary(self.plan, []), "")
 
+    def test_planned_onboarding_summary_shows_platform_skip_reason(self) -> None:
+        plan = copy.deepcopy(self.plan)
+        plan["platforms"][0]["planned_skipped"] = [
+            {
+                "name": "planned-inference",
+                "paths": ["tests/unit_tests/inference/test_new.py"],
+                "skip_reason": "Runtime lacks dependency <test>|extra",
+            }
+        ]
+        summary = flagcicd_gate.planned_onboarding_summary(plan, [])
+        self.assertIn("Skipped (unsupported on cuda)", summary)
+        self.assertIn("Runtime lacks dependency &lt;test&gt;&#124;extra", summary)
+        self.assertIn("tests/unit_tests/inference/test_new.py", summary)
+        self.assertNotIn("Missing result", summary)
+
     def test_plan_policy_and_hash_are_checked(self) -> None:
         plan = copy.deepcopy(self.plan)
         errors = flagcicd_gate.verify_plan(
