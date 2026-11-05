@@ -221,14 +221,14 @@ jobs:
           PY
 
       - name: Download unit execution attestations
-        if: needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
+        if: always() && needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
         uses: actions/download-artifact@v4
         with:
           pattern: coverage-*
           path: unit-results
 
       - name: Verify unit plan across platforms
-        if: needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
+        if: always() && needs.generate-matrix.result == 'success' && needs.generate-matrix.outputs.platforms != '[]'
         env:
           PLAN_HASH: ${{ needs.generate-matrix.outputs.plan_hash }}
           EXPECTED_UNIT_GROUPS: ${{ needs.generate-matrix.outputs.expected_unit_groups }}
@@ -244,6 +244,7 @@ jobs:
           python3 .github/scripts/ci/flagcicd_gate.py \
             --plan unit-test-plan/unit-test-plan.json \
             --attestation-root unit-results \
+            --summary "$GITHUB_STEP_SUMMARY" \
             --expected-hash "$PLAN_HASH" \
             --expected-groups "$EXPECTED_UNIT_GROUPS" \
             --matrix "$UNIT_MATRIX" \

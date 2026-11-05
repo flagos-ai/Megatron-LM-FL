@@ -104,6 +104,12 @@ runtime configuration. Add them only with executable adapters and gate evidence.
 Changed planned tests execute automatically for affected PR runs. The planner
 creates `planned-<group>` temporary execution groups containing only changed,
 existing `tests/unit_tests/**/test_*.py` files. The catalog remains `planned`.
+The final CI Summary includes a **Pending permanent onboarding** table listing
+each temporary group, changed files, platform/device, and execution result.
+Missing or invalid evidence is reported explicitly, including when platform
+execution fails. Maintainers should validate full-group coverage and runtime
+requirements before adding permanent mappings and marking the group active.
+
 Temporary group definitions travel in the hash-bound configuration identity;
 the executor validates the paths and includes these groups in normal JUnit and
 execution attestations. Their failures, missing results, and all-skipped results
