@@ -10,12 +10,17 @@ configure_iluvatar_runtime() {
   # Routing does not supply symbols missing from the installed IXTE extension.
   ci_export_env TE_FL_SKIP_CUDA 1
   ci_export_env TE_FL_PREFER flagos
-  # generic_gemm goes to the native backend as well: the flagos path dispatches
-  # to FlagGems, whose Triton autotune hangs in _init_handles on CoreX 4.5 and
-  # takes the whole group to the step timeout. With the native route the
-  # pipeline_parallel group goes from timing out to passing and the models
-  # group stops hanging in test_llava_model.
-  local per_op='rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar;generic_gemm=impl:vendor.iluvatar'
+  # Do not add generic_gemm here. 3d6e71594 routed it to vendor.iluvatar on the
+  # strength of its entry in vendor/iluvatar/register_ops.py, but the installed
+  # ixte 5.0.0 exposes only allgather_gemm, cublas_gemm_2d, grouped_gemm and
+  # reducescatter_gemm - there is no generic_gemm symbol, so every TE gemm call
+  # raised "module ...ixte_torch has no attribute 'generic_gemm'" (5602 times in
+  # job 127711739931). Measured on test_transformer_block.py in the CI image:
+  # unset 8 failed / 44 passed, vendor.iluvatar 15 failed / 37 passed,
+  # reference.torch 8 failed / 44 passed. Routing buys nothing here, so leave it
+  # on the default path; the FlagGems Triton autotune hang it was meant to avoid
+  # is now bounded by the per-test timeout instead.
+  local per_op='rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar'
   # Prepared TE wheels may replace the image's Python files. Reapply the
   # validated reference fix after installation, using the image's version guard.
   if [ -f /opt/megatron-image/apply_te_fl_patches.py ]; then
@@ -25,6 +30,10 @@ configure_iluvatar_runtime() {
   ci_export_env TE_FL_PER_OP "$per_op"
   ci_export_env CUDA_DEVICE_MAX_CONNECTIONS 1
   ci_export_env NCCL_DEBUG WARN
+  # Pin the visible devices to the eight ranks the suite launches. Runners with
+  # 16 cards otherwise fail the tests that compare device_count() against
+  # world_size, e.g. test_optimizer.py asserting 16 == 8.
+  ci_export_env CUDA_VISIBLE_DEVICES 0,1,2,3,4,5,6,7
 }
 
 validate_iluvatar_capacity() {
