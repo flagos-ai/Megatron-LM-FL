@@ -149,6 +149,13 @@ test_matrix:
       # metric is wrong on this platform for the same reason - the same FP64
       # probe already motivated the test_fp32_residual_precision_advantage
       # exclusion above. Hand-off: Iluvatar CoreX.
+      # The mHC reference selects FP64 whenever platform detection reports
+      # CUDA, but BI-V150 exposes the CUDA API while its FP64 reductions are
+      # invalid. The fused path is finite; these two comparisons therefore
+      # produce NaN from an invalid platform reference. Hand-off: Iluvatar
+      # CoreX; keep the cases visible for re-enablement after the runtime fix.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py::TestFusedProjRmsComputeHKeepFp32::test_bf16_activations_fp32_params[256-4-4096]
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py::TestFusedProjRmsComputeHKeepFp32::test_bf16_activations_fp32_params[128-4-1024]
       - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_bshd_equivalent_when_chunks_fill_seq_length
       - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_unpadded_cu_seqlens_excludes_padding
       - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_update_accumulates_across_microbatches
