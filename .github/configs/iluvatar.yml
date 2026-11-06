@@ -216,6 +216,11 @@ test_matrix:
       # whole test_moe_experts.py file (cuda.yml); keep its other parameters.
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_te_grouped_linear_torch_native[1]
       - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_te_grouped_linear_torch_native[2]
+      # Hangs on the triton+native backend and only stops at the 420s per-test
+      # timeout, taking the fusions group with it (job 127750191995). Same
+      # family as the FlagGems Triton stalls already quarantined above; the
+      # other parameters of this test pass. Hand-off: Iluvatar Triton backend.
+      - tests/unit_tests/fusions/test_fused_mhc_kernels.py::TestTritonHPostBDA::test_bwd_vs_reference[128-1-8-7168-True]
   functional:
     train:
       - model: gpt

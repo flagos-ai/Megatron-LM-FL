@@ -76,6 +76,15 @@ setup_unit_environment() {
   validate_iluvatar_capacity
   ci_install_project
   install_iluvatar_unit_test_plugins
+  # dist_checkpointing needs more than the 3600s default. It measures 2484-2754s
+  # across runs, so the default leaves under 25% headroom and job 127750191995
+  # hit the limit at 82% with zero failures. test_layer_wise_optimizer.py alone
+  # accounts for 862s of that: test_layer_wise_optimizer_resharding takes ~156s
+  # per parameter here against 4.5s for the slowest case in the same file on
+  # CUDA A100. That 35x gap is worth its own investigation; until then the
+  # budget has to cover the measured runtime. Per-test --timeout still catches
+  # real deadlocks, so this only governs the group's total wall clock.
+  ci_export_env CI_GROUP_TIMEOUT_SECONDS 5400
 }
 
 setup_functional_environment() {
