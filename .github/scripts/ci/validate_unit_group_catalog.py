@@ -82,7 +82,7 @@ def collect_errors(
                     f"Platform {name} declares unsupported group {group_name!r} "
                     "that is absent from the catalog"
                 )
-            elif group.status != "active":
+            elif group.status not in {"active", "planned"}:
                 errors.append(
                     f"Platform {name} declares {group.status} group {group_name!r} as unsupported"
                 )

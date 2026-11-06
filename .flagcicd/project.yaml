@@ -33,6 +33,7 @@ global:
   - .md
   - .rst
   shared_paths:
+  - tests/unit_tests/conftest.py
   - .flagcicd/
   - .github/
   - .pre-commit-config.yaml
@@ -172,8 +173,7 @@ test_groups:
   - core
 - name: optimizer
   description: Optimizer implementations and parameter schedulers.
-  status: planned
-  reason: No platform declares an optimizer execution group yet.
+  status: active
   paths:
   - megatron/core/optimizer/
   - tests/unit_tests/optimizer/
@@ -241,8 +241,7 @@ test_groups:
   - models
 - name: extensions
   description: Transformer Engine and third-party extension interfaces.
-  status: planned
-  reason: No platform declares an extensions execution group yet.
+  status: active
   paths:
   - megatron/core/extensions/
   - tests/unit_tests/extension/
@@ -251,8 +250,7 @@ test_groups:
   - models
 - name: a2a_overlap
   description: All-to-all overlap tests.
-  status: planned
-  reason: No platform declares an all-to-all overlap execution group yet.
+  status: active
   paths:
   - tests/unit_tests/a2a_overlap/
   depends_on:
@@ -278,9 +276,7 @@ test_groups:
 - name: dsa_kernel
   description: DSA fused-kernel accuracy and performance tests under the plugin test
     tree.
-  status: planned
-  reason: CUDA/SM90-only DSA kernel tests need a dedicated execution group and runtime
-    budget.
+  status: active
   paths:
   - tests/unit_tests/plugin/
   depends_on:
