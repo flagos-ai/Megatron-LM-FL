@@ -537,7 +537,11 @@ def test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers(monkeypatch):
     assert bucket.param_to_index[p1] == (2, 4)
     bucket.set_layerwise_params_list([[p0], [p1]])
     assert bucket.layerwise_param_flat_sizes == [2, 2]
-    assert [shard.tolist() for shard in shard_buffer(torch.arange(6), 3)] == [[0, 1], [2, 3], [4, 5]]
+    assert [shard.tolist() for shard in shard_buffer(torch.arange(6), 3)] == [
+        [0, 1],
+        [2, 3],
+        [4, 5],
+    ]
     with pytest.raises(AssertionError):
         shard_buffer(torch.arange(5), 2)
 
@@ -565,8 +569,7 @@ def test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers(monkeypatch):
     assert p0.main_grad_copy_in_grad_buffer.tolist() == [3.5, 3.5]
 
     overlap_config = DistributedDataParallelConfig(
-        overlap_grad_reduce=True,
-        overlap_param_gather=True,
+        overlap_grad_reduce=True, overlap_param_gather=True
     )
     overlap_group = _ParamAndGradBucketGroup([bucket], overlap_config, _Group(), 2)
     overlap_group.golden_per_param_grad_ready_counts = {p0: 1, p1: 1}
@@ -633,9 +636,7 @@ def test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers(monkeypatch):
         [fp8_buffer, bfloat_buffer], reduce_scatter_with_fp32_accumulation=True
     )
     assert [g.buckets for g in split_groups] == [[fp8_bucket_a], [fp8_bucket_b], [bucket]]
-    duplicate_dtype_groups = partition_buckets(
-        [bfloat_buffer, _Buffer(torch.bfloat16, [bucket])]
-    )
+    duplicate_dtype_groups = partition_buckets([bfloat_buffer, _Buffer(torch.bfloat16, [bucket])])
     assert len(duplicate_dtype_groups) == 2
 
     tiny_buffer = mock.Mock()
@@ -654,6 +655,7 @@ def test_manual_bucket_group_cpu_sync_partition_and_buffer_helpers(monkeypatch):
     with pytest.raises(Exception, match="Illegal buffer type"):
         tiny_buffer._get(torch.Size([1]), 0, object())
     assert tiny_buffer.param_index_map is param_index_map
+
 
 ######## FlagScale End ########
 

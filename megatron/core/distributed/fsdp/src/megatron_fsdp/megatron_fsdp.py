@@ -229,7 +229,9 @@ class MegatronFSDP(torch.nn.Module):
         super().__init__()
         # If device is not specified, use the current device.
         self.device = (
-            device if device is not None else torch.device(cur_platform.current_device_name())  # FlagScale Modify
+            device
+            if device is not None
+            else torch.device(cur_platform.current_device_name())  # FlagScale Modify
         )
         if self.device != torch.device(cur_platform.current_device_name()):  # FlagScale Modify
             logger.warning(

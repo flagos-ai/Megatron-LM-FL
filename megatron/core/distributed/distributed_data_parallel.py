@@ -131,7 +131,7 @@ class DistributedDataParallel(_BaseDataParallel):
             param_to_name[param] = name
             all_params.append(param)
 
-        # Group parameters by (param_dtype, grad_dtype, is_expert_parallel, is_engram_parallel).  # FlagScale Modify
+        # Group parameters by (param_dtype, grad_dtype, is_expert_parallel, is_engram_parallel).
         buffer_groups = group_params_for_buffers(all_params, self.ddp_config.grad_reduce_in_fp32)
 
         # Auto-compute layouts when using distributed optimizer but no layout was provided.
@@ -156,9 +156,7 @@ class DistributedDataParallel(_BaseDataParallel):
                 expert_data_parallel_world_size=self.intra_expt_dp_group.size(),
                 ######## FlagScale Begin ########
                 engram_data_parallel_world_size=(
-                    self.engram_dp_group.size()
-                    if self.engram_dp_group is not None
-                    else None
+                    self.engram_dp_group.size() if self.engram_dp_group is not None else None
                 ),
                 ######## FlagScale End ########
             )
@@ -182,6 +180,7 @@ class DistributedDataParallel(_BaseDataParallel):
         self.full_param_layout = full_param_layout
 
         # Compute gradient scaling factors.
+        engram_embedding_gradient_scaling_factor = None
         if config.calculate_per_token_loss:
             assert (
                 not self.ddp_config.average_in_collective
@@ -224,7 +223,9 @@ class DistributedDataParallel(_BaseDataParallel):
 
                 gradient_scaling_factor = 1.0 / data_parallel_world_size
                 expert_gradient_scaling_factor = 1.0 / data_parallel_world_size
-                engram_embedding_gradient_scaling_factor = 1.0 / data_parallel_world_size  # FlagScale Modify
+                engram_embedding_gradient_scaling_factor = (
+                    1.0 / data_parallel_world_size
+                )  # FlagScale Modify
 
         # Allocate buffers for each group.
         self.buffers = []
@@ -237,6 +238,8 @@ class DistributedDataParallel(_BaseDataParallel):
                 scaling_factor = expert_gradient_scaling_factor
             ######## FlagScale Begin ########
             elif buffer_key.is_engram_parallel:
+                if self.engram_dp_group is None:
+                    raise ValueError("Engram parameters require an Engram data parallel group")
                 data_parallel_group = self.engram_dp_group
                 scaling_factor = engram_embedding_gradient_scaling_factor
             ######## FlagScale End ########
@@ -327,8 +330,14 @@ class DistributedDataParallel(_BaseDataParallel):
             assert (
                 self.ddp_config.use_distributed_optimizer
             ), 'Partial DistOpt cannot be used without DistOpt'
-            for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
-                communication_stream = cur_platform.Stream(device=cur_platform.current_device())  # FlagScale Modify
+            for bucket_groups in [
+                self.bucket_groups,
+                self.expert_parallel_bucket_groups,
+                self.engram_embedding_bucket_groups,  # FlagScale Modify
+            ]:
+                communication_stream = cur_platform.Stream(
+                    device=cur_platform.current_device()
+                )  # FlagScale Modify
                 for bucket_group in bucket_groups:
                     bucket_group.inter_distributed_optimizer_instance_group = (
                         self.inter_dist_opt_group
@@ -341,7 +350,11 @@ class DistributedDataParallel(_BaseDataParallel):
         # layer-wise optimizer cases; the latter sets overlap_param_gather=True
         # without use_distributed_optimizer.
         if self.ddp_config.overlap_param_gather:
-            for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
+            for bucket_groups in [
+                self.bucket_groups,
+                self.expert_parallel_bucket_groups,
+                self.engram_embedding_bucket_groups,  # FlagScale Modify
+            ]:
                 num_bucket_groups = len(bucket_groups)
                 for i in range(1, num_bucket_groups):
                     bucket_groups[num_bucket_groups - i].next_param_gather_bucket_group = (
@@ -361,12 +374,20 @@ class DistributedDataParallel(_BaseDataParallel):
             and self.ddp_config.reduce_scatter_with_fp32_accumulation
             and self.ddp_config.num_distributed_optimizer_instances == 1
         ):
-            for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
+            for bucket_groups in [
+                self.bucket_groups,
+                self.expert_parallel_bucket_groups,
+                self.engram_embedding_bucket_groups,  # FlagScale Modify
+            ]:
                 for i in range(1, len(bucket_groups)):
                     bucket_groups[i].previous_grad_reduce_bucket_group = bucket_groups[i - 1]
 
         # Create map from param to bucket group, used in pre_hook.
-        for bucket_groups in [self.bucket_groups, self.expert_parallel_bucket_groups, self.engram_embedding_bucket_groups]:  # FlagScale Modify
+        for bucket_groups in [
+            self.bucket_groups,
+            self.expert_parallel_bucket_groups,
+            self.engram_embedding_bucket_groups,  # FlagScale Modify
+        ]:
             for bucket_group in bucket_groups:
                 for bucket in bucket_group.buckets:
                     for param in bucket.params_list:
@@ -524,12 +545,20 @@ class DistributedDataParallel(_BaseDataParallel):
         """
         Context manager that turns off gradient synchronization.
         """
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:  # FlagScale Modify
+        for bucket_group in (
+            self.bucket_groups
+            + self.expert_parallel_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
+        ):
             bucket_group.is_last_microbatch = False
         try:
             yield
         finally:
-            for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:  # FlagScale Modify
+            for bucket_group in (
+                self.bucket_groups
+                + self.expert_parallel_bucket_groups
+                + self.engram_embedding_bucket_groups  # FlagScale Modify
+            ):
                 bucket_group.is_last_microbatch = True
 
     def _start_bucket_group_param_sync(
@@ -569,11 +598,11 @@ class DistributedDataParallel(_BaseDataParallel):
             if self.overlap_param_gather_with_optimizer_step and not force_dispatch:
                 return
 
-        ######## FlagScale Begin ########
-
-        for bucket_group in self.bucket_groups + self.expert_parallel_bucket_groups + self.engram_embedding_bucket_groups:
-
-        ######## FlagScale End ########
+        for bucket_group in (
+            self.bucket_groups
+            + self.expert_parallel_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
+        ):
             self._start_bucket_group_param_sync(bucket_group, force_sync=force_sync)
 
     def start_grad_sync(self, *unused):
@@ -585,13 +614,11 @@ class DistributedDataParallel(_BaseDataParallel):
         calls. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        ######## FlagScale Begin ########
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.start_grad_sync()
 
     def finish_grad_sync(self, force_all_reduce: Optional[bool] = False):
@@ -603,29 +630,29 @@ class DistributedDataParallel(_BaseDataParallel):
         calls to complete. When overlap_grad_reduce is set to False, calls synchronous
         communication ops.
         """
-        ######## FlagScale Begin ########
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.finish_grad_sync(force_all_reduce=force_all_reduce)
 
     def free_overlap_buffers(self):
         """Free overlap param-gather GPU buffers across all bucket groups."""
-        ######## FlagScale Begin ########
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.free_overlap_buffers()
 
     def scale_gradients(self, scaling_factor: float):
         """Scale all gradients inside the buffers by `scaling_factor`."""
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.scale_gradients(scaling_factor)
 
     def zero_grad_buffer(self):
@@ -639,15 +666,18 @@ class DistributedDataParallel(_BaseDataParallel):
             # to True, and there will be a double-GA.
             for param in self.params_with_grad:
                 param.grad_added_to_main_grad = False
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.reset()
-        ######## FlagScale Begin ########
+
         for bucket_group in (
             self.bucket_groups
             + self.expert_parallel_bucket_groups
-            + self.engram_embedding_bucket_groups
+            + self.engram_embedding_bucket_groups  # FlagScale Modify
         ):
-        ######## FlagScale End ########
             bucket_group.reset()
 
     def broadcast_params(self):
@@ -688,7 +718,11 @@ class DistributedDataParallel(_BaseDataParallel):
         if synchronize:
             cur_platform.synchronize()  # FlagScale Modify
 
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.offload_to_cpu(move_params=False, move_grads=True)
 
         if empty_cache:
@@ -705,7 +739,11 @@ class DistributedDataParallel(_BaseDataParallel):
         Args:
             synchronize: Whether to call torch.cuda.synchronize() after allocation.
         """
-        for buffer in self.buffers + self.expert_parallel_buffers + self.engram_embedding_buffers:  # FlagScale Modify
+        for buffer in (
+            self.buffers
+            + self.expert_parallel_buffers
+            + self.engram_embedding_buffers  # FlagScale Modify
+        ):
             buffer.reload_from_cpu(move_params=False, move_grads=True)
 
         if synchronize:

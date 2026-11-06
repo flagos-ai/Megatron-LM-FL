@@ -454,6 +454,7 @@ class MoELayer(BaseMoELayer):
         """
         probs, routing_map = apply_module(self.router)(hidden_states, padding_mask, input_ids)
         return probs, routing_map
+
     ######## FlagScale End ########
 
     @maybe_skip_or_early_return_by_cudagraph("preprocess")

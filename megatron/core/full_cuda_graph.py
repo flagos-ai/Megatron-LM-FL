@@ -21,12 +21,11 @@ logger = logging.getLogger(__name__)
 # non-default stream (per-stream alloc segments can inflate memory_reserved; see
 # tools/debug_cuda_graph_pool_memory*.py).
 _shared_graph_pool = None
-_shared_graph_pool_initialized = False
 _shared_capture_stream = None
 
 
 def get_shared_capture_stream():
-    """Return one accelerator stream for full-iter and optimizer graph captures.
+    """Return one `torch.cuda.Stream` for all full-iter and optimizer graph captures.
 
     Call after the target CUDA device is selected.
     """
@@ -39,13 +38,12 @@ def get_shared_capture_stream():
 def get_shared_graph_pool():
     """Return a process-wide handle so all call sites share one graph memory pool.
 
-    The platform graph-pool API returns a new pool each time; this lazy singleton
+    `torch.cuda.graph_pool_handle()` returns a new pool each time; this lazy singleton
     ensures e.g. full-iteration and optimizer captures reuse the same pool.
     """
-    global _shared_graph_pool, _shared_graph_pool_initialized
-    if not _shared_graph_pool_initialized:
+    global _shared_graph_pool
+    if _shared_graph_pool is None:
         _shared_graph_pool = cur_platform.graph_pool_handle()
-        _shared_graph_pool_initialized = True
     return _shared_graph_pool
 
 
@@ -62,8 +60,7 @@ def get_graph_pool(use_single_mempool):
 
 # The below functions traverse through nested data structures (tuples, lists, dicts)
 # present in src and creates a deep copy where all PyTorch tensors are cloned,
-# detached from the computation graph, and moved to the current accelerator device.
-# Non-tensor objects
+# detached from the computation graph, and moved to CUDA device. Non-tensor objects
 # are returned as-is.
 
 
@@ -105,8 +102,8 @@ def clone_tensors_in_struct(tgt, src):
         raise Exception(f"Expect top-level as container type but got: {type(src)}")
 
 
-# Class to copy dataloader output to static accelerator tensors for graph input. This
-# maintains separate static buffers for training and validation graphs.
+# Class to copy dataloader output to static CUDA tensors for CUDA graph input. This
+# maintains separate static buffers for training and validation CUDA graphs.
 class StaticBufferLoader:
     """Load data to static buffers."""
 
@@ -123,32 +120,30 @@ class StaticBufferLoader:
 
         assert isinstance(inputs, dict)
         if microbatch == len(StaticBufferLoader.static_buffers[stage]):
-            ######## FlagScale Begin ########
             self.stream.wait_stream(cur_platform.current_stream())
             with cur_platform.stream(self.stream):
-            ######## FlagScale End ########
                 StaticBufferLoader.static_buffers[stage].append(copy_tensors_in_struct(inputs))
         else:
 
             for k in inputs.keys():
                 if k not in StaticBufferLoader.static_buffers[stage][microbatch]:
                     if isinstance(inputs[k], torch.Tensor):
+                        ######## FlagScale Begin ########
                         device = cur_platform.device()
                         if device is None:
-                            StaticBufferLoader.static_buffers[stage][microbatch][k] = torch.empty_like(
-                                inputs[k]
+                            StaticBufferLoader.static_buffers[stage][microbatch][k] = (
+                                torch.empty_like(inputs[k])
                             )
                         else:
-                            StaticBufferLoader.static_buffers[stage][microbatch][k] = torch.empty_like(
-                                inputs[k], device=device
+                            StaticBufferLoader.static_buffers[stage][microbatch][k] = (
+                                torch.empty_like(inputs[k], device=device)
                             )
+                        ######## FlagScale End ########
                     else:
                         StaticBufferLoader.static_buffers[stage][microbatch][k] = inputs[k]
 
-            ######## FlagScale Begin ########
             self.stream.wait_stream(cur_platform.current_stream())
             with cur_platform.stream(self.stream):
-            ######## FlagScale End ########
                 clone_tensors_in_struct(
                     StaticBufferLoader.static_buffers[stage][microbatch], inputs
                 )
@@ -227,17 +222,15 @@ class FullCudaGraphWrapper:
         training_str = 'training' if training else 'validation'
         curr_iteration = self.curr_iter(training_str)
         if curr_iteration == self.cuda_graph_warmup_steps:
+            logger.info(f'Capture CUDA graph for {training_str}!!!')
+            torch.distributed.barrier()
             assert FullCudaGraphWrapper.cuda_graph[training_str] is None
             FullCudaGraphWrapper.cuda_graph[training_str] = cur_platform.create_graph()
             if FullCudaGraphWrapper.cuda_graph[training_str] is not None:
-                logger.info(f'Capture CUDA graph for {training_str}!!!')
-                torch.distributed.barrier()
                 for _, state in get_all_rng_states().items():
                     FullCudaGraphWrapper.cuda_graph[training_str].register_generator_state(state)
-                ######## FlagScale Begin ########
                 cur_platform.synchronize()
                 capture_stream = cur_platform.Stream()
-                ######## FlagScale End ########
                 with cur_platform.capture_to_graph(
                     FullCudaGraphWrapper.cuda_graph[training_str],
                     stream=capture_stream,
@@ -253,7 +246,9 @@ class FullCudaGraphWrapper:
         if FullCudaGraphWrapper.cuda_graph[training_str] is None:
             FullCudaGraphWrapper.result[training_str] = self.forward_backward_func(*args, **kwargs)
         else:
-            cur_platform.replay_graph(FullCudaGraphWrapper.cuda_graph[training_str])
+            cur_platform.replay_graph(
+                FullCudaGraphWrapper.cuda_graph[training_str]
+            )  # FlagScale Modify
         self.next_iter(training_str)
         return FullCudaGraphWrapper.result[training_str]
 

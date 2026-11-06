@@ -208,7 +208,9 @@ class TestValidateGrids:
 
     def _grid_missing_tp(self, offset=0, dp=1):
         # Build a grid without a 'tp' dim to exercise the "missing 'tp'" raise.
-        grid = HyperCommGrid(shape=[dp], dim_names=["dp"], rank_offset=offset, backend=Utils.get_backend())
+        grid = HyperCommGrid(
+            shape=[dp], dim_names=["dp"], rank_offset=offset, backend=Utils.get_backend()
+        )
         grid.create_pg(["dp"])
         _active_grids.append(grid)
         return grid

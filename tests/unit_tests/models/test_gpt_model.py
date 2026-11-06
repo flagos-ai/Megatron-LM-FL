@@ -100,8 +100,16 @@ class TestGPTModel:
         self.gpt_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -124,9 +132,17 @@ class TestGPTModel:
         self.gpt_model.eval()
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         labels = (input_ids + 1) % self.gpt_model.vocab_size
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -182,9 +198,21 @@ class TestGPTModel:
         self.gpt_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        labels = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        labels = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -302,8 +330,16 @@ class TestGPTWithFusedOps:
         self.gpt_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
         attention_mask = torch.ones(
             (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
         ).to(get_current_device())
@@ -359,8 +395,12 @@ def test_gpt_with_te_activation_func(num_experts, gated_linear_unit):
     gpt_model.to(get_current_device())
 
     data = list(range(sequence_length))
-    input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-    position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+    input_ids = (
+        torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+    )
+    position_ids = (
+        torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
+    )
     attention_mask = torch.ones(
         (micro_batch_size, 1, sequence_length, sequence_length), dtype=bool
     ).to(get_current_device())
@@ -443,7 +483,9 @@ class TestGPTModelWithCustomPG:
 
         self.gpt_model.to(get_current_device())
 
-        input_ids = torch.ones(micro_batch_size, sequence_length, dtype=torch.int64, device=get_current_device())
+        input_ids = torch.ones(
+            micro_batch_size, sequence_length, dtype=torch.int64, device=get_current_device()
+        )
         position_ids = torch.ones(
             micro_batch_size, sequence_length, dtype=torch.int64, device=get_current_device()
         )

@@ -48,8 +48,12 @@ class TestBaseEmbedding:
 
     def test_gpu_forward(self):
         self.base_embedding.to(get_current_device())
-        input_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).to(get_current_device())
-        position_ids = torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).to(get_current_device())
+        input_ids = (
+            torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor([0, 1, 2, 3], dtype=torch.int64).repeat((2, 1)).to(get_current_device())
+        )
         embeddings = self.base_embedding(input_ids, position_ids)
         assert embeddings.device.type == get_device_str()
         assert embeddings.shape[0] == self.base_embedding.max_sequence_length

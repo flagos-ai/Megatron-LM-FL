@@ -1459,9 +1459,9 @@ class SelfAttention(Attention):
 
         ######## FlagScale Begin ########
         if self.config.qk_layernorm_hidden_dim:
-            assert get_tensor_model_parallel_world_size() <= 1, (
-                "TP world size must be less than or equal to 1 for qk_layernorm_hidden_dim"
-            )
+            assert (
+                get_tensor_model_parallel_world_size() <= 1
+            ), "TP world size must be less than or equal to 1 for qk_layernorm_hidden_dim"
         ######## FlagScale End ########
 
         self.q_layernorm = (
