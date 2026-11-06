@@ -10,7 +10,12 @@ configure_iluvatar_runtime() {
   # Routing does not supply symbols missing from the installed IXTE extension.
   ci_export_env TE_FL_SKIP_CUDA 1
   ci_export_env TE_FL_PREFER flagos
-  local per_op='rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar'
+  # generic_gemm goes to the native backend as well: the flagos path dispatches
+  # to FlagGems, whose Triton autotune hangs in _init_handles on CoreX 4.5 and
+  # takes the whole group to the step timeout. With the native route the
+  # pipeline_parallel group goes from timing out to passing and the models
+  # group stops hanging in test_llava_model.
+  local per_op='rmsnorm_bwd_add=impl:vendor.iluvatar;te_general_grouped_gemm=impl:vendor.iluvatar;generic_gemm=impl:vendor.iluvatar'
   # Prepared TE wheels may replace the image's Python files. Reapply the
   # validated reference fix after installation, using the image's version guard.
   if [ -f /opt/megatron-image/apply_te_fl_patches.py ]; then

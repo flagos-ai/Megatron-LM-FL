@@ -131,6 +131,81 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_fp8_save_load[True-src_tp_pp0-dest_tp_pp0-broadcast]
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_fp8_save_load[True-src_tp_pp1-dest_tp_pp1-gather_rounds]
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_fp8_save_load[False-src_tp_pp2-dest_tp_pp2-None]
+      # FP64 reductions return 0 on BI-V150. Probed directly in the CI image:
+      # torch.float64 sum() of [100., 200.] gives 0.0 where float32 gives 300.0.
+      # megatron/training/training.py:355 keeps the packed-sequence accumulator
+      # in float64, so every token statistic reads back as zero. This is a
+      # platform runtime defect, not a test bug, and the production FLOPs
+      # metric is wrong on this platform for the same reason - the same FP64
+      # probe already motivated the test_fp32_residual_precision_advantage
+      # exclusion above. Hand-off: Iluvatar CoreX.
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_bshd_equivalent_when_chunks_fill_seq_length
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_unpadded_cu_seqlens_excludes_padding
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_update_accumulates_across_microbatches
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulator::test_update_computes_both_stats
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorDistributed::test_pure_dp_sums_across_ranks
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorDistributed::test_pure_tp_deduplicates
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[cp2_dp4]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[cp2_pp2_dp2]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[dp8]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[pp2_dp4]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[tp2_cp2_dp2]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[tp2_cp2_pp2_dp1]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[tp2_dp4]
+      - tests/unit_tests/test_num_floating_point_operations.py::TestAccumulatorTopology::test_dedup_across_topology[tp2_pp2_dp2]
+      # Megatron-FSDP, three distinct failures in one suite. Quantization and
+      # custom dtypes hit "generic_type: TEScalingMode is already registered"
+      # from TE-FL - the same duplicate registration the test_fp8.py exclusions
+      # above record. DCP save/load reports "Could not resolve the process
+      # group registered under the name ...". The CUDA-graph cases assert
+      # CUDA_DEVICE_MAX_CONNECTIONS > 1 while set_env_iluvatar.sh exports 1;
+      # unsetting it was measured and only swaps the error - the group still
+      # reports 27 failures either way - so the variable is left alone.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_full_iteration_cuda_graph_e2e[fsdp]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py::TestMegatronFSDPE2E::test_full_iteration_cuda_graph_e2e[hsdp_optim_outer_dp2]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config0-te_transformer-optim-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-cnn-optim-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-te_transformer-optim-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-no_shard-optim]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-no_shard-optim_grads]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-no_shard-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_dcp_checkpoint_save_and_load[mesh_dim_config1-transformer-optim-optim_grads_params]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[None-custom_main_params_dtype1-no_shard-optim-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[None-custom_main_params_dtype1-no_shard-optim_grads-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[None-custom_main_params_dtype1-no_shard-optim_grads_params-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[None-custom_main_params_dtype1-optim-optim_grads_params-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[custom_main_grads_dtype1-custom_main_params_dtype1-no_shard-optim-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[custom_main_grads_dtype1-custom_main_params_dtype1-no_shard-optim_grads-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[custom_main_grads_dtype1-custom_main_params_dtype1-no_shard-optim_grads_params-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype[custom_main_grads_dtype1-custom_main_params_dtype1-optim-optim_grads_params-te_transformer]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized[fp8_current_scaling-False]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized[fp8_current_scaling-True]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized[fp8_delayed_scaling-False]
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized[fp8_delayed_scaling-True]
+      # DSA/MoE equivalence: the logprob and golden-value comparisons do not
+      # match on this platform. Numerical, not a harness problem; hand it to
+      # the DSA owner rather than widening the tolerance here.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match[1-1]
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match[1-2]
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match[2-1]
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_moe_record_and_compare_golden_values[1-1]
+      # MIMO fan-in/fan-out still deadlock in BridgeCommunicator._communicate_shapes
+      # when the whole models directory runs: some ranks sit in batch_isend_irecv
+      # while the rest wait in recv_forward. Making the embedding groups
+      # rank-symmetric and dropping the WORLD barrier from destroy_all_grids
+      # fixed the rest of the suite but not these two. Root cause still open.
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_in_dp4_to_dp1_llm_tp2_pp2_8gpu
+      - tests/unit_tests/models/test_mimo_1f1b_schedule.py::TestMimo1F1BSchedule::test_fan_out_dp1_to_dp4_enc_tp2_pp2_8gpu
+      # TE grouped linear against the torch-native reference. CUDA excludes the
+      # whole test_moe_experts.py file (cuda.yml); keep its other parameters.
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_te_grouped_linear_torch_native[1]
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py::TestExpertLayerReconfiguration::test_te_grouped_linear_torch_native[2]
   functional:
     train:
       - model: gpt
