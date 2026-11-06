@@ -131,7 +131,7 @@ class DistributedDataParallel(_BaseDataParallel):
             param_to_name[param] = name
             all_params.append(param)
 
-        # Group by dtype and expert/Engram parallelism.  # FlagScale Modify
+        # Group parameters by (param_dtype, grad_dtype, is_expert_parallel, is_engram_parallel).
         buffer_groups = group_params_for_buffers(all_params, self.ddp_config.grad_reduce_in_fp32)
 
         # Auto-compute layouts when using distributed optimizer but no layout was provided.

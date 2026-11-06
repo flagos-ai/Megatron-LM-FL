@@ -219,7 +219,7 @@ class MultiGroupUBRAllocator:
     def __enter__(self):
         for group in self.groups[1:]:
             backend = group._get_backend(
-                torch.device("cuda", cur_platform.current_device())
+                torch.device(cur_platform.current_device_name())
             )  # FlagScale Modify
             try:
                 # Since the registration is done in mempool granularity, we need to deregister
@@ -234,7 +234,7 @@ class MultiGroupUBRAllocator:
         self.mem_allocator.__exit__(*args)
         for group in self.groups[1:]:
             backend = group._get_backend(
-                torch.device("cuda", cur_platform.current_device())
+                torch.device(cur_platform.current_device_name())
             )  # FlagScale Modify
             log_single_rank(
                 logger,
