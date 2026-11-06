@@ -31,6 +31,16 @@ test_matrix:
       - -rfE
       - -m
       - not experimental and not flaky_in_dev
+      # Bound every test so a deadlock is attributed to the case that caused it
+      # instead of taking the group to the step limit. Without this a hung test
+      # ends the group at exit code 124 with no JUnit at all, which is why
+      # earlier runs could only report "the group timed out" and never named a
+      # single failing case. 420s is well above the slowest case measured here
+      # (test_fan_in_dp4_to_dp1_llm_tp2_pp2_8gpu at ~105s standalone).
+      # thread method: the default SIGALRM cannot interrupt a rank blocked in a
+      # native collective.
+      - --timeout=420
+      - --timeout-method=thread
     groups:
       - name: core
         path: tests/unit_tests/test_*.py megatron/plugin/tests/

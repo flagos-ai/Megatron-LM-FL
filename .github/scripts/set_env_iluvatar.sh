@@ -46,6 +46,19 @@ if torch.cuda.is_available() and torch.cuda.device_count():
 PY
 }
 
+install_iluvatar_unit_test_plugins() {
+  # The config passes --timeout to bound each test, which needs this plugin.
+  # ci_install_project runs with --no-deps and the image does not ship it, so
+  # install it here rather than relying on the test dependency group.
+  "$CI_PYTHON_BIN" -m pip install pytest-timeout \
+    --index-url https://pypi.org/simple \
+    --timeout 300 \
+    --retries 10 \
+    --no-cache-dir \
+    --quiet
+  "$CI_PYTHON_BIN" -c "import pytest_timeout"
+}
+
 setup_unit_environment() {
   ci_activate_python_environment
   configure_iluvatar_runtime
@@ -53,6 +66,7 @@ setup_unit_environment() {
   verify_iluvatar_software_stack
   validate_iluvatar_capacity
   ci_install_project
+  install_iluvatar_unit_test_plugins
 }
 
 setup_functional_environment() {
