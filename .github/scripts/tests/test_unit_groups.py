@@ -384,7 +384,7 @@ class UnitGroupTests(unittest.TestCase):
             "CI_PYTHON_BIN": sys.executable,
         }
 
-        def run_group(env):
+        def run_group(env, timeout=3600):
             directory = Path(env["CI_COVERAGE_DIRECTORY"])
             directory.mkdir()
             config = directory / ".coveragerc"
