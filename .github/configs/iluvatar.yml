@@ -143,6 +143,9 @@ test_matrix:
       # raw pickle-byte mismatch in the backup comparison. Checkpoint contents
       # load correctly; the failure is confined to filecmp.cmp on rank 2.
       - tests/unit_tests/dist_checkpointing/test_local.py::TestLocalCheckpointing::test_basic_save_load_scenarios[fully_parallel-False-False-2-4]
+      # The TP2/PP4 asynchronous fully-parallel case has the same Iluvatar-only
+      # raw pickle-byte mismatch in the backup comparison; rank 3 fails.
+      - tests/unit_tests/dist_checkpointing/test_local.py::TestLocalCheckpointing::test_basic_save_load_scenarios[fully_parallel-False-True-2-4]
       # TEScalingMode duplicate registration in the five recorded FP8 cases.
       # Other platforms exclude test_fp8.py; retain its unaffected parameters.
       - tests/unit_tests/dist_checkpointing/test_fp8.py::TestFP8::test_simple_broadcast[0-fp8]
