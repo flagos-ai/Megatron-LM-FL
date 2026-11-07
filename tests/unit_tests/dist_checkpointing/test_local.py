@@ -233,8 +233,19 @@ class TestLocalCheckpointing:
             )
             if async_save:
                 maybe_finalize_async_save(True)
-            if Utils.rank > 0:  # Skip assertion on rank 0 due to harmless nondeterminism
-                assert filecmp.cmp(ckpt_path, backup_path, shallow=False), [ckpt_path, backup_path]
+
+            # Rank 0 stays exempt from the comparison due to harmless nondeterminism,
+            # but the verdict has to be collective: asserting rank-locally leaves the
+            # mismatching ranks in teardown while rank 0 enters the save_checkpoint
+            # collective below, deadlocking the group until the test times out.
+            ckpt_equal = Utils.rank == 0 or filecmp.cmp(ckpt_path, backup_path, shallow=False)
+            all_equal = [None] * torch.distributed.get_world_size()
+            torch.distributed.all_gather_object(all_equal, ckpt_equal)
+            assert all(all_equal), [
+                ckpt_path,
+                backup_path,
+                [rank for rank, equal in enumerate(all_equal) if not equal],
+            ]
             save_checkpoint(
                 2,
                 model,

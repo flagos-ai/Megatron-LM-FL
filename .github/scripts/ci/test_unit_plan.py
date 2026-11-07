@@ -95,7 +95,7 @@ class CatalogTests(unittest.TestCase):
     def test_non_platform_configs_are_not_platforms(self):
         self.assertEqual(
             set(self.platforms),
-            {"ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu"},
+            {"ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu", "iluvatar"},
         )
 
     def test_catalog_paths_and_dependencies_are_valid(self):
