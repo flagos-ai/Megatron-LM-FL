@@ -222,8 +222,13 @@ ci_install_uv_compatibility_shim() {
   local force_shim="${1:-false}"
 
   if [ "$force_shim" != "true" ] && command -v uv >/dev/null 2>&1; then
-    uv --version
-    return
+    # Some vendor images ship a compatibility shim at the uv path. Treat an
+    # executable that cannot answer --version as unusable and replace it below.
+    if uv --version >/dev/null 2>&1; then
+      uv --version
+      return
+    fi
+    echo "uv executable is unavailable; installing the CI compatibility shim"
   fi
 
   local python_bin="${CI_PYTHON_BIN:-$(command -v python3)}"
