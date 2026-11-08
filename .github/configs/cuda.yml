@@ -91,9 +91,8 @@ test_matrix:
       - name: a2a_overlap
         path: tests/unit_tests/a2a_overlap/
         description: All-to-all overlap tests
-      - name: dsa_kernel
-        path: tests/unit_tests/plugin/
-        description: Plugin kernel tests
+    unsupported_groups:
+      dsa_kernel: "DSA Triton kernels require SM90+; CUDA CI currently runs on A100 (SM80)."
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:

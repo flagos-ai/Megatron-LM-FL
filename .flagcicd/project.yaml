@@ -276,7 +276,8 @@ test_groups:
 - name: dsa_kernel
   description: DSA fused-kernel accuracy and performance tests under the plugin test
     tree.
-  status: active
+  status: planned
+  reason: No SM90+ CI runner is available; onboard this group when Hopper-class hardware is provided.
   paths:
   - tests/unit_tests/plugin/
   depends_on:

@@ -91,7 +91,7 @@ test_matrix:
       optimizer: "Optimizer tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
       extensions: "Extension tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
       a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
-      dsa_kernel: "Plugin kernel tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "DSA Triton tests require SM90+ CUDA hardware; this runtime has no compatible runner."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
