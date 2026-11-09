@@ -6,6 +6,12 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/set_env_common.sh"
 
 configure_iluvatar_runtime() {
+  # Only home paths are mounted. Preserve the legacy paths used by unit tests.
+  # -T fails on an existing real directory rather than creating a link inside it.
+  mkdir -p /opt/data
+  ln -sfnT /home/gitlab-runner/data /opt/data/datasets
+  ln -sfnT /home/gitlab-runner/tokenizers /opt/data/tokenizers
+
   # Keep FlagOS as the default and route IXTE-specific ops to the native backend.
   # Routing does not supply symbols missing from the installed IXTE extension.
   ci_export_env TE_FL_SKIP_CUDA 1

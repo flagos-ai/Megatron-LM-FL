@@ -8,11 +8,10 @@ ci_image: harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:1dc1e01-iluvatar-dev
 runner_labels:
   - ts-8g-cicd-megatron
 container_volumes:
-  # Shared assets; keep the container paths used by existing tests.
-  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data
-  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers
-  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_datasets:/opt/data/datasets
-  - /mnt/airs-business/cicd/megatron-ci-assets-20260726/baai_tokenizers:/opt/data/tokenizers
+  # Assets are copied to the host home directory before running CI.
+  # The setup script provides /opt/data compatibility links for unit tests.
+  - /home/gitlab-runner/data:/home/gitlab-runner/data
+  - /home/gitlab-runner/tokenizers:/home/gitlab-runner/tokenizers
 container_options: >-
   --privileged
   --ipc=host
