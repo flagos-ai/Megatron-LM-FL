@@ -289,7 +289,8 @@ ci_setup_functional_environment() {
 ci_install_local_tokenizer_dependencies() {
   # Transformers >= 4.47 validates mounted local tokenizer paths as Hub repo
   # ids. Keep the functional images on the version that accepts local paths.
-  python3 -m pip install \
+  local python_bin="${CI_PYTHON_BIN:-$(command -v python3)}"
+  "$python_bin" -m pip install \
     "transformers<4.47.0" \
     "huggingface_hub<0.27.0" \
     --no-cache-dir --quiet
