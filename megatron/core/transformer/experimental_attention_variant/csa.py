@@ -21,6 +21,9 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
     fused_qk_topk_naive,
     rotate_activation,
 )
+from megatron.core.transformer.experimental_attention_variant.dsa_backend import (
+    use_fused_dsa_kernels,
+)
 from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -28,7 +31,7 @@ from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 ######## FlagScale Begin ########
 # ---------------------------------------------------------------------------
-# Backend dispatch: SM90 (Triton) vs SM100+ (FlashMLA + cuDNN)
+# Core cuDNN/FlashMLA SBHD compatibility dispatch
 #
 # Each kernel file exposes the same high-level API so the dispatch here is
 # a simple import switch — no adapters or wrappers needed.
@@ -41,49 +44,20 @@ _build_flat_topk_idxs_fn = None
 
 
 def _ensure_dsa_kernels():
-    """Lazily resolve the correct kernel backend based on GPU SM version.
-
-    SM90 (Hopper): Triton-based kernels from megatron.plugin.dsa_kernel.
-    SM100+ (Blackwell): FlashMLA + cuDNN kernels from dsa_kernels.py.
-    """
+    """Load the core cuDNN/FlashMLA SBHD compatibility kernels."""
     global _dsa_sparse_attn, _fused_indexer_sparse_attn, _indexer_topk, _build_flat_topk_idxs_fn
     if _dsa_sparse_attn is not None:
         return
-
-    sm = torch.cuda.get_device_capability()
-    if sm[0] >= 10:
-        # SM100+: use the cuDNN/FlashMLA implementations.
-        from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
-            build_flat_topk_idxs,
-            dsa_sparse_attn,
-            fused_indexer_sparse_attn,
-            indexer_topk,
-        )
-
-        _dsa_sparse_attn = dsa_sparse_attn
-        _fused_indexer_sparse_attn = fused_indexer_sparse_attn
-        _indexer_topk = indexer_topk
-        _build_flat_topk_idxs_fn = build_flat_topk_idxs
-    else:
-        # SM90: use the Triton plugin implementations.
-        from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-            build_flat_topk_idxs as _triton_build_flat_topk_idxs,
-        )
-        from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-            dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,
-        )
-        from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-            fused_indexer_sparse_attn as _triton_fused,
-        )
-        from megatron.plugin.dsa_kernel.triton_dsa_kernels import indexer_topk as _triton_topk
-
-        _dsa_sparse_attn = _triton_dsa_sparse_attn_sbhd
-        _fused_indexer_sparse_attn = _triton_fused
-        _indexer_topk = _triton_topk
-        _build_flat_topk_idxs_fn = _triton_build_flat_topk_idxs
-
-
-######## FlagScale End ########
+    from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+        build_flat_topk_idxs,
+        dsa_sparse_attn,
+        fused_indexer_sparse_attn,
+        indexer_topk,
+    )
+    _dsa_sparse_attn = dsa_sparse_attn
+    _fused_indexer_sparse_attn = fused_indexer_sparse_attn
+    _indexer_topk = indexer_topk
+    _build_flat_topk_idxs_fn = build_flat_topk_idxs######## FlagScale End ########
 
 # ---------------------------------------------------------------------------
 # Helper functions for index computation
@@ -681,7 +655,7 @@ class CompressedSparseAttention(MegatronModule):
             softmax_scale = config.v_head_dim**-0.5
         self.softmax_scale = softmax_scale
 
-        self.apply_dsa_kernel_fusion = config.apply_dsa_kernel_fusion
+        self.apply_dsa_kernel_fusion = use_fused_dsa_kernels(config)
         ######## FlagScale Begin ########
         if self.apply_dsa_kernel_fusion:
             _ensure_dsa_kernels()

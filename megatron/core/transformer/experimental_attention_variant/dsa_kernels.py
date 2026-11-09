@@ -28,6 +28,9 @@ from typing import Optional, Tuple
 import torch
 from torch import Tensor
 
+# Keep the upstream dispatcher entry point available alongside the legacy SBHD API.
+from .dsa_backend import use_fused_dsa_kernels
+
 # ---------------------------------------------------------------------------
 # Lazy kernel imports
 # ---------------------------------------------------------------------------

@@ -438,11 +438,38 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to use dense mode for compressed sparse attention. If True, the CSA indexer will be
     disabled."""
 
+    dsa_indexer_topk_freq: int = 1
+    """Frequency of DSA indexer top-k computation across layers.
+    A value greater than 1 enables cross-layer top-k sharing."""
+    dsa_indexer_skip_topk_offset: int = 0
+    """Layer offset for DSA cross-layer top-k sharing."""
+    dsa_kernel_backend: Literal["none", "cudnn"] | None = None
+    """Optional fused DSA kernel backend.
+    When unset, follows ``apply_dsa_kernel_fusion``: disabled selects ``none``; enabled
+    selects the core cuDNN/FlashMLA backend on SM90+. An explicit value overrides that flag."""
+    dsa_indexer_rope_interleaved: bool = False
+    """Whether DSA indexer RoPE should use MLA-style interleaving."""
+    dsa_indexer_rotate_activation: bool = True
+    """Whether DSA indexer should apply Hadamard rotate_activation to q/k before scoring."""
+    dsa_indexer_scoring_relu: bool = True
+    """Whether DSA indexer should apply ReLU to q@k^T scores before weighting."""
+    dsa_indexer_k_norm_epsilon: Optional[float] = None
+    """Optional epsilon override for the DSA indexer key LayerNorm."""
+    dsa_indexer_k_norm_fp32: bool = False
+    """Whether DSA indexer key LayerNorm should run on fp32 inputs."""
+    dsa_indexer_weights_proj_use_quantization: bool = True
+    """Whether ``DSAIndexer`` weights projection follows the enclosing FP8/FP4
+    quantization context. Disable this to keep the projection parameter outside FP8/FP4;
+    ``dsa_indexer_weights_proj_output_dtype`` then controls its BF16 or FP32 output contract."""
+    dsa_indexer_weights_proj_output_dtype: Literal["bf16", "fp32"] = "bf16"
+    """Output dtype of the ``DSAIndexer`` weights projection. BF16 preserves the existing
+    path. FP32 uses a true FP32-output projection and is not compatible with the cuDNN DSA
+    backend. The final index scores remain FP32 independently of this option."""
+
     apply_dsa_kernel_fusion: bool = False
-    """If True, use fused DSA sparse-attention kernels. On SM100+ (Blackwell), uses FlashMLA
-    forward + cuDNN DSA backward (requires ``flash_mla`` and ``nvidia-cudnn-frontend``).
-    On SM90 (Hopper), uses Triton-based fused kernels (requires ``triton>=3.0``).
-    When False, falls back to unfused PyTorch implementations."""
+    """Compatibility flag selecting the core cuDNN/FlashMLA backend on SM90+.
+    An explicit ``dsa_kernel_backend`` value takes precedence."""
+
     ######## FlagScale End ########
     ####################
     # linear attention
@@ -1492,57 +1519,12 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
             self.hetereogenous_dist_checkpoint = True
 
-            if self.apply_dsa_kernel_fusion:
-                assert (
-                    torch.cuda.is_available()
-                ), "apply_dsa_kernel_fusion requires a CUDA device, but none is available."
-                sm = torch.cuda.get_device_capability()
-                assert sm[0] >= 9, (
-                    f"apply_dsa_kernel_fusion requires SM90+ (Hopper or later), "
-                    f"but current device has compute capability {sm[0]}.{sm[1]}."
-                )
+        if self.experimental_attention_variant in ("dsa", "dsv4_hybrid"):
+            from megatron.core.transformer.experimental_attention_variant.dsa_backend import (
+                validate_dsa_kernel_backend,
+            )
 
-                if sm[0] >= 10:
-                    # SM100+ (Blackwell): require FlashMLA + cuDNN DSA
-                    _flash_mla_available = True
-                    try:
-                        from flash_mla import flash_mla_sparse_fwd  # noqa: F401
-                    except ImportError:
-                        _flash_mla_available = False
-
-                    _cudnn_dsa_available = True
-                    try:
-                        from cudnn import DSA  # noqa: F401
-                    except ImportError:
-                        _cudnn_dsa_available = False
-
-                    if not _flash_mla_available or not _cudnn_dsa_available:
-                        missing = []
-                        if not _flash_mla_available:
-                            missing.append(
-                                "flash_mla (install from "
-                                "https://github.com/deepseek-ai/FlashMLA/tree/nv_dev)"
-                            )
-                        if not _cudnn_dsa_available:
-                            missing.append("cudnn-frontend DSA (nvidia-cudnn-frontend[cutedsl])")
-                        raise ValueError(
-                            f"apply_dsa_kernel_fusion on SM100+ requires fused DSA kernels, "
-                            f"but the following packages are not available: "
-                            f"{', '.join(missing)}. "
-                            f"Install them or pass --no-dsa-kernel-fusion to use the unfused "
-                            f"PyTorch fallback."
-                        )
-                else:
-                    ######## FlagScale Begin ########
-                    # SM90 (Hopper): require Triton-based fused kernels
-                    if not HAVE_TRITON:
-                        raise ImportError(
-                            "apply_dsa_kernel_fusion on SM90 requires Triton for the "
-                            "fused sparse-attention kernels. Install triton>=3.0 or "
-                            "pass --no-dsa-kernel-fusion to use the unfused PyTorch fallback."
-                        )
-                    ######## FlagScale End ########
-        ######## FlagScale End ########
+            validate_dsa_kernel_backend(self)
         if self.fp8:
             # cannot support first last layer bf16 with delayed scaling
             if self.first_last_layers_bf16 and self.fp8_recipe == Fp8Recipe.delayed:

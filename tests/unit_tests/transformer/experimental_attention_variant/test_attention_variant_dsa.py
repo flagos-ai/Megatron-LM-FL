@@ -61,6 +61,14 @@ def patch_hadamard_if_needed():
         yield
 
 
+def _available_tp_sizes(sizes):
+    """Run the topology matrix supported by the distributed launch size."""
+    available = [size for size in sizes if Utils.world_size % size == 0]
+    if not available:
+        pytest.skip(f"requires one of TP sizes {sizes}")
+    return available
+
+
 class TestRotateActivation:
     """Test rotate_activation function."""
 
@@ -394,7 +402,8 @@ class TestFusedDSAIndexerLossGradient:
                 index_scores_ref = _compute_index_scores(q_ref, weights_ref, k_ref)
                 index_scores_masked = index_scores_ref + mask.unsqueeze(0)
                 topk_k = min(index_topk, seqlen)
-                topk_indices = index_scores_masked.topk(topk_k, dim=-1)[1]
+                selected_scores, topk_indices = index_scores_masked.topk(topk_k, dim=-1)
+                topk_indices = topk_indices.masked_fill(~torch.isfinite(selected_scores), -1)
 
                 loss_ref = compute_dsa_indexer_loss(
                     index_scores=index_scores_masked,
@@ -545,7 +554,7 @@ class TestFusedDSAIndexerLossGradientTP:
         # =============================================
         # Test each TP size against baselines
         # =============================================
-        for tensor_model_parallel_size in [2, 4]:
+        for tensor_model_parallel_size in _available_tp_sizes((2, 4)):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
@@ -1054,7 +1063,7 @@ class TestIndexerTensorParallel:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_dsa_indexer_weight_consistency(self):
         """Test that indexer weights are identical across ALL GPUs."""
-        for tensor_model_parallel_size in self.TP_SIZES:
+        for tensor_model_parallel_size in _available_tp_sizes(self.TP_SIZES):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
@@ -1122,7 +1131,7 @@ class TestIndexerTensorParallel:
         Utils.destroy_model_parallel()
 
         # Test each TP size with both SP values
-        for tensor_model_parallel_size in self.TP_SIZES:
+        for tensor_model_parallel_size in _available_tp_sizes(self.TP_SIZES):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
@@ -1177,7 +1186,7 @@ class TestIndexerTensorParallel:
         seq_len = 64
         batch_size = 2
 
-        for tensor_model_parallel_size in self.TP_SIZES:
+        for tensor_model_parallel_size in _available_tp_sizes(self.TP_SIZES):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
@@ -1302,7 +1311,7 @@ class TestDSAttentionTensorParallel:
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_dsa_weight_consistency(self):
         """Test that sparse attention indexer weights are identical across ALL GPUs."""
-        for tensor_model_parallel_size in self.TP_SIZES:
+        for tensor_model_parallel_size in _available_tp_sizes(self.TP_SIZES):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
@@ -1422,7 +1431,7 @@ class TestDSAttentionTensorParallel:
         Utils.destroy_model_parallel()
 
         # Test each TP size with all (SP, sparse) combos
-        for tensor_model_parallel_size in self.TP_SIZES:
+        for tensor_model_parallel_size in _available_tp_sizes(self.TP_SIZES):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
@@ -1556,7 +1565,7 @@ class TestDSAttentionTensorParallel:
         seq_len = 64
         batch_size = 2
 
-        for tensor_model_parallel_size in self.TP_SIZES:
+        for tensor_model_parallel_size in _available_tp_sizes(self.TP_SIZES):
             Utils.initialize_model_parallel(
                 tensor_model_parallel_size=tensor_model_parallel_size,
                 pipeline_model_parallel_size=1,
