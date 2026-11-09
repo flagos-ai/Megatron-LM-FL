@@ -234,17 +234,17 @@ def _apply_rotary_pos_emb_thd(
 ) -> Tensor:
     """Apply RoPE for `thd` format using vectorized CUDA operations.
 
-    When ``max_seqlen`` is supplied, this path performs no GPU-to-CPU sync and is
-    compatible with CUDA Graph capture. The compatibility path for legacy callers
-    that omit ``max_seqlen`` retains one GPU-to-CPU sync.
+    Frequency layout is inferred on device, without a GPU-to-CPU sync. A table
+    whose length equals the global packed token count uses packed positions;
+    other tables use sequence-relative positions, including longer RoPE caches.
 
     Args:
         t (Tensor): Input tensor of shape [total_tokens, h, d]
         cu_seqlens (Tensor): Cumulative sequence lengths, shape [num_seqs + 1], int32.
         freqs (Tensor): RoPE frequencies, shape [max_s, 1, 1, d] or [total_tokens, 1, 1, d]
         cp_group: Context parallel group
-        max_seqlen: Global max sequence length for this packed batch when known. Supplying it
-            avoids the compatibility-path host sync used by legacy callers.
+        max_seqlen: Optional global max sequence length, retained for API compatibility.
+            Frequency layout does not depend on this bound.
 
     Returns:
         Tensor: Shape [total_tokens, h, d]. Input with RoPE applied.
@@ -297,19 +297,10 @@ def _apply_rotary_pos_emb_thd(
     else:
         freq_pos = local_pos.to(torch.int64)
 
-    if max_seqlen is None:
-        # Backward compatibility for callers that predate ``max_seqlen``. This retains
-        # the old packed-frequency semantics at the cost of a GPU-to-CPU sync. Updated
-        # training paths pass ``max_seqlen`` and stay CUDA-graph safe.
-        exact_packed_freqs = freqs.dim() >= 1 and freqs.size(0) == int(cu_seqlens[-1].item())
-    else:
-        exact_packed_freqs = freqs.dim() >= 1 and freqs.size(0) > max_seqlen
-    if exact_packed_freqs:
-        # `freqs` covers all positions across all sequences (used for non-1D
-        # RoPE / VLMs); shift by the per-sequence start offset so each token
-        # samples its absolute position. When `freqs` only spans one max-len
-        # sequence, no shift is needed.
-        freq_pos = freq_pos + global_seq_start
+    # Preserve the exact packed-table convention used by legacy callers. A
+    # longer cache is not necessarily packed; max_seqlen cannot distinguish it.
+    exact_packed_freqs = cu_seqlens_i64[-1] == freqs.size(0)
+    freq_pos = torch.where(exact_packed_freqs, freq_pos + global_seq_start, freq_pos)
 
     # Padded positions can sit outside the frequency table. Clamp them into
     # range; downstream padding masks exclude those positions from the result.

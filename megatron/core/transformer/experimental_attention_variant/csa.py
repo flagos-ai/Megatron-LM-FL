@@ -808,7 +808,9 @@ class CompressedSparseAttention(MegatronModule):
                     )
 
                 n_valid_per_pos = positions // self.compress_ratio  # [sq, 1]
-                valid = topk_indices_compressed < n_valid_per_pos
+                valid = (topk_indices_compressed >= 0) & (
+                    topk_indices_compressed < n_valid_per_pos
+                )
                 compress_topk_idxs = torch.where(
                     valid, topk_indices_compressed + offset, torch.tensor(-1, device=x.device)
                 )

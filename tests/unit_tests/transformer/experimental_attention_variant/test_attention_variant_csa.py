@@ -660,6 +660,37 @@ class TestCompressedSparseAttentionCompressed:
                 return i + 1
         raise ValueError(f"No layer with compress_ratio={compress_ratio}")
 
+    @pytest.mark.parametrize('training', [True, False])
+    def test_future_raw_kv_does_not_affect_early_queries(self, compress_ratio, training):
+        """Missing compressed indices must not alias the final raw KV token."""
+        if compress_ratio != 4:
+            pytest.skip('Only ratio 4 uses an indexer')
+        csa = CompressedSparseAttention(
+            config=self.config,
+            submodules=_make_csa_submodules(),
+            layer_number=self._get_layer_number(compress_ratio),
+            attn_mask_type=AttnMaskType.causal,
+            attention_type='self',
+            pg_collection=self.pg_collection,
+            rotary_pos_emb=self.rotary_pos_emb,
+            compress_ratio=compress_ratio,
+        ).cuda()
+        csa.apply_dsa_kernel_fusion = False
+        csa.train(training)
+        seq_len = 16
+        query = torch.randn(
+            seq_len, 1, self.config.num_attention_heads, self.config.v_head_dim, device='cuda'
+        )
+        key = torch.randn(seq_len, 1, 1, self.config.v_head_dim, device='cuda')
+        x = torch.randn(seq_len, 1, self.config.hidden_size, device='cuda', dtype=torch.bfloat16)
+        qr = torch.randn(seq_len, 1, self.config.q_lora_rank, device='cuda', dtype=torch.bfloat16)
+        altered = key.clone()
+        altered[-1] += 100
+        with torch.set_grad_enabled(training):
+            original = csa(query=query, key=key, value=key, attention_mask=None, x=x, qr=qr)
+            changed = csa(query=query, key=altered, value=altered, attention_mask=None, x=x, qr=qr)
+        torch.testing.assert_close(original[:3], changed[:3], rtol=0, atol=0)
+
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_constructor(self, compress_ratio):
         """Test that compressor/indexer are conditionally built."""

@@ -2012,6 +2012,10 @@ class DSAttention(MegatronModule):
             if not previous:
                 raise ValueError("A shared DSA indexer requires a preceding full indexer layer.")
             self.source_layer = previous[-1]
+        # Sharing is scheduled within the decoder or MTP stack, but holder keys
+        # and loss logging use a common global layer-number namespace.
+        if is_mtp_layer:
+            self.source_layer += config.num_layers
         self.indexer = None
         if not self.skip_topk:
             self.indexer = build_module(
@@ -2401,7 +2405,13 @@ class DSAttention(MegatronModule):
 
         if self.skip_topk:
             assert topk_holder is not None
-            if self.source_layer not in topk_holder:
+            # A named source also carries its valid lengths. Legacy callers can
+            # still provide indices directly when no source holder is available.
+            if self.source_layer in topk_holder:
+                topk_indices = topk_holder[self.source_layer]
+                if topk_length_holder is not None:
+                    topk_length = topk_length_holder.get(self.source_layer)
+            elif topk_indices is None:
                 raise RuntimeError(
                     "DSA index-share skip layer "
                     f"(layer_number={self.layer_number}) needs top-k indices from source "
@@ -2412,9 +2422,6 @@ class DSAttention(MegatronModule):
                     f"dsa_indexer_skip_topk_offset={self.index_skip_topk_offset}). "
                     f"Holder has layers {sorted(topk_holder)}."
                 )
-            topk_indices = topk_holder[self.source_layer]
-            if topk_length_holder is not None:
-                topk_length = topk_length_holder.get(self.source_layer)
         else:
             assert self.indexer is not None
             with torch.enable_grad() if use_indexer_loss else torch.no_grad():
