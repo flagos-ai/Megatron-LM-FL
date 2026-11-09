@@ -3984,3 +3984,57 @@ class TestDSAModuleSpecDispatch:
         config = self._make_dsa_config(qk_l2_norm=True)
         with pytest.raises(AssertionError, match="qk_l2_norm is not supported"):
             get_dsa_module_spec_for_backend(config, backend=None)
+
+
+pytestmark = pytest.mark.experimental
+
+
+def test_training_log_passes_indexer_process_groups(monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
+        DSAIndexerLossLoggingHelper,
+    )
+    from megatron.training import training
+
+    Utils.initialize_model_parallel()
+    try:
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        args = SimpleNamespace(
+            timing_log_level=0,
+            micro_batch_size=1,
+            data_parallel_size=Utils.world_size,
+            world_size=Utils.world_size,
+            seq_length=16,
+            num_experts=None,
+            mtp_num_layers=None,
+            dsa_indexer_loss_coeff=0.2,
+            num_layers=1,
+            csa_compress_ratios=[4],
+            experimental_attention_variant='dsv4_hybrid',
+            csa_dense_mode=False,
+            log_interval=100,
+        )
+        monkeypatch.setattr(training, 'get_args', lambda: args)
+        monkeypatch.setattr(training, 'get_timers', MagicMock())
+        for name in (
+            'get_tensorboard_writer',
+            'get_wandb_writer',
+            'get_one_logger',
+            'get_energy_monitor',
+        ):
+            monkeypatch.setattr(training, name, lambda: None)
+        monkeypatch.setattr(training, 'get_num_microbatches', lambda: 2)
+        monkeypatch.setattr(training.one_logger_utils, 'track_app_tag', MagicMock())
+        monkeypatch.setattr(training, 'reduce_max_stat_across_model_parallel_group', lambda x: x)
+        monkeypatch.setattr(DSAIndexerLossLoggingHelper, 'tracker', {})
+        DSAIndexerLossLoggingHelper.save_loss_to_tracker(torch.tensor(6.0, device='cuda'), 1, 1)
+        total = {}
+        training.training_log(
+            {}, total, None, 1, 1.0, False, 0, None, None, None, None, pg_collection=pg
+        )
+        torch.testing.assert_close(total['indexer loss'], torch.tensor(3.0, device='cuda'))
+        assert DSAIndexerLossLoggingHelper.tracker['values'].count_nonzero().item() == 0
+    finally:
+        Utils.destroy_model_parallel()

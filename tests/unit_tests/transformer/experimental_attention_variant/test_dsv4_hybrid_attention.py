@@ -118,12 +118,14 @@ def _make_attention_spec(config):
     return get_dsv4_hybrid_module_spec_for_backend(config=config, backend=TESpecProvider())
 
 
-def _build_attention(config, layer_number, pg_collection):
+def _build_attention(config, layer_number, pg_collection, **kwargs):
     """Instantiate a DSv4HybridSelfAttention from config."""
     from megatron.core.transformer.spec_utils import build_module
 
     spec = _make_attention_spec(config)
-    return build_module(spec, config=config, layer_number=layer_number, pg_collection=pg_collection)
+    return build_module(
+        spec, config=config, layer_number=layer_number, pg_collection=pg_collection, **kwargs
+    )
 
 
 # ===========================================================================
