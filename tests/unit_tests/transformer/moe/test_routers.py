@@ -696,7 +696,9 @@ class TestHashRouting:
         """End-to-end MoELayer forward/backward with hash routing; raises without input_ids."""
         config = _hash_routing_config(moe_n_hash_layers=1)
         submodules = get_submodules(
-            get_gpt_layer_local_submodules(num_experts=config.num_moe_experts, moe_grouped_gemm=False).mlp
+            get_gpt_layer_local_submodules(
+                num_experts=config.num_moe_experts, moe_grouped_gemm=False
+            ).mlp
         )
         moe_layer = MoELayer(config, submodules, layer_number=1).cuda()
 

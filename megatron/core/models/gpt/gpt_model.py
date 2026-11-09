@@ -404,7 +404,9 @@ class GPTModel(LanguageModule):
                     and packed_seq_params.qkv_format == 'thd',
                     cp_group=packed_seq_params.cp_group if packed_seq_params is not None else None,
                 )
-        elif self.position_embedding_type == 'yarn' and not self.config.multi_latent_attention:  # FlagScale Modify
+        elif (
+            self.position_embedding_type == 'yarn' and not self.config.multi_latent_attention
+        ):  # FlagScale Modify
             if not InferenceMode.is_active() or not self.config.flash_decode:
                 rotary_seq_len = self.rotary_pos_emb.get_rotary_seq_len(
                     inference_context, self.decoder, decoder_input, self.config, packed_seq_params

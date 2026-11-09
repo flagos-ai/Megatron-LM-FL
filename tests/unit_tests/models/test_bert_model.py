@@ -82,9 +82,19 @@ class TestBertModel:
         self.bert_model.to(get_current_device())
 
         data = list(range(sequence_length))
-        input_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        position_ids = torch.tensor(data, dtype=torch.int64).repeat((micro_batch_size, 1)).to(get_current_device())
-        attention_mask = torch.ones((micro_batch_size, sequence_length), dtype=bool).to(get_current_device())
+        input_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        position_ids = (
+            torch.tensor(data, dtype=torch.int64)
+            .repeat((micro_batch_size, 1))
+            .to(get_current_device())
+        )
+        attention_mask = torch.ones((micro_batch_size, sequence_length), dtype=bool).to(
+            get_current_device()
+        )
 
         logits = self.bert_model.forward(input_ids=input_ids, attention_mask=attention_mask)
 
@@ -166,7 +176,9 @@ class TestBertModelAttentionDimensions:
             attn_mask_dimensions == "b11s"
         ), f"Expected b11s for attn_mask_dimensions but got {attn_mask_dimensions}"
 
-    @pytest.mark.skip(reason="TE >= 2.9 accepts rng_tracker_name, mocked version cannot reproduce the expected error")
+    @pytest.mark.skip(
+        reason="TE >= 2.9 accepts rng_tracker_name, mocked version cannot reproduce the expected error"
+    )
     @pytest.mark.internal
     @pytest.mark.flaky
     @pytest.mark.flaky_in_dev

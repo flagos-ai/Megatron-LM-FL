@@ -127,7 +127,9 @@ class CLIPViTModel(VisionModule):
             padding=padding,
         )
 
-        self.position_ids = torch.arange(self.seq_length).expand(1, -1).to(cur_platform.device())  # FlagScale Modify
+        self.position_ids = (
+            torch.arange(self.seq_length).expand(1, -1).to(cur_platform.device())
+        )  # FlagScale Modify
 
         self.position_embeddings = torch.nn.Embedding(
             self.seq_length, self.visual_hidden_size, dtype=transformer_config.params_dtype

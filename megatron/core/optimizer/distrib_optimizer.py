@@ -386,7 +386,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     torch.float16,
                     torch.bfloat16,
                 ):
-                ######## FlagScale End ########
+                    ######## FlagScale End ########
 
                     # Generate sharded model param.
                     if (
@@ -456,7 +456,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                     model_param.device.type == cur_platform.device_name()
                     and model_param.dtype == torch.float32
                 ):
-                ######## FlagScale End ########
+                    ######## FlagScale End ########
                     shard_model_param = model_param.view(-1)[param_range.start : param_range.end]
                     model_fp32_params_this_group.append(model_param)
                     shard_fp32_params_this_group.append(shard_model_param)
@@ -469,7 +469,8 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 else:
                     raise TypeError(
                         'Wrapped parameters must be one of '
-                        'accelerator FloatTensor, HalfTensor, or BFloat16Tensor. '  # FlagScale Modify
+                        'accelerator FloatTensor, HalfTensor, '
+                        'or BFloat16Tensor. '  # FlagScale Modify
                         'Received {}'.format(model_param.type())
                     )
 
@@ -758,7 +759,7 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                         torch.float16,
                         torch.bfloat16,
                     ):
-                    ######## FlagScale End ########
+                        ######## FlagScale End ########
                         param.main_param = None
                         param.main_param_sharded = True
 
@@ -969,7 +970,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                             # Allocate dummy tensors.
                             numel = len(param_range_map["gbuf_world"])
                             init_shard = lambda dtype=torch.float32: torch.empty(
-                                (numel,), dtype=dtype, device=cur_platform.current_device()  # FlagScale Modify
+                                (numel,),
+                                dtype=dtype,
+                                device=cur_platform.current_device(),  # FlagScale Modify
                             )
 
                             # For precision_aware_optimizer, the empty tensors should also be
@@ -1331,7 +1334,9 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
 
                             # Gather tensor list.
                             if data_parallel_rank == 0 or return_on_all_ranks:
-                                device = "cpu" if use_gloo_comm else cur_platform.current_device()  # FlagScale Modify
+                                device = (
+                                    "cpu" if use_gloo_comm else cur_platform.current_device()
+                                )  # FlagScale Modify
                                 recv_tensors = [
                                     torch.zeros(
                                         (gbuf_local_numel,), dtype=torch.float32, device=device

@@ -73,23 +73,30 @@ class MetricRecorder:
         self._name = test_name
         self._collector = collector
 
-    def record_accuracy(self, params, cos_sim, max_diff=None, mean_diff=None,
-                        target="output", status="PASS"):
-        self._collector.accuracy.append(AccuracyRecord(
-            self._class, self._name, params, cos_sim, max_diff, mean_diff, target, status))
+    def record_accuracy(
+        self, params, cos_sim, max_diff=None, mean_diff=None, target="output", status="PASS"
+    ):
+        self._collector.accuracy.append(
+            AccuracyRecord(
+                self._class, self._name, params, cos_sim, max_diff, mean_diff, target, status
+            )
+        )
 
     def record_performance(self, params, fused_ms, unfused_ms, speedup, label="fwd"):
-        self._collector.performance.append(PerformanceRecord(
-            self._class, self._name, params, fused_ms, unfused_ms, speedup, label))
+        self._collector.performance.append(
+            PerformanceRecord(self._class, self._name, params, fused_ms, unfused_ms, speedup, label)
+        )
 
     def record_memory(self, params, fused_mb, unfused_mb, ratio):
-        self._collector.memory.append(MemoryRecord(
-            self._class, self._name, params, fused_mb, unfused_mb, ratio))
+        self._collector.memory.append(
+            MemoryRecord(self._class, self._name, params, fused_mb, unfused_mb, ratio)
+        )
 
 
 # ---------------------------------------------------------------------------
 # Markdown rendering
 # ---------------------------------------------------------------------------
+
 
 def _param_cols(records):
     seen = {}
@@ -107,15 +114,21 @@ def _render_accuracy(records):
     if not records:
         return "_No accuracy data._\n"
     pcols = _param_cols(records)
-    hdrs = ["test_class", "test_name", "target"] + pcols + ["cos_sim", "max_diff", "mean_diff", "status"]
+    hdrs = (
+        ["test_class", "test_name", "target"]
+        + pcols
+        + ["cos_sim", "max_diff", "mean_diff", "status"]
+    )
     lines = [_md_row(hdrs), _md_row(["---"] * len(hdrs))]
     for r in records:
         row = [r.test_class, r.test_name, r.target]
         row += [r.params.get(k, "") for k in pcols]
-        row += [f"{r.cos_sim:.6f}",
-                f"{r.max_diff:.4e}" if r.max_diff is not None else "-",
-                f"{r.mean_diff:.4e}" if r.mean_diff is not None else "-",
-                r.status]
+        row += [
+            f"{r.cos_sim:.6f}",
+            f"{r.max_diff:.4e}" if r.max_diff is not None else "-",
+            f"{r.mean_diff:.4e}" if r.mean_diff is not None else "-",
+            r.status,
+        ]
         lines.append(_md_row(row))
     return "\n".join(lines) + "\n"
 
@@ -176,7 +189,7 @@ def pytest_addoption(parser):
         action="store",
         default=None,
         help="Enable DSA test report generation. Pass a path (relative to test dir) "
-             "to write the markdown report. Omit to skip report generation (CI default).",
+        "to write the markdown report. Omit to skip report generation (CI default).",
     )
     parser.addoption(
         "--run-perf",
@@ -187,7 +200,9 @@ def pytest_addoption(parser):
 
 
 def pytest_configure(config):
-    config.addinivalue_line("markers", "perf: mark test as performance benchmark (skipped unless --run-perf)")
+    config.addinivalue_line(
+        "markers", "perf: mark test as performance benchmark (skipped unless --run-perf)"
+    )
 
 
 def pytest_collection_modifyitems(config, items):

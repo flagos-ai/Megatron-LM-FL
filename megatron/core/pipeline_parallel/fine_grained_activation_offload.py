@@ -11,6 +11,7 @@ DEBUG = False
 DEBUG_RANK = 0
 
 from megatron.core.transformer.cuda_graphs import is_graph_capturing
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
@@ -1064,7 +1065,9 @@ class ChunkOffloadHandler:
         if not is_graph_capturing() and len(self._reloading_group) > 0:
             for reloading_group in self._reloading_group:
                 if reloading_group._name == name:
-                    reloading_group.wait_reload_event(cur_platform.current_stream())  # FlagScale Modify
+                    reloading_group.wait_reload_event(
+                        cur_platform.current_stream()
+                    )  # FlagScale Modify
                     self._reloading_group.remove(reloading_group)
                     break
 

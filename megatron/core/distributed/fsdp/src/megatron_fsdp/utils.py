@@ -190,7 +190,9 @@ def contains_submesh(
 
 
 def _get_cuda_rng_state(
-    device: Union[int, str, torch.device] = cur_platform.device_name(), clone: bool = False, graph_safe: bool = False  # FlagScale Modify
+    device: Union[int, str, torch.device] = cur_platform.device_name(),  # FlagScale Modify
+    clone: bool = False,
+    graph_safe: bool = False,
 ) -> torch.Tensor:
     """Return the random number generator state of the specified GPU.
 
@@ -249,11 +251,11 @@ def _set_cuda_rng_state(new_state: torch.Tensor, device: int = -1, graph_safe: b
 
         def cb():
             idx = device.index
+            ######## FlagScale Begin ########
             if idx is None:
-                ######## FlagScale Begin ########
                 idx = cur_platform.current_device()
             default_generator = cur_platform.default_generator(idx)
-                ######## FlagScale End ########
+            ######## FlagScale End ########
 
             # if graph capturing, set the rng state in a cudagraphable way
             if graph_safe:

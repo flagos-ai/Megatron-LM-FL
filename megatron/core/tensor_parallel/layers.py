@@ -679,7 +679,6 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
             handle.wait()
             # Need to return None's as gradient has to flow for all the input arguments
             # provided during forward
-            ######## FlagScale Begin ########
             return (
                 sub_grad_input,
                 grad_weight,
@@ -690,14 +689,24 @@ class LinearWithGradAccumulationAndAsyncCommunication(torch.autograd.Function):
                 None,
                 None,
                 None,
-                None,
+                None,  # FlagScale Modify
             )
-            ######## FlagScale End ########
 
         if ctx.allreduce_dgrad:
             handle.wait()
 
-        return grad_input, grad_weight, grad_bias, None, None, None, None, None, None, None  # FlagScale Modify
+        return (
+            grad_input,
+            grad_weight,
+            grad_bias,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,  # FlagScale Modify
+        )
 
 
 def linear_with_grad_accumulation_and_async_allreduce(

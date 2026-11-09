@@ -101,9 +101,13 @@ class Router(ABC, MegatronModule):
         """
         if self.weight.device.type == 'cpu':
             # move weights to GPU
-            self.weight.data = self.weight.data.to(device=cur_platform.current_device())  # FlagScale Modify
+            self.weight.data = self.weight.data.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Modify
         if self.bias is not None and self.bias.device.type == 'cpu':
-            self.bias.data = self.bias.data.to(device=cur_platform.current_device())  # FlagScale Modify
+            self.bias.data = self.bias.data.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Modify
 
         # Convert to specified datatype for routing computation if enabled
         router_dtype = input.dtype
@@ -242,7 +246,9 @@ class TopKRouter(Router):
             )
             self.register_buffer(
                 'ga_steps',
-                torch.tensor(0, dtype=torch.float32, device=cur_platform.current_device()),  # FlagScale Modify
+                torch.tensor(
+                    0, dtype=torch.float32, device=cur_platform.current_device()
+                ),  # FlagScale Modify
                 persistent=False,
             )
         else:
