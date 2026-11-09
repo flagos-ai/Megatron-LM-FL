@@ -24,6 +24,7 @@ from megatron.core.context_parallel.layout import (
 )
 from megatron.core.context_parallel.utils import get_packed_seq_padding_mask
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.experimental_attention_variant.csa_utils import cp_utils
 from megatron.core.utils import flatten_batch_for_packed_sequences
 from tests.unit_tests.test_utilities import Utils
 
@@ -539,6 +540,14 @@ def _packed():
     )
 
 
+@pytest.mark.parametrize("cp_size", [1, 2])
+@pytest.mark.parametrize("backend", ["triton", "none", "tilelang"])
+def test_thd_rejects_unsupported_provider_even_at_cp1(backend, cp_size):
+    config = SimpleNamespace(
+        dsa_kernel_backend=backend, attention_cp_layout="contiguous", deterministic_mode=False
+    )
+    with pytest.raises(ValueError, match="requires dsa_kernel_backend='cudnn'"):
+        cp_utils.validate_packed_inputs(_packed(), config, _Group(cp_size))
 
 
 @pytest.mark.parametrize("start,count", [(0, 10), (0, 5), (5, 5)])

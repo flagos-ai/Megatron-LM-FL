@@ -348,8 +348,13 @@ def forward_step_calc_loss(
         if config.calculate_per_token_loss:
             DSAIndexerLossAutoScaler.set_loss_scale(loss_scale)
         else:
-            # The indexer loss is already a local mean; DDP averages the CP shards.
-            DSAIndexerLossAutoScaler.set_loss_scale(loss_scale / num_microbatches)
+            # Packed CSA normalizes by global real tokens; DSA uses a local mean.
+            cp_scale = (
+                (cp_group_size or 1)
+                if config.experimental_attention_variant == "dsv4_hybrid"
+                else 1
+            )
+            DSAIndexerLossAutoScaler.set_loss_scale(loss_scale * cp_scale / num_microbatches)
 
     return output_tensor, num_tokens
 

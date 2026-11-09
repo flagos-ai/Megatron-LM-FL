@@ -466,6 +466,9 @@ class TransformerConfig(ModelParallelConfig):
     path. FP32 uses a true FP32-output projection and is not compatible with the cuDNN DSA
     backend. The final index scores remain FP32 independently of this option."""
 
+    attention_cp_layout: str = "zigzag"
+    """Physical attention token layout; DSv4 static CP uses contiguous shards."""
+
     ####################
     # linear attention
     ####################
@@ -1570,6 +1573,8 @@ class TransformerConfig(ModelParallelConfig):
                         "because the cuDNN Frontend SM90 dense DSA kernels are not reliable for "
                         "this path. Use sparse indexer loss or set dsa_kernel_backend='none'."
                     )
+            if self.context_parallel_size > 1:
+                self.attention_cp_layout = "contiguous"
             self.hetereogenous_dist_checkpoint = True
 
         if self.fp8:
