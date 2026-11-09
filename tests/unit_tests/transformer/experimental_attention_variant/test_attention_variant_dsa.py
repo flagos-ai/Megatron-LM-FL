@@ -1,5 +1,6 @@
 # Copyright (c) 2025, NVIDIA CORPORATION. All rights reserved.
 
+from copy import deepcopy
 from unittest.mock import patch
 
 import pytest
@@ -67,6 +68,158 @@ def _available_tp_sizes(sizes):
     if not available:
         pytest.skip(f"requires one of TP sizes {sizes}")
     return available
+
+
+@pytest.mark.parametrize('comm_type', ['allgather', 'all_gather'])
+def test_dsa_context_parallel_config_accepts_allgather(comm_type):
+    config = TransformerConfig(
+        num_layers=2,
+        hidden_size=128,
+        num_attention_heads=2,
+        experimental_attention_variant='dsa',
+        context_parallel_size=2,
+        cp_comm_type=comm_type,
+    )
+    assert config.context_parallel_size == 2
+
+
+def test_dsa_context_parallel_config_rejects_p2p():
+    with pytest.raises((AssertionError, ValueError), match='all.?gather'):
+        TransformerConfig(
+            num_layers=2,
+            hidden_size=128,
+            num_attention_heads=2,
+            experimental_attention_variant='dsa',
+            context_parallel_size=2,
+            cp_comm_type='p2p',
+        )
+
+
+@pytest.mark.parametrize('packed', [False, True])
+def test_dsa_cp2_matches_cp1_forward_and_gradients(packed):
+    if Utils.world_size < 2 or Utils.world_size % 2:
+        pytest.skip('requires an even number of ranks')
+    from megatron.core.extensions.transformer_engine import TELinear, TENorm
+    from megatron.core.packed_seq_params import PackedSeqParams
+    from megatron.core.transformer.spec_utils import ModuleSpec
+
+    def make_config(cp):
+        return MLATransformerConfig(
+            num_layers=2,
+            hidden_size=128,
+            num_attention_heads=2,
+            use_cpu_initialization=True,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+            q_lora_rank=64,
+            kv_lora_rank=64,
+            qk_head_dim=64,
+            qk_pos_emb_head_dim=32,
+            v_head_dim=64,
+            experimental_attention_variant='dsa',
+            context_parallel_size=cp,
+            cp_comm_type='allgather',
+            dsa_indexer_n_heads=2,
+            dsa_indexer_head_dim=64,
+            dsa_indexer_topk=4,
+            dsa_indexer_loss_coeff=0.0,
+        )
+
+    spec = DSAttentionSubmodules(
+        indexer=ModuleSpec(
+            module=DSAIndexer,
+            submodules=DSAIndexerSubmodules(
+                linear_wq_b=ModuleSpec(module=TELinear),
+                linear_wk=ModuleSpec(module=TELinear),
+                k_norm=ModuleSpec(module=TENorm),
+                linear_weights_proj=ModuleSpec(module=TELinear),
+            ),
+        )
+    )
+    torch.manual_seed(198)
+    full_inputs = [torch.randn(16, 1, 2, 64, device='cuda', dtype=torch.bfloat16) for _ in range(3)]
+    if packed:
+        full_inputs = [t.squeeze(1) for t in full_inputs]
+    cu = torch.tensor([0, 8, 16], dtype=torch.int32, device='cuda')
+    packed_params = (
+        PackedSeqParams(
+            qkv_format='thd', cu_seqlens_q=cu, cu_seqlens_kv=cu, max_seqlen_q=8, max_seqlen_kv=8
+        )
+        if packed
+        else None
+    )
+    x = torch.randn(16, 1, 128, device='cuda', dtype=torch.bfloat16)
+    qr = torch.randn(16, 1, 64, device='cuda', dtype=torch.bfloat16)
+    reference = [t.clone().requires_grad_() for t in full_inputs]
+    Utils.initialize_model_parallel(tensor_model_parallel_size=1, context_parallel_size=1)
+    torch.manual_seed(13)
+    groups = ProcessGroupCollection.use_mpu_process_groups(required_pgs=['tp', 'cp'])
+    model = (
+        DSAttention(
+            make_config(1),
+            spec,
+            1,
+            AttnMaskType.causal,
+            'self',
+            cp_comm_type='allgather',
+            pg_collection=groups,
+        )
+        .cuda()
+        .eval()
+    )
+    weights = deepcopy(model.state_dict())
+    ref_out = model(
+        *reference,
+        attention_mask=None,
+        x=x,
+        qr=qr,
+        attn_mask_type=AttnMaskType.causal,
+        packed_seq_params=packed_params,
+    )
+    ref_out.float().sum().backward()
+    Utils.destroy_model_parallel()
+    Utils.initialize_model_parallel(tensor_model_parallel_size=1, context_parallel_size=2)
+    groups = ProcessGroupCollection.use_mpu_process_groups(required_pgs=['tp', 'cp'])
+    model = (
+        DSAttention(
+            make_config(2),
+            spec,
+            1,
+            AttnMaskType.causal,
+            'self',
+            cp_comm_type='allgather',
+            pg_collection=groups,
+        )
+        .cuda()
+        .eval()
+    )
+    model.load_state_dict(weights)
+    rank = groups.cp.rank()
+    if packed:
+        positions = [
+            i + offset
+            for offset in (0, 8)
+            for i in (*range(rank * 2, (rank + 1) * 2), *range(8 - (rank + 1) * 2, 8 - rank * 2))
+        ]
+    else:
+        positions = list(range(rank * 4, (rank + 1) * 4)) + list(
+            range(16 - (rank + 1) * 4, 16 - rank * 4)
+        )
+    indices = torch.tensor(positions, device='cuda')
+    local = [t.index_select(0, indices).detach().requires_grad_() for t in full_inputs]
+    out = model(
+        *local,
+        attention_mask=None,
+        x=x[indices],
+        qr=qr[indices],
+        attn_mask_type=AttnMaskType.causal,
+        packed_seq_params=packed_params,
+    )
+    out.float().sum().backward()
+    torch.testing.assert_close(out, ref_out[indices], rtol=0.03, atol=0.03)
+    for actual, expected in zip(local, reference):
+        torch.testing.assert_close(actual.grad, expected.grad[indices], rtol=0.05, atol=0.05)
+    Utils.destroy_model_parallel()
 
 
 class TestRotateActivation:
@@ -849,6 +1002,53 @@ class TestDSAttention:
         assert isinstance(self.sparse_attention, DSAttention)
         assert hasattr(self.sparse_attention, 'indexer')
         assert isinstance(self.sparse_attention.indexer, DSAIndexer)
+
+    @pytest.mark.parametrize('use_types', [False, True])
+    def test_mtp_shared_indices_use_mtp_source_and_legacy_fallback(self, use_types):
+        config = deepcopy(self.config)
+        config.dsa_indexer_topk_freq = 2
+        config.indexer_types = ['full', 'shared'] if use_types else None
+        layer = (
+            DSAttention(
+                config=config,
+                submodules=DSAttentionSubmodules(indexer=None),
+                layer_number=2,
+                attn_mask_type=AttnMaskType.causal,
+                attention_type='self',
+                pg_collection=self.pg_collection,
+                is_mtp_layer=True,
+            )
+            .cuda()
+            .eval()
+        )
+        assert layer.source_layer == 3
+        holder = layer._get_index_share_topk_holder(None, None)
+        seq_len = 8
+        source = torch.zeros(1, seq_len, 1, dtype=torch.long, device='cuda')
+        stale = torch.arange(seq_len, device='cuda').view(1, seq_len, 1)
+        holder[1] = stale
+        holder[3] = source
+        q = torch.randn(seq_len, 1, 16, 16, device='cuda', dtype=torch.bfloat16)
+        k = torch.randn_like(q)
+        v = torch.randn_like(q)
+        x = torch.randn(seq_len, 1, config.hidden_size, device='cuda', dtype=torch.bfloat16)
+        qr = torch.randn(seq_len, 1, config.q_lora_rank, device='cuda', dtype=torch.bfloat16)
+        kwargs = dict(
+            query=q,
+            key=k,
+            value=v,
+            x=x,
+            qr=qr,
+            attention_mask=None,
+            attn_mask_type=AttnMaskType.causal,
+        )
+        with torch.no_grad():
+            from_holder = layer(**kwargs, prev_topk_indices=stale)
+            del holder[3]
+            from_legacy = layer(**kwargs, prev_topk_indices=source)
+            from_stale = layer(**kwargs, prev_topk_indices=stale)
+        torch.testing.assert_close(from_holder, from_legacy)
+        assert not torch.equal(from_holder, from_stale)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_dsa_forward(self):

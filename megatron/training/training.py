@@ -149,6 +149,14 @@ from megatron.core.models.gpt.experimental_attention_variant_module_specs import
 from megatron.plugin.platform.platform_manager import get_platform
 
 cur_platform = get_platform()
+from megatron.core.distributed import DistributedDataParallel as DDP
+from megatron.core.distributed import (
+    DistributedDataParallelConfig,
+    TorchFullyShardedDataParallelConfig,
+)
+from megatron.core.distributed.fsdp.mcore_fsdp_adapter import (
+    FullyShardedDataParallel as megatron_FSDP,
+)
 from megatron.core.optimizer import get_mup_config_overrides, get_standard_config_overrides
 from megatron.core.optimizer.optimizer import param_group_identifier_keys
 from megatron.core.optimizer.optimizer_cuda_graph import OptimizerCudaGraphWrapper
@@ -163,12 +171,6 @@ from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.transformer.cuda_graphs import TECudaGraphHelper
 from megatron.core.transformer.module import Float16Module
 from megatron.core.transformer.moe.paged_stash import PagedStashRunner
-from megatron.core.distributed import DistributedDataParallelConfig, TorchFullyShardedDataParallelConfig
-from megatron.core.distributed import DistributedDataParallel as DDP
-from megatron.core.distributed.fsdp.mcore_fsdp_adapter import FullyShardedDataParallel as megatron_FSDP
-from megatron.core.optimizer.optimizer import param_group_identifier_keys
-
-from megatron.core.optimizer.qk_clip import clip_qk
 from megatron.core.utils import (
     StragglerDetector,
     check_param_hashes_across_dp_replicas,
@@ -215,7 +217,10 @@ from megatron.core.rerun_state_machine import (
     get_rerun_state_machine,
 )
 from megatron.core.resharding.refit import swap_model_weights
-from megatron.core.transformer.experimental_attention_variant.dsa import DSAIndexerLossLoggingHelper
+from megatron.core.transformer.experimental_attention_variant.dsa import (
+    DSAIndexerLossLoggingHelper,
+    is_dsa_skip_topk_layer,
+)
 from megatron.core.transformer.moe import upcycling_utils
 from megatron.core.transformer.moe.moe_logging import get_moe_metrics_tracker
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
@@ -2369,6 +2374,66 @@ def train_step(forward_step_func, data_iterator, model, optimizer, opt_param_sch
     return {}, skipped_iter, should_checkpoint, should_exit, exit_code, grad_norm, num_zeros_in_grad, log_max_attention_logit
 
 
+def _get_indexer_logging_layer_counts(args) -> tuple[int, int | None]:
+    """Return tracker slots and the number of indexer modules contributing losses."""
+    mtp_layers = args.mtp_num_layers or 0
+    tracker_layers = args.num_layers + mtp_layers
+    ratios = getattr(args, "csa_compress_ratios", None)
+    if ratios is not None:
+        if is_hybrid_model(args):
+            from megatron.core.models.hybrid.hybrid_layer_allocation import parse_hybrid_pattern
+
+            pattern = parse_hybrid_pattern(args.hybrid_layer_pattern)
+            tracker_layers = args.num_layers + len(pattern.mtp_pattern or "")
+            main_indexers = sum(ratio == 4 for ratio in ratios[: args.num_layers])
+            mtp_indexers = sum(ratio == 4 for ratio in ratios[args.num_layers : tracker_layers])
+            repeats = 1 if args.mtp_use_repeated_layer else pattern.mtp_num_depths
+            count = main_indexers + mtp_indexers * repeats
+        else:
+            count = sum(ratio == 4 for ratio in ratios[:tracker_layers])
+        return tracker_layers, 0 if args.csa_dense_mode else count
+
+    hybrid_pattern = getattr(args, "hybrid_layer_pattern", None)
+    if getattr(args, "experimental_attention_variant", None) != "dsa" and not hybrid_pattern:
+        return tracker_layers, None
+
+    indexer_types = getattr(args, "indexer_types", None)
+    rule = getattr(args, "indexer_type_rule", None)
+    if indexer_types is None and rule is not None:
+        from megatron.core.transformer.transformer_config import TransformerConfig
+
+        indexer_types = TransformerConfig._parse_indexer_type_rule(rule, args.num_layers)
+    topk_freq = getattr(args, "dsa_indexer_topk_freq", 1) or 1
+    skip_offset = getattr(args, "dsa_indexer_skip_topk_offset", 0) or 0
+
+    def count_indexers(num_layers, layer_types=None):
+        return sum(
+            (layer_types is None or layer_types[layer - 1] == "D")
+            and (
+                indexer_types[layer - 1] not in ("share", "shared")
+                if indexer_types is not None
+                else not is_dsa_skip_topk_layer(layer, skip_offset, topk_freq)
+            )
+            for layer in range(1, num_layers + 1)
+        )
+
+    if hybrid_pattern:
+        from megatron.core.models.hybrid.hybrid_layer_allocation import parse_hybrid_pattern
+
+        pattern = parse_hybrid_pattern(hybrid_pattern)
+        main_types = pattern.main_pattern.replace("|", "")
+        mtp_types = pattern.mtp_pattern or ""
+        tracker_layers = args.num_layers + len(mtp_types)
+        repeats = 1 if args.mtp_use_repeated_layer else pattern.mtp_num_depths
+        return tracker_layers, count_indexers(len(main_types), main_types) + (
+            count_indexers(len(mtp_types), mtp_types) * repeats
+        )
+
+    # MTP uses its own local layer numbering and can reuse one module at every depth.
+    mtp_modules = min(mtp_layers, 1) if getattr(args, "mtp_use_repeated_layer", False) else mtp_layers
+    return tracker_layers, count_indexers(args.num_layers) + count_indexers(mtp_modules)
+
+
 def training_log(
     loss_dict,
     total_loss_dict,
@@ -2596,12 +2661,20 @@ def training_log(
     # Track sparse attention indexer loss.
     if args.dsa_indexer_loss_coeff is not None and args.dsa_indexer_loss_coeff > 0:
         indexer_loss_scale = 1 / get_num_microbatches()
+        if pg_collection is None:
+            # Legacy entrypoints do not pass model process groups to training_log.
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["pp", "dp"])
+        indexer_tracker_layers, indexer_layer_count = _get_indexer_logging_layer_counts(args)
         DSAIndexerLossLoggingHelper.track_indexer_metrics(
             loss_scale=indexer_loss_scale,
             iteration=iteration,
             writer=writer,
+            pg_collection=pg_collection,
             wandb_writer=wandb_writer,
             total_loss_dict=total_loss_dict,
+            num_layers=indexer_tracker_layers,
+            num_indexer_layers=indexer_layer_count,
+            preserve_groups=args.cuda_graph_impl != "none",
         )
 
     # Dump memory snapshot and print metrics to stdout.
