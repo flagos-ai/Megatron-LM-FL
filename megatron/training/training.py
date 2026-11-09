@@ -2663,7 +2663,7 @@ def training_log(
         indexer_loss_scale = 1 / get_num_microbatches()
         if pg_collection is None:
             # Legacy entrypoints do not pass model process groups to training_log.
-            pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["pp", "dp"])
+            pg_collection = ProcessGroupCollection.use_mpu_process_groups(required_pgs=["pp", "dp", "cp"])
         indexer_tracker_layers, indexer_layer_count = _get_indexer_logging_layer_counts(args)
         DSAIndexerLossLoggingHelper.track_indexer_metrics(
             loss_scale=indexer_loss_scale,
@@ -2675,6 +2675,7 @@ def training_log(
             num_layers=indexer_tracker_layers,
             num_indexer_layers=indexer_layer_count,
             preserve_groups=args.cuda_graph_impl != "none",
+            calculate_per_token_loss=args.calculate_per_token_loss,
         )
 
     # Dump memory snapshot and print metrics to stdout.
