@@ -6,6 +6,7 @@ import torch
 
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.models.common.model_chunk_schedule_plan import TransformerLayerSchedulePlan
+from megatron.core.models.gpt.fine_grained_callables import build_transformer_layer_callables
 from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_decoder_block_spec,
     get_gpt_layer_with_transformer_engine_spec,
@@ -13,8 +14,11 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 )
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.pipeline_parallel.utils import get_comm_stream, get_comp_stream, set_streams
+from megatron.core.transformer.enums import AttnBackend
+from megatron.core.transformer.moe.moe_utils import MoEAuxLossAutoScaler
 from megatron.core.utils import is_te_min_version
 from tests.unit_tests.a2a_overlap.utils import (
+    DummyNode,
     DummyState,
     build_data,
     compare_captures,
@@ -25,6 +29,82 @@ from tests.unit_tests.a2a_overlap.utils import (
     reset_model,
 )
 from tests.unit_tests.test_utilities import Utils
+
+
+@pytest.mark.parametrize("all_padding", [False, True])
+def test_overlap_router_padding_mask(monkeypatch, all_padding):
+    """The overlap callable preserves the ordinary router mask and aux gradient."""
+    Utils.initialize_model_parallel()
+    previous_scale = MoEAuxLossAutoScaler.main_loss_backward_scale
+    try:
+        with deterministic_mode():
+            from megatron.core.transformer.transformer_config import TransformerConfig
+
+            config = TransformerConfig(
+                num_layers=1,
+                hidden_size=16,
+                num_attention_heads=2,
+                num_moe_experts=4,
+                moe_router_topk=2,
+                moe_aux_loss_coeff=0.1,
+                use_cpu_initialization=True,
+                add_bias_linear=False,
+                moe_token_dispatcher_type="alltoall",
+                attention_backend=AttnBackend.unfused,
+            )
+            model = GPTModel(
+                config=config,
+                transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(
+                    num_experts=4, moe_grouped_gemm=False
+                ),
+                vocab_size=16,
+                max_sequence_length=4,
+            ).cuda()
+            layer = model.decoder.layers[0]
+            hidden = torch.randn(4, 2, 16, device="cuda", requires_grad=True)
+            mask = torch.tensor([[0, 0, 1, 1], [0, 1, 1, 1]], device="cuda", dtype=torch.int32)
+            if all_padding:
+                mask.fill_(1)
+            MoEAuxLossAutoScaler.set_loss_scale(torch.ones((), device="cuda"))
+            expected_probs, expected_routes = layer.mlp.route(
+                layer.pre_mlp_layernorm(hidden), padding_mask=mask.T.bool()
+            )
+            (expected_probs.sum() * 0).backward()
+            expected_gradient = layer.mlp.router.weight.grad.clone()
+            model.zero_grad(set_to_none=True)
+            hidden.grad = None
+
+            # Isolate the schedule's routing boundary; retain the real norm/router.
+            monkeypatch.setattr(
+                layer, "_forward_attention", lambda **kwargs: (kwargs["hidden_states"], None)
+            )
+            original_route = layer.mlp.route
+
+            def route(inputs, padding_mask=None, input_ids=None):
+                assert padding_mask.dtype == torch.bool
+                assert torch.equal(padding_mask, mask.T.bool())
+                probs, routes = original_route(
+                    inputs, padding_mask=padding_mask, input_ids=input_ids
+                )
+                torch.testing.assert_close(probs, expected_probs.detach())
+                assert torch.equal(routes, expected_routes)
+                return probs, routes
+
+            monkeypatch.setattr(layer.mlp, "route", route)
+            monkeypatch.setattr(
+                layer.mlp, "preprocess", lambda inputs, probs, routes: (inputs, probs)
+            )
+            node = DummyNode()
+            node.chunk_state = DummyState()
+            node.layer_state = DummyState()
+            node.chunk_state.padding_mask = mask
+            functions, _ = build_transformer_layer_callables(layer)
+            _, probs = functions[0](node, hidden)
+            (probs.sum() * 0).backward()
+            torch.testing.assert_close(layer.mlp.router.weight.grad, expected_gradient)
+    finally:
+        MoEAuxLossAutoScaler.main_loss_backward_scale = previous_scale
+        Utils.destroy_model_parallel()
 
 
 def run_transformer_layer_ref_with_capture(model, input_tensors, iterations):

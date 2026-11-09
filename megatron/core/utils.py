@@ -2337,115 +2337,15 @@ def get_batch_on_this_tp_rank(
 def get_sft_batch_on_this_cp_rank(
     batch: dict[str, torch.Tensor], cp_group: torch.distributed.ProcessGroup
 ):
-    """Partition an SFT packed-sequence batch across context-parallel ranks using THD indexing.
-
-    For SFT workloads the batch contains multiple variable-length sub-sequences
-    packed contiguously (THD format). This function uses Transformer Engine's
-    ``thd_get_partitioned_indices`` to compute the token indices assigned to the
-    current CP rank and gathers only those tokens from every sequence-dimension
-    tensor in the batch.
-
-    Metadata keys ('attention_mask', 'cu_seqlens', 'cu_seqlens_padded',
-    'max_seqlen', 'local_cp_size', 'hybrid_cp_group') are left unchanged
-    because TE's attention kernels consume them directly.
-
-    Args:
-        batch (dict[str, torch.Tensor]): Batch dict with tensors of shape
-            ``[micro_batch_size, seq_length, ...]``.
-        cp_group (torch.distributed.ProcessGroup): The context-parallel process
-            group.
-
-    Returns:
-        dict[str, torch.Tensor]: The batch with sequence-dimension tensors
-        index-selected to this CP rank's partition.
-    """
-    cp_size = torch.distributed.get_world_size(cp_group)
-    cp_rank = torch.distributed.get_rank(cp_group)
-
-    if cp_size > 1:
-        # cu_seqlens / cu_seqlens_padded carry the dataloader's batch dim (1, n).
-        # tex.thd_get_partitioned_indices expects a 1-D tensor, so squeeze the
-        # batch dim inline without mutating the batch dict.
-        cu_seqlens_for_te = (
-            batch["cu_seqlens_padded"]
-            if batch["cu_seqlens_padded"] is not None
-            else batch["cu_seqlens"]
-        )[0]
-        _validate_per_document_cp_lengths(cu_seqlens_for_te, cp_size)
-        index = tex.thd_get_partitioned_indices(
-            cu_seqlens_for_te,
-            (
-                batch["tokens"].size(1) if batch["tokens"] is not None else batch["labels"].size(1)
-            ),  # NOTE(asolergi-nv): Labels to enable PP!
-            cp_size,
-            cp_rank,
-        )
-        SEQUENCE_KEYS = ('tokens', 'labels', 'loss_mask', 'position_ids')
-        for key in SEQUENCE_KEYS:
-            if batch.get(key) is not None:
-                batch[key] = batch[key].index_select(1, index)
-    return batch
+    """Partition a batch with the per-document zigzag layout."""
+    return _get_batch_on_this_cp_rank_per_document_balancing(batch, cp_group)
 
 
 def get_pretrain_batch_on_this_cp_rank(
     batch: dict[str, torch.Tensor], cp_group: torch.distributed.ProcessGroup
 ):
-    """Partition a pretraining batch across context-parallel ranks with load-balanced chunking.
-
-    With causal masking, each token only attends to its prior tokens. Simply splitting
-    the sequence into CP chunks can result in severe load imbalance, as chunks at the
-    end of the sequence have bigger workloads than earlier ones. To address this, the
-    sequence is split into ``2 * cp_size`` chunks and assigned in a zigzag pattern:
-    for CP=2 the 4 chunks are assigned as (chunk_0, chunk_3) -> GPU 0 and
-    (chunk_1, chunk_2) -> GPU 1, balancing the workload across the CP group.
-
-    All tensor-valued entries in the batch are partitioned along their sequence
-    dimension (``seq_dim=1`` by default, ``seq_dim=2`` for 'attention_mask').
-    None-valued entries are left unchanged.
-
-    Args:
-        batch (dict[str, torch.Tensor]): Batch dict with tensors of shape
-            ``[micro_batch_size, seq_length, ...]``.
-        cp_group (torch.distributed.ProcessGroup): The context-parallel process
-            group.
-
-    Returns:
-        dict[str, torch.Tensor]: The batch with sequence-dimension tensors
-        sliced to this CP rank's zigzag partition.
-    """
-
-    cp_size = torch.distributed.get_world_size(cp_group)
-    cp_rank = torch.distributed.get_rank(cp_group)
-
-    # HybridCP metadata is not partitioned along the sequence dim — skip by key.
-    # Intermediate PP stages set non-metadata keys to None, so still skip those.
-    METADATA_KEYS = (
-        'cu_seqlens',
-        'cu_seqlens_padded',
-        'max_seqlen',
-        'local_cp_size',
-        'hybrid_cp_group',
-    )
-
-    if cp_size > 1:
-        for key, val in batch.items():
-            if key in METADATA_KEYS or val is None:
-                continue
-            seq_dim = 2 if key == 'attention_mask' else 1
-            val = val.view(
-                *val.shape[0:seq_dim],
-                2 * cp_size,
-                val.shape[seq_dim] // (2 * cp_size),
-                *val.shape[(seq_dim + 1) :],
-            )
-            index = torch.zeros(2, dtype=torch.int64, device=val.device)
-            index[0].fill_(cp_rank)
-            index[1].fill_(2 * cp_size - cp_rank - 1)
-            val = val.index_select(seq_dim, index)
-            val = val.view(*val.shape[0:seq_dim], -1, *val.shape[(seq_dim + 2) :])
-            batch[key] = val
-
-    return batch
+    """Partition a batch with the per-sequence zigzag layout."""
+    return _get_batch_on_this_cp_rank_per_sequence_balancing(batch, cp_group)
 
 
 def get_batch_on_this_cp_rank(
@@ -3010,10 +2910,12 @@ def flatten_batch_for_packed_sequences(batch: Dict[str, Any]) -> Dict[str, Any]:
             if cu_seqlens.shape[0] == 1:
                 seq_length *= batch[key].shape[0]
             break
-    if seq_length is None:
-        seq_length = cu_seqlens[0, -1].item()
-
     physical = batch.get('cu_seqlens_padded')
+    if seq_length is None:
+        # Metadata-only PP stages still need the physical stride between samples.
+        lengths = physical if physical is not None else cu_seqlens
+        seq_length = lengths[0, -1].item()
+
     if physical is None:
         batch['cu_seqlens'] = _merge_cu_seqlens_across_micro_batch(
             cu_seqlens, seq_length

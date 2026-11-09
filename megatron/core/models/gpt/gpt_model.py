@@ -327,6 +327,8 @@ class GPTModel(LanguageModule):
 
         Applies embeddings to input tokens, or uses `decoder_input` from a previous
         pipeline stage. Also sets up rotary positional embeddings.
+        `padding_mask` covers the full CP-local sequence on every pipeline stage;
+        this boundary scatters it once to match sequence-parallel hidden states.
         """
 
         # If decoder_input is provided (not None), then input_ids and position_ids are ignored.
@@ -338,24 +340,26 @@ class GPTModel(LanguageModule):
         if decoder_input is not None:
             pass
         elif self.pre_process:
-            if padding_mask is not None:
-                assert padding_mask.shape == input_ids.shape, (
-                    f"padding_mask shape {padding_mask.shape} does not match "
-                    f"input_ids shape {input_ids.shape}"
-                )
             decoder_input = self.embedding(input_ids=input_ids, position_ids=position_ids)
-            if padding_mask is not None and self.config.sequence_parallel:
-                padding_mask = (
-                    tensor_parallel.scatter_to_sequence_parallel_region(
-                        padding_mask.transpose(0, 1).contiguous()
-                    )
-                    .transpose(0, 1)
-                    .contiguous()
-                )
         else:
             # intermediate stage of pipeline
             # decoder will get hidden_states from encoder.input_tensor
             decoder_input = None
+
+        if padding_mask is not None:
+            if input_ids is not None:
+                assert padding_mask.shape == input_ids.shape, (
+                    f"padding_mask shape {padding_mask.shape} does not match "
+                    f"input_ids shape {input_ids.shape}"
+                )
+            if self.config.sequence_parallel:
+                padding_mask = (
+                    tensor_parallel.scatter_to_sequence_parallel_region(
+                        padding_mask.transpose(0, 1).contiguous(), group=self.pg_collection.tp
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                )
 
         # Rotary positional embeddings (embedding is None for PP intermediate devices)
         rotary_pos_emb = None

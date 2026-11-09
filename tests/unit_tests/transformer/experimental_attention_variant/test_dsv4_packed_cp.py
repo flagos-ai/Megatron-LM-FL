@@ -237,9 +237,11 @@ def test_packed_cp_matches_full_attention_and_gradients(
         pytest.skip(f"requires {cp_size} ranks")
     pytest.importorskip("flash_mla")
     pytest.importorskip("cudnn.deepseek_sparse_attention")
-    # CI builds FlashMLA with FLASH_MLA_DISABLE_SM90=1.
-    if torch.cuda.get_device_capability()[0] < 10:
-        pytest.skip("Fused CSA CP tests require the SM100 kernels included in the CI image")
+    # The local SM90 build includes sparse FlashMLA. Dense indexer loss requires SM100.
+    if torch.cuda.get_device_capability()[0] < 9:
+        pytest.skip("Fused CSA requires SM90+")
+    if torch.cuda.get_device_capability()[0] < 10 and ratio == 4 and not sparse and coeff > 0:
+        pytest.skip("Dense fused indexer loss requires SM100; sparse H100 cases run normally")
     Utils.initialize_model_parallel(
         tensor_model_parallel_size=1, pipeline_model_parallel_size=1, context_parallel_size=cp_size
     )
@@ -438,4 +440,34 @@ def test_packed_cp2_optimizer_steps_match_cp1():
                 torch.testing.assert_close(param, replica, rtol=0, atol=0)
         assert any(not torch.equal(before[name], value) for name, value in model.named_parameters())
     finally:
+        Utils.destroy_model_parallel()
+
+
+@pytest.mark.parametrize("packed,per_token", [(False, False), (False, True), (True, False), (True, True)])
+def test_indexer_logging_across_cp_and_empty_pipeline_stage(packed, per_token):
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
+        DSAIndexerLossLoggingHelper as logger,
+    )
+
+    if Utils.world_size % 4:
+        pytest.skip("requires two pipeline stages with two context ranks each")
+    Utils.initialize_model_parallel(
+        tensor_model_parallel_size=1, pipeline_model_parallel_size=2, context_parallel_size=2
+    )
+    old_tracker = logger.tracker
+    logger.tracker = {}
+    try:
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        if pg.pp.rank() == 0:
+            loss = torch.tensor(float(pg.cp.rank() + 1), device="cuda")
+            logger.save_loss_to_tracker(
+                loss, 1, 2,
+                reduce_group=pg.cp if packed or per_token else None,
+                avg_group=pg.cp if not (packed or per_token) else None,
+            )
+        logger.reduce_loss_in_tracker(pg, num_layers=2, calculate_per_token_loss=per_token)
+        expected = [3.0 if packed or per_token else 1.5, 0.0]
+        torch.testing.assert_close(logger.tracker["values"], torch.tensor(expected, device="cuda"))
+    finally:
+        logger.tracker = old_tracker
         Utils.destroy_model_parallel()

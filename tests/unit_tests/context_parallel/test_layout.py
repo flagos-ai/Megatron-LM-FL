@@ -557,7 +557,8 @@ def test_router_padding_uses_real_lengths_and_physical_offsets(start, count):
     torch.testing.assert_close(actual, oracle[start : start + count])
 
 
-def test_packed_batch_merges_real_and_physical_prefixes_together():
+@pytest.mark.parametrize("metadata_only", [False, True])
+def test_packed_batch_merges_real_and_physical_prefixes_together(metadata_only):
     tokens = torch.arange(16).view(2, 8)
     batch = dict(
         tokens=tokens,
@@ -568,10 +569,16 @@ def test_packed_batch_merges_real_and_physical_prefixes_together():
         cu_seqlens_padded=torch.tensor([[0, 4, 8], [0, 3, 8]], dtype=torch.int32),
         max_seqlen=torch.tensor([4, 5]),
     )
+    if metadata_only:
+        for key in ("tokens", "labels", "position_ids", "loss_mask"):
+            batch[key] = None
     actual = flatten_batch_for_packed_sequences(batch)
     assert actual['cu_seqlens'].tolist() == [[0, 3, 6, 8, 11]]
     assert actual['cu_seqlens_padded'].tolist() == [[0, 4, 8, 11, 16]]
-    assert actual['tokens'].tolist() == [list(range(16))]
+    if metadata_only:
+        assert actual['tokens'] is None
+    else:
+        assert actual['tokens'].tolist() == [list(range(16))]
     assert actual['max_seqlen'].tolist() == [5]
     repeated = flatten_batch_for_packed_sequences(actual)
     assert repeated['cu_seqlens'].tolist() == [[0, 3, 6, 8, 11]]
@@ -582,3 +589,37 @@ def test_packed_batch_leaves_sbhd_tensor_layout_unchanged():
     tokens = torch.arange(16).view(2, 8)
     batch = dict(tokens=tokens, cu_seqlens=None)
     assert flatten_batch_for_packed_sequences(batch)['tokens'] is tokens
+
+
+def test_gpt_dataset_emits_actual_document_lengths_before_padding():
+    import numpy as np
+
+    from megatron.core.datasets.gpt_dataset import GPTDataset
+
+    config = SimpleNamespace(
+        add_extra_token_to_sequence=True,
+        inter_document_masking=True,
+        preserve_packed_sequence_lengths=True,
+        sequence_length=8,
+        tokenizer=SimpleNamespace(eod=99),
+        reset_position_ids=False,
+        reset_attention_mask=False,
+        eod_mask_loss=False,
+        create_attention_mask=False,
+    )
+    sample = SimpleNamespace(
+        config=config,
+        _pad_token_id=-1,
+        masks_and_position_ids_are_cacheable=False,
+        masks_and_position_ids_are_cached=False,
+        _query_document_sample_shuffle_indices=lambda idx: (
+            np.array([1, 2, 3, 4, 5, 6, 7, -1, -1]),
+            np.array([0, 1, 2]),
+            [3, 2, 2],
+        ),
+    )
+    result = GPTDataset.__getitem__(sample, 0)
+    # The last document has one query token, followed by physical sample padding.
+    assert result['cu_seqlens'][:4].tolist() == [0, 3, 5, 6]
+    assert result['cu_seqlens_padded'][:4].tolist() == [0, 3, 5, 8]
+    assert result['position_ids'].tolist() == [0, 1, 2, 0, 1, 0, 1, 2]
