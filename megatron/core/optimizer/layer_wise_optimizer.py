@@ -815,7 +815,7 @@ class LayerWiseDistributedOptimizer(ChainedOptimizer):
             # wrap empty containers into LocalNonpersistentObject so it won't be saved/loaded
             # params is already wrapped, we only need to handle fp32_from_fp16_params and state
             # more details in load_state_dict comment
-            if 'fp32_from_fp16_params' in sd:
+            if isinstance(sd.get('fp32_from_fp16_params'), list):
                 sd['fp32_from_fp16_params'][:] = [
                     group if group else LocalNonpersistentObject(group)
                     for group in sd['fp32_from_fp16_params']
