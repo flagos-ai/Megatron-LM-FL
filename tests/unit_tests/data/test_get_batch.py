@@ -6,14 +6,13 @@ import sys
 import pytest
 import torch
 
-from megatron.core import mpu
+from megatron.core import mpu, parallel_state
 from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
 from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args, validate_args
 from megatron.training.global_vars import destroy_global_vars, set_global_variables
 from pretrain_hybrid import get_batch
 from tests.unit_tests.test_utilities import Utils
-
 
 cur_platform = get_platform()
 
@@ -737,3 +736,58 @@ def test_hybrid_cp_batch(tp_size, cp_size, seq_length, create_attention_mask):
         assert hybrid_cp_group is None
 
     Utils.destroy_model_parallel()
+
+
+@pytest.mark.parametrize('padded', [False, True])
+def test_per_document_cp_accepts_aligned_physical_offsets(padded):
+    from megatron.core.utils import get_batch_on_this_cp_rank, get_sft_batch_on_this_cp_rank
+
+    Utils.initialize_model_parallel(context_parallel_size=2)
+    try:
+        cp = parallel_state.get_context_parallel_group()
+        real = [0, 5, 5, 16] if padded else [0, 8, 8, 16]
+        physical = [0, 8, 8, 20] if padded else None
+        n = 20 if padded else 16
+        for sharder in (get_batch_on_this_cp_rank, get_sft_batch_on_this_cp_rank):
+            tokens = torch.arange(n, device='cuda').view(1, n)
+            batch = dict(
+                tokens=tokens,
+                labels=tokens.clone(),
+                position_ids=None,
+                loss_mask=None,
+                cu_seqlens=torch.tensor([real], device='cuda', dtype=torch.int32),
+                cu_seqlens_padded=(
+                    None
+                    if physical is None
+                    else torch.tensor([physical], device='cuda', dtype=torch.int32)
+                ),
+            )
+            kwargs = {'is_hybrid_cp': False} if sharder is get_batch_on_this_cp_rank else {}
+            result = sharder(batch, cp_group=cp, **kwargs)
+            all_ids = [None] * 2
+            torch.distributed.all_gather_object(
+                all_ids, result['tokens'].flatten().tolist(), group=cp
+            )
+            assert sorted(sum(all_ids, [])) == list(range(n))
+    finally:
+        Utils.destroy_model_parallel()
+
+
+
+def test_cp1_accepts_unaligned_documents():
+    from megatron.core.utils import get_batch_on_this_cp_rank
+
+    Utils.initialize_model_parallel()
+    try:
+        tokens = torch.arange(16, device='cuda').view(1, 16)
+        batch = dict(
+            tokens=tokens,
+            cu_seqlens=torch.tensor([[0, 5, 16]], device='cuda', dtype=torch.int32),
+            cu_seqlens_padded=None,
+        )
+        actual = get_batch_on_this_cp_rank(
+            batch, is_hybrid_cp=False, cp_group=parallel_state.get_context_parallel_group()
+        )
+        torch.testing.assert_close(actual['tokens'], tokens)
+    finally:
+        Utils.destroy_model_parallel()

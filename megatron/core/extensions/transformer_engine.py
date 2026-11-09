@@ -1827,6 +1827,8 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
                 super().set_context_parallel_group(None, None, None, self.cp_comm_type)
             self.kept_packed_seq_params.discard("cp_group")
             self.kept_packed_seq_params.discard("local_cp_size")
+            for internal_field in ("tokens_per_sample", "pad_between_seqs", "cp_scatter_cache"):
+                self.kept_packed_seq_params.discard(internal_field)
 
         # Default to constructor-provided num_splits unless explicitly overridden
         if num_splits is None:
