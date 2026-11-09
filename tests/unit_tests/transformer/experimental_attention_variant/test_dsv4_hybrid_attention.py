@@ -544,9 +544,7 @@ def _build_dsv4_moe_layer(config, layer_number, pg_collection):
     )
     from megatron.core.transformer.spec_utils import build_module
 
-    block_submodules = get_transformer_block_with_experimental_attention_variant_spec(
-        config=config
-    )
+    block_submodules = get_transformer_block_with_experimental_attention_variant_spec(config=config)
     return build_module(
         block_submodules.layer_specs[layer_number - 1],
         config=config,
@@ -742,5 +740,6 @@ class TestDSv4HybridRopeFusion:
         for name, param in attn_fused.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"No gradient for parameter {name}"
+
 
 pytestmark = pytest.mark.experimental

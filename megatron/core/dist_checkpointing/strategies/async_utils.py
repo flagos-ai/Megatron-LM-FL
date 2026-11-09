@@ -32,7 +32,6 @@ cur_platform = get_platform()
 ######## FlagScale End ########
 
 
-
 def _set_process_qos(cpu_priority: int, io_priority: Optional[int]) -> None:
     """
     Set QoS (Quality of Service) for the current checkpoint writer process.
@@ -228,7 +227,9 @@ class AsyncCaller(ABC):
             bool: True if all ranks are done, False if at least one rank is still active.
 
         """
-        ten = torch.tensor([is_alive], dtype=torch.int, device=cur_platform.current_device())  # FlagScale Modify
+        ten = torch.tensor(
+            [is_alive], dtype=torch.int, device=cur_platform.current_device()
+        )  # FlagScale Modify
         torch.distributed.all_reduce(ten)
         return ten[0] == 0
 

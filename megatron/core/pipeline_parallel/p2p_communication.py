@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.pipeline_parallel.utils import is_pp_first_stage, is_pp_last_stage
+
 ######## FlagScale Begin ########
 from megatron.core.utils import get_pg_rank, get_pg_size, nvtx_decorator
 from megatron.plugin.hetero.p2p_communication import (
@@ -19,6 +20,7 @@ from megatron.plugin.hetero.p2p_communication import (
     send_forward_hetero,
     send_forward_recv_backward_hetero,
 )
+
 ######## FlagScale End ########
 
 # Types
@@ -235,11 +237,15 @@ class P2PCommunicator:
             )
         if tensor_send_prev is not None:
             send_prev_shape_tensor = torch.tensor(
-                tensor_send_prev.size(), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                tensor_send_prev.size(),
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
         if tensor_send_next is not None:
             send_next_shape_tensor = torch.tensor(
-                tensor_send_next.size(), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                tensor_send_next.size(),
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
 
         if config.use_ring_exchange_p2p:

@@ -3,7 +3,6 @@
 from contextlib import nullcontext
 from typing import Any, Callable, Optional
 
-import torch
 from torch import Tensor
 
 from megatron.core.enums import Fp8Recipe
@@ -14,7 +13,6 @@ from megatron.core.pipeline_parallel.utils import (
     get_comm_stream,
     get_comp_stream,
 )
-from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
@@ -425,7 +423,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
             and decoder.config.recompute_granularity == 'selective'
             and "mhc" in decoder.config.recompute_modules
         )
-        # If not enable_hyper_connections, the mhc_layer_managers will be all None and mhc_is_last_in_recompute_block will be all False, so it won't have effect on execution.
+        # If not enable_hyper_connections, the mhc_layer_managers will be all None and
+        # mhc_is_last_in_recompute_block will be all False, so it won't have effect on execution.
         self.mhc_layer_managers, self.mhc_is_last_in_recompute_block = (
             decoder._build_mhc_recompute_layer_plan(use_mhc_recompute)
         )
@@ -638,7 +637,8 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # backward pass for the remaining layers
         for i in range(overlapped_layers, b_num_layers):
             b_layer = b_schedule_plan.pop_layer()
-            cur_platform.range_push(f"layer_{b_schedule_plan.num_layers()}b")  # FlagScale Modify
+            nvtx_msg = f"layer_{b_schedule_plan.num_layers()}b"
+            cur_platform.range_push(nvtx_msg)  # FlagScale Modify
             _, b_grad = TransformerLayerSchedulePlan.run(
                 None, b_layer, b_grad=b_grad, is_last_layer_in_bwd=(i == b_num_layers - 1)
             )
@@ -649,9 +649,11 @@ class TransformerModelChunkSchedulePlan(AbstractSchedulePlan):
         # forward pass for the remaining layers
         for i in range(overlapped_layers, f_num_layers):
             f_layer = f_schedule_plan.get_layer(i)
-            cur_platform.range_push(f"layer_{i}f")  # FlagScale Modify
+            nvtx_msg = f"layer_{i}f"
+            cur_platform.range_push(nvtx_msg)  # FlagScale Modify
             f_input, _ = TransformerLayerSchedulePlan.run(f_layer, None, f_input=f_input)
             cur_platform.range_pop()  # FlagScale Modify
+
             ######## FlagScale Begin ########
             TransformerBlock._finalize_mhc_recompute_layer(
                 mhc_manager=f_layer.layer_state.mhc_recompute_manager,

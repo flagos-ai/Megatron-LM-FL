@@ -173,7 +173,9 @@ def register_mem_pool(pool, group, symmetric=True):
     Register a memory pool to a group.
     symmetric: bool, this is for future use.
     """
-    backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))  # FlagScale Modify
+    backend = group._get_backend(
+        torch.device(cur_platform.current_device_name())
+    )  # FlagScale Modify
     if symmetric:
         try:
             backend.register_mem_pool(pool, symm=symmetric)
@@ -194,7 +196,9 @@ def deregister_mem_pool(pool, group):
     """
     Deregister a memory pool from a group.
     """
-    backend = group._get_backend(torch.device("cuda", cur_platform.current_device()))  # FlagScale Modify
+    backend = group._get_backend(
+        torch.device(cur_platform.current_device_name())
+    )  # FlagScale Modify
     if pool.snapshot():
         backend.deregister_mem_pool(pool)
 
@@ -314,7 +318,9 @@ class MultiGroupMemPoolAllocator:
         self.mem_context = cur_platform.use_mem_pool(self.pool)  # FlagScale Modify
         self.symmetric = symmetric
 
-        assert isinstance(self.pool, cur_platform.MemPool), "pool must be a cur_platform.MemPool"  # FlagScale Modify
+        assert isinstance(
+            self.pool, cur_platform.MemPool
+        ), "pool must be a cur_platform.MemPool"  # FlagScale Modify
         assert isinstance(self.groups, list), "groups must be a list"
         assert all(
             isinstance(group, torch.distributed.ProcessGroup) for group in self.groups
@@ -325,7 +331,9 @@ class MultiGroupMemPoolAllocator:
         # If the pool is not empty, deregister the pool from all the groups.
         if self.pool.snapshot():
             for group in self.groups:
-                backend = group._get_backend(torch.device(cur_platform.current_device_name()))  # FlagScale Modify
+                backend = group._get_backend(
+                    torch.device(cur_platform.current_device_name())
+                )  # FlagScale Modify
                 try:
                     # Since the registration is done in mempool granularity, we need to deregister
                     # the tensors in the mempool and re-register the mempool including
@@ -342,7 +350,9 @@ class MultiGroupMemPoolAllocator:
 
     def __exit__(self, *args):
         for group in self.groups:
-            backend = group._get_backend(torch.device(cur_platform.current_device_name()))  # FlagScale Modify
+            backend = group._get_backend(
+                torch.device(cur_platform.current_device_name())
+            )  # FlagScale Modify
             try:
                 # Prefer attempting symmetric registration first; fall back if unsupported.
                 if self.symmetric:

@@ -433,18 +433,30 @@ class Float16Module(MegatronModule):
         self.bf16 = config.bf16
         self.vp_size = config.virtual_pipeline_model_parallel_size
         self.vp_stage = getattr(module, 'vp_stage', None)
+        ######## FlagScale Begin ########
         self.dualpipev_size = config.dualpipev_pipeline_model_parallel_size
-        self.dualpipev_stage = getattr(module, 'dualpipev_stage',  None)
+        self.dualpipev_stage = getattr(module, 'dualpipev_stage', None)
+        ######## FlagScale End ########
         self.pg_collection = getattr(module, 'pg_collection', None)
 
         if self.fp16:
-            self.add_module('module', convert_module_to_dtype_except_fp32_marked(module, torch.float16))
+            self.add_module(
+                'module',
+                convert_module_to_dtype_except_fp32_marked(
+                    module, torch.float16
+                ),  # FlagScale Modify
+            )
 
             def float16_convertor(val):
                 return val.half()
 
         elif self.bf16:
-            self.add_module('module', convert_module_to_dtype_except_fp32_marked(module, torch.bfloat16))
+            self.add_module(
+                'module',
+                convert_module_to_dtype_except_fp32_marked(
+                    module, torch.bfloat16
+                ),  # FlagScale Modify
+            )
 
             def float16_convertor(val):
                 return val.bfloat16()
@@ -481,10 +493,12 @@ class Float16Module(MegatronModule):
             and ``fp32_output``.
         """
         from megatron.core.pipeline_parallel.utils import (
-            ######## FlagScale Begin ########
-            is_dualpipev_first_stage,
-            is_dualpipev_last_stage,
-            ######## FlagScale End ########
+            is_dualpipev_first_stage,  # FlagScale Modify
+        )
+        from megatron.core.pipeline_parallel.utils import (
+            is_dualpipev_last_stage,  # FlagScale Modify
+        )
+        from megatron.core.pipeline_parallel.utils import (
             is_pp_first_stage,
             is_pp_last_stage,
             is_vp_first_stage,
@@ -499,7 +513,9 @@ class Float16Module(MegatronModule):
         ######## FlagScale Begin ########
         # TODO: Fix the dualpipev import issue in the latest Megatron codebase
         if self.config.use_dualpipev:
-            if is_dualpipev_first_stage(self.dualpipev_stage, self.dualpipev_size) and is_pp_first_stage(pp_group):
+            if is_dualpipev_first_stage(
+                self.dualpipev_stage, self.dualpipev_size
+            ) and is_pp_first_stage(pp_group):
                 inputs = fp32_to_float16(inputs, self.float16_convertor)
             outputs = self.module(*inputs, **kwargs)
             if (
@@ -541,6 +557,7 @@ class Float16Module(MegatronModule):
         self.module.load_state_dict(state_dict, strict=strict)
 
 
+######## FlagScale Begin ########
 def mark_keep_in_fp32(tensor: torch.Tensor) -> torch.Tensor:
     """Mark a parameter or buffer so that ``Float16Module`` keeps it in FP32.
 
@@ -573,3 +590,6 @@ def convert_module_to_dtype_except_fp32_marked(
             else tensor
         )
     )
+
+
+######## FlagScale End ########

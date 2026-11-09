@@ -232,6 +232,7 @@ def vocab_parallel_cross_entropy(vocab_parallel_logits, target, label_smoothing=
     return _VocabParallelCrossEntropy.apply(vocab_parallel_logits, target, label_smoothing)
 
 
+######## FlagScale Begin ########
 class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
     """Chunked vocab parallel cross entropy that reduces peak memory usage.
 
@@ -254,11 +255,7 @@ class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
 
     @staticmethod
     def _run_chunk_forward(
-        chunk_logits_bf16,
-        chunk_target,
-        vocab_start_index,
-        vocab_end_index,
-        label_smoothing,
+        chunk_logits_bf16, chunk_target, vocab_start_index, vocab_end_index, label_smoothing
     ):
         """Run one chunk through the full forward pass.
 
@@ -269,13 +266,9 @@ class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
             masked_target_1d : [chunk_size * batch], int64
         """
         # Step 1 — convert to fp32 and find per-position max
-        chunk_logits, logits_max = VocabParallelCrossEntropy.calculate_logits_max(
-            chunk_logits_bf16
-        )
+        chunk_logits, logits_max = VocabParallelCrossEntropy.calculate_logits_max(chunk_logits_bf16)
         torch.distributed.all_reduce(
-            logits_max,
-            op=torch.distributed.ReduceOp.MAX,
-            group=get_tensor_model_parallel_group(),
+            logits_max, op=torch.distributed.ReduceOp.MAX, group=get_tensor_model_parallel_group()
         )
 
         # Step 2 — subtract max, extract ground-truth logit, compute exp
@@ -334,9 +327,7 @@ class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
         get_vocab_range = VocabUtility.vocab_range_from_per_partition_vocab_size
         rank = get_tensor_model_parallel_rank()
         world_size = get_tensor_model_parallel_world_size()
-        vocab_start_index, vocab_end_index = get_vocab_range(
-            partition_vocab_size, rank, world_size
-        )
+        vocab_start_index, vocab_end_index = get_vocab_range(partition_vocab_size, rank, world_size)
 
         # Process sequence in chunks
         for start in range(0, seq_len, chunk_size):
@@ -428,10 +419,7 @@ class _VocabParallelCrossEntropyChunked(torch.autograd.Function):
 
 
 def vocab_parallel_cross_entropy_chunked(
-    vocab_parallel_logits,
-    target,
-    label_smoothing=0.0,
-    chunk_size=4096,
+    vocab_parallel_logits, target, label_smoothing=0.0, chunk_size=4096
 ):
     """Chunked version of vocab_parallel_cross_entropy with lower peak memory.
 
@@ -458,3 +446,6 @@ def vocab_parallel_cross_entropy_chunked(
     return _VocabParallelCrossEntropyChunked.apply(
         vocab_parallel_logits, target, label_smoothing, chunk_size
     )
+
+
+######## FlagScale End ########

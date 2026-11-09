@@ -10,6 +10,7 @@ from typing import Dict, List, Optional
 import torch
 
 from megatron.core import parallel_state
+
 ######## FlagScale Begin ########
 from megatron.core.utils import log_single_rank
 
@@ -341,7 +342,9 @@ class ProcessGroupCollection:
                 intra_expt_dp_group_gloo = parallel_state.get_expert_data_parallel_group_gloo(
                     partial_expert_data_parallel=True
                 )
-                engram_dp_group_gloo = parallel_state.get_engram_data_parallel_group_gloo()  # FlagScale Modify
+                engram_dp_group_gloo = (
+                    parallel_state.get_engram_data_parallel_group_gloo()
+                )  # FlagScale Modify
             else:
                 intra_dp_cp_group_gloo = None
                 intra_expt_dp_group_gloo = None

@@ -29,6 +29,7 @@ from megatron.core.utils import (
     is_torch_min_version,
     make_sharded_tensor_for_checkpoint,
 )
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 

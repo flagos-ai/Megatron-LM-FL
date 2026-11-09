@@ -288,7 +288,8 @@ class DSv4HybridAttention(Attention):
                 x=hidden_states,
                 qr=q_compressed,
             )
-        # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) -> group_offload(latest)
+        # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) ->
+        # group_offload(latest)
         if self.offload_core_attention and self.training:
             core_attn_out = core_attn_manager.group_commit(
                 core_attn_out, name="core_attn", forced_released_tensors=[query, key, value]
@@ -393,9 +394,12 @@ class DSv4HybridAttention(Attention):
         attn_proj_manager = off_interface(self.offload_attn_proj, core_attn_out, "attn_proj")
         with attn_proj_manager as core_attn_out:
             output, bias = self.linear_proj(core_attn_out)
-        # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) -> group_offload(latest)
+        # NOTE: No implement in megatron version core_v0.17.0, group_commit(v0.17.0) ->
+        # group_offload(latest)
         if self.offload_attn_proj:
-            output = attn_proj_manager.group_commit(output, name="attn_proj", forced_released_tensors=[core_attn_out])
+            output = attn_proj_manager.group_commit(
+                output, name="attn_proj", forced_released_tensors=[core_attn_out]
+            )
 
         return output, bias
 

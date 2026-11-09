@@ -94,7 +94,9 @@ def _gather_along_last_dim(input_, group):
     dim_size = list(input_.size())
     dim_size[0] = dim_size[0] * world_size
 
-    output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
+    output = torch.empty(
+        dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+    )  # FlagScale Modify
     dist_all_gather_func(output, input_.contiguous(), group=group)
     tensor_list = output.chunk(world_size, dim=0)
     output = torch.cat(tensor_list, dim=-1).contiguous()
@@ -144,14 +146,18 @@ def _gather_along_first_dim(input_, group, output_split_sizes=None, use_global_b
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Modify
         dist_all_gather_func(output, input_.contiguous(), group=group)
     else:
         dim_size[0] = sum(output_split_sizes)
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Modify
         output_tensor_list = list(torch.split(output, output_split_sizes, dim=0))
         torch.distributed.all_gather(output_tensor_list, input_, group=group)
 
@@ -184,7 +190,9 @@ def _reduce_scatter_along_first_dim(input_, group, input_split_sizes=None, use_g
         if use_global_buffer:
             output = get_global_memory_buffer().get_tensor(dim_size, input_.dtype, "mpu")
         else:
-            output = torch.empty(dim_size, dtype=input_.dtype, device=cur_platform.current_device())  # FlagScale Modify
+            output = torch.empty(
+                dim_size, dtype=input_.dtype, device=cur_platform.current_device()
+            )  # FlagScale Modify
         dist_reduce_scatter_func(output, input_.contiguous(), group=group)
     else:
         rank = group.rank()

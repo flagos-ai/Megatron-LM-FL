@@ -151,7 +151,8 @@ _ENGRAM_EMBEDDING_PARALLEL_GROUP_GLOO = None
 _ENGRAM_EMBEDDING_PARALLEL_GLOBAL_RANKS = None
 _ENGRAM_ENABLE = False
 
-# Parallel group of engram model parallel, which contain pipeline + embed, used to allreduce grad and param norm.
+# Engram model parallel group (pipeline + embedding).
+# Used to all-reduce gradient and parameter norms.
 _ENGRAM_MODEL_PARALLEL_GROUP = None
 _ENGRAM_MODEL_PARALLEL_GROUP_RANKS = None
 
@@ -1653,7 +1654,6 @@ def get_data_parallel_group(with_context_parallel=False, partial_data_parallel=F
         return _DATA_PARALLEL_GROUP
 
 
-
 def get_data_parallel_group_gloo(with_context_parallel=False, partial_data_parallel=False):
     """Get the Gloo data-parallel group the caller rank belongs to."""
     ######## FlagScale Begin ########
@@ -1949,7 +1949,9 @@ def get_pipeline_model_parallel_rank(group=None):  # FlagScale Modify
     return torch.distributed.get_rank(group=get_pipeline_model_parallel_group())
 
 
-def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None, group=None, ignore_dualpipev=True, dualpipev_stage=None):  # FlagScale Modify
+def is_pipeline_first_stage(
+    ignore_virtual=True, vp_stage=None, group=None, ignore_dualpipev=True, dualpipev_stage=None
+):  # FlagScale Modify
     """Return True if in the first pipeline model-parallel stage, False otherwise."""
     ######## FlagScale Begin ########
     para_ctx = get_parallel_context()
@@ -1963,16 +1965,22 @@ def is_pipeline_first_stage(ignore_virtual=True, vp_stage=None, group=None, igno
         if vp_stage != 0:
             return False
 
+    ######## FlagScale Begin ########
     if not ignore_dualpipev and get_dualpipev_pipeline_model_parallel_world_size() is not None:
-        assert dualpipev_stage is not None, "dualpipev_stage must be passed if use_dualpipev is enabled"
+        assert (
+            dualpipev_stage is not None
+        ), "dualpipev_stage must be passed if use_dualpipev is enabled"
 
         if dualpipev_stage != 0:
             return False
+    ######## FlagScale End ########
 
     return get_pipeline_model_parallel_rank() == 0
 
 
-def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None, group=None, ignore_dualpipev=True, dualpipev_stage=None):  # FlagScale Modify
+def is_pipeline_last_stage(
+    ignore_virtual=True, vp_stage=None, group=None, ignore_dualpipev=True, dualpipev_stage=None
+):  # FlagScale Modify
     """Return True if in the last pipeline-model-parallel stage, False otherwise."""
     ######## FlagScale Begin ########
     para_ctx = get_parallel_context()
@@ -1986,13 +1994,17 @@ def is_pipeline_last_stage(ignore_virtual=True, vp_stage=None, group=None, ignor
         if vp_stage != (get_virtual_pipeline_model_parallel_world_size() - 1):
             return False
 
+    ######## FlagScale Begin ########
     if not ignore_dualpipev and get_dualpipev_pipeline_model_parallel_world_size() is not None:
-        assert dualpipev_stage is not None, "dualpipev_stage must be passed if use_dualpipev is enabled"
+        assert (
+            dualpipev_stage is not None
+        ), "dualpipev_stage must be passed if use_dualpipev is enabled"
 
         if dualpipev_stage != (get_dualpipev_pipeline_model_parallel_world_size() - 1):
             return False
 
         return get_pipeline_model_parallel_rank() == 0
+    ######## FlagScale End ########
 
     return get_pipeline_model_parallel_rank() == (get_pipeline_model_parallel_world_size() - 1)
 
@@ -2204,8 +2216,7 @@ def get_data_parallel_world_size(with_context_parallel=False, partial_data_paral
     para_ctx = get_parallel_context()
     if para_ctx is not None:
         return para_ctx.get_data_parallel_world_size(
-            with_context_parallel=with_context_parallel,
-            partial_data_parallel=partial_data_parallel,
+            with_context_parallel=with_context_parallel, partial_data_parallel=partial_data_parallel
         )
     ######## FlagScale End ########
 
@@ -2238,8 +2249,7 @@ def get_data_parallel_rank(with_context_parallel=False, partial_data_parallel=Fa
     para_ctx = get_parallel_context()
     if para_ctx is not None:
         return para_ctx.get_data_parallel_rank(
-            with_context_parallel=with_context_parallel,
-            partial_data_parallel=partial_data_parallel,
+            with_context_parallel=with_context_parallel, partial_data_parallel=partial_data_parallel
         )
     ######## FlagScale End ########
 
@@ -2668,6 +2678,7 @@ def get_engram_data_parallel_group():
 
 
 def get_engram_data_parallel_world_size():
+    """Return the Engram data parallel group size, or one if unavailable."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         engram_group = get_engram_data_parallel_group()
         return engram_group.size() if engram_group is not None else 1
@@ -2683,6 +2694,8 @@ def get_engram_embedding_parallel_group_gloo():
 def get_engram_data_parallel_group_gloo():
     """Get the engram data parallel group the caller rank belongs to."""
     return _ENGRAM_DATA_PARALLEL_GROUP_GLOO
+
+
 ######## FlagScale End ########
 
 
@@ -2752,7 +2765,6 @@ def destroy_model_parallel():
 
     global _DATA_PARALLEL_GROUP_WITH_CP
     _DATA_PARALLEL_GROUP_WITH_CP = None
-
 
     global _CONTEXT_PARALLEL_GROUP
     _CONTEXT_PARALLEL_GROUP = None

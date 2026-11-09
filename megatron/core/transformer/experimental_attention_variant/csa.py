@@ -59,6 +59,7 @@ def _ensure_dsa_kernels():
             fused_indexer_sparse_attn,
             indexer_topk,
         )
+
         _dsa_sparse_attn = dsa_sparse_attn
         _fused_indexer_sparse_attn = fused_indexer_sparse_attn
         _indexer_topk = indexer_topk
@@ -75,10 +76,13 @@ def _ensure_dsa_kernels():
             fused_indexer_sparse_attn as _triton_fused,
         )
         from megatron.plugin.dsa_kernel.triton_dsa_kernels import indexer_topk as _triton_topk
+
         _dsa_sparse_attn = _triton_dsa_sparse_attn_sbhd
         _fused_indexer_sparse_attn = _triton_fused
         _indexer_topk = _triton_topk
         _build_flat_topk_idxs_fn = _triton_build_flat_topk_idxs
+
+
 ######## FlagScale End ########
 
 # ---------------------------------------------------------------------------

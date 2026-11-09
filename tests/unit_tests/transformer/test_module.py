@@ -115,10 +115,7 @@ class TestFloat16Module:
 
 def _cpu_transformer_config(**overrides):
     config = TransformerConfig(
-        num_layers=2,
-        hidden_size=8,
-        num_attention_heads=2,
-        use_cpu_initialization=True,
+        num_layers=2, hidden_size=8, num_attention_heads=2, use_cpu_initialization=True
     )
     for key, value in overrides.items():
         setattr(config, key, value)
@@ -156,7 +153,9 @@ def test_megatron_module_cpu_cache_and_conversion_paths(monkeypatch):
     assert param_is_not_shared(torch.nn.Parameter(torch.ones(1))) is True
 
     nested_values = (torch.tensor([1.0]), [torch.tensor([2.0]), "keep"])
-    converted = conversion_helper(nested_values, lambda value: value + 1 if torch.is_tensor(value) else value)
+    converted = conversion_helper(
+        nested_values, lambda value: value + 1 if torch.is_tensor(value) else value
+    )
     assert torch.equal(converted[0], torch.tensor([2.0]))
     assert torch.equal(converted[1][0], torch.tensor([3.0]))
     half_values = fp32_to_float16(nested_values, lambda value: value.half())
@@ -166,9 +165,7 @@ def test_megatron_module_cpu_cache_and_conversion_paths(monkeypatch):
 
 def test_graphable_megatron_module_cpu_cuda_graph_paths(monkeypatch):
     monkeypatch.setattr(
-        transformer_module,
-        "cur_platform",
-        SimpleNamespace(current_device=lambda: "cpu"),
+        transformer_module, "cur_platform", SimpleNamespace(current_device=lambda: "cpu")
     )
 
     class _Graphable(GraphableMegatronModule):
@@ -228,32 +225,28 @@ def test_graphable_megatron_module_cpu_cuda_graph_paths(monkeypatch):
     assert torch.equal(args[0], torch.tensor([1.0]))
     assert kwargs["is_first_microbatch"] is True
     with pytest.raises(AssertionError, match="hidden_states should only"):
-        graphable._get_te_cuda_graph_replay_args(torch.tensor([1.0]), hidden_states=torch.tensor([1.0]))
+        graphable._get_te_cuda_graph_replay_args(
+            torch.tensor([1.0]), hidden_states=torch.tensor([1.0])
+        )
     with pytest.raises(AssertionError, match="CUDA graph accepts only Tensor"):
         graphable._te_cuda_graph_replay("not-a-tensor")
 
 
 def test_float16_module_cpu_forward_and_state_paths(monkeypatch):
     monkeypatch.setattr(
-        transformer_module.parallel_state,
-        "get_pipeline_model_parallel_group",
-        lambda: "pp",
+        transformer_module.parallel_state, "get_pipeline_model_parallel_group", lambda: "pp"
     )
     monkeypatch.setattr(
-        "megatron.core.pipeline_parallel.utils.is_pp_first_stage",
-        lambda group: True,
+        "megatron.core.pipeline_parallel.utils.is_pp_first_stage", lambda group: True
     )
     monkeypatch.setattr(
-        "megatron.core.pipeline_parallel.utils.is_pp_last_stage",
-        lambda group: True,
+        "megatron.core.pipeline_parallel.utils.is_pp_last_stage", lambda group: True
     )
     monkeypatch.setattr(
-        "megatron.core.pipeline_parallel.utils.is_vp_first_stage",
-        lambda vp_stage, vp_size: True,
+        "megatron.core.pipeline_parallel.utils.is_vp_first_stage", lambda vp_stage, vp_size: True
     )
     monkeypatch.setattr(
-        "megatron.core.pipeline_parallel.utils.is_vp_last_stage",
-        lambda vp_stage, vp_size: True,
+        "megatron.core.pipeline_parallel.utils.is_vp_last_stage", lambda vp_stage, vp_size: True
     )
 
     class _Wrapped(torch.nn.Module):
