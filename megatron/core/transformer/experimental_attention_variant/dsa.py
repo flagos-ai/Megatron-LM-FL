@@ -28,6 +28,9 @@ from megatron.core.transformer.experimental_attention_variant import (
     dsa_layout,
     dsa_masking,
 )
+from megatron.core.transformer.experimental_attention_variant.dsa_index_sharing import (
+    get_dsa_index_sharing_state,
+)
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -337,7 +340,9 @@ class DSAIndexerLossLoggingHelper:
 
     @staticmethod
     def reduce_loss_in_tracker(
-        pg_collection: ProcessGroupCollection, num_layers: Optional[int] = None
+        pg_collection: ProcessGroupCollection,
+        num_layers: Optional[int] = None,
+        calculate_per_token_loss: bool | None = None,
     ):
         """Collect and reduce indexer losses across every pipeline rank.
 
@@ -345,6 +350,8 @@ class DSAIndexerLossLoggingHelper:
             pg_collection: Process groups used for pipeline and data-parallel reductions.
             num_layers: Total number of decoder and MTP layers. When provided, ranks without
                 local indexer losses contribute zeros to the pipeline-wide reduction.
+            calculate_per_token_loss: Explicit CP reduction policy: sum per-token losses,
+                otherwise average across CP ranks. None retains legacy saved-group reductions.
         """
         tracker = DSAIndexerLossLoggingHelper.tracker
         pp_group = pg_collection.pp
@@ -375,13 +382,29 @@ class DSAIndexerLossLoggingHelper:
         values = tracker["values"]
 
         torch.distributed.all_reduce(values, group=pp_group)
-        # Reduce indexer losses across ranks.
-        if tracker.get('reduce_group') is not None:
-            torch.distributed.all_reduce(values, group=tracker.get('reduce_group'))
-        if tracker.get('avg_group') is not None:
-            torch.distributed.all_reduce(
-                values, group=tracker['avg_group'], op=torch.distributed.ReduceOp.AVG
-            )
+        if calculate_per_token_loss is not None:
+            # Every pipeline stage now holds the PP-wide losses, including stages
+            # without a local indexer. Use explicit CP groups on all of them.
+            cp_group = pg_collection.cp
+            if get_pg_size(cp_group) > 1:
+                torch.distributed.all_reduce(
+                    values,
+                    group=cp_group,
+                    op=(
+                        torch.distributed.ReduceOp.SUM
+                        if calculate_per_token_loss
+                        else torch.distributed.ReduceOp.AVG
+                    ),
+                )
+        else:
+            # Compatibility for direct callers that supply reduction groups when
+            # saving losses rather than an explicit logging policy.
+            if tracker.get('reduce_group') is not None:
+                torch.distributed.all_reduce(values, group=tracker.get('reduce_group'))
+            if tracker.get('avg_group') is not None:
+                torch.distributed.all_reduce(
+                    values, group=tracker['avg_group'], op=torch.distributed.ReduceOp.AVG
+                )
         torch.distributed.all_reduce(
             values, group=pg_collection.dp, op=torch.distributed.ReduceOp.AVG
         )
@@ -398,6 +421,7 @@ class DSAIndexerLossLoggingHelper:
         num_layers: Optional[int] = None,
         num_indexer_layers: Optional[int] = None,
         preserve_groups: bool = False,
+        calculate_per_token_loss: bool | None = None,
     ):
         """Track the sparse attention indexer metrics for logging.
 
@@ -414,9 +438,13 @@ class DSAIndexerLossLoggingHelper:
             num_indexer_layers: Number of layers that own an indexer. Defaults to the
                 tracker size when every tracked layer owns one.
             preserve_groups: Keep the saved reduction groups for CUDA Graph replays.
+            calculate_per_token_loss: Explicit CP sum/mean policy, including stages without
+                a local indexer. None retains legacy reductions using saved groups.
         """
         DSAIndexerLossLoggingHelper.reduce_loss_in_tracker(
-            pg_collection=pg_collection, num_layers=num_layers
+            pg_collection=pg_collection,
+            num_layers=num_layers,
+            calculate_per_token_loss=calculate_per_token_loss,
         )
         tracker = DSAIndexerLossLoggingHelper.tracker
         if "values" not in tracker:
@@ -2043,6 +2071,9 @@ class DSAttention(MegatronModule):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> dict[int, torch.Tensor]:
         """Return the per-forward top-k holder for DSA index sharing."""
+        state = get_dsa_index_sharing_state()
+        if state is not None:
+            return state.topk_indices
         carrier = self._get_index_share_carrier(packed_seq_params, attention_mask)
         holder = getattr(carrier, self._HOLDER_ATTR, None)
         if holder is None:
@@ -2056,6 +2087,9 @@ class DSAttention(MegatronModule):
         attention_mask: Optional[torch.Tensor] = None,
     ) -> dict[int, torch.Tensor]:
         """Return the optional per-forward top-k length holder."""
+        state = get_dsa_index_sharing_state()
+        if state is not None:
+            return state.topk_lengths
         carrier = self._get_index_share_carrier(packed_seq_params, attention_mask)
         holder = getattr(carrier, self._LENGTH_HOLDER_ATTR, None)
         if holder is None:

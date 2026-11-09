@@ -4,8 +4,12 @@ from types import SimpleNamespace
 from unittest.mock import create_autospec, patch
 
 import pytest
+import torch
 
+from megatron.core.process_groups_config import ProcessGroupCollection
+from megatron.core.transformer.experimental_attention_variant.dsa import DSAIndexerLossLoggingHelper
 from megatron.training import training
+from tests.unit_tests.test_utilities import Utils
 
 
 @pytest.mark.parametrize(
@@ -34,7 +38,8 @@ def test_indexer_logging_layer_counts(overrides, expected):
 
 
 @pytest.mark.parametrize('legacy', [False, True])
-def test_training_log_passes_indexer_groups_and_layer_counts(legacy):
+@pytest.mark.parametrize('per_token', [False, True])
+def test_training_log_passes_indexer_groups_and_layer_counts(legacy, per_token):
     args = SimpleNamespace(
         timing_log_level=0,
         perform_rl_step=False,
@@ -53,6 +58,7 @@ def test_training_log_passes_indexer_groups_and_layer_counts(legacy):
         indexer_type_rule=None,
         mtp_use_repeated_layer=False,
         cuda_graph_impl='none',
+        calculate_per_token_loss=per_token,
     )
     groups = object()
 
@@ -97,3 +103,51 @@ def test_training_log_passes_indexer_groups_and_layer_counts(legacy):
     assert logger.call_args.kwargs['num_layers'] == 6
     assert logger.call_args.kwargs['num_indexer_layers'] == 3
     assert logger.call_args.kwargs['preserve_groups'] is False
+    assert logger.call_args.kwargs['calculate_per_token_loss'] is per_token
+
+
+@pytest.mark.parametrize('per_token', [False, True])
+@pytest.mark.parametrize('legacy', [False, True])
+def test_indexer_logging_pp2_cp2_empty_stage(per_token, legacy):
+    if Utils.world_size < 4 or Utils.world_size % 4:
+        pytest.skip('requires a multiple of four ranks')
+    Utils.initialize_model_parallel(pipeline_model_parallel_size=2, context_parallel_size=2)
+    groups = ProcessGroupCollection.use_mpu_process_groups(required_pgs=['pp', 'cp', 'dp'])
+    logger = DSAIndexerLossLoggingHelper
+    logger.tracker = {}
+    if legacy:
+        # Legacy callers must provide saved group metadata on every PP stage.
+        logger.tracker.update(
+            reduce_group=groups.cp if per_token else None,
+            avg_group=None if per_token else groups.cp,
+        )
+    try:
+        # A second iteration checks the cached tracker shape and retained groups.
+        for _ in range(2):
+            if groups.pp.rank() == 0:
+                local_loss = torch.tensor(float(1 + 2 * groups.cp.rank()), device='cuda')
+                logger.save_loss_to_tracker(
+                    local_loss,
+                    layer_number=1,
+                    num_layers=1,
+                    reduce_group=groups.cp if per_token else None,
+                    avg_group=None if per_token else groups.cp,
+                )
+            logged = {}
+            logger.track_indexer_metrics(
+                loss_scale=1.0,
+                iteration=1,
+                writer=None,
+                pg_collection=groups,
+                total_loss_dict=logged,
+                num_layers=1,
+                num_indexer_layers=1,
+                preserve_groups=True,
+                calculate_per_token_loss=None if legacy else per_token,
+            )
+            torch.testing.assert_close(
+                logged['indexer loss'], torch.tensor(4.0 if per_token else 2.0, device='cuda')
+            )
+    finally:
+        logger.tracker = {}
+        Utils.destroy_model_parallel()
