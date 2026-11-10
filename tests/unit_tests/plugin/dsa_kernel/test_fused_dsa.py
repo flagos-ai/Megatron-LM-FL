@@ -40,9 +40,7 @@ from torch import Tensor
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 # SM90+ check for module-level tests that use dsa_kernel_backend='cudnn'
-_SM90_AVAILABLE = (
-    torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 9
-)
+_SM90_AVAILABLE = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 9
 _skip_unless_sm90 = pytest.mark.skipif(
     not _SM90_AVAILABLE, reason="SM90+ (Hopper or later) required for apply_dsa_kernel_fusion"
 )

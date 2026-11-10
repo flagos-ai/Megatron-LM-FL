@@ -218,7 +218,6 @@ def _get_thd_freqs_on_this_cp_rank(
         return freqs[offset : offset + x.size(0)]
 
 
-######## FlagScale Begin ########
 def _apply_rotary_pos_emb_thd(
     t: Tensor,
     cu_seqlens: Tensor,
@@ -318,11 +317,6 @@ def _apply_rotary_pos_emb_thd(
     ).squeeze(1)
 
 
-
-######## FlagScale End ########
-
-
-######## FlagScale Begin ########
 def apply_rotary_pos_emb(
     t: Tensor,
     freqs: Tensor,
@@ -437,9 +431,6 @@ def apply_rotary_pos_emb(
         )
 
 
-######## FlagScale End ########
-
-
 def apply_rotary_pos_emb_with_cos_sin(
     t: Tensor, cos: Tensor, sin: Tensor, rotary_interleaved: bool = False
 ) -> Tensor:
@@ -463,7 +454,7 @@ def apply_rotary_pos_emb_with_cos_sin(
             t,
             freqs,
             rotary_interleaved=rotary_interleaved,
-            mla_rotary_interleaved=False,  # FlagScale Modify
+            mla_rotary_interleaved=False,
             mscale=1.0,
         )
     else:

@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from megatron.core.transformer.transformer_config import TransformerConfig
 
 _BACKEND_MODULE_NAME_BY_BACKEND = {
-    "cudnn": "megatron.core.transformer.experimental_attention_variant.dsa_cudnn_kernels",
+    "cudnn": "megatron.core.transformer.experimental_attention_variant.dsa_cudnn_kernels"
 }
 _BACKEND: Optional[ModuleType] = None
 _BACKEND_SELECTION: Optional[str] = None
