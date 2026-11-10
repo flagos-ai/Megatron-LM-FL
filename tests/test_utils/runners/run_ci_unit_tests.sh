@@ -141,6 +141,20 @@ printf '[run]\nparallel = true\ndynamic_context = test_function\nsource =\n    %
   "$COVERAGE_CORE_SOURCE" \
   "$COVERAGE_DIR" \
   > "$COVERAGE_DIR/.coveragerc"
+# Omitted directories stay in the collected data; they only leave the reported
+# denominator, for this group's JSON and the combined report alike.
+CI_COVERAGE_OMIT="${CI_COVERAGE_OMIT:-[]}" "$PYTHON_BIN" -c '
+import json
+import os
+
+omit = json.loads(os.environ["CI_COVERAGE_OMIT"])
+assert isinstance(omit, list) and all(isinstance(item, str) and item for item in omit)
+root = os.environ["GITHUB_WORKSPACE"]
+if omit:
+    print("[report]\nomit =")
+    for item in omit:
+        print("    " + os.path.join(root, item.rstrip("/"), "*"))
+' >> "$COVERAGE_DIR/.coveragerc"
 
 PYTEST_ARGS=(
   -v

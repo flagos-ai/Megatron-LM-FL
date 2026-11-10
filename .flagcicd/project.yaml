@@ -53,6 +53,16 @@ coverage:
   sources:
   - megatron/plugin/
   - megatron/core/
+  # Reported denominator only; collection still measures every source file.
+  omit:
+  # Test code, not code under test.
+  - megatron/plugin/tests/
+  # Owned by planned groups that no platform executes yet. Remove an entry
+  # when its group becomes active.
+  - megatron/core/inference/
+  - megatron/core/ssm/
+  - megatron/core/resharding/
+  - megatron/core/export/
 test_groups:
 - name: core
   description: Model-parallel configuration, process groups, and root unit tests.
@@ -282,6 +292,18 @@ test_groups:
   depends_on:
   - core
   - transformer
+- name: flagcicd_cov
+  description: FlagCICD supplementary coverage cases, kept apart from developer-owned
+    tests.
+  status: active
+  # Supplementary cases must never lengthen a pull request run.
+  stages:
+  - nightly
+  - manual
+  paths:
+  - tests/unit_tests/flagcicd_cov/
+  depends_on:
+  - core
 - name: tools
   description: Repository tooling tests.
   status: planned

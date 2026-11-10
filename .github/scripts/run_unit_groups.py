@@ -433,6 +433,7 @@ def main() -> int:
             "CI_SETUP_SCRIPT",
             "CI_NPROC_PER_NODE",
             "CI_IGNORED_TESTS",
+            "CI_COVERAGE_OMIT",
             "CI_PYTEST_EXTRA_ARGS",
             "CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS",
             "CI_TEST_RETRIES",

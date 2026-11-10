@@ -43,6 +43,8 @@ test_matrix:
         path: tests/unit_tests/models/
         description: Model tests
     ignored_tests: []
+    # Source directories excluded from this platform's reported coverage.
+    coverage_omit: []
 
   functional:
     train: []

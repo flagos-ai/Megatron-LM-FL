@@ -91,7 +91,14 @@ between attempts: this is result reuse, not a frozen environment or container
 snapshot. No automatic test retries are added.
 
 Coverage data is isolated per group. Coverage measures `megatron/plugin/*` and
-`megatron/core/*`; it is core/plugin coverage, not full unit-group coverage. The
+`megatron/core/*`; it is core/plugin coverage, not full unit-group coverage.
+The reported denominator leaves out `coverage.omit` in `.flagcicd/project.yaml`
+(plugin test code and sources owned by planned groups that no platform runs)
+plus the platform's `test_matrix.unit.coverage_omit` (other vendors' plugin
+directories). Omission applies only to reports: collection still measures every
+source file, and an omitted directory returns to the denominator once its entry
+is removed. Percentages are therefore comparable only between runs with the
+same omit lists. The
 coverage artifact retains each completed group's JSON and `unit-results.json`.
 That attestation records `plan_hash`, `expected_groups`, `executed_groups`,
 `missing_groups`, `unexpected_groups`, `status`, and per-group results; the

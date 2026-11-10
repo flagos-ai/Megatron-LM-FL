@@ -128,6 +128,16 @@ def verify_plan(
     actual_groups = plan.get("expected_unit_groups")
     if actual_groups != expected_groups:
         errors.append("expected execution groups differ from the uploaded plan")
+    excluded = set(plan.get("stage_excluded_groups", []))
+    for platform in plan.get("platforms", []):
+        leaked = sorted(
+            group["name"] for group in platform.get("selected_groups", []) if group["name"] in excluded
+        )
+        if leaked:
+            errors.append(
+                f"{platform['name']} selects groups excluded from stage "
+                f"{plan.get('stage')!r}: {', '.join(leaked)}"
+            )
     if matrix is not None:
         errors.extend(verify_matrix(expected_groups, matrix))
         identities = {

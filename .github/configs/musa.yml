@@ -76,6 +76,7 @@ test_matrix:
       optimizer: "Optimizer tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
       extensions: "Extension tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
       a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
+      flagcicd_cov: "FlagCICD supplementary coverage cases are written and validated against CUDA only."
       dsa_kernel: "Plugin kernel tests are not onboarded or validated in the musa CI runtime; CUDA provides execution coverage."
       plugin: "The MUSA smoke configuration does not include the plugin test directory yet."
       transformer: "Transformer unit tests currently run only on CUDA."

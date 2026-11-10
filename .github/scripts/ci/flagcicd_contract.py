@@ -96,7 +96,16 @@ def load_project(path: pathlib.Path) -> tuple[dict[str, Any], str]:
             raise ContractError("every test group must have a string name")
         _check_keys(
             group,
-            {"name", "description", "status", "reason", "paths", "depends_on", "execution_group"},
+            {
+                "name",
+                "description",
+                "status",
+                "reason",
+                "paths",
+                "depends_on",
+                "execution_group",
+                "stages",
+            },
             "test group",
         )
         name = group["name"]
@@ -112,6 +121,16 @@ def load_project(path: pathlib.Path) -> tuple[dict[str, Any], str]:
             raise ContractError(f"test group {name} must declare paths")
         if not isinstance(group.get("depends_on", []), list):
             raise ContractError(f"test group {name} depends_on must be a list")
+        if "stages" in group:
+            stages = group["stages"]
+            if (
+                not isinstance(stages, list)
+                or not stages
+                or any(stage not in project["stages"] for stage in stages)
+            ):
+                raise ContractError(
+                    f"test group {name} stages must be a non-empty list of declared stages"
+                )
         for dependency in group.get("depends_on", []):
             if dependency not in names and dependency not in {item.get("name") for item in groups}:
                 raise ContractError(f"test group {name} depends on unknown group {dependency}")
@@ -122,6 +141,12 @@ def load_project(path: pathlib.Path) -> tuple[dict[str, Any], str]:
         required = config.get("required_groups", [])
         if not isinstance(required, list) or any(item not in names for item in required):
             raise ContractError(f"level {level} has an unknown required group")
+        for group in groups:
+            # A required group must run in every stage that uses the level.
+            if group["name"] in required and "stages" in group:
+                raise ContractError(
+                    f"level {level} requires stage-restricted group {group['name']}"
+                )
     for stage, config in project["stages"].items():
         if not isinstance(config, dict):
             raise ContractError(f"stage {stage} must be a mapping")

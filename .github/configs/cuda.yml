@@ -94,6 +94,16 @@ test_matrix:
       - name: dsa_kernel
         path: tests/unit_tests/plugin/
         description: Plugin kernel tests
+      - name: flagcicd_cov
+        path: tests/unit_tests/flagcicd_cov/
+        description: FlagCICD supplementary coverage cases (nightly and manual only)
+    # Other vendors' plugin code cannot execute on this platform; keep it out
+    # of this platform's reported coverage denominator.
+    coverage_omit:
+      - megatron/plugin/Ascend/
+      - megatron/plugin/kunlunxin/
+      - megatron/plugin/metax/
+      - megatron/plugin/mthreads/
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:

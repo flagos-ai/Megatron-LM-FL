@@ -40,6 +40,8 @@ class Group:
     execution_group: str | None
     paths: tuple[str, ...]
     depends_on: tuple[str, ...]
+    # Empty means every stage; otherwise the group runs only in these stages.
+    stages: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,7 @@ class Catalog:
     documentation_suffixes: tuple[str, ...]
     shared_paths: tuple[str, ...]
     coverage_sources: tuple[str, ...]
+    coverage_omit: tuple[str, ...]
     digest: str
 
     def matches_all(self, path: str) -> list[str]:
@@ -114,6 +117,14 @@ class Catalog:
             raise CatalogError(f"Unknown routing level: {level}")
         return self.levels[level].required_groups
 
+    def stage_excluded(self, stage: str | None) -> set[str]:
+        """Return groups whose contract keeps them out of the given stage."""
+        if stage is None:
+            return set()
+        return {
+            name for name, group in self.groups.items() if group.stages and stage not in group.stages
+        }
+
     def validate(self, root: pathlib.Path | None = None) -> list[str]:
         """Return catalog errors; an empty list means the catalog is usable."""
         errors: list[str] = []
@@ -125,6 +136,18 @@ class Catalog:
             for source in self.coverage_sources:
                 if not path_exists(root, source):
                     errors.append(f"Coverage source does not exist: {source}")
+            for omitted in self.coverage_omit:
+                if not path_exists(root, omitted):
+                    errors.append(f"Coverage omit path does not exist: {omitted}")
+        for omitted in self.coverage_omit:
+            # A whole source or a file glob here would hide the boundary itself.
+            if not omitted.endswith("/") or not any(
+                omitted.startswith(source) and omitted != source
+                for source in self.coverage_sources
+            ):
+                errors.append(
+                    f"Coverage omit path must be a directory inside a coverage source: {omitted}"
+                )
         for name, group in self.groups.items():
             if not GROUP_NAME.fullmatch(name):
                 errors.append(f"Invalid group name: {name!r}")
@@ -283,6 +306,7 @@ def load_catalog(path: pathlib.Path) -> Catalog:
     if not isinstance(coverage, dict):
         raise CatalogError("coverage must be a mapping")
     coverage_sources = _string_tuple(coverage, "sources", required=True)
+    coverage_omit = _string_tuple(coverage, "omit")
     groups: dict[str, Group] = {}
     for name, entry in _mapping(data.get("groups"), "groups").items():
         if not isinstance(name, str) or not GROUP_NAME.fullmatch(name):
@@ -312,6 +336,7 @@ def load_catalog(path: pathlib.Path) -> Catalog:
             execution_group=execution_group,
             paths=paths,
             depends_on=depends_on,
+            stages=_string_tuple(entry, "stages"),
         )
 
     levels: dict[str, Level] = {}
@@ -335,6 +360,7 @@ def load_catalog(path: pathlib.Path) -> Catalog:
         documentation_suffixes=documentation_suffixes,
         shared_paths=shared_paths,
         coverage_sources=coverage_sources,
+        coverage_omit=coverage_omit,
         digest=digest,
     )
     errors = catalog.validate()
@@ -413,7 +439,13 @@ def load_platform(config_path: pathlib.Path) -> PlatformUnit:
 
 
 def select_groups(
-    catalog: Catalog, changed: list[str], *, selection: str, level: str, unknown_diff: bool = False
+    catalog: Catalog,
+    changed: list[str],
+    *,
+    selection: str,
+    level: str,
+    unknown_diff: bool = False,
+    stage: str | None = None,
 ) -> dict[str, Any]:
     """Select logical groups and explain every selection.
 
@@ -421,7 +453,10 @@ def select_groups(
     and the paths/conflicts that forced a fallback. The caller materializes the
     result per platform.
     """
-    all_groups = set(catalog.groups)
+    # Stage-restricted groups never enter another stage, not even through a
+    # fallback: their paths stay mapped, so changing them does not widen a PR.
+    excluded = catalog.stage_excluded(stage)
+    all_groups = set(catalog.groups) - excluded
     required = set(catalog.required_groups(level))
 
     def result(
@@ -436,14 +471,15 @@ def select_groups(
         conflicts: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         return {
-            "selected": set(selected),
-            "reasons": reasons,
+            "selected": set(selected) - excluded,
+            "reasons": {name: value for name, value in reasons.items() if name not in excluded},
+            "stage_excluded": sorted(excluded),
             "required": required,
             "fallback": fallback,
             "fallback_reason": fallback_reason,
             "unmapped_paths": unmapped or [],
             "documentation_only": documentation_only,
-            "direct_groups": sorted(set(direct)),
+            "direct_groups": sorted(set(direct) - excluded),
             "route_conflicts": conflicts or [],
         }
 
@@ -576,6 +612,7 @@ def materialize_groups(
     selected: set[str],
     reasons: dict[str, list[dict[str, str]]],
     required: set[str],
+    stage_excluded: Iterable[str] = (),
 ) -> dict[str, list[dict[str, Any]]]:
     """Split logical groups into executable, planned, unsupported, unresolved, and blocked.
 
@@ -637,7 +674,7 @@ def materialize_groups(
         reason = "planned group selected: " + ", ".join(selected_planned)
         executable = []
         for name, group in sorted(catalog.groups.items()):
-            if group.status != "active":
+            if group.status != "active" or name in stage_excluded:
                 continue
             effective = group.execution_group or name
             if name in platform.unsupported_groups:
