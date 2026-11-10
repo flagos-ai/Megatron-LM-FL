@@ -206,7 +206,6 @@ fi
   "$COVERAGE_DIR" 2>/dev/null || true
 "$PYTHON_BIN" -m coverage json \
   --rcfile="$COVERAGE_DIR/.coveragerc" \
-  --show-contexts \
   -o "$COVERAGE_JSON" \
   --include="$COVERAGE_INCLUDE" 2>/dev/null || true
 

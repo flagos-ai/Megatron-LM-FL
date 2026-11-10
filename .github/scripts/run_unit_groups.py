@@ -279,7 +279,6 @@ def combine_coverage(directories: list, output: Path, environment: dict) -> None
                 "coverage",
                 "json",
                 *options,
-                "--show-contexts",
                 "--include=megatron/plugin/*,megatron/core/*",
                 "-o",
                 str(output),
