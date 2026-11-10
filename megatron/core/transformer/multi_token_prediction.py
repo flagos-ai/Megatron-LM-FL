@@ -679,6 +679,7 @@ def process_mtp_loss(
     cp_group: Optional[torch.distributed.ProcessGroup] = None,
     packed_seq_params: Optional[PackedSeqParams] = None,
     scale_logits_fn: Optional[Callable[[Tensor], Tensor]] = None,
+    compute_output_loss: Optional[Callable] = None,
 ) -> Tensor:
     """Process Multi-Token Prediction (MTP) loss computation.
 
@@ -699,6 +700,8 @@ def process_mtp_loss(
         packed_seq_params (Optional[PackedSeqParams]): Packed sequence parameters.
         scale_logits_fn (Optional[Callable[[Tensor], Tensor]]): Optional function to
             scale logits before loss computation (e.g., MuP output scaling).
+        compute_output_loss (Optional[Callable]): Optional joint output projection and loss,
+            accepting a callable that rolls labels after the default projection.
 
     Returns:
         Tensor: Updated hidden states after MTP loss processing (first chunk only).
@@ -716,23 +719,37 @@ def process_mtp_loss(
     # Store the original number of tokens before rolling for proper normalization
     # when calculate_per_token_loss is enabled. This ensures MTP gradients are
     # correctly scaled relative to the main loss gradients in finalize_model_grads.
-    original_num_tokens = loss_mask.sum()
+    original_num_tokens = num_tokens = loss_mask.sum()
 
-    for mtp_layer_number in range(config.mtp_num_layers):
-        mtp_logits, _ = output_layer(
-            hidden_states_list[mtp_layer_number + 1],
-            weight=output_weight,
-            runtime_gather_output=runtime_gather_output,
-        )
-        if scale_logits_fn is not None:
-            mtp_logits = scale_logits_fn(mtp_logits)
+    def roll_mtp_labels() -> Tensor:
+        nonlocal mtp_labels, loss_mask, num_tokens
         mtp_labels, _ = roll_tensor(
             mtp_labels, shifts=-1, dims=-1, cp_group=cp_group, packed_seq_params=packed_seq_params
         )
         loss_mask, num_tokens = roll_tensor(
             loss_mask, shifts=-1, dims=-1, cp_group=cp_group, packed_seq_params=packed_seq_params
         )
-        mtp_loss = compute_language_model_loss(mtp_labels, mtp_logits)
+        return mtp_labels
+
+    for mtp_layer_number in range(config.mtp_num_layers):
+        if compute_output_loss is None:
+            mtp_logits, _ = output_layer(
+                hidden_states_list[mtp_layer_number + 1],
+                weight=output_weight,
+                runtime_gather_output=runtime_gather_output,
+            )
+            if scale_logits_fn is not None:
+                mtp_logits = scale_logits_fn(mtp_logits)
+            mtp_loss = compute_language_model_loss(roll_mtp_labels(), mtp_logits)
+        else:
+            mtp_loss = compute_output_loss(
+                hidden_states_list[mtp_layer_number + 1],
+                output_layer,
+                output_weight,
+                roll_mtp_labels,
+                runtime_gather_output,
+                scale_logits_fn,
+            )
         mtp_loss = loss_mask * mtp_loss
         if is_training:
             # Safe divide without sync: mask numerator when num_tokens==0, divide by clamp(min=1)

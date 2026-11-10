@@ -215,3 +215,17 @@ register(
     impl="megatron.plugin.metax.distributed.fsdp.param_and_grad_buffer._get_communication_stream",
     vendor="metax",
 )
+
+
+# Ascend output projection and vocabulary-parallel cross entropy.
+register(
+    target="megatron.core.tensor_parallel.layers.ColumnParallelLinear.forward",
+    impl="megatron.plugin.Ascend.fusions.linear_cross_entropy.column_parallel_linear_forward",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.models.common.language_module.language_module.LanguageModule.compute_output_loss",
+    impl="megatron.plugin.Ascend.fusions.linear_cross_entropy.compute_output_loss",
+    vendor="npu",
+)

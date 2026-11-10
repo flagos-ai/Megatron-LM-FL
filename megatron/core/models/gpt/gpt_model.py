@@ -713,6 +713,7 @@ class GPTModel(LanguageModule):
                     cp_group=self.pg_collection.cp,
                     packed_seq_params=packed_seq_params,
                     scale_logits_fn=self._scale_logits if self.config.use_mup else None,
+                    compute_output_loss=self.compute_output_loss,
                 )
         sequence_parallel_override = False
 
@@ -758,6 +759,20 @@ class GPTModel(LanguageModule):
                 # then back to [S’, B, H] for the output layer.
                 reshaped = hidden_states.squeeze(1).unsqueeze(0)
                 hidden_states = inference_context.last_token_logits(reshaped).unsqueeze(1)
+
+        if (
+            labels is not None
+            and not in_inference_mode
+            and not has_config_logger_enabled(self.config)
+        ):
+            return self.compute_output_loss(
+                hidden_states,
+                self.output_layer,
+                output_weight,
+                labels,
+                runtime_gather_output,
+                self._scale_logits,
+            )
 
         logits, _ = self.output_layer(
             hidden_states, weight=output_weight, runtime_gather_output=runtime_gather_output
