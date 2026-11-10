@@ -39,8 +39,10 @@ from torch import Tensor
 # Skip entire module if CUDA is not available
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
-# SM90+ check for module-level tests that use apply_dsa_kernel_fusion=True
-_SM90_AVAILABLE = torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 9
+# SM90+ check for module-level tests that use dsa_kernel_backend='cudnn'
+_SM90_AVAILABLE = (
+    torch.cuda.is_available() and torch.cuda.get_device_capability(0)[0] >= 9
+)
 _skip_unless_sm90 = pytest.mark.skipif(
     not _SM90_AVAILABLE, reason="SM90+ (Hopper or later) required for apply_dsa_kernel_fusion"
 )
@@ -56,32 +58,33 @@ logger = logging.getLogger(__name__)
 # Imports
 # ---------------------------------------------------------------------------
 
+from megatron.core.transformer.experimental_attention_variant.csa import (
+    get_compress_topk_idxs,
+    get_window_topk_idxs,
+    unfused_compressed_sparse_attn,
+)
 from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-    build_flat_topk_idxs,
-    dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,
-    fused_indexer_sparse_attn,
-    _sbhd_to_bshd_indexer_inputs,
     _indexer_topk_bshd,
-    _kl_loss_from_target_predict,
     _kl_loss_from_dense_scores,
+    _kl_loss_from_target_predict,
+    _sbhd_to_bshd_indexer_inputs,
+    build_flat_topk_idxs,
 )
-from megatron.plugin.dsa_kernel.triton_indexer_kernels import (
-    sparse_indexer_score_recompute,
-    sparse_attn_score_recompute,
-    dense_indexer_score_recompute,
-    dense_attn_score_recompute,
-    fused_sparse_indexer_loss_and_backward,
+from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
+    dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,
 )
+from megatron.plugin.dsa_kernel.triton_dsa_kernels import fused_indexer_sparse_attn
 from megatron.plugin.dsa_kernel.triton_dsa_utils import (
     compute_ratio_causal_mask,
     topk_with_causal_mask,
 )
-from megatron.core.transformer.experimental_attention_variant.csa import (
-    unfused_compressed_sparse_attn,
-    get_compress_topk_idxs,
-    get_window_topk_idxs,
+from megatron.plugin.dsa_kernel.triton_indexer_kernels import (
+    dense_attn_score_recompute,
+    dense_indexer_score_recompute,
+    fused_sparse_indexer_loss_and_backward,
+    sparse_attn_score_recompute,
+    sparse_indexer_score_recompute,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -197,8 +200,8 @@ def _run_unfused_with_same_indices(inputs: dict) -> Tuple[Tensor, Tensor]:
         (output, combined_topk_idxs)
     """
     from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-        _sbhd_to_bshd_indexer_inputs,
         _indexer_topk_bshd,
+        _sbhd_to_bshd_indexer_inputs,
     )
 
     n_comp = inputs["n_comp"]
@@ -458,8 +461,8 @@ class TestFusedIndexerSparseAttnBackward:
     def _run_unfused_with_grad(inputs: dict) -> dict:
         """Run unfused path with gradients enabled, return output + grads."""
         from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-            _sbhd_to_bshd_indexer_inputs,
             _indexer_topk_bshd,
+            _sbhd_to_bshd_indexer_inputs,
         )
 
         query = inputs["query"].clone().detach().requires_grad_(True)
@@ -1438,7 +1441,6 @@ from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
 )
 from tests.unit_tests.test_utilities import Utils
 
-
 # ---------------------------------------------------------------------------
 # OOM guard — unfused path can OOM at large sequence lengths
 # ---------------------------------------------------------------------------
@@ -1459,14 +1461,13 @@ def _oom_guard():
 #
 # Now that csa.py uses _ensure_dsa_kernels() to lazily import the Triton
 # backend (dsa_sparse_attn_sbhd, build_flat_topk_idxs, etc.), tests that set
-# apply_dsa_kernel_fusion=True in the config no longer need monkey-patching.
+# dsa_kernel_backend='cudnn' in the config no longer need monkey-patching.
 # The globals are populated during CSA construction.
 # ---------------------------------------------------------------------------
 
-from megatron.plugin.dsa_kernel.triton_dsa_kernels import (
-    dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,  # noqa: F401
+from megatron.plugin.dsa_kernel.triton_dsa_kernels import (  # noqa: F401
+    dsa_sparse_attn_sbhd as _triton_dsa_sparse_attn_sbhd,
 )
-
 
 # Patch targets for the csa.py module-level globals (used by _ensure_dsa_kernels).
 # These are needed only when apply_dsa_kernel_fusion was NOT set in the config
@@ -1532,7 +1533,7 @@ def _make_test_mla_config(
         dsa_indexer_topk=dsa_indexer_topk,
         dsa_indexer_loss_coeff=dsa_indexer_loss_coeff,
         dsa_indexer_use_sparse_loss=dsa_indexer_use_sparse_loss,
-        apply_dsa_kernel_fusion=apply_dsa_kernel_fusion,
+        dsa_kernel_backend="cudnn" if apply_dsa_kernel_fusion else "none",
     )
 
 
@@ -1607,7 +1608,7 @@ def _make_csa_inputs(sq, b, config, device="cuda"):
 
 
 # Patch target for fused_indexer_sparse_attn in the csa module (kept for reference;
-# not needed when apply_dsa_kernel_fusion=True is set in the config).
+# not needed when dsa_kernel_backend='cudnn' is set in the config).
 _PATCH_FUSED_INDEXER = (
     'megatron.core.transformer.experimental_attention_variant.csa._fused_indexer_sparse_attn'
 )
@@ -4418,8 +4419,8 @@ class TestSortedScatterAdd:
     def test_numerical_accuracy(self, total_Sq, TopK, total_Skv, D, device):
         """Sorted scatter_add matches reference fused_mask_scatter_add."""
         from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
-            sorted_scatter_add,
             fused_mask_scatter_add,
+            sorted_scatter_add,
         )
 
         torch.manual_seed(42)
@@ -4449,8 +4450,8 @@ class TestSortedScatterAdd:
     def test_high_contention(self, device):
         """Sorted scatter handles high-contention (many writes to same target)."""
         from megatron.plugin.dsa_kernel.triton_sparse_attn_bwd import (
-            sorted_scatter_add,
             fused_mask_scatter_add,
+            sorted_scatter_add,
         )
 
         torch.manual_seed(123)

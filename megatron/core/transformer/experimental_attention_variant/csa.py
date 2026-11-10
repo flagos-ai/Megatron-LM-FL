@@ -21,7 +21,7 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
     fused_qk_topk_naive,
     rotate_activation,
 )
-from megatron.core.transformer.experimental_attention_variant.dsa_backend import (
+from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
     use_fused_dsa_kernels,
 )
 from megatron.core.transformer.module import MegatronModule, mark_keep_in_fp32
@@ -48,7 +48,7 @@ def _ensure_dsa_kernels():
     global _dsa_sparse_attn, _fused_indexer_sparse_attn, _indexer_topk, _build_flat_topk_idxs_fn
     if _dsa_sparse_attn is not None:
         return
-    from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+    from megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels import (
         build_flat_topk_idxs,
         dsa_sparse_attn,
         fused_indexer_sparse_attn,
