@@ -1525,7 +1525,6 @@ class TransformerConfig(ModelParallelConfig):
                     f"got {set(self.indexer_types) - valid_types}"
                 )
         ######## FlagScale End ########
-        ######## FlagScale Begin ########
         elif self.experimental_attention_variant == "dsv4_hybrid":
             assert self.multi_latent_attention, "DSv4 Hybrid requires multi_latent_attention."
             assert self.csa_compress_ratios is not None, "csa_compress_ratios must be set"
@@ -2994,8 +2993,7 @@ class TransformerConfig(ModelParallelConfig):
                     else [self.cp_comm_type]
                 )
                 assert all(
-                    comm_type is not None
-                    and comm_type.replace("_", "").lower() == "allgather"
+                    comm_type is not None and comm_type.replace("_", "").lower() == "allgather"
                     for comm_type in cp_comm_types
                 ), "DSAttention context parallelism currently supports cp_comm_type=allgather only."
             assert not self.apply_rope_fusion, "RoPE fusion is not supported for DSAttention"

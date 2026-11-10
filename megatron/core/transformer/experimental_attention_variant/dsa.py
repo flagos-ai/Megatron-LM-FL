@@ -35,7 +35,9 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import ensure_params_ready, get_pg_size
+from megatron.plugin.platform import get_platform  # FlagScale Modify
 
+cur_platform = get_platform()  # FlagScale Modify
 logger = logging.getLogger(__name__)
 _DSA_WEIGHTS_PROJ_TE_GEMM_FALLBACK_WARNED = False
 
@@ -316,7 +318,9 @@ class DSAIndexerLossLoggingHelper:
         # because every prediction depth can contain multiple hybrid layers.
         needed = max(num_layers, layer_number)
         if "values" not in tracker:
-            tracker["values"] = torch.zeros(needed, device=torch.cuda.current_device())
+            tracker["values"] = torch.zeros(
+                needed, device=cur_platform.device(cur_platform.current_device())
+            )  # FlagScale Modify
         elif tracker["values"].shape[0] < needed:
             grown = torch.zeros(
                 needed, device=tracker["values"].device, dtype=tracker["values"].dtype
@@ -364,7 +368,9 @@ class DSAIndexerLossLoggingHelper:
         else:
             local_size = tracker["values"].shape[0] if "values" in tracker else (num_layers or 0)
             size_t = torch.tensor(
-                [local_size], device=torch.cuda.current_device(), dtype=torch.long
+                [local_size],
+                device=cur_platform.device(cur_platform.current_device()),  # FlagScale Modify
+                dtype=torch.long,
             )
             torch.distributed.all_reduce(size_t, op=torch.distributed.ReduceOp.MAX, group=pp_group)
             size = int(size_t.item())
@@ -372,7 +378,9 @@ class DSAIndexerLossLoggingHelper:
         if size == 0:
             return
         if "values" not in tracker:
-            tracker["values"] = torch.zeros(size, device=torch.cuda.current_device())
+            tracker["values"] = torch.zeros(
+                size, device=cur_platform.device(cur_platform.current_device())
+            )  # FlagScale Modify
         elif tracker["values"].shape[0] < size:
             grown = torch.zeros(
                 size, device=tracker["values"].device, dtype=tracker["values"].dtype
