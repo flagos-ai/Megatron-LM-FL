@@ -38,8 +38,7 @@ def model_params():
             config,
             expected_num_parameters,
             marks=pytest.mark.skipif(
-                requires_torch_2_4 and not TORCH_VERSION_GE_2_4,
-                reason="Requires PyTorch >= 2.4.0",
+                requires_torch_2_4 and not TORCH_VERSION_GE_2_4, reason="Requires PyTorch >= 2.4.0"
             ),
         )
         for config, expected_num_parameters, requires_torch_2_4 in MODEL_CASES
@@ -64,11 +63,7 @@ def build_heterogeneous_gpt_model(params, tmp_path, compact):
 
     first_layer_config = {
         "attention": {"no_op": False, "replace_with_linear": False, "num_query_groups": 8},
-        "mlp": {
-            "no_op": False,
-            "replace_with_linear": False,
-            "ffn_hidden_size": ffn_hidden_size,
-        },
+        "mlp": {"no_op": False, "replace_with_linear": False, "ffn_hidden_size": ffn_hidden_size},
     }
 
     second_layer_config = {
@@ -151,9 +146,7 @@ class TestHeterogeneousGPTModel:
         model_params(),
         indirect=["compact_heterogeneous_gpt_model"],
     )
-    def test_post_process_forward(
-        self, compact_heterogeneous_gpt_model, expected_num_parameters
-    ):
+    def test_post_process_forward(self, compact_heterogeneous_gpt_model, expected_num_parameters):
         sequence_length = compact_heterogeneous_gpt_model.max_sequence_length
         micro_batch_size = 2
 

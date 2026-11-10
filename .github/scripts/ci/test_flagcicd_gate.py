@@ -84,6 +84,67 @@ class GateTests(unittest.TestCase):
         ]
         self.assertEqual(flagcicd_gate.verify_attestations(plan, attestations), [])
 
+    def test_planned_onboarding_summary_reports_actual_results(self) -> None:
+        plan = copy.deepcopy(self.plan)
+        platform = plan["platforms"][0]
+        platform["config_identity"]["planned_execution"] = [
+            {"name": "planned-inference", "paths": ["tests/unit_tests/inference/test_new.py"]}
+        ]
+        evidence = {
+            "schema_version": 1,
+            "reports": {
+                name: {"tests": 1, "passed": 1, "skipped": 0, "failures": 0, "errors": 0}
+                for name in platform["junit_reports"]
+            },
+        }
+        report = {
+            "plan_hash": plan["plan_hash"],
+            "platform": "cuda",
+            "device": "a100",
+            "executed_groups": ["planned-inference"],
+            "groups": [{"name": "planned-inference", "exit_code": 0, "evidence": evidence}],
+        }
+        summary = flagcicd_gate.planned_onboarding_summary(plan, [report])
+        self.assertIn("Pending permanent onboarding", summary)
+        self.assertIn(
+            "| `inference` | `tests/unit_tests/inference/test_new.py` | `cuda` | `a100` | Passed |",
+            summary,
+        )
+        self.assertIn("Missing result", flagcicd_gate.planned_onboarding_summary(plan, []))
+        report["groups"][0]["exit_code"] = 1
+        self.assertIn("| Failed |", flagcicd_gate.planned_onboarding_summary(plan, [report]))
+        report["groups"][0]["exit_code"] = 0
+        for counts in evidence["reports"].values():
+            counts.update(passed=0, skipped=1)
+        self.assertIn("all-skipped", flagcicd_gate.planned_onboarding_summary(plan, [report]))
+        report["plan_hash"] = "wrong"
+        self.assertIn(
+            "plan hash mismatch", flagcicd_gate.planned_onboarding_summary(plan, [report])
+        )
+        self.assertIn(
+            "duplicate results", flagcicd_gate.planned_onboarding_summary(plan, [report, report])
+        )
+        platform["devices"].append("h100")
+        self.assertIn(
+            "| `h100` | Missing result |", flagcicd_gate.planned_onboarding_summary(plan, [report])
+        )
+        self.assertEqual(flagcicd_gate.planned_onboarding_summary(self.plan, []), "")
+
+    def test_planned_onboarding_summary_shows_platform_skip_reason(self) -> None:
+        plan = copy.deepcopy(self.plan)
+        plan["platforms"][0]["planned_skipped"] = [
+            {
+                "name": "planned-inference",
+                "paths": ["tests/unit_tests/inference/test_new.py"],
+                "skip_reason": "Runtime lacks dependency <test>|extra",
+            }
+        ]
+        summary = flagcicd_gate.planned_onboarding_summary(plan, [])
+        self.assertIn("Skipped (unsupported on cuda)", summary)
+        self.assertIn("Runtime lacks dependency &lt;test&gt;&#124;extra", summary)
+        self.assertIn("tests/unit_tests/inference/test_new.py", summary)
+        self.assertNotIn("Missing result", summary)
+
     def test_plan_policy_and_hash_are_checked(self) -> None:
         plan = copy.deepcopy(self.plan)
         errors = flagcicd_gate.verify_plan(

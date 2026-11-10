@@ -503,9 +503,7 @@ class TestDSAGPTMambaEquivalence:
         mamba_model.load_state_dict(mamba_sd, strict=True)
 
         torch.manual_seed(99)
-        tokens = torch.randint(
-            0, _VOCAB_SIZE, (_BATCH_SIZE, _SEQ_LEN), device=get_current_device()
-        )
+        tokens = torch.randint(0, _VOCAB_SIZE, (_BATCH_SIZE, _SEQ_LEN), device=get_current_device())
 
         gpt_logprobs = _forward_logprobs_pp1(gpt_model, tokens)
         mamba_logprobs = _forward_logprobs_pp1(mamba_model, tokens)
@@ -637,9 +635,7 @@ class TestDSAMoEGPTMambaEquivalence:
         mamba_model.load_state_dict(mamba_sd, strict=True)
 
         torch.manual_seed(99)
-        tokens = torch.randint(
-            0, _VOCAB_SIZE, (_BATCH_SIZE, _SEQ_LEN), device=get_current_device()
-        )
+        tokens = torch.randint(0, _VOCAB_SIZE, (_BATCH_SIZE, _SEQ_LEN), device=get_current_device())
 
         gpt_logprobs = _forward_logprobs_pp1(gpt_model, tokens)
         mamba_logprobs = _forward_logprobs_pp1(mamba_model, tokens)

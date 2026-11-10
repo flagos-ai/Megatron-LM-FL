@@ -876,7 +876,11 @@ def group_params_for_buffers(
 
         ######## FlagScale Begin ########
         key = BufferKey(
-            param_dtype, grad_dtype, is_expert_parallel, is_managed_by_layer_wise_optimizer, is_engram_parallel
+            param_dtype,
+            grad_dtype,
+            is_expert_parallel,
+            is_managed_by_layer_wise_optimizer,
+            is_engram_parallel,
         )
         ######## FlagScale End ########
         param_list = key_to_params.get(key, [])
@@ -887,7 +891,11 @@ def group_params_for_buffers(
         # logical high-precision dtype, needed for checkpoint compatibility.
         ######## FlagScale Begin ########
         offset_key = BufferKey(
-            param.dtype, grad_dtype, is_expert_parallel, is_managed_by_layer_wise_optimizer, is_engram_parallel
+            param.dtype,
+            grad_dtype,
+            is_expert_parallel,
+            is_managed_by_layer_wise_optimizer,
+            is_engram_parallel,
         )
         ######## FlagScale End ########
         offset = dtype_to_offsets.get(offset_key, 0)

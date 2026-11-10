@@ -306,7 +306,9 @@ class Timers:
         # and since we are only gathering a small amount of data,
         # it should be ok to use all-gather instead of gather.
         rank_name_to_time = torch.zeros(
-            (world_size, len(names)), dtype=torch.float, device=cur_platform.current_device()  # FlagScale Modify
+            (world_size, len(names)),
+            dtype=torch.float,
+            device=cur_platform.current_device(),  # FlagScale Modify
         )
         for i, name in enumerate(names):
             if name in self._timers:

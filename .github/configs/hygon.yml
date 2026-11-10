@@ -86,6 +86,10 @@ test_matrix:
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
         description: post-training, tokenizer, and utility tests
     unsupported_groups:
+      optimizer: "Optimizer tests are not onboarded or validated in the hygon CI runtime; CUDA provides execution coverage."
+      extensions: "Extension tests are not onboarded or validated in the hygon CI runtime; CUDA provides execution coverage."
+      a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the hygon CI runtime; CUDA provides execution coverage."
+      dsa_kernel: "Plugin kernel tests are not onboarded or validated in the hygon CI runtime; CUDA provides execution coverage."
       data: "Hygon omits the data group because its remaining test blocks a rank until the unit-test timeout."
       distributed: "Hygon omits the distributed group until the DTK stack supports its remaining boundaries."
       transformer: "Transformer unit tests currently run only on CUDA."

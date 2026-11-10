@@ -119,6 +119,7 @@ jobs:
           RUN_FUNCTIONAL_TESTS: ${{ inputs.run_functional_tests }}
           TE_FL_ARTIFACT: ${{ inputs.te_fl_artifact }}
           EXPECTED_UNIT_GROUPS: ${{ inputs.expected_unit_groups }}
+          CONFIG_IDENTITY: ${{ inputs.config_identity }}
         run: |
           set -euo pipefail
 
@@ -160,9 +161,31 @@ jobs:
             unit_groups=$(EXPECTED_UNIT_GROUPS="$EXPECTED_UNIT_GROUPS" python3 - "$unit_groups" <<'PY'
           import json
           import os
+          import pathlib
+          import re
           import sys
 
           groups = json.loads(sys.argv[1])
+          identity = json.loads(os.environ["CONFIG_IDENTITY"])
+          names = {group["name"] for group in groups}
+          for temporary in identity.get("planned_execution", []):
+              name, paths = temporary["name"], temporary["paths"]
+              if not re.fullmatch(r"planned-[A-Za-z0-9_-]+", name) or name in names:
+                  raise SystemExit("Invalid or duplicate temporary group")
+              if not isinstance(paths, list) or not paths:
+                  raise SystemExit("Temporary groups require changed test files")
+              for path in paths:
+                  if (
+                      not isinstance(path, str)
+                      or not re.fullmatch(r"tests/unit_tests/[A-Za-z0-9_./-]+", path)
+                      or ".." in pathlib.PurePosixPath(path).parts
+                      or not pathlib.PurePosixPath(path).match("test_*.py")
+                      or not pathlib.Path(path).is_file()
+                      or not pathlib.Path(path).resolve().is_relative_to(pathlib.Path.cwd().resolve())
+                  ):
+                      raise SystemExit("Invalid temporary test path")
+              groups.append({"name": name, "path": " ".join(paths)})
+              names.add(name)
           selected = json.loads(os.environ["EXPECTED_UNIT_GROUPS"])
           if not isinstance(selected, list) or any(
               not isinstance(name, str) or not name for name in selected

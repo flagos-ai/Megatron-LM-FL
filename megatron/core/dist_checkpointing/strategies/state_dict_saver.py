@@ -259,7 +259,9 @@ def save_state_dict_async_finalize(
     # Broadcast failure status to all ranks to raise exceptions everywhere if needed.
     # The failure details are only raised on the coordinator.
     failures_occurred = torch.tensor(
-        [int(len(node_failures) > 0)], dtype=torch.int, device=cur_platform.current_device()  # FlagScale Modify
+        [int(len(node_failures) > 0)],
+        dtype=torch.int,
+        device=cur_platform.current_device(),  # FlagScale Modify
     )
     torch.distributed.broadcast(
         failures_occurred, src=dist_wrapper.coordinator_rank, group=dist_wrapper.group

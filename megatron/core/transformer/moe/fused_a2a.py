@@ -6,7 +6,6 @@
 from typing import Optional
 
 from megatron.core.utils import internal_api
-
 from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 try:

@@ -37,8 +37,10 @@ from megatron.core.transformer.transformer_block import (
 )
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import (
+    HyperConnectionTransformerLayer,  # FlagScale Modify
+)
+from megatron.core.transformer.transformer_layer import (
     MlpBuilder,
-    HyperConnectionTransformerLayer,
     TransformerLayer,
     TransformerLayerSubmodules,
     get_transformer_layer_offset,
@@ -715,10 +717,7 @@ def get_gpt_decoder_block_spec(
     # Note: MCore layer_number starts at 1
     ######## FlagScale Begin ########
     num_layers_to_build = get_num_layers_to_build(
-        config,
-        vp_stage=vp_stage,
-        pp_rank=pp_rank,
-        dualpipev_stage=dualpipev_stage,
+        config, vp_stage=vp_stage, pp_rank=pp_rank, dualpipev_stage=dualpipev_stage
     )
     ######## FlagScale End ########
 
@@ -735,10 +734,7 @@ def get_gpt_decoder_block_spec(
     else:
         ######## FlagScale Begin ########
         offset = get_transformer_layer_offset(
-            config,
-            vp_stage=vp_stage,
-            pp_rank=pp_rank,
-            dualpipev_stage=dualpipev_stage,
+            config, vp_stage=vp_stage, pp_rank=pp_rank, dualpipev_stage=dualpipev_stage
         )
         ######## FlagScale End ########
         local_layer_specs = layer_specs[offset : offset + num_layers_to_build]
@@ -763,7 +759,7 @@ def get_gpt_mtp_block_spec(
     use_transformer_engine: bool,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    dualpipev_stage: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Modify
 ) -> MultiTokenPredictionBlockSubmodules:
     """GPT Multi-Token Prediction (MTP) block spec."""
     if use_transformer_engine:
@@ -787,7 +783,12 @@ def get_gpt_mtp_block_spec(
             else LocalSpecProvider()
         )
     return get_gpt_mtp_block_spec_for_backend(
-        config=config, spec=spec, backend=backend, vp_stage=vp_stage, pp_rank=pp_rank, dualpipev_stage=dualpipev_stage
+        config=config,
+        spec=spec,
+        backend=backend,
+        vp_stage=vp_stage,
+        pp_rank=pp_rank,
+        dualpipev_stage=dualpipev_stage,  # FlagScale Modify
     )
 
 
@@ -797,10 +798,15 @@ def get_gpt_mtp_block_spec_for_backend(
     backend: BackendSpecProvider,
     vp_stage: Optional[int] = None,
     pp_rank: Optional[int] = None,
-    dualpipev_stage: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Modify
 ) -> MultiTokenPredictionBlockSubmodules:
     """GPT Multi-Token Prediction (MTP) block spec."""
-    num_layers_to_build = get_mtp_num_layers_to_build(config, vp_stage=vp_stage, pp_rank=pp_rank, dualpipev_stage=dualpipev_stage)
+    num_layers_to_build = get_mtp_num_layers_to_build(
+        config,
+        vp_stage=vp_stage,
+        pp_rank=pp_rank,
+        dualpipev_stage=dualpipev_stage,  # FlagScale Modify
+    )
     if num_layers_to_build == 0:
         return None
 
@@ -826,7 +832,9 @@ def get_gpt_mtp_block_spec_for_backend(
         mtp_layer_specs = [mtp_layer_spec] * mtp_num_layers
 
     if not config.mtp_use_repeated_layer:
-        offset = get_mtp_layer_offset(config, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage)  # FlagScale Modify
+        offset = get_mtp_layer_offset(
+            config, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage
+        )  # FlagScale Modify
         # Split the MTP layer specs to only include the layers that are built in this
         # pipeline stage.
         mtp_layer_specs = mtp_layer_specs[offset : offset + num_layers_to_build]

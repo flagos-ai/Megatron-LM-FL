@@ -751,7 +751,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 ):
                     self.config.recompute_method = 'block'
                 else:
-                    raise ValueError("the item of recompute_method_per_stage_micro_batch must be '0' or '1' ")
+                    raise ValueError(
+                        "the item of recompute_method_per_stage_micro_batch must be '0' or '1' "
+                    )
             else:
                 if (
                     self.config.recompute_method_per_stage_micro_batch[
@@ -768,18 +770,24 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 ):
                     self.config.recompute_method = 'block'
                 else:
-                    raise ValueError("the item of recompute_method_per_stage_micro_batch must be '0' or '1' ")
+                    raise ValueError(
+                        "the item of recompute_method_per_stage_micro_batch must be '0' or '1' "
+                    )
         if self.config.recompute_num_layers_per_stage_micro_batch != None:
             if self.config.virtual_pipeline_model_parallel_size != None:
-                self.config.recompute_num_layers = self.config.recompute_num_layers_per_stage_micro_batch[
-                    parallel_state.get_virtual_pipeline_model_parallel_rank()
-                    * self.config.pipeline_model_parallel_size
-                    + parallel_state.get_pipeline_model_parallel_rank()
-                ][self.current_microbatch]
+                self.config.recompute_num_layers = (
+                    self.config.recompute_num_layers_per_stage_micro_batch[
+                        parallel_state.get_virtual_pipeline_model_parallel_rank()
+                        * self.config.pipeline_model_parallel_size
+                        + parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                )
             else:
-                self.config.recompute_num_layers = self.config.recompute_num_layers_per_stage_micro_batch[
-                    parallel_state.get_pipeline_model_parallel_rank()
-                ][self.current_microbatch]
+                self.config.recompute_num_layers = (
+                    self.config.recompute_num_layers_per_stage_micro_batch[
+                        parallel_state.get_pipeline_model_parallel_rank()
+                    ][self.current_microbatch]
+                )
             if self.config.recompute_num_layers == 0:
                 self.config.recompute_method = None
                 self.config.recompute_granularity = None
@@ -808,7 +816,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         )
 
         with rng_context, outer_quantization_context:
-            engram_hash_input_ids = decoder_extra_block_kwargs.get("engram_hash_input_ids")  # FlagScale Modify
+            engram_hash_input_ids = decoder_extra_block_kwargs.get(
+                "engram_hash_input_ids"
+            )  # FlagScale Modify
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
                 assert engram_hash_input_ids is None  # FlagScale Modify

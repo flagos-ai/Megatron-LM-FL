@@ -21,6 +21,7 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.utils import divide
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 

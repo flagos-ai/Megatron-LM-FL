@@ -126,11 +126,13 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                 ######## FlagScale Begin ########
                 self._h2d_stream.wait_stream(cur_platform.current_stream())
                 with cur_platform.stream(self._h2d_stream):
-                ######## FlagScale End ########
+                    ######## FlagScale End ########
                     for param in _param_generator(optimizer):
                         gpu_param = self.cpu_copys_map_gpu_param[param]
                         gpu_param.data.copy_(param.data, non_blocking=True)
-                self._h2d_stream.record_event().wait(cur_platform.current_stream())  # FlagScale Modify
+                self._h2d_stream.record_event().wait(
+                    cur_platform.current_stream()
+                )  # FlagScale Modify
 
             return param_copy_back_gpu_hook
 
@@ -170,7 +172,7 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
         ######## FlagScale Begin ########
         self._d2h_stream.wait_stream(cur_platform.current_stream())
         with cur_platform.stream(self._d2h_stream):
-        ######## FlagScale End ########
+            ######## FlagScale End ########
             self._set_sub_optimizer_grads()
 
         # Step the sub-optimizers.
@@ -289,8 +291,9 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                     getattr(param, "is_offloading_candidate", False)
                     or offload_params_numel < offload_threshold
                 ) and param.is_cuda:
-                    # If the param is a candidate for offloading and enven if we have not offloaded enough params, we offload it to CPU.
-                ######## FlagScale End ########
+                    # If the param is a candidate for offloading and enven if we have not offloaded
+                    # enough params, we offload it to CPU.
+                    ######## FlagScale End ########
                     param = param.detach().clone().cpu().pin_memory()
                     offload_params_numel += param.numel()
                     cpu_copy = True
@@ -384,7 +387,9 @@ class HybridDeviceOptimizer(torch.optim.Optimizer):
                     if isinstance(optimizer, self.defaults["cpu_optimizer_cls"]):
                         self.state[orig_param][k] = state[k] = v.to("cpu")
                     else:
-                        self.state[orig_param][k] = state[k] = v.to(cur_platform.device_name())  # FlagScale Modify
+                        self.state[orig_param][k] = state[k] = v.to(
+                            cur_platform.device_name()
+                        )  # FlagScale Modify
 
     def _update_fp32_params_by_new_state(self):
         if not self.param_update_in_fp32:

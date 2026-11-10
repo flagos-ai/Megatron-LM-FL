@@ -341,6 +341,7 @@ class TestCudaGraphConfigAndArguments:
         assert cfg.cuda_graph_modules == []
         assert cfg.cuda_graph_scope is None
 
+
 def test_cuda_graphs_cpu_metadata_pool_tree_and_state_helpers(monkeypatch):
     from megatron.core.transformer import cuda_graphs
 
@@ -358,8 +359,7 @@ def test_cuda_graphs_cpu_metadata_pool_tree_and_state_helpers(monkeypatch):
 
     tensor = torch.ones(2, requires_grad=True)
     tensor.cg_buffer_metadata = cuda_graphs.CudagraphBufferMetadata(
-        is_cudagraph_input=True,
-        input_use_count=2,
+        is_cudagraph_input=True, input_use_count=2
     )
     meta = ArgMetadata(tensor)
     assert meta.shape == torch.Size([2])
@@ -431,7 +431,9 @@ def test_cuda_graphs_cpu_global_record_and_delete_paths(monkeypatch):
 
     calls = []
     monkeypatch.setattr(cuda_graphs.torch.distributed, "get_rank", lambda: 1)
-    monkeypatch.setattr(cuda_graphs.torch.cuda, "set_stream", lambda stream: calls.append(("set_stream", stream)))
+    monkeypatch.setattr(
+        cuda_graphs.torch.cuda, "set_stream", lambda stream: calls.append(("set_stream", stream))
+    )
     monkeypatch.setattr(cuda_graphs.torch.cuda, "default_stream", lambda: "default")
     monkeypatch.setattr(cuda_graphs.gc, "collect", lambda: calls.append("gc"))
     monkeypatch.setattr(
@@ -469,7 +471,9 @@ def test_cuda_graphs_cpu_global_record_and_delete_paths(monkeypatch):
     _CudagraphGlobalRecord.cudagraph_created = False
     _CudagraphGlobalRecord.cudagraph_record = []
     _CudagraphGlobalRecord.cudagraph_inference_record = []
-    _CudagraphGlobalRecord.record_fwd_graph(runner, (torch.tensor([1.0]),), {"x": 2}, torch.tensor([3.0]))
+    _CudagraphGlobalRecord.record_fwd_graph(
+        runner, (torch.tensor([1.0]),), {"x": 2}, torch.tensor([3.0])
+    )
     _CudagraphGlobalRecord.record_bwd_graph(runner)
     stats = create_cudagraphs()
     assert runner.created[0][0] == "fwd"

@@ -15,7 +15,7 @@ import torch.nn.functional as F
 # before torch, it registers the same namespace first, causing:
 # "RuntimeError: Only a single TORCH_LIBRARY can be used to register the namespace triton"
 try:
-    import triton  # noqa: F401
+    import triton  # noqa: F401  # pylint: disable=unused-import
 
     HAVE_TRITON = True
 except ImportError:
@@ -656,7 +656,8 @@ class TransformerConfig(ModelParallelConfig):
 
     recompute_modules: Optional[List[str]] = None
     """The submodules to recompute.
-    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe", "shared_experts", "mhc".
+    choices: "core_attn", "moe_act", "layernorm", "mla_up_proj", "mlp", "moe",
+    "shared_experts", "mhc".
     default: ["core_attn"].
     "core_attn": recompute the core attention part of the transformer layer.
     "moe_act": recompute the MoE MLP activation function.
@@ -1362,6 +1363,7 @@ class TransformerConfig(ModelParallelConfig):
 
     lora_out_init_method: str = "zero"
     """Initialization method for LoRA B matrix."""
+
     ######## FlagScale End ########
     @overridable  # FlagScale Modify
     def __post_init__(self):
@@ -3068,7 +3070,9 @@ class TransformerConfig(ModelParallelConfig):
                 )
 
         return result
+
     ######## FlagScale End ########
+
 
 @dataclass
 class MLATransformerConfig(TransformerConfig):

@@ -188,6 +188,7 @@ def cleanup_gpu_memory():
     # Use platform-specific device cleanup instead of hardcoded torch.cuda
     try:
         from megatron.plugin import cur_platform
+
         if cur_platform.is_available():
             cur_platform.empty_cache()
     except (ImportError, AttributeError):
