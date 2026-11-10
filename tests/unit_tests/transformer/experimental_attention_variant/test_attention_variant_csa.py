@@ -250,6 +250,7 @@ def _make_mla_config(
         rotary_percent=1.0,
         multi_latent_attention=True,
         experimental_attention_variant='dsv4_hybrid',
+        dsa_kernel_backend='none',
         csa_compress_ratios=csa_compress_ratios,
         csa_window_size=csa_window_size,
         csa_dense_mode=csa_dense_mode,
