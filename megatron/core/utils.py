@@ -1216,7 +1216,9 @@ def local_multi_tensor_l2_norm(chunk_size, noop_flag, tensor_lists, per_tensor, 
     l2 = [[(torch.norm(tensor)) for tensor in tensor_list] for tensor_list in tensor_lists]
     l2_reduced = torch.norm(torch.tensor(l2))
     l2_cuda = torch.tensor(
-        [float(l2_reduced)], dtype=torch.float, device=cur_platform.device(cur_platform.current_device())
+        [float(l2_reduced)],
+        dtype=torch.float,
+        device=cur_platform.device(cur_platform.current_device()),  # FlagScale Modify
     )
     return l2_cuda, None
 
@@ -2168,9 +2170,7 @@ def get_batch_on_this_tp_rank(
 
     else:
         if is_hybrid_cp:
-            hybrid_cp_seq_length = torch.tensor(
-                0, dtype=torch.int32, device=device
-            )
+            hybrid_cp_seq_length = torch.tensor(0, dtype=torch.int32, device=device)
             _broadcast(hybrid_cp_seq_length)
             shape = (micro_batch_size, hybrid_cp_seq_length.item())
         else:
@@ -2190,9 +2190,7 @@ def get_batch_on_this_tp_rank(
             max_seqlen = torch.empty(1, dtype=torch.int32, device=device)
         if create_attention_mask_in_dataloader:
             attention_mask = torch.empty(
-                (micro_batch_size, 1, seq_length, seq_length),
-                dtype=torch.bool,
-                device=device,
+                (micro_batch_size, 1, seq_length, seq_length), dtype=torch.bool, device=device
             )
 
         if is_hybrid_cp:

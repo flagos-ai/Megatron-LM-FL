@@ -7,6 +7,7 @@ from packaging import version
 
 from megatron.core.jit import jit_fuser
 from megatron.core.utils import null_decorator
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
@@ -17,12 +18,10 @@ try:
     import triton
     import triton.language as tl
 
-    ######## FlagScale Begin ########
     if (
         version.parse(triton.__version__) < version.parse("3.4.0")
-        and not cur_platform.is_available()
+        and not cur_platform.is_available()  # FlagScale Modify
     ):
-    ######## FlagScale End ########
         HAVE_TRITON = False
     else:
         HAVE_TRITON = tl.constexpr(version.parse(triton.__version__) >= version.parse("2.0.0"))

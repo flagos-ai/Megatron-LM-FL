@@ -14,6 +14,7 @@ from megatron.core.datasets.gpt_dataset import GPTDatasetConfig
 from megatron.core.datasets.megatron_dataset import LowLevelDataset, MegatronDataset
 from megatron.core.datasets.utils import Split, normalize
 from megatron.core.utils import log_single_rank
+
 ######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 from megatron.plugin.utils import is_built_on_zero_rank

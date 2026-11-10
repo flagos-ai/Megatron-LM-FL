@@ -151,7 +151,9 @@ class FullyShardedDataParallel(_BaseDataParallel):
         self.bucket_size = self.ddp_config.bucket_size
         if disable_bucketing:
             self.bucket_size = None
-        self.device = device if device else torch.device(cur_platform.current_device_name())  # FlagScale Modify
+        self.device = (
+            device if device else torch.device(cur_platform.current_device_name())
+        )  # FlagScale Modify
 
         if fsdp_unit_modules is not None:
             self.fsdp_unit_modules = fsdp_unit_modules

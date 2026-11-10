@@ -29,7 +29,7 @@ from megatron.core.tensor_parallel.inference_layers import (
     inference_all_gather_from_tensor_model_parallel_region,
 )
 from megatron.core.transformer.enums import AttnMaskType, LayerType
-from megatron.core.transformer.hyper_connection import learned_output_contract
+from megatron.core.transformer.hyper_connection import learned_output_contract  # FlagScale Modify
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
@@ -372,7 +372,9 @@ class MTPLossLoggingHelper:
 
         tracker = MTPLossLoggingHelper.tracker
         if "values" not in tracker:
-            tracker["values"] = torch.zeros(num_layers, device=cur_platform.current_device())  # FlagScale Modify
+            tracker["values"] = torch.zeros(
+                num_layers, device=cur_platform.current_device()
+            )  # FlagScale Modify
         tracker["values"][layer_number] += loss.detach()
         tracker["reduce_group"] = reduce_group
         tracker["avg_group"] = avg_group
@@ -444,15 +446,17 @@ class MultiTokenPredictionLayerSubmodules:
     layer_norm: LayerNormBuilder
 
     eh_proj: Union[ModuleSpec, type] = None
+    ######## FlagScale Begin ########
     e_proj: Union[ModuleSpec, type] = None
     h_proj: Union[ModuleSpec, type] = None
+    ######## FlagScale End ########
     mtp_model_layer: Union[ModuleSpec, type] = None
 
 
 def get_mtp_layer_spec(
     mtp_model_layer_spec: ModuleSpec,
     use_transformer_engine: bool,
-    enable_hyper_connections: bool = False,
+    enable_hyper_connections: bool = False,  # FlagScale Modify
 ) -> ModuleSpec:
     """Get the MTP layer spec.
 
@@ -462,14 +466,14 @@ def get_mtp_layer_spec(
     return get_mtp_layer_spec_for_backend(
         mtp_model_layer_spec,
         backend=TESpecProvider() if use_transformer_engine else LocalSpecProvider(),
-        enable_hyper_connections=enable_hyper_connections,
+        enable_hyper_connections=enable_hyper_connections,  # FlagScale Modify
     )
 
 
 def get_mtp_layer_spec_for_backend(
     mtp_model_layer_spec: ModuleSpec,
     backend: BackendSpecProvider,
-    enable_hyper_connections: bool = False,
+    enable_hyper_connections: bool = False,  # FlagScale Modify
 ) -> ModuleSpec:
     """Get the MTP layer spec.
 
@@ -479,6 +483,7 @@ def get_mtp_layer_spec_for_backend(
     column_parallel_linear_impl: type = backend.column_parallel_linear()
     layer_norm_impl = backend.layer_norm()
 
+    ######## FlagScale Begin ########
     submodules_kwargs = dict(
         enorm=layer_norm_impl,
         hnorm=layer_norm_impl,
@@ -495,6 +500,7 @@ def get_mtp_layer_spec_for_backend(
         module=MultiTokenPredictionLayer,
         submodules=MultiTokenPredictionLayerSubmodules(**submodules_kwargs),
     )
+    ######## FlagScale End ########
     return mtp_layer_spec
 
 
@@ -539,8 +545,10 @@ def mtp_on_this_rank(
         # without custom PP layout, we only support put all of MTP layers on the last pipeline stage
         if mtp_num_layers is not None:
             mtp_on_this_rank = parallel_state.is_pipeline_last_stage(
-                ignore_virtual=ignore_virtual, vp_stage=vp_stage,
-                ignore_dualpipev=ignore_dualpipev, dualpipev_stage=dualpipev_stage
+                ignore_virtual=ignore_virtual,
+                vp_stage=vp_stage,
+                ignore_dualpipev=ignore_dualpipev,  # FlagScale Modify
+                dualpipev_stage=dualpipev_stage,  # FlagScale Modify
             )
         else:
             mtp_on_this_rank = False
@@ -563,11 +571,15 @@ def get_mtp_ranks(pp_ranks: List[int], config: TransformerConfig) -> List[int]:
     return list(mtp_ranks)
 
 
-def get_mtp_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = None, dualpipev_stage: Optional[int] = None) -> int:
+def get_mtp_layer_offset(
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Modify
+) -> int:
     """Get the offset of the MTP layer."""
     if config.pipeline_model_parallel_size > 1:
         if config.pipeline_model_parallel_layout:
-            assert dualpipev_stage is None
+            assert dualpipev_stage is None  # FlagScale Modify
             offset = config.pipeline_model_parallel_layout.get_layer_offset(
                 layer_type=LayerType.mtp, vp_stage=vp_stage
             )
@@ -579,11 +591,14 @@ def get_mtp_layer_offset(config: TransformerConfig, vp_stage: Optional[int] = No
 
 
 def get_mtp_num_layers_to_build(
-    config: TransformerConfig, vp_stage: Optional[int] = None, pp_rank: Optional[int] = None, dualpipev_stage: Optional[int] = None,
+    config: TransformerConfig,
+    vp_stage: Optional[int] = None,
+    pp_rank: Optional[int] = None,
+    dualpipev_stage: Optional[int] = None,  # FlagScale Modify
 ) -> int:
     """Get the number of MTP layers to build."""
     if config.pipeline_model_parallel_layout is not None:
-        assert dualpipev_stage is None
+        assert dualpipev_stage is None  # FlagScale Modify
         # If we have a custom PP layout, get the number of mtp layers in the layout array.
         num_layers_to_build = config.pipeline_model_parallel_layout.get_num_layers_to_build(
             layer_type=LayerType.mtp, vp_stage=vp_stage
@@ -594,7 +609,11 @@ def get_mtp_num_layers_to_build(
             f"mtp_num_layers ({config.mtp_num_layers}) or be 0."
         )
     else:
-        if parallel_state.is_pipeline_last_stage(ignore_virtual=False, vp_stage=vp_stage, dualpipev_stage=dualpipev_stage):
+        if parallel_state.is_pipeline_last_stage(
+            ignore_virtual=False,
+            vp_stage=vp_stage,
+            dualpipev_stage=dualpipev_stage,  # FlagScale Modify
+        ):
             num_layers_to_build = config.mtp_num_layers if config.mtp_num_layers else 0
         else:
             num_layers_to_build = 0
@@ -834,7 +853,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                     f"The supported attention mask types are {SUPPORTED_ATTN_MASK}."
                 )
 
-        self.mhc_enabled = self.config.enable_hyper_connections
+        self.mhc_enabled = self.config.enable_hyper_connections  # FlagScale Modify
 
         self.enorm = self.submodules.enorm(
             config=self.config,
@@ -849,6 +868,7 @@ class MultiTokenPredictionLayer(MegatronModule):
         )
 
         if self.mhc_enabled:
+            ######## FlagScale Begin ########
             # mHC mode: separate e_proj and h_proj, operating per-stream.
             # e_proj: [h] -> [h], applied to embedding then broadcast across streams.
             # h_proj: [h] -> [h], applied per-stream on hidden states.
@@ -881,6 +901,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                 name=(name + ".h_proj") if name is not None else None,
             )
             self.eh_proj = None
+            ######## FlagScale End ########
         else:
             # For the linear projection at the (k - 1)-th MTP layer, the input is the concatenation
             # of the i-th token's hidden states and the (i + K)-th token's decoder input,
@@ -944,6 +965,7 @@ class MultiTokenPredictionLayer(MegatronModule):
             eps=self.config.layernorm_epsilon,
         )
 
+        ######## FlagScale Begin ########
         if self.mhc_enabled:
             hc_mult = self.config.num_residual_streams
             hc_dim = self.config.hidden_size * hc_mult
@@ -955,6 +977,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                 setattr(self.hc_head_fn, 'sequence_parallel', True)
                 setattr(self.hc_head_base, 'sequence_parallel', True)
                 setattr(self.hc_head_scale, 'sequence_parallel', True)
+        ######## FlagScale End ########
 
         self.offload_context = nullcontext()
 
@@ -1020,6 +1043,7 @@ class MultiTokenPredictionLayer(MegatronModule):
         decoder_input = make_viewless_tensor(inp=decoder_input, requires_grad=True, keep_graph=True)
 
         if self.mhc_enabled:
+            ######## FlagScale Begin ########
             n = self.config.num_residual_streams
             h = self.config.hidden_size
             # hidden_states is [s, b, n*h] (multi-stream).
@@ -1043,15 +1067,18 @@ class MultiTokenPredictionLayer(MegatronModule):
                 hidden_states = scatter_to_sequence_parallel_region(
                     hidden_states, group=self.tp_group
                 )
+            ######## FlagScale End ########
         else:
             hidden_states = apply_module(self.hnorm)(hidden_states)
-            hidden_states = make_viewless_tensor(inp=hidden_states, requires_grad=True, keep_graph=True)
+            hidden_states = make_viewless_tensor(
+                inp=hidden_states, requires_grad=True, keep_graph=True
+            )
             # At the (k - 1)-th MTP module, concatenates the i-th token's hidden_states
             # and the (i + K)-th token's embedding, and combine them with linear projection.
             hidden_states = torch.cat((decoder_input, hidden_states), -1)
             hidden_states, _ = self.eh_proj(hidden_states)
             # For tensor parallel we need to gather the tensor across the model-parallel
-        # ranks after the linear projection.
+            # ranks after the linear projection.
             if InferenceMode.is_active():
                 hidden_states = inference_all_gather_from_tensor_model_parallel_region(
                     hidden_states, self.tp_group, self.config
@@ -1062,7 +1089,9 @@ class MultiTokenPredictionLayer(MegatronModule):
                 )
             # For sequence parallel, scatter after linear_fc and before transformer layer.
             if self.sequence_parallel:
-                hidden_states = scatter_to_sequence_parallel_region(hidden_states, group=self.tp_group)
+                hidden_states = scatter_to_sequence_parallel_region(
+                    hidden_states, group=self.tp_group
+                )
         return hidden_states
 
     def _proj_and_transformer_layer(
@@ -1133,7 +1162,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                         padding_mask=padding_mask,
                     )
 
-        if not self.mhc_enabled:
+        if not self.mhc_enabled:  # FlagScale Modify
             hidden_states = self._postprocess(hidden_states)
 
         return hidden_states
@@ -1142,7 +1171,7 @@ class MultiTokenPredictionLayer(MegatronModule):
         """
         Postprocesses the output of the transformer layers.
         """
-
+        ######## FlagScale Begin ########
         if self.mhc_enabled:
             hidden_states = learned_output_contract(
                 hidden_states,
@@ -1152,6 +1181,7 @@ class MultiTokenPredictionLayer(MegatronModule):
                 self.config.num_residual_streams,
                 self.config.layernorm_epsilon,
             )
+        ######## FlagScale End ########
 
         # Layer norm before shared head layer.
         hidden_states = apply_module(self.final_layernorm)(hidden_states)
@@ -1720,7 +1750,7 @@ class MultiTokenPredictionBlock(MegatronModule):
         sequence_len_offset: Optional[Tensor] = None,
         extra_block_kwargs: Optional[dict] = None,
         embedding=None,
-        mhc_multistream: Optional[Tensor] = None,
+        mhc_multistream: Optional[Tensor] = None,  # FlagScale Modify
     ) -> Tensor:
         """
         Perform the forward pass through all of the MTP modules.
@@ -1741,9 +1771,11 @@ class MultiTokenPredictionBlock(MegatronModule):
         offset = get_mtp_layer_offset(self.config, self.vp_stage)
         hidden_states_list = list(torch.chunk(hidden_states, 1 + offset, dim=0))
         if mhc_multistream is not None:
+            ######## FlagScale Begin ########
             # mHC mode: use multi-stream for MTP depth input, contracted for loss list.
             mhc_chunks = list(torch.chunk(mhc_multistream, 1 + offset, dim=0))
             hidden_states = mhc_chunks[offset]
+            ######## FlagScale End ########
         else:
             hidden_states = hidden_states_list[offset]
         for iteration in range(self.config.mtp_num_layers):
@@ -1765,8 +1797,10 @@ class MultiTokenPredictionBlock(MegatronModule):
             )
 
             if mhc_multistream is not None:
+                ######## FlagScale Begin ########
                 mhc_chunks.append(hidden_states)
                 hidden_states_list.append(self.layers[layer_idx]._postprocess(hidden_states))
+                ######## FlagScale End ########
             else:
                 # append the output hidden states of the current mtp layer
                 # to the hidden_states_list

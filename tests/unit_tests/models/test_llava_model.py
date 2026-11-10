@@ -299,7 +299,9 @@ class TestLLaVAModel:
         input_ids[4, 50] = image_token_index
         input_ids[4, 150] = image_token_index
 
-        position_ids = torch.arange(0, 1024, dtype=torch.int).expand(5, 1024).to(get_current_device())
+        position_ids = (
+            torch.arange(0, 1024, dtype=torch.int).expand(5, 1024).to(get_current_device())
+        )
 
         loss_mask = torch.ones((5, 1024)).to(get_current_device())
 
@@ -330,10 +332,12 @@ class TestLLaVAModel:
         # Try with labels and PackedSeqParams. Only micro batch size 1 is supported in this mode.
         packed_seq_params = PackedSeqParams(
             qkv_format="thd",
-            cu_seqlens_q=torch.tensor(
-                [0, 512, 1024, 1600], dtype=torch.int32
-            ).to(get_current_device()),  # Just example values.
-            cu_seqlens_kv=torch.tensor([0, 512, 1024, 1600], dtype=torch.int32).to(get_current_device()),
+            cu_seqlens_q=torch.tensor([0, 512, 1024, 1600], dtype=torch.int32).to(
+                get_current_device()
+            ),  # Just example values.
+            cu_seqlens_kv=torch.tensor([0, 512, 1024, 1600], dtype=torch.int32).to(
+                get_current_device()
+            ),
             max_seqlen_q=1600,
             max_seqlen_kv=1600,
         )
@@ -652,10 +656,14 @@ class TestLLaVAModelTokenParallel:
                 dtype=torch.bfloat16,
             )  # [S, B, H]
         new_labels = torch.ones(
-            [self.batch_size, self.combined_padded_seqlen], device=get_current_device(), dtype=torch.bfloat16
+            [self.batch_size, self.combined_padded_seqlen],
+            device=get_current_device(),
+            dtype=torch.bfloat16,
         )  # [B, S]
         new_loss_mask = torch.ones(
-            [self.batch_size, self.combined_padded_seqlen], device=get_current_device(), dtype=torch.bfloat16
+            [self.batch_size, self.combined_padded_seqlen],
+            device=get_current_device(),
+            dtype=torch.bfloat16,
         )  # [B, S]
 
         cu_seqlens = torch.arange(

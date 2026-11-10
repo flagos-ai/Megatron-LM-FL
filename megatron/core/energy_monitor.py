@@ -44,7 +44,9 @@ class EnergyMonitor:
         """Setup the NVML Handler."""
         if has_nvml:
             nvmlInit()
-            self._handle = nvmlDeviceGetHandleByIndex(cur_platform.current_device())  # FlagScale Modify
+            self._handle = nvmlDeviceGetHandleByIndex(
+                cur_platform.current_device()
+            )  # FlagScale Modify
 
     def shutdown(self) -> None:
         """Shutdown NVML."""

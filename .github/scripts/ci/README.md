@@ -87,8 +87,9 @@ separately.
 
 The project gate policy is stage-specific. The PR stage accepts `ready` and
 `partial` plans because a known shared path intentionally expands to the full
-active matrix; unknown paths, route conflicts, direct planned groups, and
-required gaps remain `blocked` and cannot pass. Branch, nightly, and manual
+active matrix. Direct planned groups are advisory: their coverage gaps are
+reported while configured tests run. Unknown paths, route conflicts, active
+execution gaps, and required gaps remain `blocked` and cannot pass. Branch, nightly, and manual
 stages currently require `ready`.
 The `/ci run` and manual requested entrypoint uses the same planner and the same
 evidence gate; its report job downloads the requested plan and platform
@@ -100,11 +101,38 @@ single-device/distributed acceptance pipelines. Both use the platform's actual
 `nproc_per_node`. L0/L3/L4 and release acceptance are future design work, not
 runtime configuration. Add them only with executable adapters and gate evidence.
 
+Changed planned tests execute automatically for affected PR runs. The planner
+creates `planned-<group>` temporary execution groups containing only changed,
+existing `tests/unit_tests/**/test_*.py` files. The catalog remains `planned`.
+The final CI Summary includes a **Pending permanent onboarding** table listing
+each temporary group, changed files, platform/device, and execution result.
+Missing or invalid evidence is reported explicitly, including when platform
+execution fails. Maintainers should validate full-group coverage and runtime
+requirements before adding permanent mappings and marking the group active.
+
+Temporary group definitions travel in the hash-bound configuration identity;
+the executor validates the paths and includes these groups in normal JUnit and
+execution attestations. Their failures, missing results, and all-skipped results
+fail the final gate just like configured groups. They use each selected
+platform's existing image, process count, pytest options, and ignored tests;
+temporary planned groups respect platform `unsupported_groups`. A skipped
+planned group is listed in the onboarding table as `Skipped (unsupported on
+<platform>)`, with its reason, and is not required execution evidence. Planned
+groups may declare these platform exclusions before permanent activation.
+If every selected platform excludes the group, configured tests continue and
+the missing planned coverage remains advisory. Exclusions for regular active
+groups remain unchanged. No special hardware is provisioned.
+
+Source-only changes, deleted test files, and helper/conftest-only changes do not
+create temporary tests. Configured tests continue and the unexecuted planned
+groups are reported as advisory coverage gaps. Nightly/configured selection
+remains unchanged; activating a group is still required for permanent coverage.
+
 Blocking conditions:
 
-- A directly affected group is `planned` or declared unsupported on every
-  selected platform. Planned fallback is allowed only when the planned group is
-  not the direct match.
+- A directly affected non-planned group has no execution coverage on any
+  selected platform. Direct planned groups do not block: existing active groups
+  run as a fallback, and unexecuted planned groups remain visible as warnings.
 - A changed path is unknown or matches more than one logical group (route
   conflict). Unknown paths still produce a diagnostic full fallback plan, but
   the plan is `blocked` and the fallback is not executed until catalog
@@ -115,7 +143,7 @@ Blocking conditions:
   group the platform can run. This is allowed but marked `partial`.
 
 Every changed path is classified before expansion. A shared path cannot hide an
-unknown path, route conflict, or directly affected unsupported/planned group in
+unknown path, route conflict, or directly affected non-planned execution gap in
 the same diff. Selection and plan hashes are independent of input path order.
 `global.impact_paths` separates shared runtime impact from path ownership:
 changes to `megatron/core/*.py` retain their logical owner and expand to all

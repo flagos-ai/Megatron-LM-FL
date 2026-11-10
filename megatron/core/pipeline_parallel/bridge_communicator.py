@@ -437,7 +437,9 @@ class BridgeCommunicator:
         ):
             # Non-leader rank - participate in broadcast
             shape_tensor = torch.empty(
-                (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                (self.tensor_ndim,),
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
             dist.broadcast(
                 shape_tensor, src=self.dest_local_leader_rank, group=self.dest_grid_broadcast_pg
@@ -532,7 +534,9 @@ class BridgeCommunicator:
             for dest_rank, grad_shape in zip(rank_info.send_to_ranks, recv_grad_shapes):
                 # The destination rank that we sent to will send us gradients back
                 grad_tensor = torch.empty(
-                    grad_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Modify
+                    grad_shape,
+                    device=cur_platform.current_device(),
+                    dtype=self.comm_dtype,  # FlagScale Modify
                 )
                 dist.recv(grad_tensor, src=dest_rank)
                 logging.debug(
@@ -550,7 +554,9 @@ class BridgeCommunicator:
             )
 
             shape_tensor = torch.tensor(
-                aggregated_gradient.shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                aggregated_gradient.shape,
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
             dist.broadcast(shape_tensor, src=self.current_rank, group=self.src_grid_broadcast_pg)
 
@@ -566,7 +572,9 @@ class BridgeCommunicator:
             # Non-leader rank - participate in gather for gradients
             # Receive broadcasted tensor shape from leader rank
             shape_tensor = torch.empty(
-                (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                (self.tensor_ndim,),
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
             dist.broadcast(
                 shape_tensor, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
@@ -578,7 +586,9 @@ class BridgeCommunicator:
             )
             received_shape = tuple(shape_tensor.tolist())
             received_gradient = torch.empty(
-                received_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Modify
+                received_shape,
+                device=cur_platform.current_device(),
+                dtype=self.comm_dtype,  # FlagScale Modify
             )
 
             dist.broadcast(
@@ -637,7 +647,9 @@ class BridgeCommunicator:
                 received_gradients_list = []
                 for i, recv_grad_shape in enumerate(recv_grad_shapes):
                     grad_tensor = torch.empty(
-                        recv_grad_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Modify
+                        recv_grad_shape,
+                        device=cur_platform.current_device(),
+                        dtype=self.comm_dtype,  # FlagScale Modify
                     )
                     received_gradients_list.append(grad_tensor)
 
@@ -674,7 +686,9 @@ class BridgeCommunicator:
                 # Broadcast tensor shape to all ranks in scatter_pg
                 tensor_shape_to_broadcast = aggregated_gradient.shape
                 shape_tensor = torch.tensor(
-                    tensor_shape_to_broadcast, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                    tensor_shape_to_broadcast,
+                    device=cur_platform.current_device(),
+                    dtype=torch.int64,  # FlagScale Modify
                 )
                 dist.broadcast(
                     shape_tensor, src=self.current_rank, group=self.src_grid_broadcast_pg
@@ -693,7 +707,9 @@ class BridgeCommunicator:
             # participate in both gather for gradients
             # Receive gradient from leader using broadcast
             shape_tensor = torch.empty(
-                (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                (self.tensor_ndim,),
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
             dist.broadcast(
                 shape_tensor, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
@@ -702,7 +718,9 @@ class BridgeCommunicator:
             # Use the received shape to create tensor for broadcast
             received_shape = tuple(shape_tensor.tolist())
             received_gradient = torch.empty(
-                received_shape, device=cur_platform.current_device(), dtype=self.comm_dtype  # FlagScale Modify
+                received_shape,
+                device=cur_platform.current_device(),
+                dtype=self.comm_dtype,  # FlagScale Modify
             )
             dist.broadcast(
                 received_gradient, src=self.src_local_leader_rank, group=self.src_grid_broadcast_pg
@@ -799,7 +817,9 @@ class BridgeCommunicator:
                 # Broadcast tensor shape to all ranks in scatter_pg
                 tensor_shape_to_scatter = aggregated_activation.shape
                 shape_tensor = torch.tensor(
-                    tensor_shape_to_scatter, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                    tensor_shape_to_scatter,
+                    device=cur_platform.current_device(),
+                    dtype=torch.int64,  # FlagScale Modify
                 )
                 dist.broadcast(
                     shape_tensor, src=self.current_rank, group=self.dest_grid_broadcast_pg
@@ -816,7 +836,9 @@ class BridgeCommunicator:
             and self.current_rank in self.dest_grid_broadcast_ranks
         ):
             shape_tensor = torch.empty(
-                (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                (self.tensor_ndim,),
+                device=cur_platform.current_device(),
+                dtype=torch.int64,  # FlagScale Modify
             )
             dist.broadcast(
                 shape_tensor, src=self.dest_local_leader_rank, group=self.dest_grid_broadcast_pg
@@ -890,7 +912,9 @@ class BridgeCommunicator:
                 # Add send operations for each destination
                 for dest_rank, tensor in zip(rank_info.send_to_ranks, tensors_to_send):
                     send_shape_tensor = torch.tensor(
-                        tensor.shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                        tensor.shape,
+                        device=cur_platform.current_device(),
+                        dtype=torch.int64,  # FlagScale Modify
                     )
                     ops.append(
                         torch.distributed.P2POp(
@@ -902,7 +926,9 @@ class BridgeCommunicator:
             if recv_next:
                 for dest_rank in rank_info.send_to_ranks:
                     grad_shape_tensor = torch.empty(
-                        (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                        (self.tensor_ndim,),
+                        device=cur_platform.current_device(),
+                        dtype=torch.int64,  # FlagScale Modify
                     )
                     recv_grad_shape_tensors.append(grad_shape_tensor)
                     ops.append(
@@ -916,7 +942,9 @@ class BridgeCommunicator:
             if recv_prev:
                 for src_rank in rank_info.recv_from_ranks:
                     forward_shape_tensor = torch.empty(
-                        (self.tensor_ndim,), device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                        (self.tensor_ndim,),
+                        device=cur_platform.current_device(),
+                        dtype=torch.int64,  # FlagScale Modify
                     )
                     recv_forward_shape_tensors.append(forward_shape_tensor)
                     ops.append(
@@ -934,7 +962,9 @@ class BridgeCommunicator:
 
                 for src_rank, tensor in zip(rank_info.recv_from_ranks, tensors_to_send):
                     grad_shape_tensor = torch.tensor(
-                        tensor.shape, device=cur_platform.current_device(), dtype=torch.int64  # FlagScale Modify
+                        tensor.shape,
+                        device=cur_platform.current_device(),
+                        dtype=torch.int64,  # FlagScale Modify
                     )
                     ops.append(
                         torch.distributed.P2POp(

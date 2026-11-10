@@ -204,6 +204,7 @@ jobs:
             if python3 .github/scripts/ci/flagcicd_gate.py \
               --plan requested-unit-test-plan/unit-test-plan.json \
               --attestation-root requested-unit-results \
+              --summary "$GITHUB_STEP_SUMMARY" \
               --expected-hash "$PLAN_HASH" \
               --expected-groups "$EXPECTED_UNIT_GROUPS" \
               --matrix "$UNIT_MATRIX" \

@@ -282,27 +282,45 @@ def _generate_and_broadcast_global_batches(
     for batch_idx in range(num_batches):
         if rank == 0:
             encoder_hidden_states = torch.randn(
-                image_seq_length, global_mbs, hidden_size, device=get_current_device(), dtype=torch.float32
+                image_seq_length,
+                global_mbs,
+                hidden_size,
+                device=get_current_device(),
+                dtype=torch.float32,
             )
             image_tokens = torch.full(
-                (global_mbs, image_seq_length), image_token_id, dtype=torch.long, device=get_current_device()
+                (global_mbs, image_seq_length),
+                image_token_id,
+                dtype=torch.long,
+                device=get_current_device(),
             )
             text_tokens = torch.randint(
-                1, vocab_size, (global_mbs, seq_length - image_seq_length), device=get_current_device()
+                1,
+                vocab_size,
+                (global_mbs, seq_length - image_seq_length),
+                device=get_current_device(),
             )
             input_ids = torch.cat([image_tokens, text_tokens], dim=1)
         else:
             encoder_hidden_states = torch.empty(
-                image_seq_length, global_mbs, hidden_size, device=get_current_device(), dtype=torch.float32
+                image_seq_length,
+                global_mbs,
+                hidden_size,
+                device=get_current_device(),
+                dtype=torch.float32,
             )
-            input_ids = torch.empty(global_mbs, seq_length, dtype=torch.long, device=get_current_device())
+            input_ids = torch.empty(
+                global_mbs, seq_length, dtype=torch.long, device=get_current_device()
+            )
 
         dist.broadcast(encoder_hidden_states, src=0)
         dist.broadcast(input_ids, src=0)
 
         labels = input_ids.clone()
         labels[input_ids == image_token_id] = -100
-        loss_mask = torch.ones(global_mbs, seq_length, device=get_current_device(), dtype=torch.float32)
+        loss_mask = torch.ones(
+            global_mbs, seq_length, device=get_current_device(), dtype=torch.float32
+        )
         loss_mask[input_ids == image_token_id] = 0.0
 
         if mask_pattern == "asymmetric":
@@ -316,7 +334,10 @@ def _generate_and_broadcast_global_batches(
                 loss_mask[sample_idx, seq_length - n_drop :] = 0.0
                 labels[sample_idx, seq_length - n_drop :] = -100
         position_ids = (
-            torch.arange(seq_length, device=get_current_device()).unsqueeze(0).expand(global_mbs, -1).clone()
+            torch.arange(seq_length, device=get_current_device())
+            .unsqueeze(0)
+            .expand(global_mbs, -1)
+            .clone()
         )
 
         batches.append(

@@ -611,6 +611,8 @@ def materialize_groups(
         if group.status == "planned":
             if name in required:
                 blocked.append(entry_for(name, group, reason="required group is planned"))
+            elif name in platform.unsupported_groups:
+                unsupported.append(entry_for(name, group, reason=platform.unsupported_groups[name]))
             else:
                 planned.append(entry_for(name, group))
         elif group.status == "unsupported":
@@ -630,8 +632,9 @@ def materialize_groups(
         else:
             unresolved.append(entry_for(name, group))
 
-    if planned:
-        reason = "planned group selected: " + ", ".join(sorted(entry["name"] for entry in planned))
+    selected_planned = sorted(name for name in selected if catalog.groups[name].status == "planned")
+    if selected_planned:
+        reason = "planned group selected: " + ", ".join(selected_planned)
         executable = []
         for name, group in sorted(catalog.groups.items()):
             if group.status != "active":

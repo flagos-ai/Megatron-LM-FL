@@ -56,7 +56,6 @@ from megatron.core.transformer.utils import (
     make_sharded_tensors_for_checkpoint,
 )
 from megatron.core.typed_torch import copy_signature
-from megatron.plugin.decorators import overridable  # FlagScale Modify
 from megatron.core.utils import (
     get_pg_rank,
     get_pg_size,
@@ -65,6 +64,7 @@ from megatron.core.utils import (
     is_te_min_version,
     is_torch_min_version,
 )
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 try:
     import transformer_engine as te
@@ -381,7 +381,9 @@ def _get_extra_te_kwargs(config: TransformerConfig):
         elif config.init_model_with_meta_device:
             extra_transformer_engine_kwargs["device"] = "meta"
         else:
-            extra_transformer_engine_kwargs["device"] = cur_platform.current_device()  # FlagScale Modify
+            extra_transformer_engine_kwargs["device"] = (
+                cur_platform.current_device()
+            )  # FlagScale Modify
     return extra_transformer_engine_kwargs
 
 
@@ -1781,7 +1783,11 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
             ),
             attn_mask_type=attn_mask_type.name,
             sequence_parallel=self.config.sequence_parallel,
-            tp_size=self.config.tensor_model_parallel_size if get_parallel_context() is None else get_tensor_model_parallel_world_size(),  # FlagScale Modify
+            tp_size=(
+                self.config.tensor_model_parallel_size
+                if get_parallel_context() is None
+                else get_tensor_model_parallel_world_size()
+            ),  # FlagScale Modify
             get_rng_state_tracker=(
                 get_cuda_rng_tracker if get_cuda_rng_tracker().is_initialized() else None
             ),
