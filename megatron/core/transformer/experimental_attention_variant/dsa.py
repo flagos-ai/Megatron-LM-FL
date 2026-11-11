@@ -1105,12 +1105,6 @@ class FusedDSAIndexerLoss(torch.autograd.Function):
         """
         Fused forward: index_scores never materialized in full.
         """
-        # The fork's public apply ABI placed the per-token flag immediately
-        # after pg_collection. Keep that positional call valid alongside the
-        # upstream optional tensor metadata arguments.
-        if isinstance(varlen_starts, bool):
-            calculate_per_token_loss = varlen_starts
-            varlen_starts = None
         topk_indices, loss = fwd_fused_indexer_loss_naive(
             q,
             weights,

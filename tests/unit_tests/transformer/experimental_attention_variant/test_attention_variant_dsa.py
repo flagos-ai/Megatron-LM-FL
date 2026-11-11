@@ -421,6 +421,76 @@ class TestComputeDSAIndexerLoss:
 
             assert torch.allclose(loss_sum, loss_mean * (batch_size * seqlen), rtol=1e-3, atol=1e-3)
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    def test_sparse_varlen_empty_rows_are_finite(self, seqlen_and_topk):
+        """Sparse varlen rows with no valid keys should not produce NaN gradients."""
+        del seqlen_and_topk
+        seqlen = 3
+        batch_size = 1
+        num_heads = 2
+        head_dim = 4
+        index_n_heads = 2
+        index_head_dim = 4
+
+        q = torch.randn(
+            seqlen,
+            batch_size,
+            index_n_heads,
+            index_head_dim,
+            dtype=torch.float32,
+            device="cuda",
+            requires_grad=True,
+        )
+        weights = torch.randn(
+            seqlen,
+            batch_size,
+            index_n_heads,
+            dtype=torch.float32,
+            device="cuda",
+            requires_grad=True,
+        )
+        k = torch.randn(
+            seqlen,
+            batch_size,
+            index_head_dim,
+            dtype=torch.float32,
+            device="cuda",
+            requires_grad=True,
+        )
+        query = torch.randn(seqlen, batch_size, num_heads, head_dim, dtype=torch.bfloat16).cuda()
+        key = torch.randn(seqlen, batch_size, num_heads, head_dim, dtype=torch.bfloat16).cuda()
+
+        varlen_starts = torch.tensor([0, 0, 2], dtype=torch.int64, device="cuda")
+        varlen_ends = torch.tensor([1, 0, 3], dtype=torch.int64, device="cuda")
+        key_positions = torch.arange(seqlen, dtype=torch.int64, device="cuda")
+        query_valid_rows = torch.tensor([[True, False, True]], dtype=torch.bool, device="cuda")
+
+        _, loss = FusedDSAIndexerLoss.apply(
+            q,
+            weights,
+            k,
+            query,
+            key,
+            1.0,
+            2,
+            0.01,
+            None,
+            True,
+            self.pg_collection,
+            varlen_starts,
+            varlen_ends,
+            key_positions,
+            query_valid_rows,
+            False,
+            False,
+        )
+
+        assert torch.isfinite(loss)
+        loss.backward()
+        assert torch.isfinite(q.grad).all()
+        assert torch.isfinite(weights.grad).all()
+        assert torch.isfinite(k.grad).all()
+
 
 class TestDSAIndexerLossAutoScaler:
     """Test DSAIndexerLossAutoScaler autograd function."""
@@ -501,8 +571,7 @@ class TestFusedDSAIndexerLossGradient:
         Utils.destroy_model_parallel()
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    @pytest.mark.parametrize("calculate_per_token_loss", [False, True])
-    def test_fused_indexer_loss_gradient_matches_autograd(self, calculate_per_token_loss):
+    def test_fused_indexer_loss_gradient_matches_autograd(self):
         """
         Test that the manually written backward in FusedDSAIndexerLoss produces
         the same gradients as PyTorch autograd on the unfused implementation.
@@ -517,10 +586,7 @@ class TestFusedDSAIndexerLossGradient:
 
         for seqlen, index_topk in [[16, 8], [32, 16], [64, 32]]:
             for sparse_loss in [False, True]:
-                tag = (
-                    f"[seqlen={seqlen}, topk={index_topk}, sparse={sparse_loss}, "
-                    f"per_token={calculate_per_token_loss}]"
-                )
+                tag = f"[seqlen={seqlen}, topk={index_topk}, sparse={sparse_loss}]"
                 torch.manual_seed(42)
 
                 q_ref = (
@@ -552,11 +618,9 @@ class TestFusedDSAIndexerLossGradient:
                 )
 
                 # Method 1: Autograd (reference)
-                index_scores_ref = _compute_index_scores(q_ref, weights_ref, k_ref)
-                index_scores_masked = index_scores_ref + mask.unsqueeze(0)
-                topk_k = min(index_topk, seqlen)
-                selected_scores, topk_indices = index_scores_masked.topk(topk_k, dim=-1)
-                topk_indices = topk_indices.masked_fill(~torch.isfinite(selected_scores), -1)
+                index_scores_masked, topk_indices = fused_qk_topk_naive(
+                    q_ref, k_ref, weights_ref, index_topk, mask=mask
+                )
 
                 loss_ref = compute_dsa_indexer_loss(
                     index_scores=index_scores_masked,
@@ -567,7 +631,6 @@ class TestFusedDSAIndexerLossGradient:
                     loss_coeff=loss_coeff,
                     sparse_loss=sparse_loss,
                     pg_collection=self.pg_collection,
-                    calculate_per_token_loss=calculate_per_token_loss,
                 )
                 loss_ref.backward()
 
@@ -592,7 +655,9 @@ class TestFusedDSAIndexerLossGradient:
                     mask,
                     sparse_loss,
                     self.pg_collection,
-                    calculate_per_token_loss,
+                    None,
+                    None,
+                    None,
                 )
                 loss_fused.backward()
 
@@ -690,7 +755,9 @@ class TestFusedDSAIndexerLossGradientTP:
                 mask,
                 sparse_loss,
                 pg_collection_tp1,
-                False,
+                None,
+                None,
+                None,
             )
             loss_tp1.backward()
 
@@ -747,7 +814,9 @@ class TestFusedDSAIndexerLossGradientTP:
                     mask,
                     sparse_loss,
                     pg_collection_tpn,
-                    False,
+                    None,
+                    None,
+                    None,
                 )
                 loss_tpn.backward()
 

@@ -790,6 +790,10 @@ class CompressedSparseAttention(MegatronModule):
                         causal_mask,
                         getattr(self.config, "dsa_indexer_use_sparse_loss", True),
                         self.indexer.pg_collection,
+                        None,  # varlen_starts
+                        None,  # varlen_ends
+                        None,  # key_positions
+                        None,  # query_valid_rows
                         self.config.calculate_per_token_loss,
                     )
                     if indexer_loss_coeff > 0:

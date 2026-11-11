@@ -3573,7 +3573,9 @@ class TestIndexerGradAccuracy:
             causal_mask,
             sparse_loss,
             pg_collection,
-            False,  # calculate_per_token_loss
+            None,
+            None,
+            None,
         )
 
         loss.backward()
@@ -3947,7 +3949,9 @@ class TestIndexerLossConsistency:
                 causal_mask,
                 sparse_loss,
                 pg_collection,
-                False,  # calculate_per_token_loss
+                None,
+                None,
+                None,
             )
 
         return loss.item()
