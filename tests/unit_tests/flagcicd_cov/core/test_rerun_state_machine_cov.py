@@ -85,14 +85,15 @@ def test_quick_stats_report_and_reset():
 
 @pytest.fixture
 def rerun_mode(monkeypatch):
-    """Let RerunDataIterator see a rerun mode without building the global state machine."""
-    holder = SimpleNamespace(mode=RerunMode.VALIDATE_RESULTS)
-    monkeypatch.setattr(
-        rerun_state_machine,
-        "get_rerun_state_machine",
-        lambda: SimpleNamespace(get_mode=lambda: holder.mode),
-    )
-    return holder
+    """Install a real global rerun state machine in the requested mode; restore the previous one."""
+    monkeypatch.setattr(rerun_state_machine, "_GLOBAL_RERUN_STATE_MACHINE", None)
+
+    def install(mode):
+        rerun_state_machine.destroy_rerun_state_machine()
+        rerun_state_machine.initialize_rerun_state_machine(mode=mode)
+
+    install(RerunMode.VALIDATE_RESULTS)
+    return install
 
 
 def test_data_iterator_replays_the_buffered_microbatches(rerun_mode):
@@ -110,7 +111,7 @@ def test_data_iterator_replays_the_buffered_microbatches(rerun_mode):
 
 
 def test_data_iterator_does_not_buffer_when_reruns_are_disabled(rerun_mode):
-    rerun_mode.mode = RerunMode.DISABLED
+    rerun_mode(RerunMode.DISABLED)
     iterator = RerunDataIterator(iter(range(3)))
     assert next(iterator) == 0
     assert iterator.saved_microbatches == []
@@ -163,7 +164,9 @@ def test_injector_skips_when_the_draw_misses(monkeypatch):
 
 def test_miscompare_defers_to_the_comparison_when_nothing_was_injected():
     injector = RerunErrorInjector(error_injection_rate=4)
-    result = injector.maybe_miscompare(lambda a, b: abs(a - b), 1.0, 3.5, RerunState.NOT_RUNNING_YET)
+    result = injector.maybe_miscompare(
+        lambda a, b: abs(a - b), 1.0, 3.5, RerunState.NOT_RUNNING_YET
+    )
     assert result == 2.5
 
 

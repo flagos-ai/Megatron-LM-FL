@@ -10,8 +10,8 @@ import torch
 from megatron.core import recompute
 
 
-class AttentionLayer:
-    """Stands in for TransformerLayer: adds `step` and passes the context through."""
+class AttentionLayer(recompute.TransformerLayer):
+    """A real TransformerLayer subtype (not initialised): adds `step`, passes the context through."""
 
     def __init__(self, layer_number, step):
         self.layer_number = layer_number
@@ -56,7 +56,6 @@ def calls(monkeypatch):
         record.contexts.append((kind, layer_index))
         yield
 
-    monkeypatch.setattr(recompute, 'TransformerLayer', AttentionLayer)
     monkeypatch.setattr(
         recompute,
         'tensor_parallel',

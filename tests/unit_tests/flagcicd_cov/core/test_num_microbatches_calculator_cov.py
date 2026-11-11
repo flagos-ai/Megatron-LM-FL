@@ -154,7 +154,12 @@ def test_reconfigure_warns_only_on_rank_zero(unset_global, caplog):
     calculator.reconfigure_num_microbatches_calculator(0, [1], 32, 2, 4)
     assert len(caplog.records) == 1
     assert calculator.get_num_microbatches() == 4
+
+
+def test_unset_clears_the_global_calculator(unset_global):
+    calculator.init_num_microbatches_calculator(1, None, 32, 2, 4)
     calculator.update_num_microbatches(0)
+    assert calculator.get_num_microbatches() == 4
     calculator.unset_num_microbatches_calculator()
     assert calculator._GLOBAL_NUM_MICROBATCHES_CALCULATOR is None
 

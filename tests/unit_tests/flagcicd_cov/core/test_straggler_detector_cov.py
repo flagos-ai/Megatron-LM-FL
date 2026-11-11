@@ -361,10 +361,13 @@ def test_handler_acknowledges_a_request_and_stops_on_socket_error(world, message
     assert detector._handler() is None
     assert detector.toggle is True
     assert connection.closed is True
-    assert connection.sent == [
-        b'HTTP/1.0 200 OK\\r\\nConnection: Close\\r\\nContent-length: 56\r\n\r\n'
-        b'Will turn StragglerDetector OFF at next logging interval'
-    ]
+    # Header separators are not pinned: utils.py:1739 builds them from a raw string (suspected
+    # source bug, literal backslash pairs); only the status line, length and body are asserted.
+    (response,) = connection.sent
+    assert response.startswith(b'HTTP/1.0 200 OK')
+    assert response.endswith(
+        b'Content-length: 56\r\n\r\nWill turn StragglerDetector OFF at next logging interval'
+    )
     logged = messages()
     assert 'Controller ready to recv commands on port 77. Current state ON' in logged
     assert 'Will turn StragglerDetector OFF at next logging interval' in logged

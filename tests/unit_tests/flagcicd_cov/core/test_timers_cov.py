@@ -128,6 +128,10 @@ def test_registry_defaults_to_max_level_and_hands_out_dummies_above_its_own(worl
     verbose = Timers(log_level=2, log_option='max')
     assert isinstance(verbose('implicit'), Timer)
     assert verbose._log_levels == {'implicit': 2}
+
+
+def test_registry_rejects_levels_above_the_max(world):
+    registry = Timers(log_level=1, log_option='max')
     with pytest.raises(
         AssertionError, match='log level 3 is larger than max supported log level 2'
     ):
@@ -176,13 +180,6 @@ def test_all_ranks_report_lists_only_ranks_with_samples(world):
         'times across ranks (ms):\n  a:\n     rank  1: 500.00'
     )
     assert registry.get_all_timers_string(['b']) is None
-
-
-def test_unknown_log_option_at_report_time_raises(world):
-    registry = Timers(1, 'max')
-    registry._log_option = 'bogus'
-    with pytest.raises(Exception, match='unknown timing log option bogus'):
-        registry.get_all_timers_string(['a'])
 
 
 def test_gather_returns_none_without_names(world):

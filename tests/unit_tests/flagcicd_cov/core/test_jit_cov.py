@@ -10,13 +10,11 @@ from megatron.core import jit
 from megatron.plugin.platform import platform_manager
 
 
-def fake_torch(version='2.1.0', available=True, device_name='NVIDIA A100'):
-    return SimpleNamespace(
-        __version__=version,
-        cuda=SimpleNamespace(
-            is_available=lambda: available, get_device_name=lambda index: device_name
-        ),
-    )
+def probe_torch(monkeypatch, version='2.4.0', available=False, device_name='NVIDIA A100'):
+    """Drive the MetaX probe through the real torch: version string and CUDA device query."""
+    monkeypatch.setattr(torch, '__version__', version)
+    monkeypatch.setattr(torch.cuda, 'is_available', lambda: available)
+    monkeypatch.setattr(torch.cuda, 'get_device_name', lambda index: device_name)
 
 
 @pytest.fixture
@@ -24,7 +22,7 @@ def fuser(monkeypatch):
     """Isolate the module-level fuser and let a test choose the platform."""
     monkeypatch.setattr(jit, 'jit_fuser', 'unset')
     monkeypatch.setattr(jit, 'is_torch_min_version', lambda version: True)
-    monkeypatch.setattr(jit, '_is_metax_torch', lambda: False)
+    probe_torch(monkeypatch)
 
     def select(device_name):
         monkeypatch.setattr(
@@ -57,7 +55,7 @@ def test_other_platforms_keep_eager_functions(fuser):
 
 def test_metax_keeps_eager_functions_even_on_cuda(fuser, monkeypatch):
     fuser('cuda')
-    monkeypatch.setattr(jit, '_is_metax_torch', lambda: True)
+    probe_torch(monkeypatch, available=True, device_name='MetaX C500')
     jit.enable_jit_fuser()
     assert jit.jit_fuser is jit.noop_decorator
 
@@ -86,18 +84,19 @@ def test_disable_installs_the_noop(fuser):
 
 
 @pytest.mark.parametrize(
-    ('torch_module', 'expected'),
+    ('probe', 'expected'),
     [
-        (fake_torch(version='2.1.0+metax', available=False), True),
-        (fake_torch(device_name='MetaX C500'), True),
-        (fake_torch(device_name='MACA dev'), True),
-        (fake_torch(device_name=None), False),
-        (fake_torch(), False),
-        (fake_torch(available=False), False),
+        ({'version': '2.1.0+metax', 'available': False}, True),
+        ({'available': True, 'device_name': 'MetaX C500'}, True),
+        ({'available': True, 'device_name': 'MACA dev'}, True),
+        ({'available': True, 'device_name': None}, False),
+        ({'available': True}, False),
+        ({'available': False}, False),
     ],
+    ids=['version', 'metax-device', 'maca-device', 'unnamed-device', 'nvidia-device', 'no-cuda'],
 )
-def test_metax_detection(monkeypatch, torch_module, expected):
-    monkeypatch.setattr(jit, 'torch', torch_module)
+def test_metax_detection(monkeypatch, probe, expected):
+    probe_torch(monkeypatch, **probe)
     assert jit._is_metax_torch() is expected
 
 
@@ -105,9 +104,6 @@ def test_metax_detection_survives_a_failing_cuda_query(monkeypatch):
     def failing():
         raise RuntimeError('driver error')
 
-    monkeypatch.setattr(
-        jit,
-        'torch',
-        SimpleNamespace(__version__='2.1.0', cuda=SimpleNamespace(is_available=failing)),
-    )
+    probe_torch(monkeypatch)
+    monkeypatch.setattr(torch.cuda, 'is_available', failing)
     assert jit._is_metax_torch() is False

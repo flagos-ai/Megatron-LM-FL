@@ -62,8 +62,9 @@ def test_inverse_square_root_without_warmup_treats_step_zero_as_one():
 
 def test_warmup_stable_decay_halves_every_decay_window():
     scheduler = make_scheduler('warmup-stable-decay')
-    stable_steps = round((110 - 10) * 10.0 / 11.0)
-    decay_window = 110 - 10 - stable_steps
+    # 100 post-warmup steps split 10:1 -> S = round(100 * 10 / 11) = 91 stable, T = 9 decay.
+    stable_steps = 91
+    decay_window = 9
     assert lr_at(scheduler, stable_steps - 1) == 1.0
     assert lr_at(scheduler, stable_steps) == 1.0
     assert lr_at(scheduler, stable_steps + decay_window) == pytest.approx(0.5)
