@@ -1,6 +1,7 @@
 # Iluvatar uses the same platform contract and shared pipeline as Hygon.
-# Validated on BI-V150/CoreX 4.5 with eight ranks. Functional cases retain the
-# shared lightweight mode; the single-card Qwen baseline was captured locally.
+# Validated on BI-V150/CoreX 4.5 with eight ranks. Functional cases run the full
+# train-iters and compare against the Iluvatar golden values; the single-card
+# Qwen baseline was captured locally.
 hardware_name: iluvatar
 display_name: Iluvatar Tests
 setup_script: .github/scripts/set_env_iluvatar.sh
@@ -259,7 +260,7 @@ test_matrix:
         n_repeat: 1
         golden_environment: dev
         golden_platform: iluvatar
-        enable_lightweight_mode: true
+        enable_lightweight_mode: false
         data_path: /home/gitlab-runner/data
         gpus_per_node: 1
       - model: gpt
@@ -268,7 +269,7 @@ test_matrix:
         n_repeat: 1
         golden_environment: dev
         golden_platform: iluvatar
-        enable_lightweight_mode: true
+        enable_lightweight_mode: false
         data_path: /home/gitlab-runner/data
         gpus_per_node: 4
 te_fl:
