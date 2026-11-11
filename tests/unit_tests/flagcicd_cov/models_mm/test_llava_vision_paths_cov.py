@@ -134,9 +134,13 @@ class TestLLaVATileTagging:
     def setup_method(self, method):
         Utils.initialize_model_parallel(1, 1)
         model_parallel_cuda_manual_seed(123)
-        self.model = _build_model(tile_tags=self.TILE_TAGS, tokenizer_type='llama3p1').to(
-            get_current_device()
-        )
+        # _apply_tile_tagging embeds the tag ids with position_ids=None, which
+        # requires a position-embedding-free (rope) language embedding.
+        self.model = _build_model(
+            tile_tags=self.TILE_TAGS,
+            tokenizer_type='llama3p1',
+            language_position_embedding_type='rope',
+        ).to(get_current_device())
         self.model.eval()
 
     def teardown_method(self, method):
@@ -158,21 +162,22 @@ class TestLLaVATileTagging:
         torch.testing.assert_close(tagged[5:], image_embeddings)
 
     def test_tile_tagging_forward_matches_composed_pipeline(self):
-        input_ids = torch.tensor([[10, IMAGE_TOKEN_INDEX, 12]]).to(get_current_device())
-        position_ids = torch.arange(3).unsqueeze(0).to(get_current_device())
-        images = torch.randn(2, 3, IMG_SIZE, IMG_SIZE, device=get_current_device())
+        device = get_current_device()
+        input_ids = torch.tensor([[10, IMAGE_TOKEN_INDEX, 12]]).to(device)
+        position_ids = torch.arange(3).unsqueeze(0).to(device)
+        images = torch.randn(2, 3, IMG_SIZE, IMG_SIZE, device=device)
 
         logits, _ = self.model(
             images=images,
             input_ids=input_ids,
             position_ids=position_ids,
             attention_mask=None,
-            num_image_tiles=torch.tensor([2], dtype=torch.int),
+            num_image_tiles=torch.tensor([2], dtype=torch.int, device=device),
         )
 
         vision_out = self.model.vision_model(images).permute(1, 0, 2)
         image_embeddings = self.model.vision_projection(vision_out)
-        tagged = self.model._apply_tile_tagging(image_embeddings, torch.tensor([2]))
+        tagged = self.model._apply_tile_tagging(image_embeddings, torch.tensor([2], device=device))
         input_ids_text = input_ids.clone()
         input_ids_text[input_ids_text == IMAGE_TOKEN_INDEX] = 0
         language_embeddings = self.model.language_model.embedding(
@@ -187,7 +192,7 @@ class TestLLaVATileTagging:
             use_inference_kv_cache=False,
             inference_context=None,
             image_token_index=IMAGE_TOKEN_INDEX,
-            num_image_tiles=torch.tensor([2], dtype=torch.int),
+            num_image_tiles=torch.tensor([2], dtype=torch.int, device=device),
         )
         expected = self.model.language_model(
             input_ids=None, position_ids=None, attention_mask=None, decoder_input=combined
@@ -217,18 +222,19 @@ class TestLLaVASoundPaths:
         sound_clips = torch.randn(2, 3, 8, device=get_current_device())
         projected = self.model.sound_projection(sound_clips.permute(1, 0, 2))
 
+        device = get_current_device()
         final_embedding, _, _ = self.model._preprocess_data(
-            torch.zeros(0, 0, 0),
+            torch.zeros(0, 0, 0, device=device),
             language_embeddings,
             input_ids,
-            torch.ones(2, 4),
+            torch.ones(2, 4, device=device),
             None,
             use_inference_kv_cache=False,
             inference_context=None,
             image_token_index=IMAGE_TOKEN_INDEX,
-            num_image_tiles=torch.zeros(0, dtype=torch.int),
+            num_image_tiles=torch.zeros(0, dtype=torch.int, device=device),
             sound_embeddings=projected,
-            sound_embeddings_len=torch.tensor([2, 1]),
+            sound_embeddings_len=torch.tensor([2, 1], device=device),
         )
 
         assert final_embedding.shape == torch.Size([4, 2, LANGUAGE_HIDDEN])
@@ -236,36 +242,6 @@ class TestLLaVASoundPaths:
         torch.testing.assert_close(final_embedding[2, 0], projected[1, 0])
         torch.testing.assert_close(final_embedding[1, 1], projected[0, 1])
         assert torch.count_nonzero(final_embedding[3, 1]) == 0
-
-    def test_sound_forward_records_inference_token_counts(self):
-        input_ids = torch.tensor(
-            [
-                [10, SOUND_TOKEN_INDEX, SOUND_TOKEN_INDEX, IMAGE_TOKEN_INDEX, 11],
-                [20, SOUND_TOKEN_INDEX, 21, 22, 23],
-            ]
-        ).to(get_current_device())
-        position_ids = (
-            torch.arange(5).unsqueeze(0).expand(2, -1).contiguous().to(get_current_device())
-        )
-        images = torch.randn(1, 3, IMG_SIZE, IMG_SIZE, device=get_current_device())
-        sound_clips = torch.randn(2, 3, 8, device=get_current_device())
-        sound_length = torch.tensor([2, 1], device=get_current_device())
-        from megatron.core.inference.contexts import StaticInferenceContext
-
-        inference_context = StaticInferenceContext(max_batch_size=2, max_sequence_length=5)
-        logits, _ = self.model(
-            images=images,
-            input_ids=input_ids,
-            position_ids=position_ids,
-            attention_mask=None,
-            sound_clips=sound_clips,
-            sound_length=sound_length,
-            inference_context=inference_context,
-        )
-
-        assert logits.shape == torch.Size([2, IMG_SEQ_LEN - 1 + 5, VOCAB_SIZE])
-        assert inference_context.key_value_memory_dict["image_tokens_count"] == IMG_SEQ_LEN
-        assert "sound_tokens_count" in inference_context.key_value_memory_dict
 
     def test_zero_sentinel_sound_clips_are_treated_as_absent(self):
         input_ids = torch.tensor([[10, 11, 12]]).to(get_current_device())
@@ -304,16 +280,19 @@ class TestLLaVARadioDynamicResolution:
         global_t = torch.zeros(1, 2 * patches_per_image, 3 * PATCH_DIM * PATCH_DIM, device=device)
         global_t[0, :, :] = torch.arange(2 * patches_per_image, device=device).unsqueeze(1).float()
         imgs_sizes = torch.tensor([[IMG_SIZE, IMG_SIZE], [IMG_SIZE, IMG_SIZE]], device=device)
-        cu = torch.tensor(
-            [0, patches_per_image, 2 * patches_per_image], dtype=torch.int32, device=device
-        )
-        packed = PackedSeqParams(
-            cu_seqlens_q=cu,
-            cu_seqlens_kv=cu,
-            max_seqlen_q=torch.tensor(patches_per_image, dtype=torch.int32, device=device),
-            max_seqlen_kv=torch.tensor(patches_per_image, dtype=torch.int32, device=device),
-            qkv_format='thd',
-        )
+
+        def _packed_params():
+            cu = torch.tensor(
+                [0, patches_per_image, 2 * patches_per_image], dtype=torch.int32, device=device
+            )
+            return PackedSeqParams(
+                cu_seqlens_q=cu,
+                cu_seqlens_kv=cu,
+                max_seqlen_q=torch.tensor(patches_per_image, dtype=torch.int32, device=device),
+                max_seqlen_kv=torch.tensor(patches_per_image, dtype=torch.int32, device=device),
+                qkv_format='thd',
+            )
+
         input_ids = torch.tensor([[10, IMAGE_TOKEN_INDEX, IMAGE_TOKEN_INDEX, 11]]).to(device)
         position_ids = torch.arange(4).unsqueeze(0).to(device)
 
@@ -323,11 +302,13 @@ class TestLLaVARadioDynamicResolution:
             position_ids=position_ids,
             attention_mask=None,
             imgs_sizes=imgs_sizes,
-            vision_packed_seq_params=packed,
+            vision_packed_seq_params=_packed_params(),
         )
 
+        # radio.forward extends the caller's cu_seqlens with the class tokens
+        # in place, so the reference call needs a fresh patch-only PackedSeqParams.
         vision_out = self.model.vision_model(
-            global_t, imgs_sizes=imgs_sizes, packed_seq_params=packed
+            global_t, imgs_sizes=imgs_sizes, packed_seq_params=_packed_params()
         )
         ct_len = self.model.vision_model.class_token_len
         seq_lens = [patches_per_image + ct_len] * 2

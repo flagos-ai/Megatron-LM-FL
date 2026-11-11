@@ -64,9 +64,9 @@ def test_cuda_rng_tracker_fork_restores_state_after_use(model_parallel):
     before_state = torch.cuda.get_rng_state()
     with tracker.fork():
         inside = torch.rand(4, device='cuda')
-    after = torch.rand(4, device='cuda')
-
     assert torch.equal(torch.cuda.get_rng_state(), before_state)
+
+    after = torch.rand(4, device='cuda')
     assert not torch.equal(after, inside)
 
 
@@ -80,9 +80,8 @@ def test_cuda_rng_tracker_fork_raises_for_state_that_was_not_added(model_paralle
 def test_set_cuda_rng_state_accepts_string_and_integer_devices(model_parallel):
     model_parallel(1, 1)
     torch.cuda.manual_seed(99)
-    expected = torch.rand(4, device='cuda')
     state = torch.cuda.get_rng_state()
-    torch.rand(4, device='cuda')
+    expected = torch.rand(4, device='cuda')
 
     random_module._set_cuda_rng_state(state, device='cuda')
     assert torch.equal(torch.rand(4, device='cuda'), expected)
@@ -165,7 +164,7 @@ def test_checkpoint_raises_when_backward_triggered_by_grad(model_parallel):
 
     output = checkpoint(lambda tensor: tensor * 2.0, False, x)
     with pytest.raises(RuntimeError, match='please use .backward()'):
-        torch.autograd.grad(output, x)
+        torch.autograd.grad(output.sum(), x)
 
 
 @pytest.mark.parametrize(

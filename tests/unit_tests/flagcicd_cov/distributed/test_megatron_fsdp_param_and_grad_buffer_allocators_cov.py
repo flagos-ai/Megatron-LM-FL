@@ -55,9 +55,11 @@ def test_get_communication_stream_prefers_given_stream():
 
 
 def test_get_communication_stream_defaults_to_platform_current_stream():
+    # torch.cuda.current_stream() returns a new Python wrapper on every call,
+    # so streams must be compared by value, not by identity.
     assert (
         _get_communication_stream(None, DistributedDataParallelConfig())
-        is get_platform().current_stream()
+        == get_platform().current_stream()
     )
 
 

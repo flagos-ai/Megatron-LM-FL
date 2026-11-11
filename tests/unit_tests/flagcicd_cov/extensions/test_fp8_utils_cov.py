@@ -17,13 +17,15 @@ from tests.unit_tests.test_utilities import Utils
 _FACTORY_PATH = 'megatron.core.utils.get_te_version'
 
 
-def _make_context_recorder(real_function, calls):
-    """Wrap a TE context constructor, recording keyword arguments of every call."""
+def _make_context_recorder(real_function, calls, returned):
+    """Wrap a TE context constructor, recording keyword arguments and the context it returns."""
 
     @functools.wraps(real_function)
     def recorder(**kwargs):
         calls.append(kwargs)
-        return real_function(**kwargs)
+        context = real_function(**kwargs)
+        returned.append(context)
+        return context
 
     return recorder
 
@@ -39,10 +41,12 @@ def _record_te_pytorch_contexts(monkeypatch):
     recorders = {}
     for name in ('fp8_autocast', 'fp8_model_init'):
         calls = []
+        returned = []
         monkeypatch.setattr(
-            te_pytorch, name, _make_context_recorder(getattr(te_pytorch, name), calls)
+            te_pytorch, name, _make_context_recorder(getattr(te_pytorch, name), calls, returned)
         )
         recorders[name] = calls
+        recorders[f'{name}:returned'] = returned
     return recorders
 
 
@@ -268,7 +272,7 @@ def test_get_fp8_context_passes_selected_recipe_to_fp8_autocast(monkeypatch):
     recorders = _record_te_pytorch_contexts(monkeypatch)
     config = _config(fp8='e4m3', fp8_recipe='tensorwise')
     context = fp8_utils.get_fp8_context(config, layer_no=1)
-    assert type(context).__name__ == 'fp8_autocast'
+    assert context is recorders['fp8_autocast:returned'][-1]
     (call,) = recorders['fp8_autocast']
     assert call['enabled'] is True
     assert call['fp8_group'] is None
@@ -280,7 +284,7 @@ def test_get_fp8_context_passes_selected_recipe_to_fp8_model_init(monkeypatch):
     recorders = _record_te_pytorch_contexts(monkeypatch)
     config = _config(fp8='e4m3', fp8_recipe='tensorwise', fp8_param=True)
     context = fp8_utils.get_fp8_context(config, is_init=True)
-    assert type(context).__name__ == 'fp8_model_init'
+    assert context is recorders['fp8_model_init:returned'][-1]
     (call,) = recorders['fp8_model_init']
     assert call['enabled'] is True
     assert type(call['recipe']).__name__ == 'Float8CurrentScaling'
@@ -306,7 +310,7 @@ def test_get_fp8_context_uses_amax_group_when_parallel_initialized(model_paralle
     recorders = _record_te_pytorch_contexts(monkeypatch)
     config = _config(fp8='e4m3', fp8_recipe='tensorwise')
     context = fp8_utils.get_fp8_context(config, layer_no=1)
-    assert type(context).__name__ == 'fp8_autocast'
+    assert context is recorders['fp8_autocast:returned'][-1]
     (call,) = recorders['fp8_autocast']
     assert call['fp8_group'] is parallel_state.get_amax_reduction_group(
         with_context_parallel=True, tp_only_amax_red=False
@@ -326,7 +330,7 @@ def test_get_fp8_disabled_context_passes_disabled_flag_to_fp8_autocast(monkeypat
     recorders = _record_te_pytorch_contexts(monkeypatch)
     config = _config(fp8='e4m3', fp8_recipe='tensorwise')
     context = fp8_utils.get_fp8_disabled_context(config)
-    assert type(context).__name__ == 'fp8_autocast'
+    assert context is recorders['fp8_autocast:returned'][-1]
     assert recorders['fp8_autocast'] == [{'enabled': False}]
     assert recorders['fp8_model_init'] == []
 
@@ -335,6 +339,6 @@ def test_get_fp8_disabled_context_passes_disabled_flag_to_fp8_model_init(monkeyp
     recorders = _record_te_pytorch_contexts(monkeypatch)
     config = _config(fp8='e4m3', fp8_recipe='tensorwise', fp8_param=True)
     context = fp8_utils.get_fp8_disabled_context(config, is_init=True)
-    assert type(context).__name__ == 'fp8_model_init'
+    assert context is recorders['fp8_model_init:returned'][-1]
     assert recorders['fp8_model_init'] == [{'enabled': False}]
     assert recorders['fp8_autocast'] == []

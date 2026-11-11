@@ -48,4 +48,16 @@ class TestMultimodalProjectorUnsupportedType:
         assert projected.shape == torch.Size([4, self.transformer_config.hidden_size])
         assert projected.dtype == torch.float32
         torch.testing.assert_close(projected, expected, rtol=1e-5, atol=1e-5)
-        assert not torch.allclose(projected, encoder_output)
+
+        # Independent MLP computation from the module weights: the fc1 bias
+        # is added before the activation and the fc2 bias after the projection
+        # (the zero-initialized fc2 bias made the old inequality assert vacuous).
+        linear_fc1, linear_fc2 = projector.encoder.linear_fc1, projector.encoder.linear_fc2
+        intermediate = (
+            torch.nn.functional.linear(hidden_states, linear_fc1.weight) + linear_fc1.bias
+        )
+        activated = self.transformer_config.activation_func(intermediate)
+        weights_expected = (
+            torch.nn.functional.linear(activated, linear_fc2.weight) + linear_fc2.bias
+        )
+        torch.testing.assert_close(projected, weights_expected, rtol=1e-5, atol=1e-5)

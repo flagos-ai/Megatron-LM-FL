@@ -71,8 +71,8 @@ def test_mla_without_q_lora_rank_projects_queries_directly(model_parallel):
         _mla_submodules(),
         layer_number=1,
         attn_mask_type=AttnMaskType.causal,
-    )
-    hidden_states = torch.randn(4, 2, 64)
+    ).cuda()
+    hidden_states = torch.randn(4, 2, 64, device="cuda")
 
     query, key, value, q_compressed, kv_compressed = attention.get_query_key_value_tensors(
         hidden_states

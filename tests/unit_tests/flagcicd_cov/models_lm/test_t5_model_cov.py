@@ -1,10 +1,13 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
 """T5Model: position ids, attention mask, loss reference, rope/relative embeddings, stage routing."""
 
+import json
+
 import pytest
 import torch
 import torch.nn.functional as F
 
+from megatron.core import parallel_state
 from megatron.core.models.T5.t5_model import T5Model, t5_extended_attention_mask, t5_position_ids
 from megatron.core.models.T5.t5_spec import (
     get_t5_decoder_with_local_block_spec,
@@ -91,7 +94,9 @@ def test_t5_extended_attention_mask_unsqueezes_each_entry_and_keeps_none():
 def test_t5_forward_returns_logits_and_loss_matching_reference(model_parallel, nvte_auto_env):
     model_parallel()
     model_parallel_cuda_manual_seed(123)
-    model = _build_t5(_t5_config()).eval().to(get_current_device())
+    # TP=1: parallel_output=True returns the same logits without the gather region, whose output
+    # view vocab_parallel_cross_entropy would otherwise modify in place for fp32 logits.
+    model = _build_t5(_t5_config(), parallel_output=True).eval().to(get_current_device())
     device = get_current_device()
     encoder_ids, decoder_ids, encoder_mask, decoder_mask, cross_mask = _inputs(device)
     labels = torch.randint(0, 128, (2, 6), device=device)
@@ -174,7 +179,17 @@ def test_t5_with_relative_position_embedding_scatters_attention_bias(model_paral
         .to(get_current_device())
     )
     device = get_current_device()
-    encoder_ids, decoder_ids, encoder_mask, decoder_mask, cross_mask = _inputs(device)
+    encoder_ids = torch.randint(0, 128, (2, 8), device=device)
+    decoder_ids = torch.randint(0, 128, (2, 6), device=device)
+    # The TE implementation takes b11s padding masks ([b, 1, 1, s] with True = padding), no mask
+    # for the causal decoder self-attention, and a (query, key) padding-mask pair for cross
+    # attention; t5_dataset.py config_attention_mask builds exactly these for this impl.
+    encoder_mask = torch.zeros(2, 1, 1, 8, dtype=torch.bool, device=device)
+    decoder_mask = None
+    cross_mask = (
+        torch.zeros(2, 1, 1, 6, dtype=torch.bool, device=device),
+        torch.zeros(2, 1, 1, 8, dtype=torch.bool, device=device),
+    )
     captured = {}
     model.encoder.register_forward_hook(
         lambda module, args, kwargs, output: captured.__setitem__(
@@ -394,6 +409,11 @@ def test_t5_lm_head_constructor_writes_config_logger_payload(
 
     model = _build_t5(_t5_config(config_logger_dir=str(tmp_path)))
 
+    # Each process writes exactly one payload carrying its own tp/dp/cp/pp/ep ranks
+    # (config_logger.py names it f'{prefix}.rank_{rank_str}.iter{count}.json').
+    rank_str = parallel_state.get_all_ranks()
     logged = [path.name for path in tmp_path.iterdir() if path.name.startswith('T5LMHead.rank_')]
-    assert len(logged) == Utils.world_size
-    assert all(name.endswith('.json') for name in logged)
+    assert logged == [f'T5LMHead.rank_{rank_str}.iter0.json']
+    payload = json.loads((tmp_path / logged[0]).read_text())
+    assert payload['vocab_size'] == 128
+    assert payload['parallel_output'] is False

@@ -65,6 +65,15 @@ def model_parallel():
     Utils.destroy_model_parallel()
 
 
+@pytest.fixture
+def shared_queue():
+    """Manager-backed queue: picklable, so it can travel to the already running persistent worker."""
+    # A plain mp.Queue may only be shared by inheritance; sending it through the persistent
+    # caller's request queue fails in the feeder thread and the worker never sees the request.
+    with mp.Manager() as manager:
+        yield manager.Queue()
+
+
 def test_set_process_qos_is_noop_without_priorities():
     nice_before = os.nice(0)
 
@@ -95,9 +104,11 @@ def test_set_process_qos_keeps_cpu_priority_with_valid_io_class():
     assert os.nice(0) == nice_before
 
 
-def test_set_process_qos_logs_io_priority_failure(caplog):
+def test_set_process_qos_logs_io_priority_failure(caplog, monkeypatch, tmp_path):
+    # util-linux ionice exits 0 even for an unknown class, so make the binary unavailable instead.
+    monkeypatch.setenv('PATH', str(tmp_path))
     with caplog.at_level(logging.WARNING):
-        _set_process_qos(cpu_priority=None, io_priority=99)
+        _set_process_qos(cpu_priority=None, io_priority=2)
 
     assert 'Failed to set I/O priority' in caplog.text
 
@@ -215,7 +226,7 @@ def test_persistent_caller_reports_nothing_pending_as_done(model_parallel):
     assert caller.cur_item is None
 
 
-def test_persistent_caller_warmup_schedule_and_finalize(model_parallel):
+def test_persistent_caller_warmup_schedule_and_finalize(model_parallel, shared_queue):
     model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
     AsyncCallsQueue.warmup_persistent_caller(
         torch.distributed.get_rank(), mp_mode='spawn', cpu_priority=None, io_priority=None
@@ -223,7 +234,7 @@ def test_persistent_caller_warmup_schedule_and_finalize(model_parallel):
     assert PersistentAsyncCaller._persistent_process.is_alive()
 
     queue = AsyncCallsQueue(persistent=True)
-    release_queue = mp.Queue()
+    release_queue = shared_queue
     call_idx = queue.schedule_async_request(AsyncRequest(_persistent_worker, (release_queue,), []))
     assert call_idx == 0
     assert queue.get_num_unfinalized_calls() == 1
@@ -235,7 +246,6 @@ def test_persistent_caller_warmup_schedule_and_finalize(model_parallel):
     assert queue.get_num_unfinalized_calls() == 0
 
     queue.close()
-    release_queue.close()
 
 
 def _busy_worker(total_iterations):
@@ -257,10 +267,10 @@ def test_persistent_caller_blocking_done_polls_while_worker_is_busy(model_parall
     queue.close()
 
 
-def test_schedule_async_request_rebuilds_legacy_request_fields(model_parallel):
+def test_schedule_async_request_rebuilds_legacy_request_fields(model_parallel, shared_queue):
     model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=1)
     queue = AsyncCallsQueue(persistent=True)
-    release_queue = mp.Queue()
+    release_queue = shared_queue
     legacy_request = _LegacyRequest(_persistent_worker, (release_queue,), [])
 
     call_idx = queue.schedule_async_request(legacy_request)
@@ -274,7 +284,6 @@ def test_schedule_async_request_rebuilds_legacy_request_fields(model_parallel):
     release_queue.put(None)
     assert queue.maybe_finalize_async_calls(blocking=True) == [call_idx]
     queue.close()
-    release_queue.close()
 
 
 def test_maybe_finalize_returns_empty_without_active_calls():

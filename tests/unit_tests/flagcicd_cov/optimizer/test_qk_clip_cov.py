@@ -121,7 +121,8 @@ def test_clip_qk_reduces_max_over_data_parallel_and_clips_weights(model_parallel
     # clamp(threshold / max, max=1.0) and both the q and the k rows of the
     # per-group reshaped weight scale by eta ** alpha.
     expected_scale = (
-        torch.clamp(torch.full((groups,), 4.0 / float(world_size)), max=1.0) ** 0.5
+        torch.clamp(torch.full((groups,), 4.0 / float(world_size), device=original.device), max=1.0)
+        ** 0.5
     ).view(groups, 1, 1)
     torch.testing.assert_close(
         clipped[:, :query_rows], original[:, :query_rows] * expected_scale, rtol=0, atol=0

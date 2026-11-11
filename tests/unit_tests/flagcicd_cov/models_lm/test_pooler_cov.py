@@ -24,7 +24,7 @@ def test_pooler_gathers_sequence_parallel_shards_before_pooling(model_parallel):
     config = TransformerConfig(
         num_layers=1,
         hidden_size=8,
-        num_attention_heads=1,
+        num_attention_heads=2,
         use_cpu_initialization=True,
         sequence_parallel=True,
         tensor_model_parallel_size=2,

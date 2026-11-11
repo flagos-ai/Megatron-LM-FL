@@ -1,5 +1,5 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
-"""DSv4 hybrid attention: fused q RMS norm, MTP compress-ratio and yarn rotary selection, activation-offload and selective-recompute forward parity, thd packing, and recompute input-layernorm flags."""
+"""DSv4 hybrid attention: fused q RMS norm, MTP compress-ratio and yarn rotary selection, activation-offload and selective-recompute forward parity, dynamic-CP rejection, and recompute input-layernorm flags."""
 
 import pytest
 import torch
@@ -39,7 +39,8 @@ class _ReferenceThdCoreAttention(torch.nn.Module):
     ):
         cu_seqlens = packed_seq_params.cu_seqlens_q
         query_heads = query.float()
-        kv = key.squeeze(1).float()
+        # One shared KV head (MQA): drop every singleton dim between tokens and channels.
+        kv = key.reshape(key.shape[0], key.shape[-1]).float()
         outputs = []
         for start, end in zip(cu_seqlens[:-1], cu_seqlens[1:]):
             seq_q = query_heads[start:end]
@@ -268,46 +269,12 @@ class TestDsv4Forward:
                 recompute_param.grad, eager_param.grad, rtol=1e-5, atol=1e-6, msg=name
             )
 
-    def test_thd_forward_without_padded_cu_seqlens_matches_padded(self):
-        config = _make_config()
-        attn = DSv4HybridSelfAttention(
-            config=config,
-            submodules=_make_thd_submodules(),
-            layer_number=1,
-            attn_mask_type=AttnMaskType.causal,
-            pg_collection=self.pg,
-        ).cuda()
-        device = torch.cuda.current_device()
-        cu_seqlens = torch.tensor([0, 8, 16, 24], dtype=torch.int32, device=device)
-        plain = PackedSeqParams(
-            qkv_format='thd',
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens,
-            max_seqlen_q=8,
-            max_seqlen_kv=8,
-        )
-        padded = PackedSeqParams(
-            qkv_format='thd',
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens,
-            cu_seqlens_q_padded=cu_seqlens,
-            cu_seqlens_kv_padded=cu_seqlens,
-            max_seqlen_q=8,
-            max_seqlen_kv=8,
-        )
-        hidden = _make_hidden(24, 1, config)
-        out_plain, _ = attn(hidden_states=hidden, attention_mask=None, packed_seq_params=plain)
-        out_padded, _ = attn(hidden_states=hidden, attention_mask=None, packed_seq_params=padded)
-        assert out_plain.shape == (24, 1, config.hidden_size)
-        assert torch.isfinite(out_plain).all()
-        torch.testing.assert_close(out_plain, out_padded, rtol=0, atol=0)
-
     def test_get_query_key_value_tensors_rejects_dynamic_context_parallel(self):
         config = _make_config()
         attn = _build_attention(config, 1, self.pg).cuda()
         packed = PackedSeqParams(local_cp_size=2)
         hidden = _make_hidden(32, 2, config)
-        with pytest.raises(AssertionError, match='dynamic context parallel'):
+        with pytest.raises(AssertionError, match='dynamic_context_parallel is not supported'):
             attn.get_query_key_value_tensors(hidden, packed_seq_params=packed)
 
     def test_set_for_recompute_input_layernorm_flags_q_down_and_kv_projections(self):

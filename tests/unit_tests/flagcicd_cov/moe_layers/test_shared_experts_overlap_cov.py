@@ -178,10 +178,12 @@ class TestOverlappedForward:
         output = self._run_overlap_sequence(overlap, hidden, overlapped_comm_output)
 
         reference_hidden = hidden.detach().clone().requires_grad_(True)
-        torch.testing.assert_close(output, plain(reference_hidden), rtol=1e-5, atol=1e-6)
+        reference = plain(reference_hidden)
+        torch.testing.assert_close(output, reference, rtol=1e-5, atol=1e-6)
         assert overlapped_comm_output.grad_fn._sequence_nr() == torch.iinfo(torch.int).max
 
         output.sum().backward()
+        reference.sum().backward()
 
         torch.testing.assert_close(hidden.grad, reference_hidden.grad, rtol=1e-5, atol=1e-6)
         torch.testing.assert_close(
@@ -215,6 +217,8 @@ class TestOverlappedForward:
         overlap = _shared_expert(_shared_expert_config(moe_shared_expert_overlap=True), gate=False)
 
         with pytest.raises(
-            AssertionError, match='linear_fc1_forward_and_act must be called from IDLE state'
+            AssertionError,
+            match='linear_fc1_forward_and_act must be called from PRE_FORWARD_COMM_DONE '
+            'state, but current state is IDLE',
         ):
             overlap.linear_fc1_forward_and_act()

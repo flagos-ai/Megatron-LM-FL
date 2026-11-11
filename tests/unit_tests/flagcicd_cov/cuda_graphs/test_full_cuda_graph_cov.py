@@ -31,7 +31,11 @@ def model_parallel():
         Utils.initialize_model_parallel(**sizes)
 
     yield setup
-    FullCudaGraphWrapper.reset_cuda_graph()
+    # reset_cuda_graph is an instance method in this version, so reset the
+    # class-level state it clears back to its initial values instead.
+    FullCudaGraphWrapper.cuda_graph = {'training': None, 'validation': None}
+    FullCudaGraphWrapper.result = {'training': None, 'validation': None}
+    FullCudaGraphWrapper.curr_iteration = {'training': 0, 'validation': 0}
     Utils.destroy_model_parallel()
 
 
@@ -63,7 +67,8 @@ def test_copy_tensors_in_struct_deep_copies_tensors_in_nested_structures():
     assert isinstance(out, tuple) and isinstance(out[1], list) and isinstance(out[2], dict)
     assert out[3] == 3.5
     for copied in (out[0], out[1][0], out[2]['k']):
-        assert torch.equal(copied, tensor)
+        assert copied.is_cuda
+        assert torch.equal(copied.cpu(), tensor)
         assert copied.data_ptr() != tensor.data_ptr()
         assert copied.requires_grad is False
     assert out[1][1] == 7
@@ -101,9 +106,10 @@ def test_static_buffer_loader_appends_first_microbatch_then_updates_new_keys(
 
     first = loader({'tokens': tokens, 'mask': mask}, 'training', 0)
     assert buffers['training'][0] is first
-    assert torch.equal(first['tokens'], tokens)
+    assert first['tokens'].is_cuda
+    assert torch.equal(first['tokens'], tokens.cuda())
     assert first['mask'].dtype == torch.bool
-    assert torch.equal(first['mask'], mask)
+    assert torch.equal(first['mask'], mask.cuda())
 
     tokens2 = torch.tensor([5.0, 6.0])
     extra = torch.tensor([9.0, 9.0])
@@ -111,16 +117,16 @@ def test_static_buffer_loader_appends_first_microbatch_then_updates_new_keys(
         ({'tokens': tokens2, 'mask': mask, 'labels': 3, 'extra': extra},), 'training', 0
     )
     assert second is first
-    assert torch.equal(second['tokens'], tokens2)
+    assert torch.equal(second['tokens'], tokens2.cuda())
     assert second['labels'] == 3
     assert isinstance(second['mask'], torch.Tensor)
-    assert torch.equal(second['extra'], extra)
+    assert torch.equal(second['extra'], extra.cuda())
     assert second['extra'].shape == extra.shape
 
     third = loader({'tokens': tokens, 'mask': mask}, 'training', 1)
     assert buffers['training'][1] is third
     assert len(buffers['training']) == 2
-    assert torch.equal(buffers['training'][1]['tokens'], tokens)
+    assert torch.equal(buffers['training'][1]['tokens'], tokens.cuda())
 
 
 def test_static_buffer_loader_keeps_training_and_validation_stages_separate(fresh_static_buffers):
@@ -130,8 +136,8 @@ def test_static_buffer_loader_keeps_training_and_validation_stages_separate(fres
     valid_buf = loader({'tokens': torch.zeros(2)}, 'validation', 0)
     assert buffers['training'][0] is train_buf
     assert buffers['validation'][0] is valid_buf
-    assert torch.equal(train_buf['tokens'], torch.ones(2))
-    assert torch.equal(valid_buf['tokens'], torch.zeros(2))
+    assert torch.equal(train_buf['tokens'], torch.ones(2, device='cuda'))
+    assert torch.equal(valid_buf['tokens'], torch.zeros(2, device='cuda'))
 
 
 def _sum_loss_forward_backward(*, data_iterator, model, num_microbatches, **kwargs):
@@ -266,5 +272,5 @@ def test_full_cuda_graph_wrapper_data_read_builds_iterators_per_model(
     assert isinstance(data_list[0], type(iter([])))
     assert data_list[1] is None
     batch = next(data_list[0])
-    assert torch.equal(batch['x'], torch.ones(2))
+    assert torch.equal(batch['x'], torch.ones(2, device='cuda'))
     assert StaticBufferLoader.static_buffers['validation'][0] is batch

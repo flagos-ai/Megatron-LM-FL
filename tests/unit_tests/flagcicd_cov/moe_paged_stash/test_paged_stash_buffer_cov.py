@@ -155,7 +155,8 @@ def test_offload_then_reload_round_trips_tokens_on_cuda_pages():
     original, paged = _paged_activation(device, tokens=100)
     paged.offload_to_stash(buffer)
 
-    assert paged.page_record.tolist() == [0, 1, 2, 3, 4, 5, 6]
+    # The record holds max_num_tokens / page_size = 8 slots; slots past the used pages stay zero.
+    assert paged.page_record.tolist() == [0, 1, 2, 3, 4, 5, 6, 0]
     assert paged.spilled_to_host.item() == 0
     assert host_spill.item() == 0
     assert overflow.item() == 0
@@ -185,7 +186,7 @@ def test_offload_spills_to_pinned_host_when_cuda_pages_run_out():
     assert host_paged.spilled_to_host.item() == 1
     assert host_spill.item() == 1
     assert overflow.item() == 0
-    assert host_paged.page_record.tolist() == [0, 1]
+    assert host_paged.page_record.tolist() == [0, 1] + [0] * 6
     assert buffer.free_list_head.tolist() == [1, 2]
 
     reloaded = torch.empty(host_paged.original_shape, dtype=torch.float32, device=device)
@@ -352,7 +353,7 @@ def test_offload_recycles_returned_pages_through_the_circular_free_list():
     paged_tensors[0].offload_to_stash(buffer)
     paged_tensors[1].offload_to_stash(buffer)
     assert buffer.free_list_head.tolist() == [6, 0]
-    assert paged_tensors[1].page_record.tolist() == [3, 4, 5]
+    assert paged_tensors[1].page_record.tolist() == [3, 4, 5] + [0] * 5
 
     reloaded = torch.empty(paged_tensors[0].original_shape, dtype=torch.float32, device=device)
     paged_tensors[0]._tensor = reloaded
@@ -360,7 +361,7 @@ def test_offload_recycles_returned_pages_through_the_circular_free_list():
     assert torch.equal(reloaded[: 48 * 64], originals[0][: 48 * 64])
 
     paged_tensors[2].offload_to_stash(buffer)
-    assert paged_tensors[2].page_record.tolist() == [6, 7, 0]
+    assert paged_tensors[2].page_record.tolist() == [6, 7, 0] + [0] * 5
     assert buffer.free_list_head.tolist() == [9, 0]
 
     for index in (1, 2):

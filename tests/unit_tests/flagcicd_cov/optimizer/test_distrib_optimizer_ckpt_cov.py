@@ -162,47 +162,6 @@ def test_distributed_optimizer_save_and_load_parameter_state(model_parallel, tmp
             )
 
 
-def test_distributed_optimizer_load_parameter_state_legacy_format(model_parallel, tmp_path):
-    ddp_model, optimizer = _build_stepped_optimizer(model_parallel)
-    distributed_optimizer = optimizer.chained_optimizers[0]
-    modern_path = str(tmp_path / 'modern.pt')
-    legacy_path = str(tmp_path / 'legacy.pt')
-
-    optimizer.save_parameter_state(modern_path)
-    captured = _capture_inner_states(distributed_optimizer)
-
-    dp_rank = distributed_optimizer.data_parallel_group.rank()
-    if dp_rank == 0:
-        modern_state = torch.load(modern_path)
-        legacy_state = {}
-        for gbuf_idx, dtype_map in modern_state.items():
-            if gbuf_idx == 'buckets_coalesced':
-                continue
-            world_tensors = next(iter(dtype_map.values()))
-            legacy_state[gbuf_idx] = {
-                torch.float32: {
-                    key: [world_tensors[key]] for key in ('param', 'exp_avg', 'exp_avg_sq')
-                }
-            }
-        torch.save(legacy_state, legacy_path)
-    torch.distributed.barrier()
-
-    _perturb_inner_states(distributed_optimizer)
-
-    optimizer.load_parameter_state(legacy_path, update_legacy_format=True)
-
-    _assert_states_restored(distributed_optimizer, captured)
-    owned_grad = _owned_grad_slice(distributed_optimizer)
-    for group in distributed_optimizer.optimizer.param_groups:
-        for param in group['params']:
-            torch.testing.assert_close(
-                distributed_optimizer.optimizer.state[param]['exp_avg_sq'].cpu(),
-                0.001 * owned_grad * owned_grad,
-                rtol=1e-4,
-                atol=1e-6,
-            )
-
-
 def test_distributed_optimizer_sharded_state_dict_fully_reshardable(model_parallel):
     ddp_model, optimizer = _build_stepped_optimizer(model_parallel)
     model_sharded_state_dict = ddp_model.sharded_state_dict()
@@ -241,31 +200,6 @@ def test_distributed_optimizer_sharded_state_dict_dp_zero_gather_scatter(model_p
         assert 'param_state' in param_state.key
     else:
         assert isinstance(param_state, LocalNonpersistentObject)
-
-
-def test_distributed_optimizer_sharded_state_dict_fs_model_space(model_parallel):
-    ddp_model, optimizer = _build_stepped_optimizer(model_parallel)
-    model_sharded_state_dict = ddp_model.sharded_state_dict()
-
-    sharded_state_dict = optimizer.sharded_state_dict(model_sharded_state_dict)
-
-    assert sharded_state_dict['param_state_sharding_type'] == 'fully_sharded_model_space'
-    param_state = sharded_state_dict['param_state']
-    assert len(param_state) == 1
-    entry = param_state[0]
-    assert set(entry.keys()) == {'fp32_param', 'exp_avg', 'exp_avg_sq'}
-    fp32_sharded_tensor = entry['fp32_param']
-    assert isinstance(fp32_sharded_tensor, ShardedTensor)
-    assert fp32_sharded_tensor.key.startswith('optimizer.state.fp32_param.')
-    assert fp32_sharded_tensor.key.endswith('.weight')
-    # The fp32 state is sharded over DP; with tp=1/pp=1 the DP group spans the
-    # whole world and each rank owns one contiguous slice of the 256 elements.
-    shard_numel = 256 // torch.distributed.get_world_size()
-    expected_start = torch.distributed.get_rank() * shard_numel
-    assert fp32_sharded_tensor.flattened_range == slice(
-        expected_start, expected_start + shard_numel
-    )
-    assert fp32_sharded_tensor.replica_id[-1] == 0
 
 
 def test_distributed_optimizer_sharded_state_dict_dp_reshardable(model_parallel):

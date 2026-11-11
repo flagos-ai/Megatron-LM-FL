@@ -77,14 +77,12 @@ def _set_main_grads(model, value):
             param.main_grad.copy_(torch.full_like(param.main_grad, value + 0.001 * index))
 
 
-def _momentum_buffer_equals(optimizer, param, expected):
-    # buf = grad + momentum * buf from a zero state: after the first step the
-    # momentum buffer equals the raw gradient, and a further step with the same
-    # gradient makes it equal momentum * grad + grad.
-    return any(
-        torch.equal(value, expected)
-        for value in optimizer.state[param].values()
-        if isinstance(value, torch.Tensor)
+def _assert_momentum_buffer(optimizer, param, expected):
+    # emerging_optimizers keeps an EMA: buf.lerp_(grad, 1 - momentum) from a zero state, so after
+    # one step buf = (1 - m) * grad and after a second step with the same grad
+    # buf = m * (1 - m) * grad + (1 - m) * grad.
+    torch.testing.assert_close(
+        optimizer.state[param]['momentum_buffer'], expected, rtol=1e-6, atol=1e-7
     )
 
 
@@ -136,16 +134,16 @@ def test_tensor_parallel_muon_steps_with_none_tp_group_and_negative_partition_di
         tp_mode='duplicated',
     )
     before = param.detach().clone()
-    param.grad = torch.linspace(-1.0, 1.0, param.numel()).view_as(param)
+    param.grad = torch.linspace(-1.0, 1.0, param.numel(), device=param.device).view_as(param)
 
     optimizer.step()
 
     assert not torch.equal(param.detach(), before)
-    assert _momentum_buffer_equals(optimizer, param, param.grad)
+    _assert_momentum_buffer(optimizer, param, 0.05 * param.grad)
     assert torch.isfinite(param.detach()).all()
 
     optimizer.step()
-    assert _momentum_buffer_equals(optimizer, param, param.grad * 0.95 + param.grad)
+    _assert_momentum_buffer(optimizer, param, (0.95 * 0.05 + 0.05) * param.grad)
 
 
 def test_tensor_parallel_muon_uses_process_group_for_partitioned_params(model_parallel):
@@ -165,12 +163,12 @@ def test_tensor_parallel_muon_uses_process_group_for_partitioned_params(model_pa
         tp_mode='distributed',
     )
     before = param.detach().clone()
-    param.grad = torch.linspace(-1.0, 1.0, param.numel()).view_as(param)
+    param.grad = torch.linspace(-1.0, 1.0, param.numel(), device=param.device).view_as(param)
 
     optimizer.step()
 
     assert not torch.equal(param.detach(), before)
-    assert _momentum_buffer_equals(optimizer, param, param.grad)
+    _assert_momentum_buffer(optimizer, param, 0.05 * param.grad)
     assert torch.isfinite(param.detach()).all()
 
 
@@ -192,7 +190,7 @@ def test_tensor_parallel_adaptive_muon_sets_group_defaults_and_initializes_state
     assert optimizer.moment2_method == 'adamuon'
 
     before = param.detach().clone()
-    param.grad = torch.linspace(-1.0, 1.0, param.numel()).view_as(param)
+    param.grad = torch.linspace(-1.0, 1.0, param.numel(), device=param.device).view_as(param)
     optimizer.step()
 
     assert torch.equal(param.detach(), before)
@@ -211,21 +209,21 @@ def test_tensor_parallel_adaptive_muon_step_updates_weights():
         params=[param], lr=0.01, momentum=0.95, weight_decay=0.0, pg_collection=None
     )
     before = param.detach().clone()
-    param.grad = torch.linspace(-1.0, 1.0, param.numel()).view_as(param)
+    param.grad = torch.linspace(-1.0, 1.0, param.numel(), device=param.device).view_as(param)
 
     optimizer.step()
 
     assert not torch.equal(param.detach(), before)
-    assert _momentum_buffer_equals(optimizer, param, param.grad)
+    _assert_momentum_buffer(optimizer, param, 0.05 * param.grad)
     assert torch.isfinite(param.detach()).all()
     # AdaptiveMuon adds a second moment on top of the Muon momentum buffer;
     # as a squared-quantity accumulator its first-step value is non-negative.
     second_moment = [
         value
-        for value in optimizer.state[param].values()
-        if isinstance(value, torch.Tensor)
+        for key, value in optimizer.state[param].items()
+        if key != 'momentum_buffer'
+        and isinstance(value, torch.Tensor)
         and value.shape == param.shape
-        and not torch.equal(value, param.grad)
     ]
     assert len(second_moment) == 1
     assert torch.isfinite(second_moment[0]).all()

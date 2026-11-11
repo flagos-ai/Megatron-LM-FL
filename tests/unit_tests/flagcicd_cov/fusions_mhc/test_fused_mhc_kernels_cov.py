@@ -14,6 +14,15 @@ FP32_RTOL = 1e-5
 FP32_ATOL = 1e-5
 
 
+def _assert_close_at_tf32(actual, expected):
+    """fp32 results of a cuBLAS matmul vs an fp64 reference.
+
+    The CI image sets TORCH_ALLOW_TF32_CUBLAS_OVERRIDE=1, so fp32 matmuls run in TF32 (10-bit
+    mantissa) regardless of torch.backends flags; bound the error relative to the largest value.
+    """
+    torch.testing.assert_close(actual, expected, rtol=1e-3, atol=1e-3 * expected.abs().max().item())
+
+
 def _uniform(*shape, dtype=torch.bfloat16):
     return torch.empty(*shape, dtype=dtype, device="cuda").uniform_(-1.0, 1.0)
 
@@ -344,7 +353,7 @@ def test_fused_proj_rms_compute_h_native_policy_matches_reference_forward_and_ba
         (h_res, reference_h_res),
         (r, reference_r),
     ):
-        torch.testing.assert_close(actual.double(), expected, rtol=FP32_RTOL, atol=FP32_ATOL)
+        _assert_close_at_tf32(actual.double(), expected)
     torch.testing.assert_close(
         x_fused.grad.double(), x_reference.grad, rtol=BF16_RTOL, atol=BF16_ATOL
     )
@@ -355,7 +364,7 @@ def test_fused_proj_rms_compute_h_native_policy_matches_reference_forward_and_ba
         (alpha_res_fused.grad, alpha_res_reference.grad),
         (bias_fused.grad, bias_reference.grad),
     ):
-        torch.testing.assert_close(actual.double(), expected, rtol=FP32_RTOL, atol=FP32_ATOL)
+        _assert_close_at_tf32(actual.double(), expected)
 
 
 def test_fused_add_3_sums_three_tensors_and_passes_gradients_through():

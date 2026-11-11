@@ -178,8 +178,8 @@ def test_layer_passes_list_cp_comm_type_for_first_layer(model_parallel):
 
 def test_selective_recompute_layernorm_and_mlp_preserves_values_and_grads(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
-    hidden_states = torch.randn(8, 2, 32)
-    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool)
+    hidden_states = torch.randn(8, 2, 32, device="cuda")
+    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool, device="cuda")
 
     outputs = {}
     grads = {}
@@ -191,7 +191,7 @@ def test_selective_recompute_layernorm_and_mlp_preserves_values_and_grads(model_
             if recompute
             else dict()
         )
-        layer = _layer(_config(**overrides)).train()
+        layer = _layer(_config(**overrides)).train().cuda()
         output, _ = layer(hidden_states=hidden_states, attention_mask=attention_mask)
         output.sum().backward()
         outputs[recompute] = output.detach()
@@ -211,14 +211,14 @@ def test_selective_recompute_layernorm_and_mlp_preserves_values_and_grads(model_
 
 def test_fp32_residual_connection_preserves_fp32_layer_values(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
-    hidden_states = torch.randn(8, 2, 32)
-    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool)
+    hidden_states = torch.randn(8, 2, 32, device="cuda")
+    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool, device="cuda")
 
     outputs = []
     for fp32_residual in (False, True):
         torch.manual_seed(42)
         model_parallel_cuda_manual_seed(123)
-        layer = _layer(_config(fp32_residual_connection=fp32_residual)).eval()
+        layer = _layer(_config(fp32_residual_connection=fp32_residual)).eval().cuda()
         with torch.no_grad():
             output, _ = layer(hidden_states=hidden_states, attention_mask=attention_mask)
         outputs.append(output)
@@ -228,9 +228,9 @@ def test_fp32_residual_connection_preserves_fp32_layer_values(model_parallel):
 
 def test_te_cuda_graph_capture_mlp_scope_returns_mlp_output_only(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
-    layer = _layer(_config(cuda_graph_modules=[CudaGraphModule.mlp])).eval()
-    hidden_states = torch.randn(8, 2, 32)
-    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool)
+    layer = _layer(_config(cuda_graph_modules=[CudaGraphModule.mlp])).eval().cuda()
+    hidden_states = torch.randn(8, 2, 32, device="cuda")
+    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool, device="cuda")
 
     with torch.no_grad():
         captured = layer._te_cuda_graph_capture(

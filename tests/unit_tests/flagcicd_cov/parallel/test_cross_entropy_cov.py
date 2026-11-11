@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from megatron.core import parallel_state
 from megatron.core.tensor_parallel.cross_entropy import (
     vocab_parallel_cross_entropy,
     vocab_parallel_cross_entropy_chunked,
@@ -34,7 +35,7 @@ def _reference_cross_entropy(full_logits, target, vocab_start, vocab_end, label_
 
 def test_vocab_parallel_cross_entropy_matches_torch_reference(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(17)
     full_logits = torch.randn(4, 2, 16, device='cuda', requires_grad=True)
     target = torch.randint(0, 16, (4, 2), device='cuda')
@@ -54,7 +55,7 @@ def test_vocab_parallel_cross_entropy_matches_torch_reference(model_parallel):
 
 def test_vocab_parallel_cross_entropy_label_smoothing_matches_reference(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(18)
     full_logits = torch.randn(4, 2, 16, device='cuda', requires_grad=True)
     target = torch.randint(0, 16, (4, 2), device='cuda')
@@ -76,11 +77,13 @@ def test_vocab_parallel_cross_entropy_label_smoothing_matches_reference(model_pa
 
 def test_vocab_parallel_cross_entropy_chunked_matches_reference(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(19)
-    full_logits = torch.randn(4, 2, 16, device='cuda', requires_grad=True)
+    # The chunked kernel is specified for bf16 logits: it upcasts a copy and works on it in place.
+    full_bf16 = torch.randn(4, 2, 16, device='cuda').to(torch.bfloat16)
+    full_logits = full_bf16.float().requires_grad_(True)
     target = torch.randint(0, 16, (4, 2), device='cuda')
-    logits = full_logits.detach()[:, :, rank * 8 : (rank + 1) * 8].clone().requires_grad_(True)
+    logits = full_bf16[:, :, rank * 8 : (rank + 1) * 8].clone().requires_grad_(True)
 
     loss = vocab_parallel_cross_entropy_chunked(logits, target, chunk_size=2)
     expected = _reference_cross_entropy(full_logits, target, rank * 8, (rank + 1) * 8)
@@ -89,18 +92,21 @@ def test_vocab_parallel_cross_entropy_chunked_matches_reference(model_parallel):
     grad_output = torch.randn(4, 2, device='cuda')
     (loss * grad_output).sum().backward()
     (expected * grad_output).sum().backward()
+    # The gradient is returned in the input dtype (bf16): compare with the fp32 reference rounded to bf16.
     torch.testing.assert_close(
-        logits.grad, full_logits.grad[:, :, rank * 8 : (rank + 1) * 8], rtol=1e-5, atol=1e-6
+        logits.grad, full_logits.grad[:, :, rank * 8 : (rank + 1) * 8].to(torch.bfloat16)
     )
 
 
 def test_vocab_parallel_cross_entropy_chunked_label_smoothing_matches_reference(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(20)
-    full_logits = torch.randn(4, 2, 16, device='cuda', requires_grad=True)
+    # The chunked kernel is specified for bf16 logits: it upcasts a copy and works on it in place.
+    full_bf16 = torch.randn(4, 2, 16, device='cuda').to(torch.bfloat16)
+    full_logits = full_bf16.float().requires_grad_(True)
     target = torch.randint(0, 16, (4, 2), device='cuda')
-    logits = full_logits.detach()[:, :, rank * 8 : (rank + 1) * 8].clone().requires_grad_(True)
+    logits = full_bf16[:, :, rank * 8 : (rank + 1) * 8].clone().requires_grad_(True)
 
     loss = vocab_parallel_cross_entropy_chunked(logits, target, label_smoothing=0.1, chunk_size=3)
     expected = _reference_cross_entropy(
@@ -111,6 +117,7 @@ def test_vocab_parallel_cross_entropy_chunked_label_smoothing_matches_reference(
     grad_output = torch.randn(4, 2, device='cuda')
     (loss * grad_output).sum().backward()
     (expected * grad_output).sum().backward()
+    # The gradient is returned in the input dtype (bf16): compare with the fp32 reference rounded to bf16.
     torch.testing.assert_close(
-        logits.grad, full_logits.grad[:, :, rank * 8 : (rank + 1) * 8], rtol=1e-4, atol=1e-6
+        logits.grad, full_logits.grad[:, :, rank * 8 : (rank + 1) * 8].to(torch.bfloat16)
     )

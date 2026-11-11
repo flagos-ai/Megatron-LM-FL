@@ -39,13 +39,17 @@ HIDDEN_SIZE = 64
 VOCAB_SIZE = 128
 RTOL = 1e-4
 ATOL = 1e-5
+# Two local experts per rank. With one local expert, alltoall_token_perm2 returns views of the
+# all-to-all output and fwd.transformer_layer_forward_moe frees that storage before the experts read
+# it (reported as a source bug), so EP must stay below the expert count.
+EXPERT_PARALLEL_SIZE = 4
 
 
 @pytest.fixture
 def model_parallel(monkeypatch):
     monkeypatch.setattr(utils, 'COMM_STREAM', None)
     monkeypatch.setattr(global_vars, '_GLOBAL_ARGS', SimpleNamespace())
-    Utils.initialize_model_parallel(expert_model_parallel_size=8)
+    Utils.initialize_model_parallel(expert_model_parallel_size=EXPERT_PARALLEL_SIZE)
     yield
     Utils.destroy_model_parallel()
 
@@ -72,7 +76,7 @@ def _config(num_layers):
         moe_router_load_balancing_type='none',
         moe_grouped_gemm=True,
         moe_shared_expert_intermediate_size=64,
-        expert_model_parallel_size=8,
+        expert_model_parallel_size=EXPERT_PARALLEL_SIZE,
     )
 
 

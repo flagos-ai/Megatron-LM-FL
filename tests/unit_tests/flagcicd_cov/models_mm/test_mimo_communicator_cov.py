@@ -37,7 +37,7 @@ class TestColocatedBridgeDirectionAndSlices:
     def test_equal_dp_bridge_is_pure_passthrough(self, distributed):
         distributed(tensor_model_parallel_size=1)
         src_grid = _create_grid(tp=2, dp=4)
-        dest_grid = _create_grid(tp=4, dp=4)
+        dest_grid = _create_grid(tp=2, dp=4)
         comm = ColocatedBridgeCommunicator(src_grid, dest_grid)
 
         assert comm.is_fan_in() is False

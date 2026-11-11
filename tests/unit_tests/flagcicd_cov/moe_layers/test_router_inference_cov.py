@@ -174,7 +174,7 @@ class TestForceBiasedForward:
         router.load_state_dict({'weight': torch.eye(4, 8)}, strict=False)
         router = router.to(device)
         router.eval()
-        hidden = (torch.arange(64, dtype=torch.float32) % 8).reshape(8, 2, 8).to(device)
+        hidden = (torch.arange(128, dtype=torch.float32) % 8).reshape(8, 2, 8).to(device)
 
         with torch.no_grad():
             probs_biased, map_biased = router(hidden)

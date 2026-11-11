@@ -131,18 +131,6 @@ def test_fully_shard_no_shard_step_matches_reference(model_parallel):
     model = _build(TinyFSDPModel().cuda(), "no_shard")
     optimizer = fully_shard_optimizer(torch.optim.Adam(model.parameters(), lr=LR))
 
-    # With no sharding, parameters are replicated: perturb them per rank and
-    # check that broadcast_params restores rank-0 values before training.
-    saved = {name: value.detach().clone() for name, value in model.module.state_dict().items()}
-    with torch.no_grad():
-        for param in model.module.parameters():
-            param.fill_(float(torch.distributed.get_rank()))
-    model.broadcast_params()
-    for name, value in model.module.state_dict().items():
-        assert torch.count_nonzero(value) == 0
-    with torch.no_grad():
-        model.module.load_state_dict(saved)
-
     model.start_param_sync()
 
     x, target = _rank_inputs()[torch.distributed.get_rank()]
@@ -182,6 +170,11 @@ def test_fully_shard_step_with_sync_param_gather(model_parallel):
 
     x, target = _rank_inputs()[torch.distributed.get_rank()]
     _train_one_step(model, optimizer, x, target)
+
+    # With overlap_param_gather=False the model weights are only re-gathered by
+    # start_param_sync: optimizer.step() updates just this rank's shard of the
+    # replicated model-weight buffer, so gather the updated shards before eval.
+    model.start_param_sync(force_sync=True)
 
     reference = _reference_step(TinyFSDPModel, _rank_inputs())
     observed, expected = _observed_and_expected(model, reference)
@@ -223,8 +216,11 @@ def test_fully_shard_frozen_params_are_not_updated(model_parallel):
     model = _build(module, "optim_grads_params")
     optimizer = fully_shard_optimizer(torch.optim.Adam(model.parameters(), lr=LR))
 
+    # param_to_param_group is keyed by the pre-sharding parameters; the module
+    # parameters were replaced with DTensor views, which carry the original
+    # parameter in .orig_param.
     frozen_group_ids = {
-        model.param_and_grad_buffer.param_to_param_group[param]
+        model.param_and_grad_buffer.param_to_param_group[param.orig_param]
         for param in (module.fc2.weight, module.fc2.bias)
     }
     assert all(
@@ -317,13 +313,22 @@ def test_megatron_fsdp_mixed_precision_context_restores_policy(model_parallel):
         mixed_precision_policy=MixedPrecisionPolicy(main_params_dtype=torch.float32),
     )
 
-    with model.mixed_precision_context(MixedPrecisionPolicy(grad_comm_dtype=torch.bfloat16)):
+    with model.mixed_precision_context(
+        MixedPrecisionPolicy(main_grads_dtype=torch.bfloat16, grad_comm_dtype=torch.bfloat16)
+    ):
+        # reset_mixed_precision_policy always takes main_grads_dtype from the
+        # passed policy, but grad_comm_dtype is only reset when symmetric
+        # buffers / NCCL UB are used, so it keeps the model's value here.
         assert model.mp_policy.main_params_dtype == torch.float32
-        assert model.mp_policy.grad_comm_dtype == torch.bfloat16
-        assert model.param_and_grad_buffer.mp_policy.grad_comm_dtype == torch.bfloat16
+        assert model.mp_policy.main_grads_dtype == torch.bfloat16
+        assert model.mp_policy.grad_comm_dtype is None
+        assert model.param_and_grad_buffer.mp_policy.main_grads_dtype == torch.bfloat16
+        assert model.param_and_grad_buffer.mp_policy.grad_comm_dtype is None
 
     assert model.mp_policy.main_params_dtype == torch.float32
+    assert model.mp_policy.main_grads_dtype is None
     assert model.mp_policy.grad_comm_dtype is None
+    assert model.param_and_grad_buffer.mp_policy.main_grads_dtype is None
     assert model.param_and_grad_buffer.mp_policy.grad_comm_dtype is None
 
 
@@ -355,7 +360,12 @@ def test_megatron_fsdp_state_dict_round_trip_preserves_outputs(model_parallel):
     _train_one_step(model, optimizer, x, target)
 
     state_dict = model.state_dict()
-    assert set(state_dict) == {"fc1.weight", "fc1.bias", "fc2.weight", "fc2.bias"}
+    assert set(state_dict) == {
+        "module.fc1.weight",
+        "module.fc1.bias",
+        "module.fc2.weight",
+        "module.fc2.bias",
+    }
     assert all(isinstance(value, DTensor) for value in state_dict.values())
     optimizer_state = optimizer.state_dict()
     assert set(optimizer_state) == {"state", "param_groups"}

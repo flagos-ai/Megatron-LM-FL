@@ -19,12 +19,22 @@ def _batch_invariant_mode_off():
         bik.disable_batch_invariant_mode()
 
 
+def _assert_close_bf16(actual, expected):
+    """Compare a bf16 CUDA result with an fp32 CPU reference at bf16 tolerance."""
+    torch.testing.assert_close(actual.float().cpu(), expected.float().cpu(), rtol=1.6e-2, atol=1e-2)
+
+
+def _bf16_randn(*shape):
+    # bf16-representable fp32 values: the kernel and the reference then see identical inputs.
+    return torch.randn(*shape).to(torch.bfloat16).float()
+
+
 def _layout_refs(layout):
     transa = layout[0] == "T"
     transb = layout[1] == "T"
     K, O, N, S = 8, 5, 7, 2
-    a = torch.randn(O, K) if transa else torch.randn(K, O)
-    b = torch.randn(K, N) if transb else torch.randn(S, N, K)
+    a = _bf16_randn(O, K) if transa else _bf16_randn(K, O)
+    b = _bf16_randn(K, N) if transb else _bf16_randn(S, N, K)
     return a, b, transa, transb, (K, O, N, S)
 
 
@@ -53,7 +63,7 @@ def test_te_gemm_fn_forward_flattens_three_dimensional_a():
     out = bik.BatchInvariantTEGemmFn.apply(a, b, None, None, "TN")
 
     assert out.shape == (N, O)
-    torch.testing.assert_close(out, b.cpu().float() @ a[0].cpu().float(), rtol=1.6e-2, atol=1e-2)
+    _assert_close_bf16(out, b.cpu().float() @ a[0].cpu().float())
 
 
 @pytest.mark.parametrize("layout", _LAYOUTS)
@@ -61,7 +71,7 @@ def test_te_gemm_fn_forward_flattens_three_dimensional_a():
 def test_te_gemm_fn_forward_and_backward_match_reference_for_layouts(layout, with_bias):
     torch.manual_seed(1234)
     a, b, transa, transb, (K, O, N, S) = _layout_refs(layout)
-    bias = torch.randn(O) if with_bias else None
+    bias = _bf16_randn(O) if with_bias else None
 
     a_cuda = a.to("cuda", torch.bfloat16).requires_grad_(True)
     b_cuda = b.to("cuda", torch.bfloat16).requires_grad_(True)
@@ -71,7 +81,7 @@ def test_te_gemm_fn_forward_and_backward_match_reference_for_layouts(layout, wit
     expected_shape = (N, O) if b.dim() == 2 else (S, N, O)
     assert out.shape == expected_shape
     reference = _gemm_reference(a, b, bias, transa, transb)
-    torch.testing.assert_close(out, reference.to("cuda"), rtol=1.6e-2, atol=1e-2)
+    _assert_close_bf16(out, reference)
 
     grad_output = torch.randn(expected_shape).to("cuda", torch.bfloat16)
     out.backward(grad_output)
@@ -82,10 +92,10 @@ def test_te_gemm_fn_forward_and_backward_match_reference_for_layouts(layout, wit
     reference = _gemm_reference(a_ref, b_ref, bias_ref, transa, transb)
     reference.backward(grad_output.cpu().float())
 
-    torch.testing.assert_close(a_cuda.grad, a_ref.grad.to("cuda"), rtol=1.6e-2, atol=1e-2)
-    torch.testing.assert_close(b_cuda.grad, b_ref.grad.to("cuda"), rtol=1.6e-2, atol=1e-2)
+    _assert_close_bf16(a_cuda.grad, a_ref.grad)
+    _assert_close_bf16(b_cuda.grad, b_ref.grad)
     if with_bias:
-        torch.testing.assert_close(bias_cuda.grad, bias_ref.grad.to("cuda"), rtol=1.6e-2, atol=1e-2)
+        _assert_close_bf16(bias_cuda.grad, bias_ref.grad)
 
 
 def test_te_general_gemm_patched_raises_when_original_not_captured():
@@ -155,7 +165,5 @@ def test_te_general_gemm_patched_returns_bias_grad_when_grad_requested(use_out_b
     assert extra_output is None
     if use_out_buffer:
         assert gemm_out is out
-    torch.testing.assert_close(bias_grad, dy.cpu().float().sum(dim=0), rtol=1.6e-2, atol=1e-2)
-    torch.testing.assert_close(
-        gemm_out, dy.cpu().float().t() @ x.cpu().float(), rtol=1.6e-2, atol=1e-2
-    )
+    _assert_close_bf16(bias_grad, dy.cpu().float().sum(dim=0))
+    _assert_close_bf16(gemm_out, dy.cpu().float().t() @ x.cpu().float())

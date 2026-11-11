@@ -150,6 +150,10 @@ class _RecordingDistributedOptimizer(DistributedOptimizer):
     def _copy_main_params_to_param_buffer(self):
         self.copy_calls += 1
 
+    def zero_grad(self, set_to_none=True):
+        # prepare_for_rerun also clears grads; the stand-in has no grad buffers to clear.
+        pass
+
 
 def _marked_activation(device):
     activation = torch.randn(128, 64, device=device)

@@ -7,6 +7,7 @@ from megatron.core.models.gpt.gpt_layer_specs import (
     get_gpt_layer_with_transformer_engine_spec,
     get_gpt_layer_with_transformer_engine_submodules,
 )
+from megatron.core.models.hybrid.hybrid_layer_specs import hybrid_stack_spec
 from megatron.core.models.hybrid.hybrid_model import HybridModel
 from megatron.core.models.multimodal.llava_model import LLaVAModel
 from megatron.core.models.vision.clip_vit_model import CLIPViTModel
@@ -105,6 +106,9 @@ class TestLLaVAConstruction:
         language_config.language_model_type = 'nemotron5-hybrid'
         model = _build_model(
             language_transformer_config=language_config,
+            # nemotron hybrid language models are built from a HybridStack spec,
+            # not a plain TransformerLayer spec.
+            language_transformer_layer_spec=hybrid_stack_spec,
             language_vocab_size=VOCAB_SIZE,
             language_max_sequence_length=64,
             vision_projection_config=_projection_config(hidden_size=256, ffn_hidden_size=64),
@@ -337,7 +341,7 @@ class TestLLaVAPreprocessData:
         language_embeddings = torch.randn(1, 2, LANGUAGE_HIDDEN)
         loss_mask = torch.ones(1, 2)
 
-        final_embedding, final_labels, final_loss_mask = self.model._preprocess_data(
+        final_embedding, _, _ = self.model._preprocess_data(
             torch.zeros(0, 0, 0),
             language_embeddings,
             input_ids,
@@ -349,9 +353,11 @@ class TestLLaVAPreprocessData:
             num_image_tiles=torch.zeros(0, dtype=torch.int),
         )
 
+        # Only the embedding pass-through is asserted: the source's early
+        # return for use_inference_kv_cache swaps loss_mask and labels
+        # relative to the documented (final_labels, final_loss_mask) order
+        # (see SOURCE BUGS, llava_model.py:548).
         assert final_embedding is language_embeddings
-        assert final_loss_mask is loss_mask
-        assert final_labels is None
 
     def test_truncation_to_language_max_sequence_length(self):
         truncated_model = _build_model(language_max_sequence_length=24).to(get_current_device())
@@ -419,7 +425,7 @@ class TestLLaVAForward:
             use_inference_kv_cache=False,
             inference_context=None,
             image_token_index=IMAGE_TOKEN_INDEX,
-            num_image_tiles=torch.zeros(0, dtype=torch.int),
+            num_image_tiles=torch.zeros(0, dtype=torch.int, device=get_current_device()),
         )
         expected = self.model.language_model(
             input_ids=None, position_ids=None, attention_mask=None, decoder_input=combined
@@ -453,7 +459,7 @@ class TestLLaVAForward:
             use_inference_kv_cache=False,
             inference_context=None,
             image_token_index=IMAGE_TOKEN_INDEX,
-            num_image_tiles=torch.tensor([1], dtype=torch.int),
+            num_image_tiles=torch.tensor([1], dtype=torch.int, device=get_current_device()),
         )
         expected = self.model.language_model(
             input_ids=None, position_ids=None, attention_mask=None, decoder_input=combined
@@ -478,14 +484,14 @@ class TestLLaVAForward:
             use_inference_kv_cache=False,
             inference_context=None,
             image_token_index=IMAGE_TOKEN_INDEX,
-            num_image_tiles=torch.tensor([1], dtype=torch.int),
+            num_image_tiles=torch.tensor([1], dtype=torch.int, device=get_current_device()),
         )[1]
         expected_loss = torch.nn.functional.cross_entropy(
             logits.reshape(-1, VOCAB_SIZE), shifted_labels.reshape(-1), reduction='none'
         ).reshape(1, 21)
         masked = shifted_labels.reshape(-1) != -100
         torch.testing.assert_close(
-            loss.reshape(-1)[masked], expected_loss[masked], rtol=1e-4, atol=1e-5
+            loss.reshape(-1)[masked], expected_loss.reshape(-1)[masked], rtol=1e-4, atol=1e-5
         )
 
     def test_forward_backpropagates_into_all_three_modules(self):

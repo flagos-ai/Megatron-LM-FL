@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from megatron.core import parallel_state
 from megatron.core.tensor_parallel import mappings
 from megatron.core.utils import get_tensor_model_parallel_group_if_none
 from tests.unit_tests.test_utilities import Utils
@@ -30,7 +31,7 @@ def test_mapping_helpers_bypass_collectives_when_tp_world_size_is_one(model_para
 
 def test_all_gather_last_dim_from_tensor_parallel_region(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(11)
     full = torch.randn(4, 8, device='cuda')
     x = full[:, rank * 4 : (rank + 1) * 4].clone().requires_grad_(True)
@@ -48,7 +49,7 @@ def test_all_gather_last_dim_from_tensor_parallel_region(model_parallel):
 
 def test_reduce_scatter_last_dim_to_tensor_parallel_region(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     group = get_tensor_model_parallel_group_if_none(None)
     torch.manual_seed(12)
     first = torch.randn(4, 8, device='cuda')
@@ -75,7 +76,7 @@ def test_reduce_scatter_last_dim_to_tensor_parallel_region(model_parallel):
 
 def test_gather_from_sequence_parallel_region_with_uneven_split_sizes(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(13)
     full = torch.randn(8, 2, 8, device='cuda')
     split_sizes = [3, 5]
@@ -93,7 +94,7 @@ def test_reduce_scatter_to_sequence_parallel_region_with_uneven_split_sizes(
     model_parallel, use_global_buffer
 ):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(14)
     first = torch.randn(8, 2, 8, device='cuda')
     second = torch.randn(8, 2, 8, device='cuda')
@@ -110,7 +111,7 @@ def test_reduce_scatter_to_sequence_parallel_region_with_uneven_split_sizes(
 
 def test_reduce_scatter_to_sequence_parallel_region_with_global_buffer(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(15)
     first = torch.randn(8, 2, 8, device='cuda')
     second = torch.randn(8, 2, 8, device='cuda')
@@ -123,7 +124,7 @@ def test_reduce_scatter_to_sequence_parallel_region_with_global_buffer(model_par
 
 def test_gather_from_sequence_parallel_region_backward_paths(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     group = get_tensor_model_parallel_group_if_none(None)
     torch.manual_seed(16)
     full = torch.randn(4, 2, 8, device='cuda')
@@ -156,7 +157,7 @@ def test_gather_from_sequence_parallel_region_backward_paths(model_parallel):
 
 def test_scatter_to_sequence_parallel_region_backward_gathers(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(17)
     full = torch.randn(4, 2, 8, device='cuda')
     x = full.clone().requires_grad_(True)
@@ -172,7 +173,7 @@ def test_scatter_to_sequence_parallel_region_backward_gathers(model_parallel):
 @pytest.mark.parametrize('use_nccl_stream', [False, True], ids=['default-stream', 'nccl-stream'])
 def test_all_to_all_equal_split_permutes_rank_chunks(model_parallel, use_nccl_stream):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     group = get_tensor_model_parallel_group_if_none(None)
     torch.manual_seed(18)
     first_to_first = torch.randn(2, 2, 4, device='cuda')
@@ -207,7 +208,7 @@ def test_all_to_all_equal_split_permutes_rank_chunks(model_parallel, use_nccl_st
 
 def test_all_to_all_uneven_split_sizes(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     group = get_tensor_model_parallel_group_if_none(None)
     torch.manual_seed(19)
     small_to_first = torch.randn(2, 2, 4, device='cuda')
@@ -234,7 +235,7 @@ def test_all_to_all_uneven_split_sizes(model_parallel):
 
 def test_all_to_all_sp2hp_and_hp2sp_roundtrip(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     torch.manual_seed(20)
     sp_full = torch.randn(8, 16, device='cuda')
     x_sp = sp_full[rank * 4 : (rank + 1) * 4]

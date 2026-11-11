@@ -45,7 +45,7 @@ def _capture_context(manager, device, *, avg_tokens=None, max_tokens=_MAX_TOKENS
         name='moe',
         max_num_tokens=max_tokens,
         num_tokens_tensor=num_tokens_tensor,
-        avg_tokens=avg_tokens,
+        avg_num_tokens=avg_tokens,
     )
 
 
@@ -116,7 +116,7 @@ def test_on_save_truncates_to_actual_tokens_and_records_the_token_maximum():
 
     assert paged_first._tensor.shape == (_ACTUAL_TOKENS * _HIDDEN,)
     assert torch.equal(paged_first._tensor, first.reshape(-1)[: _ACTUAL_TOKENS * _HIDDEN])
-    assert paged_first.original_shape == [_MAX_TOKENS, _HIDDEN]
+    assert list(paged_first.original_shape) == [_MAX_TOKENS, _HIDDEN]
     assert paged_first.avg_num_tokens == _ACTUAL_TOKENS
     assert paged_first.schedule_layer is None
     assert manager.max_tokens_across_vp_stages == {(torch.float32, _HIDDEN): 2 * _ACTUAL_TOKENS}

@@ -34,7 +34,8 @@ def test_scaled_upper_triang_masked_softmax_matches_reference_for_forward_and_ba
     x_fused = x.detach().clone().requires_grad_(True)
     out = ScaledUpperTriangMaskedSoftmax.apply(x_fused, scale)
     grad_output = torch.randn_like(out)
-    out.backward(grad_output)
+    # The fused backward kernels write the input gradient into the incoming grad buffer in place.
+    out.backward(grad_output.clone())
 
     x_ref = x.detach().float().requires_grad_(True)
     ref = _masked_softmax_fp32(x_ref, mask, scale)
@@ -56,7 +57,8 @@ def test_scaled_masked_softmax_matches_reference_with_padding_mask_for_backward(
     x_fused = x.detach().clone().requires_grad_(True)
     out = ScaledMaskedSoftmax.apply(x_fused, mask, scale)
     grad_output = torch.randn_like(out)
-    out.backward(grad_output)
+    # The fused backward kernels write the input gradient into the incoming grad buffer in place.
+    out.backward(grad_output.clone())
 
     x_ref = x.detach().float().requires_grad_(True)
     ref = _masked_softmax_fp32(x_ref, mask, scale)
@@ -76,7 +78,8 @@ def test_scaled_softmax_matches_reference_without_mask_for_forward_and_backward(
     x_fused = x.detach().clone().requires_grad_(True)
     out = ScaledSoftmax.apply(x_fused, scale)
     grad_output = torch.randn_like(out)
-    out.backward(grad_output)
+    # The fused backward kernels write the input gradient into the incoming grad buffer in place.
+    out.backward(grad_output.clone())
 
     x_ref = x.detach().float().requires_grad_(True)
     ref = _masked_softmax_fp32(x_ref, None, scale)

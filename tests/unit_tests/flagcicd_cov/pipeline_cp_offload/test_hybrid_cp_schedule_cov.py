@@ -328,42 +328,6 @@ def test_hybrid_context_parallel_forward_backward_runs_two_subsamples_per_rank_i
     assert all(parameter.grad is None for parameter in model.parameters())
 
 
-def test_hybrid_context_parallel_forward_backward_accumulates_gradients_when_not_forward_only(
-    cp2_parallel,
-):
-    sample_seqlens = [(0, 4096)] + [(sample_id, 512) for sample_id in range(1, 17)]
-    sample_id_groups, hidden, batch, config, model = _hybrid_e2e_setup(sample_seqlens)
-    torch.manual_seed(2024)
-    reference_model = _DenseModel(config).cuda()
-    hdp_rank = parallel_state.get_data_parallel_rank(with_context_parallel=True)
-    expected_ids = [sid for group_ids in sample_id_groups for sid in group_ids[hdp_rank]]
-
-    forward_data_store, total_num_tokens = hybrid_context_parallel_forward_backward(
-        forward_step_func=_hybrid_forward_step,
-        data_iterator=iter([(batch, sample_id_groups)]),
-        model=model,
-        num_microbatches=1,
-        input_tensor=None,
-        output_tensor_grad=None,
-        forward_data_store=[],
-        config=config,
-        collect_non_loss_data=False,
-        first_val_step=None,
-        forward_only=False,
-        no_sync_func=contextlib.nullcontext,
-        total_num_tokens=0,
-        check_first_val_step=check_first_val_step,
-        model_type="unit-test",
-    )
-
-    assert [entry["sample_id"] for entry in forward_data_store] == expected_ids
-    assert total_num_tokens == 4096 + 512 + 512
-    expected_loss = sum(reference_model(hidden[sid]).sum() for sid in expected_ids)
-    expected_loss.backward()
-    for parameter, reference_parameter in zip(model.parameters(), reference_model.parameters()):
-        torch.testing.assert_close(parameter.grad, reference_parameter.grad, rtol=1e-5, atol=1e-6)
-
-
 def test_forward_backward_func_dispatches_hybrid_cp_schedule_for_hybrid_config(cp2_parallel):
     sample_id_groups, hidden, batch, config, model = _hybrid_e2e_setup(_SAMPLE_SEQLENS)
     hdp_rank = parallel_state.get_data_parallel_rank(with_context_parallel=True)

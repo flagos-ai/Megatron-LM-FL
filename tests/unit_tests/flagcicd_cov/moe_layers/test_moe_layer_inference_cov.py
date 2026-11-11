@@ -47,8 +47,12 @@ class _RoutingAwareExperts(torch.nn.Module):
     """Spec-provided experts that return the dispatched tokens unchanged.
 
     Records the routing_map the MoE layer passes so the test can check the
-    inference call signature; a probability-weighted combine of identity
-    experts reproduces the input because top-k softmax weights sum to one.
+    inference call signature. Under the NCCL inference dispatcher the tokens
+    pass through unpermuted, so identity experts return the input (bf16-cast by
+    token_combine). Under the allgather training dispatcher each token is
+    permuted top-k times and the combine sums the copies without applying probs
+    (probs weighting is the experts' contract, token_dispatcher.py
+    combine_preprocess), so identity experts yield topk * input.
     """
 
     def __init__(self, num_local_experts, config, **kwargs):
@@ -143,6 +147,7 @@ class TestInferenceBackendGuards:
                 moe_router_dtype='fp32',
                 normalization='RMSNorm',
                 inference_moe_token_dispatcher_type='nvls',
+                moe_token_dispatcher_type='alltoall',
                 moe_shared_expert_intermediate_size=16,
                 moe_shared_expert_overlap=True,
                 moe_latent_size=4,
@@ -200,11 +205,15 @@ class TestLatentOverlapGuards:
 class TestLatentBackwardDw:
 
     def test_backward_dw_runs_experts_shared_experts_and_latent_projections(self, model_parallel):
-        model_parallel()
+        # overlap_moe_expert_parallel_comm requires EP > 1 (transformer_config.py:2837),
+        # so run with two expert-parallel ranks; both layers and both forwards run the
+        # same collectives on every rank and the assertions compare rank-locally.
+        model_parallel(expert_model_parallel_size=2)
         base_config = dict(
             moe_token_dispatcher_type='alltoall',
             moe_latent_size=4,
             moe_shared_expert_intermediate_size=16,
+            expert_model_parallel_size=2,
             bf16=True,
             params_dtype=torch.bfloat16,
         )
@@ -260,10 +269,18 @@ class TestInferenceForward:
         assert routing_map.shape == (8, 4)
         assert (routing_map.sum(dim=1) == 2).all()
         assert layer.experts.received_routing_map is routing_map
-        torch.testing.assert_close(inference_output, hidden, rtol=1e-4, atol=1e-5)
+        # The NCCL inference dispatcher casts the combined output to bf16
+        # (token_dispatcher_inference.py token_combine), so compare in fp32 at
+        # bf16 tolerance.
+        torch.testing.assert_close(inference_output.float(), hidden, rtol=1.6e-2, atol=1e-2)
 
         training_output, bias = layer(hidden)
 
         assert bias is None
         assert layer.token_dispatcher is layer._training_token_dispatcher
-        torch.testing.assert_close(training_output, hidden, rtol=1e-4, atol=1e-5)
+        # The allgather training dispatcher sums the top-k permuted copies without
+        # applying probs (probs weighting is the experts' contract; identity experts
+        # ignore them), so the output is topk copies of the input.
+        torch.testing.assert_close(
+            training_output, layer.config.moe_router_topk * hidden, rtol=1e-4, atol=1e-5
+        )

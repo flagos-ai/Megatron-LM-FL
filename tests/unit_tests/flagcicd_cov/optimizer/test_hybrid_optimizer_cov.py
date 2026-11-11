@@ -38,7 +38,9 @@ def _reference_adamw_step(initial_value, grad, dtype):
     return reference.detach().to(dtype)
 
 
+@torch.no_grad()
 def _perturb_state(optimizer):
+    # The state also holds the fp32 master parameter, a leaf that requires grad.
     for param, state in optimizer.state.items():
         for key, value in state.items():
             if isinstance(value, torch.Tensor) and value.dtype == torch.float32:
@@ -81,12 +83,16 @@ def test_hybrid_optimizer_update_fp32_param_by_new_param_copies_current_values()
 
     fp32_param = optimizer.param_to_fp32_param[param]
     assert fp32_param.dtype == torch.float32
-    torch.testing.assert_close(fp32_param.detach(), torch.full((4,), 2.0), rtol=0, atol=0)
+    torch.testing.assert_close(
+        fp32_param.detach(), torch.full((4,), 2.0, device=_device()), rtol=0, atol=0
+    )
 
     param.data.copy_(torch.full((4,), 3.0, dtype=torch.bfloat16, device=_device()))
     optimizer.update_fp32_param_by_new_param()
 
-    torch.testing.assert_close(fp32_param.detach(), torch.full((4,), 3.0), rtol=0, atol=0)
+    torch.testing.assert_close(
+        fp32_param.detach(), torch.full((4,), 3.0, device=_device()), rtol=0, atol=0
+    )
 
 
 def test_hybrid_optimizer_zero_grad_clears_param_and_decoupled_grads():
@@ -124,8 +130,10 @@ def test_hybrid_optimizer_steps_resident_and_offloaded_params_against_reference(
     assert len(optimizer.cpu_optimizers) == 1
     assert optimizer.sub_optimizers == [*optimizer.cpu_optimizers, optimizer.gpu_optimizer]
 
-    grad_resident = torch.tensor([0.5, 1.0, 2.0, 4.0], device=_device())
-    grad_offloaded = torch.tensor([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], device=_device())
+    grad_resident = torch.tensor([0.5, 1.0, 2.0, 4.0], dtype=torch.bfloat16, device=_device())
+    grad_offloaded = torch.tensor(
+        [0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=torch.bfloat16, device=_device()
+    )
     param_resident.grad = grad_resident
     param_offloaded.grad = grad_offloaded
 
@@ -173,7 +181,7 @@ def test_hybrid_optimizer_skips_params_without_grads_when_syncing():
     optimizer = _build_hdo(
         [param_with_grad, param_resident_frozen, param_offloaded_frozen], param_update_in_fp32=True
     )
-    grad = torch.tensor([0.5, 1.0, 2.0, 4.0], device=_device())
+    grad = torch.tensor([0.5, 1.0, 2.0, 4.0], dtype=torch.bfloat16, device=_device())
     param_with_grad.grad = grad
 
     optimizer.step()
@@ -213,8 +221,10 @@ def test_hybrid_optimizer_state_dict_round_trip_restores_sub_optimizer_states():
     )
     param_offloaded.is_offloading_candidate = True
     optimizer = _build_hdo([param_resident, param_offloaded], param_update_in_fp32=True)
-    param_resident.grad = torch.tensor([0.5, 1.0, 2.0, 4.0], device=_device())
-    param_offloaded.grad = torch.tensor([0.25, 0.5, 1.0, 2.0, 4.0, 8.0], device=_device())
+    param_resident.grad = torch.tensor([0.5, 1.0, 2.0, 4.0], dtype=torch.bfloat16, device=_device())
+    param_offloaded.grad = torch.tensor(
+        [0.25, 0.5, 1.0, 2.0, 4.0, 8.0], dtype=torch.bfloat16, device=_device()
+    )
     optimizer.step()
 
     saved_state = copy.deepcopy(optimizer.state_dict())

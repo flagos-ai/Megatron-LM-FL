@@ -45,7 +45,7 @@ def _capture_context(manager, device, *, avg_tokens=None, max_tokens=_MAX_TOKENS
         name='moe',
         max_num_tokens=max_tokens,
         num_tokens_tensor=num_tokens_tensor,
-        avg_tokens=avg_tokens,
+        avg_num_tokens=avg_tokens,
     )
 
 

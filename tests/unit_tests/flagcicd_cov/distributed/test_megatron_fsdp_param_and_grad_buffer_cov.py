@@ -183,8 +183,11 @@ def test_data_parallel_buffer_slices_items_by_shard(model_parallel):
     assert buffer.shard_bucket_index.global_data_index == rank
 
     buffer.init_data(torch.full((buffer.data_size,), float(rank)))
-    assert buffer.locate_item_in_global_item(0) == (min(rank, 2), min(rank + 1, 2))
-    if rank >= 2:
+    # The first item covers global rows [0, 2); its intersection with this
+    # rank's one-element shard is empty from rank 2 onwards (F1).
+    if rank < 2:
+        assert buffer.locate_item_in_global_item(0) == (rank, rank + 1)
+    else:
         assert buffer.locate_item_in_global_item(0) == (0, 0)
 
     item_slice = buffer.get_item(0)
@@ -222,6 +225,9 @@ def test_data_parallel_buffer_fetches_and_allocates_buckets(model_parallel):
     buffer.set_item(0, torch.full((16,), 7.0))
     torch.testing.assert_close(buffer.get_item(0), torch.full((16,), 7.0), rtol=0, atol=0)
 
+    # get_shard_from_local_buffer returns this rank's virtual shard of the
+    # replicated buffer, so seed rank-dependent values first (F1).
+    buffer.set_item(0, torch.arange(16.0))
     rank = torch.distributed.get_rank()
     shard = buffer.get_shard_from_local_buffer()
     torch.testing.assert_close(

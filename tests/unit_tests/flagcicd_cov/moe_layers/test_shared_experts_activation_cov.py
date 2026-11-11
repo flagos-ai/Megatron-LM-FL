@@ -6,6 +6,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.mlp import MLPSubmodules
@@ -13,6 +14,11 @@ from megatron.core.transformer.moe.moe_utils import get_default_pg_collection
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
 from tests.unit_tests.test_utilities import Utils
+
+
+def _tanh_gelu(x):
+    """GELU with the tanh approximation the fused geglu kernel computes."""
+    return F.gelu(x, approximate='tanh')
 
 
 def _shared_expert_config(**overrides):
@@ -112,23 +118,37 @@ class TestOverlappedActivationPaths:
         fused = self._run_fc1_activation(
             dict(activation_func=F.gelu, bias_activation_fusion=True), hidden
         )
-        plain = self._run_fc1_activation(dict(activation_func=F.gelu), hidden)
+        plain = self._run_fc1_activation(dict(activation_func=_tanh_gelu), hidden)
 
         torch.testing.assert_close(fused, plain, rtol=1e-5, atol=1e-6)
 
     def test_bias_fusion_rejects_unsupported_activation(self, model_parallel):
         model_parallel()
         model_parallel_cuda_manual_seed(123)
-        config = dict(activation_func=F.relu, bias_activation_fusion=True)
+        # relu is rejected up front by the config validation.
+        with pytest.raises(
+            ValueError,
+            match='When bias_activation_fusion is True, activation function should be '
+            'either gelu, swiglu, or quick_geglu',
+        ):
+            self._run_fc1_activation(
+                dict(activation_func=F.relu, bias_activation_fusion=True), torch.zeros(2, 2, 8)
+            )
 
+        # quick_gelu passes the config check but the shared-expert fused path does not
+        # implement it, so the layer itself rejects it during linear_fc1_forward_and_act.
         with pytest.raises(ValueError, match='Only support fusion of gelu and swiglu'):
-            self._run_fc1_activation(config, torch.zeros(2, 2, 8))
+            self._run_fc1_activation(
+                dict(activation_func=quick_gelu, bias_activation_fusion=True),
+                torch.zeros(2, 2, 8, device='cuda'),
+            )
 
     def test_te_activation_module_matches_plain_glu(self, model_parallel):
         model_parallel()
         model_parallel_cuda_manual_seed(123)
         device = torch.cuda.current_device()
         from megatron.core.extensions.transformer_engine import (
+            TEActivationOp,
             TEColumnParallelLinear,
             TERowParallelLinear,
         )
@@ -139,7 +159,9 @@ class TestOverlappedActivationPaths:
         te_expert = SharedExpertMLP(
             config=te_config,
             submodules=MLPSubmodules(
-                linear_fc1=TEColumnParallelLinear, linear_fc2=TERowParallelLinear
+                linear_fc1=TEColumnParallelLinear,
+                linear_fc2=TERowParallelLinear,
+                activation_func=TEActivationOp,
             ),
             gate=False,
             pg_collection=get_default_pg_collection(),
@@ -157,8 +179,14 @@ class TestOverlappedActivationPaths:
         plain.pre_forward_comm(hidden)
         plain.linear_fc1_forward_and_act()
 
+        # The TE activation module returns the gated half-width output like the plain
+        # GLU path. Both fc1 GEMMs run in fp32 TF32 on the CI image, so compare the
+        # fp32 result with the fp32 reference at the matmul tolerance.
         torch.testing.assert_close(
-            te_expert.cached_fc2_input, plain.cached_fc2_input, rtol=1e-5, atol=1e-6
+            te_expert.cached_fc2_input,
+            plain.cached_fc2_input,
+            rtol=1e-3,
+            atol=1e-3 * plain.cached_fc2_input.abs().max().item(),
         )
 
     def test_glu_clamp_limits_gate_and_linear_halves(self, model_parallel):
@@ -168,7 +196,11 @@ class TestOverlappedActivationPaths:
         clamp_value = 0.5
         expert = _shared_expert(
             _shared_expert_config(
-                moe_shared_expert_overlap=True, activation_func_clamp_value=clamp_value
+                moe_shared_expert_overlap=True,
+                activation_func_clamp_value=clamp_value,
+                # SwiGLU clamping is only validated for MoE configs
+                # (transformer_config.py:2304).
+                num_moe_experts=2,
             ),
             gate=False,
         ).cuda()

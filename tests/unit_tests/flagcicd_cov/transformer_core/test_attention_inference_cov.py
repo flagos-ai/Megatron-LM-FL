@@ -159,7 +159,7 @@ def test_flash_decode_returns_new_value_and_caches_rotated_key(model_parallel):
         .cuda()
         .eval()
     )
-    batch_size, heads, head_dim = 2, 4, 8
+    batch_size, heads, head_dim = 2, 4, 16
     query_layer = torch.randn(1, batch_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     key_layer = torch.randn(1, batch_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     value_layer = torch.randn(1, batch_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
@@ -182,28 +182,32 @@ def test_flash_decode_returns_new_value_and_caches_rotated_key(model_parallel):
 
     assert out.shape == (batch_size, 1, heads, head_dim)
     torch.testing.assert_close(out[:, 0], value_layer[0], rtol=1e-2, atol=1e-2)
-    expected_key = torch.cat([-key_layer[..., 4:], key_layer[..., :4]], dim=-1)
+    expected_key = torch.cat(
+        [-key_layer[..., head_dim // 2 :], key_layer[..., : head_dim // 2]], dim=-1
+    )
     torch.testing.assert_close(key_cache[0], expected_key[0], rtol=1e-2, atol=1e-2)
 
 
 def test_flash_decode_forward_matches_unpacked_kv_attention(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
-    config = _config(bf16=True, params_dtype=torch.bfloat16)
+    config = _config(bf16=True, params_dtype=torch.bfloat16, hidden_size=64)
     torch.manual_seed(7)
     plain = _self_attention(config).cuda().eval()
     torch.manual_seed(7)
     flash = (
-        _self_attention(_config(bf16=True, params_dtype=torch.bfloat16, flash_decode=True))
+        _self_attention(
+            _config(bf16=True, params_dtype=torch.bfloat16, flash_decode=True, hidden_size=64)
+        )
         .cuda()
         .eval()
     )
-    prefill_hidden = torch.randn(4, 2, 32, device="cuda", dtype=torch.bfloat16)
-    decode_hidden = torch.randn(1, 2, 32, device="cuda", dtype=torch.bfloat16)
+    prefill_hidden = torch.randn(4, 2, 64, device="cuda", dtype=torch.bfloat16)
+    decode_hidden = torch.randn(1, 2, 64, device="cuda", dtype=torch.bfloat16)
 
     with torch.no_grad():
         _, key_prefill, value_prefill = plain.get_query_key_value_tensors(prefill_hidden)
-    key_memory = torch.zeros(8, 2, 4, 8, device="cuda", dtype=torch.bfloat16)
+    key_memory = torch.zeros(8, 2, 4, 16, device="cuda", dtype=torch.bfloat16)
     value_memory = torch.zeros_like(key_memory)
     key_memory[:4] = key_prefill
     value_memory[:4] = value_prefill
@@ -222,16 +226,16 @@ def test_flash_decode_forward_matches_unpacked_kv_attention(model_parallel):
                 decode_hidden,
                 None,
                 inference_context=flash_context,
-                rotary_pos_cos=torch.ones(8, 4, device="cuda", dtype=torch.bfloat16),
-                rotary_pos_sin=torch.zeros(8, 4, device="cuda", dtype=torch.bfloat16),
+                rotary_pos_cos=torch.ones(8, 8, device="cuda", dtype=torch.bfloat16),
+                rotary_pos_sin=torch.zeros(8, 8, device="cuda", dtype=torch.bfloat16),
                 sequence_len_offset=torch.full((2,), 4, dtype=torch.int32, device="cuda"),
             )
         plain_output, _ = plain(
             decode_hidden, None, inference_context=plain_context, rotary_pos_emb=None
         )
 
-    assert flash_output.shape == (1, 2, 32)
-    assert plain_output.shape == (1, 2, 32)
+    assert flash_output.shape == (1, 2, 64)
+    assert plain_output.shape == (1, 2, 64)
     torch.testing.assert_close(flash_output, plain_output, rtol=1.6e-2, atol=1e-2)
 
 
@@ -239,7 +243,7 @@ def test_flash_decode_and_prefill_over_paged_kv_returns_shared_value(model_paral
     model_parallel(tensor_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
     attention = _self_attention(_config(bf16=True, params_dtype=torch.bfloat16)).cuda().eval()
-    heads, head_dim, block_size = 2, 8, 4
+    heads, head_dim, block_size = 2, 8, 256
     shared_value = torch.randn(heads, head_dim, device="cuda", dtype=torch.bfloat16)
     key_cache = torch.randn(1, block_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     value_cache = shared_value.expand(1, block_size, heads, head_dim).contiguous().clone()
@@ -272,7 +276,7 @@ def test_flash_decode_and_prefill_decode_only_over_paged_kv(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
     attention = _self_attention(_config(bf16=True, params_dtype=torch.bfloat16)).cuda().eval()
-    heads, head_dim, block_size = 2, 8, 4
+    heads, head_dim, block_size = 2, 8, 256
     shared_value = torch.randn(heads, head_dim, device="cuda", dtype=torch.bfloat16)
     key_cache = torch.randn(2, block_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     value_cache = shared_value.expand(2, block_size, heads, head_dim).contiguous().clone()

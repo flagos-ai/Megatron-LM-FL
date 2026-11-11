@@ -239,8 +239,11 @@ def test_block_forward_zero_recompute_granularity_entry_clears_method(
 
 def test_block_forward_empty_stage_clones_input_tensor(model_parallel):
     model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=2)
+    layout = PipelineParallelLayerLayout(
+        [["embedding", "decoder", "decoder"], ["loss"]], pipeline_model_parallel_size=2
+    )
     config = _config(
-        num_layers=2, pipeline_model_parallel_size=2, num_layers_in_first_pipeline_stage=2
+        num_layers=2, pipeline_model_parallel_size=2, pipeline_model_parallel_layout=layout
     )
     block = TransformerBlock(
         config, get_gpt_layer_local_spec(), pre_process=False, post_process=False

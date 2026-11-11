@@ -8,6 +8,7 @@ import torch.nn.functional as F
 
 from megatron.core.activations import squared_relu
 from megatron.core.extensions.transformer_engine import (
+    TEActivationOp,
     TEColumnParallelGroupedLinear,
     TERowParallelGroupedLinear,
 )
@@ -40,19 +41,26 @@ def _experts_config(**overrides):
     return TransformerConfig(**defaults)
 
 
-def _grouped_submodules():
-    """Grouped-linear submodules with real Transformer Engine modules (A100 only)."""
+def _grouped_submodules(activation_func=None):
+    """Grouped-linear submodules with real Transformer Engine modules (A100 only).
+
+    ``activation_func`` must be TEActivationOp when the config sets
+    use_te_activation_func: without it TEGroupedMLP falls back to the raw
+    activation function, which never chunks the GLU halves (experts.py:220).
+    """
     return GroupedMLPSubmodules(
-        linear_fc1=TEColumnParallelGroupedLinear, linear_fc2=TERowParallelGroupedLinear
+        linear_fc1=TEColumnParallelGroupedLinear,
+        linear_fc2=TERowParallelGroupedLinear,
+        activation_func=activation_func,
     )
 
 
-def _grouped_experts(config):
+def _grouped_experts(config, activation_func=None):
     """TEGroupedMLP on the current CUDA device with deterministic silu-glu weights."""
     experts = TEGroupedMLP(
         num_local_experts=config.num_moe_experts,
         config=config,
-        submodules=_grouped_submodules(),
+        submodules=_grouped_submodules(activation_func),
         pg_collection=get_default_pg_collection(),
     ).cuda()
     with torch.no_grad():
@@ -286,7 +294,7 @@ class TestTEGroupedMLPForward:
         config = _experts_config(
             use_te_activation_func=True, bf16=True, params_dtype=torch.bfloat16
         )
-        experts = _grouped_experts(config)
+        experts = _grouped_experts(config, activation_func=TEActivationOp)
         hidden = (torch.arange(40, device='cuda').reshape(5, 8) / 8.0).to(torch.bfloat16)
         probs = torch.tensor([0.5, 0.25, 0.75, 1.0, 0.5], device='cuda', dtype=torch.bfloat16)
         tokens_per_expert = torch.tensor([3, 2], device='cuda', dtype=torch.long)
@@ -311,7 +319,7 @@ class TestTEGroupedMLPForward:
             bf16=True,
             params_dtype=torch.bfloat16,
         )
-        experts = _grouped_experts(config)
+        experts = _grouped_experts(config, activation_func=TEActivationOp)
         hidden = (torch.arange(40, device='cuda').reshape(5, 8) / 8.0).to(torch.bfloat16)
         probs = torch.tensor([0.5, 0.25, 0.75, 1.0, 0.5], device='cuda', dtype=torch.bfloat16)
         tokens_per_expert = torch.tensor([3, 2], device='cuda', dtype=torch.long)

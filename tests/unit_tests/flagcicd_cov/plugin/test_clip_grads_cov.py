@@ -12,10 +12,19 @@ from megatron.core.utils import local_multi_tensor_applier, local_multi_tensor_l
 from megatron.plugin import utils as plugin_utils
 from megatron.plugin.optimizer import clip_grads
 
+_TE_OPTIMIZER_MODULES = (
+    "transformer_engine",
+    "transformer_engine.pytorch",
+    "transformer_engine.pytorch.optimizers",
+)
+
 
 def _block_backend_imports(context, *names):
+    # A dotted module already in sys.modules is returned without checking its parents, so on an
+    # image with Transformer Engine every level of the import chain must be blocked.
     for name in names:
-        context.setitem(sys.modules, name, None)
+        for blocked in _TE_OPTIMIZER_MODULES if name == "transformer_engine" else (name,):
+            context.setitem(sys.modules, blocked, None)
 
 
 def test_import_falls_back_to_local_multi_tensor_impl_when_backends_absent():

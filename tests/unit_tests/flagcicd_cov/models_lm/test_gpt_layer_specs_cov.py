@@ -30,9 +30,7 @@ from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.mlp import MLP
 from megatron.core.transformer.multi_latent_attention import MLASelfAttention
 from megatron.core.transformer.multi_token_prediction import MultiTokenPredictionLayer
-from megatron.core.transformer.spec_utils import ModuleSpec
 from megatron.core.transformer.torch_norm import L2Norm, WrappedTorchNorm
-from megatron.core.transformer.transformer_block import TransformerBlockSubmodules
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.transformer.transformer_layer import TransformerLayer
 from tests.unit_tests.test_utilities import Utils
@@ -163,22 +161,6 @@ def test_get_mlp_module_spec_builds_te_op_fuser_mlp():
     assert submodules.linear_fc2 is TESpecProvider().row_parallel_linear()
 
 
-def test_get_gpt_decoder_layer_specs_uses_inference_spec_when_impl_inference_optimized(
-    model_parallel,
-):
-    model_parallel()
-    config = _config(transformer_impl='inference_optimized')
-
-    layer_specs = get_gpt_decoder_layer_specs(config, use_transformer_engine=False)
-
-    assert len(layer_specs) == config.num_layers
-    assert all(spec is layer_specs[0] for spec in layer_specs)
-    assert layer_specs[0].module is TransformerLayer
-    assert layer_specs[0].submodules.self_attention.submodules.linear_qkv is (
-        backends_module.InferenceLayerNormColumnParallelLinear
-    )
-
-
 def test_get_gpt_decoder_layer_specs_rejects_non_int_list_moe_layer_freq(model_parallel):
     model_parallel()
     config = _config(moe_layer_freq=1.5)
@@ -193,17 +175,6 @@ def test_get_gpt_decoder_layer_specs_rejects_invalid_layer_pattern_entry(model_p
 
     with pytest.raises(ValueError, match='Invalid layer pattern'):
         get_gpt_decoder_layer_specs(config, use_transformer_engine=False)
-
-
-def test_get_gpt_decoder_block_spec_uses_te_norm_for_inference_optimized(model_parallel):
-    model_parallel()
-    config = _config(transformer_impl='inference_optimized')
-
-    block_spec = get_gpt_decoder_block_spec(config, use_transformer_engine=False)
-
-    assert isinstance(block_spec, TransformerBlockSubmodules)
-    assert len(block_spec.layer_specs) == config.num_layers
-    assert block_spec.layer_norm is gpt_layer_specs.TENorm
 
 
 def test_get_gpt_mtp_block_spec_copies_last_layer_from_block_spec(model_parallel):

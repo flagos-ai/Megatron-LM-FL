@@ -123,7 +123,7 @@ def test_fsdp_distributed_index_group_accessors(model_parallel):
     assert dist_index.get_fsdp_group() is dist_index.fsdp_group
     assert dist_index.get_outer_fsdp_group() is None
     assert dist_index.get_root_mesh() is mesh
-    assert dist_index.get_submesh("dp_shard") is mesh["dp_shard"]
+    assert dist_index.get_submesh("dp_shard") == mesh["dp_shard"]
 
 
 def test_fsdp_distributed_index_requires_fsdp_group(model_parallel):

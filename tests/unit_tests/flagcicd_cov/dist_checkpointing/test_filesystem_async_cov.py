@@ -210,6 +210,11 @@ def test_async_save_raises_when_checkpoint_directory_is_removed(model_parallel, 
         request.execute_sync()
 
     failures = caught.value.failures
+    # state_dict_saver.save_state_dict_async_finalize: every rank raises, but the per-rank failure
+    # details are only gathered on the coordinator (rank 0); other ranks raise with an empty dict.
+    if rank != 0:
+        assert failures == {}
+        return
     assert set(failures.keys()) == set(range(world_size))
     for exc, _ in failures.values():
         assert isinstance(exc, RuntimeError)

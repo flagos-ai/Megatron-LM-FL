@@ -245,7 +245,7 @@ def test_fp32_optimizer_clips_grads_to_norm_and_counts_zeros(model_parallel):
     success, grad_norm, num_zeros_in_grad = optimizer.step()
 
     assert success is True
-    assert grad_norm == pytest.approx(32.0**0.5, rel=1e-5)
+    assert float(grad_norm) == pytest.approx(32.0**0.5, rel=1e-5)
     assert num_zeros_in_grad == 2
     clipped_grad = original_grad * (1.0 / (32.0**0.5 + 1.0e-6))
     torch.testing.assert_close(

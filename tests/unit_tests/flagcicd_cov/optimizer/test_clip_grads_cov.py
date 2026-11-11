@@ -38,7 +38,7 @@ def test_get_grad_norm_fp32_l2_norm_of_single_tensor_matches_reference(model_par
     total_norm = get_grad_norm_fp32(grad, norm_type=2)
 
     expected = (25.0 * _world_size()) ** 0.5
-    assert total_norm == pytest.approx(expected, rel=1e-5)
+    assert float(total_norm) == pytest.approx(expected, rel=1e-5)
 
 
 def test_get_grad_norm_fp32_l2_norm_of_grad_list_matches_reference(model_parallel):
@@ -48,7 +48,7 @@ def test_get_grad_norm_fp32_l2_norm_of_grad_list_matches_reference(model_paralle
     total_norm = get_grad_norm_fp32(grads, norm_type=2)
 
     expected = ((25.0 + 100.0) * _world_size()) ** 0.5
-    assert total_norm == pytest.approx(expected, rel=1e-5)
+    assert float(total_norm) == pytest.approx(expected, rel=1e-5)
 
 
 def test_get_grad_norm_fp32_inf_norm_matches_reference(model_parallel):
@@ -67,7 +67,7 @@ def test_get_grad_norm_fp32_third_norm_matches_reference(model_parallel):
     total_norm = get_grad_norm_fp32(grads, norm_type=3)
 
     expected = (9.0 * _world_size()) ** (1.0 / 3.0)
-    assert total_norm == pytest.approx(expected, rel=1e-5)
+    assert float(total_norm) == pytest.approx(expected, rel=1e-5)
 
 
 def test_get_grad_norm_fp32_returns_zero_for_empty_grad_list(model_parallel):

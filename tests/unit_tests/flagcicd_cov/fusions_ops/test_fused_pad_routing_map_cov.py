@@ -47,8 +47,9 @@ def test_fused_pad_routing_map_pads_every_expert_column_and_keeps_input_untouche
 
     out = _eager(fused_pad_routing_map.fused_pad_routing_map)(routing_map, 4)
 
+    # Expert 0 has 1 token and needs 3 more (rows 1-3); expert 1 has 2 and needs 2 more (rows 0, 2).
     expected = torch.tensor(
-        [[1, 1], [1, 1], [1, 1], [0, 1], [0, 0], [0, 0], [0, 0]], dtype=torch.int32, device=DEVICE
+        [[1, 1], [1, 1], [1, 1], [1, 1], [0, 0], [0, 0], [0, 0]], dtype=torch.int32, device=DEVICE
     )
     assert torch.equal(out, expected)
     assert int(out[:, 0].sum()) % 4 == 0
@@ -86,8 +87,9 @@ def test_fused_pad_routing_map_public_call_flips_leading_zeros_to_reach_pad_mult
 
     out = fused_pad_routing_map.fused_pad_routing_map(routing_map, 4)
 
+    # Expert 0 has 1 token and needs 3 more (rows 1-3); expert 1 has 2 and needs 2 more (rows 0, 2).
     expected = torch.tensor(
-        [[1, 1], [1, 1], [1, 1], [0, 1], [0, 0], [0, 0], [0, 0]], dtype=torch.int32, device=DEVICE
+        [[1, 1], [1, 1], [1, 1], [1, 1], [0, 0], [0, 0], [0, 0]], dtype=torch.int32, device=DEVICE
     )
     assert out.shape == (7, 2)
     assert out.dtype == torch.int32

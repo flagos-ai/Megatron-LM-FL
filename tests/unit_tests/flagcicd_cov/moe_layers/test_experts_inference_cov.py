@@ -79,7 +79,12 @@ class TestInferenceGroupedMLP:
     """Inference-optimized grouped experts on the A100 CI node."""
 
     def _inference_experts(self, activation_func):
-        from megatron.core.models.gpt.moe_module_specs import get_inference_optimized_moe_spec
+        # The inference-optimized GPT layer pairs the InferenceGroupedMLP experts with
+        # the default TopKRouter (MoESubmodules default, moe_layer.py:157); the layer
+        # always passes layer_number to the router (moe_layer.py:260), which only
+        # TopKRouter accepts, so build the layer from the spec that pairing uses.
+        from megatron.core.models.backends import InferenceSpecProvider
+        from megatron.core.models.gpt.moe_module_specs import get_moe_module_spec_for_backend
 
         config = _experts_config(
             activation_func=activation_func,
@@ -93,19 +98,23 @@ class TestInferenceGroupedMLP:
             bf16=True,
             params_dtype=torch.bfloat16,
         )
-        layer = get_inference_optimized_moe_spec()(config=config)
+        layer = get_moe_module_spec_for_backend(
+            backend=InferenceSpecProvider(),
+            num_experts=config.num_moe_experts,
+            moe_grouped_gemm=True,
+        )(config=config)
         layer = layer.cuda()
         return layer, layer.experts
 
     def test_constructor_resolves_mcore_activation_type_and_backend(self, model_parallel):
         model_parallel()
         model_parallel_cuda_manual_seed(123)
-        from megatron.core.inference.moe import InferenceGroupedGemmBackend, McoreActivationType
+        from megatron.core.inference.moe import ActivationType, InferenceGroupedGemmBackend
 
         _, experts = self._inference_experts(squared_relu)
 
         assert isinstance(experts, InferenceGroupedMLP)
-        assert experts._mcore_activation_type is McoreActivationType.SQUARED_RELU
+        assert experts._mcore_activation_type is ActivationType.SQUARED_RELU
         assert experts.inference_grouped_gemm_backend is InferenceGroupedGemmBackend.TORCH
         assert experts._nvls_dispatcher is False
         assert experts._concatenated_weights_built is False
@@ -114,7 +123,8 @@ class TestInferenceGroupedMLP:
         model_parallel()
 
         with pytest.raises(
-            ValueError, match='No mcore_fused_moe ActivationType mapping for activation_func=silu'
+            ValueError,
+            match='No mcore_fused_moe ActivationType mapping for activation_func=<function silu',
         ):
             self._inference_experts(F.silu)
 

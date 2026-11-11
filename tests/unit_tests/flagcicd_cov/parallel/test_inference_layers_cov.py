@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from megatron.core import parallel_state
 from megatron.core.inference.symmetric_memory import SymmetricMemoryManager
 from megatron.core.tensor_parallel.inference_layers import (
     InferenceColumnParallelLinear,
@@ -119,7 +120,7 @@ def test_inference_column_parallel_linear_tp1_matches_torch_linear(model_paralle
 
 def test_inference_column_parallel_linear_tp2_gathers_sequence(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = InferenceColumnParallelLinear(
         16,
         32,
@@ -173,7 +174,7 @@ def test_inference_layer_norm_column_parallel_linear_tp1_matches_reference(model
 
 def test_inference_layer_norm_column_parallel_linear_tp2_gathers_sequence(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     eps = 1e-5
     layer = InferenceLayerNormColumnParallelLinear(
         16,
@@ -227,7 +228,7 @@ def test_inference_row_parallel_linear_tp1_matches_torch_linear(model_parallel):
 
 def test_inference_row_parallel_linear_tp2_reduce_scatters_output(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = InferenceRowParallelLinear(
         16,
         16,
@@ -254,7 +255,7 @@ def test_inference_row_parallel_linear_tp2_reduce_scatters_output(model_parallel
 
 def test_inference_column_parallel_linear_training_delegates_to_parent(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = InferenceColumnParallelLinear(
         16,
         32,
@@ -281,7 +282,7 @@ def test_inference_column_parallel_linear_training_delegates_to_parent(model_par
 
 def test_inference_row_parallel_linear_training_delegates_to_parent(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = InferenceRowParallelLinear(
         16,
         16,
@@ -330,7 +331,7 @@ def test_inference_row_parallel_linear_fused_setters_store_inputs(model_parallel
 
 def test_inference_all_gather_from_tensor_model_parallel_region(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     config = _sequence_parallel_config()
     layer = InferenceColumnParallelLinear(
         16,
@@ -372,7 +373,7 @@ def test_inference_all_gather_from_tensor_model_parallel_region_tp_size_one(mode
 
 def test_inference_reduce_scatter_to_sequence_parallel_region(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     config = _sequence_parallel_config()
     layer = InferenceColumnParallelLinear(
         16,

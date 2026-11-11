@@ -26,6 +26,8 @@ def model_parallel():
 def _make_config(**overrides):
     overrides.setdefault('params_dtype', torch.bfloat16)
     overrides.setdefault('bf16', True)
+    # TransformerConfig defaults attention_dropout to 0.1; the references are dropout-free.
+    overrides.setdefault('attention_dropout', 0.0)
     return TransformerConfig(num_layers=2, hidden_size=32, num_attention_heads=4, **overrides)
 
 
@@ -61,10 +63,13 @@ def _attention_reference(q, k, v, bias=None, window_size=None):
         query_pos = torch.arange(seq_q, device=q.device).unsqueeze(1)
         key_pos = torch.arange(seq_k, device=q.device).unsqueeze(0)
         distance = (seq_k - seq_q) + query_pos - key_pos
-        windowed = (distance >= 0) & (distance < window_size[0])
+        # (left, right) window as in flash-attn/TE: key j is visible for i - left <= j <= i + right.
+        windowed = (distance >= -window_size[1]) & (distance <= window_size[0])
         scores = scores.masked_fill(~windowed, float('-inf'))
     probs = torch.softmax(scores, dim=-1)
-    return (probs @ vf).permute(2, 0, 1, 3).to(q.dtype)
+    out = (probs @ vf).permute(2, 0, 1, 3)
+    # TE DotProductAttention returns [s, b, heads * head_dim].
+    return out.reshape(out.shape[0], out.shape[1], -1).to(q.dtype)
 
 
 def _make_attention_and_inputs(model_parallel, **config_overrides):
@@ -96,7 +101,7 @@ def test_dpa_forward_matches_torch_reference(model_parallel):
     attn, q, k, v = _make_attention_and_inputs(model_parallel)
     out = attn(q, k, v, None, AttnMaskType.causal)
     expected = _attention_reference(q, k, v)
-    assert out.shape == (16, 2, 4, 8)
+    assert out.shape == (16, 2, 32)
     torch.testing.assert_close(out, expected, rtol=RTOL, atol=ATOL)
 
 
@@ -128,7 +133,7 @@ def test_dpa_forward_disables_context_parallel_when_local_cp_size_is_one(model_p
     packed = PackedSeqParams(local_cp_size=1)
     out = attn(q, k, v, None, AttnMaskType.causal, packed_seq_params=packed)
     expected = _attention_reference(q, k, v)
-    assert out.shape == (16, 2, 4, 8)
+    assert out.shape == (16, 2, 32)
     torch.testing.assert_close(out, expected, rtol=RTOL, atol=ATOL)
     assert attn.cp_group is None
 
@@ -140,7 +145,7 @@ def test_dpa_forward_switches_to_bottom_right_mask_for_window_decode(model_paral
     v = _det_qkv(4, offset=7).cuda()
     out = attn(q, k, v, None, AttnMaskType.no_mask)
     expected = _attention_reference(q, k, v, window_size=(2, 0))
-    assert out.shape == (1, 2, 4, 8)
+    assert out.shape == (1, 2, 32)
     torch.testing.assert_close(out, expected, rtol=RTOL, atol=ATOL)
 
 
@@ -186,7 +191,8 @@ def test_dpa_sharded_state_dict_shards_learnable_softmax_offset(model_parallel):
             'dp_cp_group': parallel_state.get_data_parallel_group(with_context_parallel=True)
         },
     )
-    assert set(state_dict) == {'module.softmax_offset'}
+    # TE modules also carry an _extra_state entry (FP8 metadata), sharded alongside the offset.
+    assert set(state_dict) == {'module.softmax_offset', 'module._extra_state'}
     sharded = state_dict['module.softmax_offset']
     assert isinstance(sharded, ShardedTensor)
     assert sharded.key == 'module.softmax_offset'
@@ -255,7 +261,7 @@ def test_fused_rope_thd_interleaved_matches_reference(model_parallel):
 
     model_parallel(tensor_model_parallel_size=1)
     cu_seqlens = torch.tensor([0, 4, 7], dtype=torch.int32, device='cuda')
-    t = _det_qkv(7, dim=16).cuda().reshape(7, 4, 16)
+    t = _det_qkv(7, batch=1, dim=16).cuda().reshape(7, 4, 16)
     freqs_full = _rope_angles(4, 16, interleaved=True)
     token_freqs = torch.cat((freqs_full[:4], freqs_full[:3]), dim=0).reshape(7, 1, 16)
     out = fused_apply_rotary_pos_emb_thd(t, cu_seqlens, freqs_full, interleaved=True)

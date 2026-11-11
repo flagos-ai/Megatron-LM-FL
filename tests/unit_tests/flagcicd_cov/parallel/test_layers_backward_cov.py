@@ -4,6 +4,7 @@
 import pytest
 import torch
 
+from megatron.core import parallel_state
 from megatron.core.tensor_parallel.layers import ColumnParallelLinear, RowParallelLinear
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
@@ -35,7 +36,7 @@ def _gpu_config(**overrides):
 
 def test_frozen_weight_column_parallel_linear_sequence_parallel(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -70,7 +71,7 @@ def test_frozen_weight_column_parallel_linear_sequence_parallel(model_parallel):
 
 def test_frozen_weight_column_parallel_linear_allreduces_dgrad(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -104,7 +105,7 @@ def test_column_parallel_linear_skips_offload_annotation_outside_cpu_offload_con
     model_parallel,
 ):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     from megatron.core.extensions.transformer_engine import get_cpu_offload_context
 
     config = _gpu_config(cpu_offloading=True)
@@ -117,7 +118,8 @@ def test_column_parallel_linear_skips_offload_annotation_outside_cpu_offload_con
         skip_bias_add=False,
         gather_output=False,
     )
-    offload_context, _ = get_cpu_offload_context(True, 1, 1, True, False, False, False)
+    # TE requires the last model layer to stay resident: offload 1 of 2 layers.
+    offload_context, _ = get_cpu_offload_context(True, 1, 2, True, False, False, False)
     config._cpu_offloading_context = offload_context
     torch.manual_seed(62)
     full_weight = torch.randn(16, 16, device='cuda')
@@ -139,7 +141,7 @@ def test_column_parallel_linear_skips_offload_annotation_outside_cpu_offload_con
 
 def test_row_parallel_linear_skips_offload_annotation_outside_cpu_offload_context(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     from megatron.core.extensions.transformer_engine import get_cpu_offload_context
 
     config = _gpu_config(cpu_offloading=True)
@@ -152,7 +154,8 @@ def test_row_parallel_linear_skips_offload_annotation_outside_cpu_offload_contex
         input_is_parallel=True,
         skip_bias_add=True,
     )
-    offload_context, _ = get_cpu_offload_context(True, 1, 1, True, False, False, False)
+    # TE requires the last model layer to stay resident: offload 1 of 2 layers.
+    offload_context, _ = get_cpu_offload_context(True, 1, 2, True, False, False, False)
     config._cpu_offloading_context = offload_context
     torch.manual_seed(63)
     full_weight = torch.randn(16, 16, device='cuda', requires_grad=True)
@@ -209,7 +212,7 @@ def test_column_parallel_linear_defers_embedding_wgrad_compute(model_parallel):
 
 def test_column_parallel_linear_accumulates_main_grad_across_microbatches(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -240,7 +243,7 @@ def test_column_parallel_linear_fused_wgrad_accumulates_main_grad_across_microba
     model_parallel, dtype
 ):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -288,7 +291,7 @@ def test_column_parallel_linear_rejects_unsupported_main_grad_dtype(model_parall
 
 def test_column_parallel_linear_backward_dw_is_noop(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -315,7 +318,7 @@ def test_column_parallel_linear_backward_dw_is_noop(model_parallel):
 
 def test_row_parallel_linear_backward_dw_is_noop(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = RowParallelLinear(
         16,
         16,

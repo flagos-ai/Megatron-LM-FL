@@ -5,6 +5,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from megatron.core import parallel_state
 from megatron.core.tensor_parallel.layers import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -58,7 +59,7 @@ def test_column_parallel_linear_cpu_initialization_matches_master_weight_shard(m
         skip_bias_add=False,
         keep_master_weight_for_test=True,
     )
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
 
     assert layer.weight.shape == (8, 16)
     assert layer.master_weight.shape == (16, 16)
@@ -80,7 +81,7 @@ def test_row_parallel_linear_cpu_initialization_matches_master_weight_shard(mode
         skip_bias_add=False,
         keep_master_weight_for_test=True,
     )
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
 
     assert layer.weight.shape == (16, 8)
     assert layer.master_weight.shape == (16, 16)
@@ -95,7 +96,7 @@ def test_initialize_affine_weight_cpu_shards_with_stride_when_rank_not_given(mod
     master_weight = _initialize_affine_weight_cpu(
         weight, 16, 16, 8, 0, torch.nn.init.normal_, stride=2, return_master_weight=True
     )
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
 
     expected = torch.cat(
         [
@@ -109,7 +110,7 @@ def test_initialize_affine_weight_cpu_shards_with_stride_when_rank_not_given(mod
 
 def test_column_parallel_linear_forward_with_gather_output_matches_torch_linear(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -146,7 +147,7 @@ def test_column_parallel_linear_forward_with_gather_output_matches_torch_linear(
 
 def test_column_parallel_linear_sequence_parallel_matches_torch_linear(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -178,7 +179,7 @@ def test_column_parallel_linear_sequence_parallel_matches_torch_linear(model_par
 
 def test_column_parallel_linear_runtime_gather_output_overrides_constructor(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -201,7 +202,7 @@ def test_column_parallel_linear_runtime_gather_output_overrides_constructor(mode
 
 def test_column_parallel_linear_inference_optimized_all_gather(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = ColumnParallelLinear(
         16,
         16,
@@ -258,7 +259,7 @@ def test_column_parallel_linear_rejects_supplied_weight_of_wrong_shape(model_par
 
 def test_row_parallel_linear_scatters_input_when_not_parallel(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = RowParallelLinear(
         16,
         16,
@@ -290,7 +291,7 @@ def test_row_parallel_linear_scatters_input_when_not_parallel(model_parallel):
 
 def test_row_parallel_linear_sequence_parallel_reduce_scatters_output(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = RowParallelLinear(
         16,
         16,
@@ -325,7 +326,7 @@ def test_row_parallel_linear_sequence_parallel_reduce_scatters_output(model_para
 
 def test_row_parallel_linear_expert_bypasses_reduce_and_bias(model_parallel):
     model_parallel(2, 1, expert_model_parallel_size=2)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     layer = RowParallelLinear(
         16,
         16,
@@ -351,7 +352,7 @@ def test_row_parallel_linear_expert_bypasses_reduce_and_bias(model_parallel):
 
 def test_vocab_parallel_embedding_inference_optimized_reduce_scatter(model_parallel):
     model_parallel(2, 1)
-    rank = torch.distributed.get_rank()
+    rank = parallel_state.get_tensor_model_parallel_rank()
     embedding = VocabParallelEmbedding(
         16,
         8,

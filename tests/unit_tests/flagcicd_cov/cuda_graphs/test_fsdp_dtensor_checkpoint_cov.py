@@ -2,6 +2,7 @@
 """FSDP DTensor checkpoints: expert key remapping, FP8 extra-state stripping, state-dict diff reporting, and DCP round-trip validation."""
 
 import logging
+import pathlib
 
 import pytest
 import torch
@@ -177,7 +178,10 @@ class TestValidateLoadedStateDict:
         assert tuple(dtensor.shape) == (8, 4)
 
         state_dict = {'plain': torch.arange(6.0).reshape(2, 3), 'sharded': dtensor, 'iteration': 7}
-        checkpoint_dir = tmp_path / 'fsdp-dtensor-ckpt'
+        # tmp_path differs per rank; every rank must save into and validate rank 0's directory.
+        shared = [str(tmp_path / 'fsdp-dtensor-ckpt')]
+        torch.distributed.broadcast_object_list(shared, src=0)
+        checkpoint_dir = pathlib.Path(shared[0])
         torch.distributed.checkpoint.save(state_dict, checkpoint_id=str(checkpoint_dir))
         assert (checkpoint_dir / '.metadata').exists()
 

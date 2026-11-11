@@ -217,9 +217,18 @@ def test_get_megatron_optimizer_sgd_step_matches_reference(model_parallel):
     success, grad_norm, num_zeros_in_grad = optimizer.step()
 
     assert success is True
-    assert grad_norm is None
-    assert num_zeros_in_grad is None
     grads = [0.02 + 0.001 * index for index, _ in enumerate(ddp_model.parameters())]
+    # get_megatron_optimizer returns a ChainedOptimizer, whose step always reports the global L2
+    # norm of the main grads (optimizer.py ChainedOptimizer.step), even with clip_grad=0.
+    expected_norm = (
+        sum(
+            param.numel() * grad_value**2
+            for param, grad_value in zip(ddp_model.parameters(), grads)
+        )
+        ** 0.5
+    )
+    assert float(grad_norm) == pytest.approx(expected_norm, rel=1e-5)
+    assert num_zeros_in_grad is None
     for param, original, grad_value in zip(ddp_model.parameters(), original_values, grads):
         expected = original - config.lr * grad_value
         torch.testing.assert_close(param.detach(), expected, rtol=1e-6, atol=1e-7)
@@ -355,7 +364,10 @@ def test_get_mup_config_overrides_exclude_muon_matrices_from_lr_scaling(model_pa
         muon_num_ns_steps=5,
         muon_tp_mode='duplicated',
     )
-    mup_overrides = get_mup_config_overrides(config, mup_width_mult=2.0)
+    # optimizer_type defaults to 'adam'; the Muon exclusion applies only when it names Muon.
+    mup_overrides = get_mup_config_overrides(
+        config, mup_width_mult=2.0, optimizer_type=config.optimizer
+    )
 
     assert mup_overrides
 

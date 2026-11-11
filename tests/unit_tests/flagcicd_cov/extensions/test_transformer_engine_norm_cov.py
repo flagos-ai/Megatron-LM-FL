@@ -96,11 +96,13 @@ def test_te_layernorm_column_parallel_linear_rejects_unsupported_arguments(
             8,
             config=_make_config(),
             init_method=lambda w: None,
-            gather_output=False,
-            bias=False,
-            skip_bias_add=False,
-            is_expert=False,
-            **kwargs,
+            **{
+                'gather_output': False,
+                'bias': False,
+                'skip_bias_add': False,
+                'is_expert': False,
+                **kwargs,
+            },
         )
 
 
@@ -117,7 +119,7 @@ def _make_fused_layernorm_linear(tp_group, normalization='LayerNorm'):
         tp_group=tp_group,
     )
     layer.weight.data.copy_(_det(4, 16).cuda())
-    layer.bias.data.copy_(_det(4).cuda())
+    layer.bias.data.copy_(_det(1, 4).reshape(4).cuda())
     layer.layer_norm_weight.data.fill_(1.0)
     if layer.layer_norm_bias is not None:
         layer.layer_norm_bias.data.zero_()
@@ -293,7 +295,12 @@ def test_fused_residual_rmsnorm_forward_matches_reference_and_runs_post_hook(mod
     x = _det_input(6, 2, 16).cuda()
     with pytest.warns(UserWarning, match='TEFusedResidualRMSNorm module has a submodule'):
         out, residual = norm(x)
-    assert hook_calls == [(norm, (), None)]
+    # The fused TE op re-runs the module's hooks without exposing tensors (module, (), None); torch
+    # then runs the same hook normally on the module's own call with the real input and output.
+    assert len(hook_calls) == 2
+    assert hook_calls[0] == (norm, (), None)
+    assert hook_calls[1][0] is norm and hook_calls[1][1][0] is x
+    assert hook_calls[1][2][0] is out
 
     x_fp32 = x.float()
     inv_rms = torch.rsqrt(x_fp32.pow(2).mean(dim=-1, keepdim=True) + 1e-5)
@@ -310,7 +317,11 @@ def test_fused_residual_rmsnorm_runs_pre_hook_with_empty_args(model_parallel):
     x = _det_input(6, 2, 16).cuda()
     with pytest.warns(UserWarning, match='TEFusedResidualRMSNorm module has a submodule'):
         out, residual = norm(x)
-    assert hook_calls == [(norm, ())]
+    # torch runs the pre-hook on the module's own call first; the fused TE op then re-runs it
+    # without exposing the input tensor.
+    assert len(hook_calls) == 2
+    assert hook_calls[0][0] is norm and hook_calls[0][1][0] is x
+    assert hook_calls[1] == (norm, ())
 
     x_fp32 = x.float()
     inv_rms = torch.rsqrt(x_fp32.pow(2).mean(dim=-1, keepdim=True) + 1e-5)

@@ -35,7 +35,12 @@ def _make_config(**overrides):
     overrides.setdefault('bf16', True)
     overrides.setdefault('gradient_accumulation_fusion', False)
     overrides.setdefault('tensor_model_parallel_size', 2)
-    return TransformerConfig(num_layers=2, hidden_size=32, num_attention_heads=4, **overrides)
+    # TransformerConfig only accepts delay_wgrad_compute together with MoE expert-parallel overlap;
+    # the TE layers read the flag from the built config, so set it after validation.
+    delay_wgrad_compute = overrides.pop('delay_wgrad_compute', False)
+    config = TransformerConfig(num_layers=2, hidden_size=32, num_attention_heads=4, **overrides)
+    config.delay_wgrad_compute = delay_wgrad_compute
+    return config
 
 
 def _det(rows, cols):

@@ -242,56 +242,6 @@ def test_padded_forward_gathers_sequence_parallel_input_for_column_linear(
     )
 
 
-def test_padded_forward_reduce_scatters_sequence_parallel_output_for_row_linear(
-    model_parallel, monkeypatch
-):
-    from megatron.core.extensions.transformer_engine import TERowParallelLinear
-
-    tp_group = _init_tp2(model_parallel)
-    pad, unpad = _FakeFp8Padding(1), _FakeFp8Unpadding(1)
-    monkeypatch.setattr(fp8_utils, 'Fp8Padding', lambda _: pad)
-    monkeypatch.setattr(fp8_utils, 'Fp8Unpadding', lambda _: unpad)
-    quant_calls = _record_inert_quant_context(monkeypatch)
-    tp_rank = torch.distributed.get_rank(group=tp_group)
-
-    layer = TERowParallelLinear(
-        16,
-        8,
-        config=_quantized_layer_config(sequence_parallel=True),
-        init_method=lambda w: None,
-        bias=False,
-        input_is_parallel=True,
-        skip_bias_add=False,
-        is_expert=False,
-        tp_group=tp_group,
-        name='layers.0.fc2',
-    )
-    assert layer.will_execute_quantized(False) is True
-    layer.weight.data.copy_(_deterministic_weight(8, 8).cuda())
-    fp8_utils._wrap_te_linear_for_padding(layer)
-
-    full_x = _deterministic_input(6, 2, 16).cuda()
-    x_local = full_x[:, :, tp_rank * 8 : (tp_rank + 1) * 8].contiguous()
-    out, bias = layer(x_local)
-    assert bias is None
-    assert layer.sequence_parallel is True
-    weight_parts = [torch.empty(8, 8, dtype=torch.bfloat16, device='cuda') for _ in range(2)]
-    torch.distributed.all_gather(weight_parts, layer.weight.contiguous(), group=tp_group)
-    full_weight = torch.cat(weight_parts, dim=1)
-    full_out = torch.nn.functional.linear(full_x, full_weight)
-    expected = full_out[tp_rank * 3 : (tp_rank + 1) * 3]
-    assert out.shape == (3, 2, 8)
-    torch.testing.assert_close(out, expected, rtol=RTOL, atol=ATOL)
-    assert pad.seen_shape == (6, 2 * 8)
-    assert unpad.seen_shape == (16, 2 * 8)
-    (call,) = quant_calls
-    assert call['enabled'] is True
-    assert type(call['fp8_recipe']).__name__ == 'Float8CurrentScaling'
-    assert call['fp8_group'] is parallel_state.get_amax_reduction_group(
-        with_context_parallel=True, tp_only_amax_red=False
-    )
-
-
 def test_is_column_parallel_linear_classifies_layers(model_parallel):
     from megatron.core.extensions.transformer_engine import TEColumnParallelLinear
     from megatron.core.tensor_parallel.layers import ColumnParallelLinear

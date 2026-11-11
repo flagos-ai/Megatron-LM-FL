@@ -1,6 +1,8 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
 """GPTModel: position-embedding dispatch (rope/yarn/mrope), flash-decode preprocessing, deferred wgrad buffers, and hash-routing forward."""
 
+import json
+
 import pytest
 import torch
 
@@ -181,6 +183,7 @@ def test_gpt_constructor_allocates_wgrad_deferral_buffers_on_last_stage_when_def
             pipeline_model_parallel_size=2,
             pipeline_dtype=torch.float32,
             defer_embedding_wgrad_compute=True,
+            gradient_accumulation_fusion=True,
         ),
         pre_process=pre_process,
         post_process=post_process,
@@ -199,12 +202,20 @@ def test_gpt_constructor_writes_config_logger_payloads(model_parallel, nvte_auto
 
     model = _build_gpt(_config(config_logger_dir=str(tmp_path)))
 
+    # Each process writes exactly one payload per prefix, carrying its own tp/dp/cp/pp/ep ranks
+    # (config_logger.py names them f'{prefix}.rank_{rank_str}.iter{count}'; the state-dict
+    # payload is an OrderedDict and is dumped as .pth).
+    rank_str = parallel_state.get_all_ranks()
     names = [path.name for path in tmp_path.iterdir()]
-    assert len([name for name in names if name.startswith('GPTModel.rank_')]) == Utils.world_size
-    assert (
-        len([name for name in names if name.startswith('GPTModel_init_ckpt.rank_')])
-        == Utils.world_size
-    )
+    assert [name for name in names if name.startswith('GPTModel.rank_')] == [
+        f'GPTModel.rank_{rank_str}.iter0.json'
+    ]
+    assert [name for name in names if name.startswith('GPTModel_init_ckpt.rank_')] == [
+        f'GPTModel_init_ckpt.rank_{rank_str}.iter0.pth'
+    ]
+    payload = json.loads((tmp_path / f'GPTModel.rank_{rank_str}.iter0.json').read_text())
+    assert payload['vocab_size'] == 128
+    assert payload['max_sequence_length'] == 8
 
 
 def test_gpt_forward_threads_input_ids_to_decoder_for_hash_routing(model_parallel, nvte_auto_env):

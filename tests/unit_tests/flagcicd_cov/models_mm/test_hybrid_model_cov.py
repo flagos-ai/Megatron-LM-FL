@@ -1,5 +1,7 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
 """Hybrid language model: deprecated pattern and ratio arguments, yarn rotary embeddings, offloading markers, and forward/inference logits."""
+import math
+
 import pytest
 import torch
 
@@ -36,12 +38,22 @@ def _hybrid_config(**overrides):
 
 def _build_hybrid_model(config=None, **kwargs):
     model_config = config if config is not None else _hybrid_config()
+    if 'hybrid_layer_pattern' in kwargs:
+        hybrid_layer_pattern = kwargs.pop('hybrid_layer_pattern')
+    elif any(
+        key in kwargs
+        for key in ('hybrid_override_pattern', 'hybrid_attention_ratio', 'hybrid_mlp_ratio')
+    ):
+        # The deprecated arguments are only honoured when hybrid_layer_pattern is absent.
+        hybrid_layer_pattern = None
+    else:
+        hybrid_layer_pattern = 'M*'
     return HybridModel(
         config=model_config,
         hybrid_stack_spec=hybrid_stack_spec,
         vocab_size=VOCAB_SIZE,
         max_sequence_length=MAX_SEQUENCE_LENGTH,
-        hybrid_layer_pattern=kwargs.pop('hybrid_layer_pattern', 'M*'),
+        hybrid_layer_pattern=hybrid_layer_pattern,
         position_embedding_type=kwargs.pop('position_embedding_type', 'rope'),
         **kwargs,
     )
@@ -116,9 +128,37 @@ class TestHybridModelConstruction:
 
         assert model.rotary_pos_emb.__class__.__name__ == 'YarnRotaryEmbedding'
         rotary_pos_emb, _ = model.rotary_pos_emb(MAX_SEQUENCE_LENGTH)
-        assert rotary_pos_emb.shape == torch.Size(
-            [MAX_SEQUENCE_LENGTH, model.config.kv_channels // 2]
-        )
+        dim = model.config.kv_channels
+        assert rotary_pos_emb.shape == torch.Size([MAX_SEQUENCE_LENGTH, 1, 1, dim])
+
+        # Independent yarn frequency computation: blend the interpolated and
+        # extra inverse frequencies through the correction ramp mask, then
+        # take the outer product with the sequence and duplicate the halves.
+        config = _yarn_config()
+        rotary_base = 10000.0
+        exponents = torch.arange(0, dim, 2, dtype=torch.float32) / dim
+        inv_freq_extra = 1.0 / (rotary_base**exponents)
+        inv_freq_inter = 1.0 / (config.yarn_rotary_scaling_factor * rotary_base**exponents)
+
+        def correction_dim(num_rotations):
+            return (
+                dim
+                * math.log(
+                    config.yarn_original_max_position_embeddings / (num_rotations * 2 * math.pi)
+                )
+                / (2 * math.log(rotary_base))
+            )
+
+        low = max(math.floor(correction_dim(config.yarn_beta_fast)), 0)
+        high = min(math.ceil(correction_dim(config.yarn_beta_slow)), dim - 1)
+        if low == high:
+            high += 0.001
+        ramp = torch.clamp((torch.arange(dim // 2, dtype=torch.float32) - low) / (high - low), 0, 1)
+        inv_freq_mask = 1.0 - ramp
+        inv_freq = inv_freq_inter * (1 - inv_freq_mask) + inv_freq_extra * inv_freq_mask
+        freqs = torch.outer(torch.arange(MAX_SEQUENCE_LENGTH, dtype=torch.float32), inv_freq)
+        expected = torch.cat((freqs, freqs), dim=-1)[:, None, None, :]
+        torch.testing.assert_close(rotary_pos_emb.cpu(), expected, rtol=1e-5, atol=1e-6)
         assert torch.isfinite(rotary_pos_emb).all()
 
     def test_preprocess_for_fine_grained_offloading_marks_params(self):

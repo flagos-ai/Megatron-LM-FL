@@ -1,6 +1,8 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
 """fully_shard_model rejects invalid sharding strategies; fully_shard_optimizer requires FSDP-wrapped params."""
 
+import re
+
 import pytest
 import torch
 from torch.distributed.device_mesh import init_device_mesh
@@ -62,7 +64,10 @@ def test_fully_shard_model_rejects_invalid_outer_strategy_enum(cuda_mesh):
 
 
 def test_fully_shard_model_outer_sharding_requires_full_inner_sharding(cuda_mesh):
-    with pytest.raises(ValueError, match="Sharding with Hybrid (Fully) Sharded Data Parallel"):
+    # "Hybrid (Fully)" contains regex metacharacters, so match the escaped text.
+    with pytest.raises(
+        ValueError, match=re.escape("Sharding with Hybrid (Fully) Sharded Data Parallel")
+    ):
         fully_shard_model(
             torch.nn.Linear(4, 4),
             device_mesh=cuda_mesh,
@@ -72,13 +77,17 @@ def test_fully_shard_model_outer_sharding_requires_full_inner_sharding(cuda_mesh
 
 
 @pytest.mark.parametrize(
-    "dp_outer_dim,hybrid_fsdp_group",
-    [("dp_outer", None), (None, torch.distributed.group.WORLD)],
+    "dp_outer_dim,provide_hybrid_group",
+    [("dp_outer", False), (None, True)],
     ids=["missing_hybrid_group", "missing_dp_outer_dim"],
 )
 def test_fully_shard_model_requires_dp_outer_and_hybrid_group_together(
-    cuda_mesh, dp_outer_dim, hybrid_fsdp_group
+    cuda_mesh, dp_outer_dim, provide_hybrid_group
 ):
+    # torch.distributed.group.WORLD is None until the process group is
+    # initialized, so the world group must be resolved at runtime (inside the
+    # test) for the hybrid group to be non-None.
+    hybrid_fsdp_group = torch.distributed.group.WORLD if provide_hybrid_group else None
     with pytest.raises(ValueError, match="must be specified together for Hybrid FSDP"):
         fully_shard_model(
             torch.nn.Linear(4, 4),

@@ -66,9 +66,12 @@ def test_warm_up_comm_group_restores_variable_seq_lengths_after_warming(model_pa
 
 def test_warm_up_comm_group_hetero_warms_every_pipeline_group_the_rank_joins(model_parallel):
     model_parallel(pipeline_model_parallel_size=1, tensor_model_parallel_size=1)
-    groups = [
-        dist.new_group(ranks=members, backend="nccl") for members in ([0, 1, 2, 3], [4, 5, 6, 7])
-    ]
+    rank = dist.get_rank()
+    member_lists = ([0, 1, 2, 3], [4, 5, 6, 7])
+    # new_group must be called on every rank, but it returns a non-member sentinel on ranks outside
+    # the group; a hetero communicator only holds the pipeline groups this rank belongs to.
+    all_groups = [dist.new_group(ranks=members, backend="nccl") for members in member_lists]
+    groups = [pg for pg, members in zip(all_groups, member_lists) if rank in members]
     config = ModelParallelConfig(
         pipeline_model_parallel_size=1,
         pipeline_dtype=torch.float,
@@ -79,8 +82,7 @@ def test_warm_up_comm_group_hetero_warms_every_pipeline_group_the_rank_joins(mod
 
     assert comm.warm_up_comm_group() is None
 
-    rank = dist.get_rank()
-    own = next(pg for pg in groups if rank in dist.get_process_group_ranks(pg))
+    (own,) = groups
     stage = own.rank()
     device = torch.device("cuda", torch.cuda.current_device())
     payload = torch.full((1,), (stage + 1) * 7.0, device=device)

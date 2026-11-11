@@ -55,6 +55,25 @@ class _TensorBox:
     label: int = 0
 
 
+class _Float64GraphedFuncModule(_GraphedFuncModule):
+    """Float64 graphed module whose function does not read its bookkeeping buffer.
+
+    create_fwd_graph restores every module buffer in place after capture, which
+    bumps the saved-for-backward version of any buffer that a differentiable op
+    reads and aborts the backward capture ("modified by an inplace operation").
+    Graphed modules keep mutated buffers out of the differentiable path (the MoE
+    router counters behind that restore are updated under torch.no_grad), so this
+    module's function leaves its buffer alone while the backup/restore path still
+    runs over it.
+    """
+
+    def my_op(self, hidden_states=None, flag=0, box=None, **kwargs):
+        if hidden_states is None:
+            return None
+        out = self.linear(hidden_states)
+        return out + flag if flag else out
+
+
 def _manager_config(**overrides):
     base = dict(
         num_layers=2,
@@ -74,13 +93,19 @@ def _reset_global_cudagraph_state():
     CudaGraphManager.global_mempool = None
 
 
-def test_ensure_generator_state_is_cudagraph_safe_for_plain_generator():
-    gen = torch.Generator()
+def test_ensure_generator_state_is_cudagraph_safe_for_default_cuda_generator():
+    # graphsafe_get_state/graphsafe_set_state are only implemented for CUDA
+    # generators; the source passes the default CUDA generators of each device
+    # through this helper before every capture.
+    gen = torch.cuda.default_generators[torch.cuda.current_device()]
     gen.manual_seed(1234)
     before = gen.get_state().clone()
     assert _ensure_generator_state_is_cudagraph_safe(gen) is gen
     assert torch.equal(gen.get_state(), before)
-    assert gen.get_state().data_ptr() != before.data_ptr()
+    # The fixed-up generator keeps producing the seeded stream after the round trip.
+    draws = torch.randn(4, device='cuda', generator=gen)
+    gen.manual_seed(1234)
+    assert torch.equal(torch.randn(4, device='cuda', generator=gen), draws)
 
 
 def test_create_cudagraphs_returns_early_when_no_graphs_were_recorded(monkeypatch):
@@ -234,14 +259,13 @@ class TestSingleMempoolReuseWhenPipelineParallelIsOne:
         for layer in self.block.layers:
             assert len(layer.cudagraph_manager.cudagraph_runners) == 1
 
-        first_layer_mask_meta = (
-            self.block.layers[0]
-            .cudagraph_manager.cudagraph_runners[0]
-            .fwd_graph_input_kwarg_metas['attention_mask']
-            .cg_buffer_metadata
-        )
-        assert first_layer_mask_meta.input_use_count == 2
-        assert first_layer_mask_meta.is_cudagraph_input is True
+        # The reuse accounting lives on the recorded tensor itself: ArgMetadata
+        # only keeps a reference copy of cg_buffer_metadata once the tensor has
+        # one, and the runner's kwarg metas are built before any metadata is
+        # attached. The shared mask is counted once per layer, when each layer's
+        # runner first records its inputs.
+        assert mask.cg_buffer_metadata.input_use_count == len(self.block.layers)
+        assert mask.cg_buffer_metadata.is_cudagraph_input is True
 
         create_cudagraphs()
 
@@ -277,7 +301,7 @@ class TestManagerRecordAndMismatchErrors:
         self.hidden_size = self.config.hidden_size
         self.recorded = torch.randn(4, self.hidden_size, device='cuda', requires_grad=True)
         self.box = _TensorBox(values=torch.randn(2, 3, device='cuda'), label=7)
-        out = self.module.my_op(self.recorded, flag=3, box=self.box)
+        out = self.module.my_op(self.recorded, 3, box=self.box)
         out.sum().backward()
 
     def teardown_method(self, method):
@@ -290,44 +314,49 @@ class TestManagerRecordAndMismatchErrors:
 
     def test_matching_arguments_produce_no_mismatch_errors(self):
         same = torch.randn(4, self.hidden_size, device='cuda')
-        errors = self._mismatch_errors((same,), {'flag': 3, 'box': self.box})
+        errors = self._mismatch_errors((same, 3), {'box': self.box})
         assert errors == []
 
     def test_get_mismatch_errors_reports_each_argument_kind(self):
         h = self.hidden_size
         cases = [
             (
-                (torch.zeros(2, h, device='cuda'),),
-                {'flag': 3, 'box': self.box},
+                (torch.zeros(2, h, device='cuda'), 3),
+                {'box': self.box},
                 'Tensor mismatch at args[0]: Received shape',
             ),
             (
-                (torch.zeros(4, h, device='cuda', dtype=torch.float64),),
-                {'flag': 3, 'box': self.box},
+                (torch.zeros(4, h, device='cuda', dtype=torch.float64), 3),
+                {'box': self.box},
                 'Received dtype',
             ),
-            ((torch.zeros(4, h, device='cpu'),), {'flag': 3, 'box': self.box}, 'Received device'),
-            ((torch.zeros(4, h, device='cuda'), 'oops'), {'flag': 3}, 'Type mismatch at args[1]'),
+            ((torch.zeros(4, h, device='cpu'), 3), {'box': self.box}, 'Received device'),
             (
-                (torch.zeros(4, h, device='cuda'),),
-                {'flag': 4, 'box': self.box},
-                "Value mismatch at kwargs['flag']: 4 vs 3",
+                (torch.zeros(4, h, device='cuda'), 'oops'),
+                {'box': self.box},
+                'Type mismatch at args[1]',
             ),
             (
-                (torch.zeros(4, h, device='cuda'),),
-                {'flag': 3, 'box': _TensorBox(values=torch.zeros(2, 3, device='cuda'), label=7)},
+                (torch.zeros(4, h, device='cuda'), 4),
+                {'box': self.box},
+                'Value mismatch at args[1]: 4 vs 3',
+            ),
+            (
+                (torch.zeros(4, h, device='cuda'), 3),
+                # Same dtype/device as the recorded (2, 3) values but a different shape.
+                {'box': _TensorBox(values=torch.zeros(3, 3, device='cuda'), label=7)},
                 "Tensor mismatch at kwargs['box'].values",
             ),
-            ((torch.zeros(4, h, device='cuda'),), {'flag': 3}, 'Missing kwargs'),
+            ((torch.zeros(4, h, device='cuda'), 3), {}, 'Missing kwargs'),
             (
-                (torch.zeros(4, h, device='cuda'),),
-                {'flag': 3, 'box': self.box, 'extra': 1},
+                (torch.zeros(4, h, device='cuda'), 3),
+                {'box': self.box, 'extra': 1},
                 'Unexpected kwargs',
             ),
             (
-                (torch.zeros(4, h, device='cuda'), torch.zeros(4, h, device='cuda')),
-                {'flag': 3, 'box': self.box},
-                'Argument count mismatch: 2 vs 1',
+                (torch.zeros(4, h, device='cuda'), 3, torch.zeros(4, h, device='cuda')),
+                {'box': self.box},
+                'Argument count mismatch: 3 vs 2',
             ),
         ]
         for args, kwargs, fragment in cases:
@@ -336,7 +365,7 @@ class TestManagerRecordAndMismatchErrors:
 
     def test_get_mismatch_errors_rejects_unsupported_argument_types(self):
         with pytest.raises(AssertionError, match='not supported'):
-            self._mismatch_errors(([torch.zeros(4, self.hidden_size, device='cuda')],), {})
+            self._mismatch_errors(([torch.zeros(4, self.hidden_size, device='cuda')], 3), {})
 
     def test_get_tensors_flattens_tensors_nested_in_dataclasses(self):
         flat = torch.zeros(4, self.hidden_size, device='cuda')
@@ -348,7 +377,7 @@ class TestManagerRecordAndMismatchErrors:
     def test_get_mismatch_errors_dataclass_field_value_mismatch(self):
         same_shape = torch.zeros(2, 3, device='cuda')
         errors = self._mismatch_errors(
-            (self.recorded,), {'flag': 3, 'box': _TensorBox(values=same_shape, label=9)}
+            (self.recorded, 3), {'box': _TensorBox(values=same_shape, label=9)}
         )
         assert any("Value mismatch at kwargs['box'].label: 9 vs 7" in message for message in errors)
 
@@ -361,7 +390,7 @@ class TestCudagraphWeakRefFallback:
         Utils.initialize_model_parallel()
         model_parallel_cuda_manual_seed(123)
         self.config = _manager_config()
-        self.module = _GraphedFuncModule(self.config).cuda().double()
+        self.module = _Float64GraphedFuncModule(self.config).cuda().double()
         self.manager = CudaGraphManager(self.config, base_module=self.module, function_name='my_op')
         self.hidden_size = self.config.hidden_size
         self.box = _TensorBox(values=torch.randn(2, 3, device='cuda', dtype=torch.float64), label=7)
@@ -385,7 +414,7 @@ class TestCudagraphWeakRefFallback:
         replay_input = torch.randn(
             4, self.hidden_size, device='cuda', dtype=torch.float64, requires_grad=True
         )
-        expected = self.module.linear(replay_input) * self.module.scale
+        expected = self.module.linear(replay_input) + 3
         out = self.module.my_op(replay_input, flag=3, box=self.box)
         out.sum().backward()
         assert torch.equal(out, expected)

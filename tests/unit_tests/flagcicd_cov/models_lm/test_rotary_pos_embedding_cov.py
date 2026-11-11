@@ -227,7 +227,12 @@ def test_mrope_forward_slices_sequence_for_context_parallel_rank(model_parallel)
 
     emb = mrope(position_ids, [2, 2, 2], cp_group=cp_group)
 
-    full = mrope(position_ids, [2, 2, 2], cp_group=None)
+    # cp_group=None falls back to the module's own CP group (size 2 here) and would slice too;
+    # a single-rank group (TP=1) yields the unsliced embedding.
+    single_rank_group = parallel_state.get_tensor_model_parallel_group()
+    assert single_rank_group.size() == 1
+    full = mrope(position_ids, [2, 2, 2], cp_group=single_rank_group)
+    assert full.shape == (4, 1, 1, 12)
     rank = cp_group.rank()
     expected = full.index_select(0, torch.tensor([rank, 3 - rank], device=full.device))
     assert emb.shape == (2, 1, 1, 12)

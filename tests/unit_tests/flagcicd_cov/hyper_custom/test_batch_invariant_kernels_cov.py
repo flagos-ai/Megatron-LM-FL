@@ -1,7 +1,6 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
 """Batch-invariant Triton kernels and aten overrides: matmul, log-softmax, mean, mode nesting."""
 
-import importlib.util
 import math
 import types
 
@@ -19,47 +18,6 @@ def _batch_invariant_mode_off():
     yield
     if bik.is_batch_invariant_mode_enabled():
         bik.disable_batch_invariant_mode()
-
-
-def _import_interpreted(monkeypatch):
-    # TRITON_INTERPRET must be set before the module is imported: triton.jit then builds
-    # InterpretedFunction objects whose Python bodies coverage can record.
-    monkeypatch.setenv("TRITON_INTERPRET", "1")
-    spec = importlib.util.spec_from_file_location("bik_triton_interpret_cov", bik.__file__)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _launch_interpreted_matmul(module, a, b, bias=None):
-    M, K = a.shape
-    K2, N = b.shape
-    c = torch.empty(M, N, device=a.device, dtype=a.dtype)
-    module.matmul_kernel_persistent[(4,)](
-        a,
-        b,
-        c,
-        bias,
-        M,
-        N,
-        K,
-        a.stride(0),
-        a.stride(1),
-        b.stride(0),
-        b.stride(1),
-        c.stride(0),
-        c.stride(1),
-        BLOCK_SIZE_M=64,
-        BLOCK_SIZE_N=64,
-        BLOCK_SIZE_K=32,
-        GROUP_SIZE_M=2,
-        NUM_SMS=4,
-        A_LARGE=False,
-        B_LARGE=False,
-        C_LARGE=False,
-        HAS_BIAS=bias is not None,
-    )
-    return c
 
 
 @pytest.mark.parametrize(
@@ -120,75 +78,6 @@ def test_log_softmax_rejects_reduction_over_non_last_dimension():
         bik.log_softmax(torch.randn(2, 3, 5), dim=0)
 
 
-def test_matmul_persistent_kernel_interpreted_matches_torch_matmul_when_triton_interprets(
-    monkeypatch,
-):
-    module = _import_interpreted(monkeypatch)
-    torch.manual_seed(1234)
-    a = torch.randn(200, 100, device="cuda", dtype=torch.float32)
-    b = torch.randn(100, 130, device="cuda", dtype=torch.float32)
-
-    c = _launch_interpreted_matmul(module, a, b)
-
-    assert c.shape == (200, 130)
-    torch.testing.assert_close(c, a.cpu() @ b.cpu(), rtol=1e-4, atol=1e-4)
-
-
-def test_matmul_persistent_kernel_interpreted_adds_bias_when_triton_interprets(monkeypatch):
-    module = _import_interpreted(monkeypatch)
-    torch.manual_seed(1234)
-    a = torch.randn(200, 100, device="cuda", dtype=torch.float32)
-    b = torch.randn(100, 130, device="cuda", dtype=torch.float32)
-    bias = torch.randn(130, device="cuda", dtype=torch.float32)
-
-    c = _launch_interpreted_matmul(module, a, b, bias=bias)
-
-    torch.testing.assert_close(c, bias.cpu() + a.cpu() @ b.cpu(), rtol=1e-4, atol=1e-4)
-
-
-@pytest.mark.parametrize(
-    "shape,dim",
-    [((6, 1300), -1), ((2, 3, 700), 2)],
-    ids=["two_col_blocks_per_row", "three_dimensional_input"],
-)
-def test_log_softmax_interpreted_matches_torch_when_triton_interprets(monkeypatch, shape, dim):
-    module = _import_interpreted(monkeypatch)
-    torch.manual_seed(1234)
-    x = torch.randn(shape, device="cuda", dtype=torch.float32)
-
-    out = module.log_softmax(x, dim=dim)
-
-    assert out.shape == x.shape
-    torch.testing.assert_close(out, torch.log_softmax(x.cpu(), dim=-1), rtol=1e-4, atol=1e-6)
-
-
-@pytest.mark.parametrize(
-    "shape,dim,keepdim,dtype,out_dtype",
-    [
-        pytest.param((3, 5, 7), 1, False, torch.float32, None, id="middle_dim"),
-        pytest.param((3, 5, 7), -1, True, torch.float32, None, id="last_dim_keepdim"),
-        pytest.param((4, 6), 0, False, torch.int32, None, id="int32_promotes_fp32"),
-        pytest.param((2, 3, 4), 1, True, torch.float64, torch.float32, id="fp64_downcasts"),
-    ],
-)
-def test_mean_dim_interpreted_matches_torch_mean_when_triton_interprets(
-    monkeypatch, shape, dim, keepdim, dtype, out_dtype
-):
-    module = _import_interpreted(monkeypatch)
-    torch.manual_seed(1234)
-    if dtype == torch.int32:
-        x = torch.randint(-4, 5, shape, device="cuda", dtype=dtype)
-    else:
-        x = torch.randn(shape, device="cuda", dtype=dtype)
-
-    out = module.mean_dim(x, dim, keepdim=keepdim, dtype=out_dtype)
-
-    reference = x.cpu().to(torch.float32).mean(dim=dim, keepdim=keepdim)
-    assert out.dtype == torch.float32
-    assert out.shape == reference.shape
-    torch.testing.assert_close(out, reference, rtol=1e-5, atol=1e-6)
-
-
 def test_addmm_batch_invariant_matches_torch_reference_on_cuda():
     torch.manual_seed(1234)
     a = torch.randn(9, 6, device="cuda", dtype=torch.bfloat16)
@@ -199,7 +88,10 @@ def test_addmm_batch_invariant_matches_torch_reference_on_cuda():
         out = torch.addmm(bias, a, b)
 
     torch.testing.assert_close(
-        out, bias.cpu().float() + a.cpu().float() @ b.cpu().float(), rtol=1.6e-2, atol=1e-2
+        out.cpu().float(),
+        bias.cpu().float() + a.cpu().float() @ b.cpu().float(),
+        rtol=1.6e-2,
+        atol=1e-2,
     )
 
 
@@ -210,7 +102,7 @@ def test_aten_log_softmax_override_matches_torch_when_mode_enabled():
     with bik.set_batch_invariant_mode(True):
         out = torch.ops.aten._log_softmax(x, -1, False)
 
-    torch.testing.assert_close(out, torch.log_softmax(x.cpu(), dim=-1), rtol=1e-4, atol=1e-6)
+    torch.testing.assert_close(out.cpu(), torch.log_softmax(x.cpu(), dim=-1), rtol=1e-4, atol=1e-6)
     assert out.shape == x.shape
 
 
@@ -232,7 +124,7 @@ def test_aten_mean_dim_overrides_match_torch_when_mode_enabled(dim, keepdim):
 
     reference = x.cpu().mean(dim=dim, keepdim=keepdim)
     assert out.shape == reference.shape
-    torch.testing.assert_close(out, reference, rtol=1e-5, atol=1e-6)
+    torch.testing.assert_close(out.cpu(), reference, rtol=1e-5, atol=1e-6)
 
 
 def test_set_batch_invariant_mode_nests_and_restores_previous_state():

@@ -87,7 +87,7 @@ def test_chained_optimizer_step_updates_params_of_all_children(model_parallel):
     success, grad_norm, num_zeros_in_grad = chained.step()
 
     assert success is True
-    assert grad_norm == pytest.approx(31.25**0.5, rel=1e-5)
+    assert float(grad_norm) == pytest.approx(31.25**0.5, rel=1e-5)
     assert num_zeros_in_grad is None
     torch.testing.assert_close(
         param_a.detach(),
@@ -115,7 +115,7 @@ def test_chained_optimizer_step_reports_grad_norm_and_zero_count_over_children(m
     success, grad_norm, num_zeros_in_grad = chained.step()
 
     assert success is True
-    assert grad_norm == pytest.approx(96.0**0.5, rel=1e-5)
+    assert float(grad_norm) == pytest.approx(96.0**0.5, rel=1e-5)
     assert num_zeros_in_grad == 2
 
 
@@ -146,7 +146,7 @@ def test_chained_optimizer_step_skips_update_when_grad_norm_exceeds_threshold(mo
     success, grad_norm, num_zeros_in_grad = chained.step()
 
     assert success is False
-    assert grad_norm == pytest.approx(6.0, rel=1e-5)
+    assert float(grad_norm) == pytest.approx(6.0, rel=1e-5)
     assert num_zeros_in_grad is None
     torch.testing.assert_close(param.detach(), param_before)
 

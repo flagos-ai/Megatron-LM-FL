@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 import torch
+from torch.distributed import distributed_c10d
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
 from torch.distributed.tensor.placement_types import Replicate, Shard
@@ -30,6 +31,7 @@ from megatron.core.utils import (
     make_tp_sharded_tensor_for_checkpoint,
     prepare_input_tensors_for_wgrad_compute,
 )
+from tests.unit_tests.test_utilities import Utils
 
 
 class _FakeGroup:
@@ -49,13 +51,26 @@ class _FakeGroup:
 @pytest.fixture
 def distributed(monkeypatch):
     """Make the group helpers consult the fake groups instead of an unstarted default group."""
+    Utils.initialize_distributed()
     monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: True)
     monkeypatch.setattr(torch.distributed, 'get_rank', lambda: 0)
 
 
+def _single_rank_mesh():
+    """A DeviceMesh holding only this rank, so no new process group is created.
+
+    torch 2.7 (CI image) has no ``_rank`` override: the mesh resolves the caller through
+    torch.distributed.get_rank(), so it must contain exactly that rank.
+    """
+    Utils.initialize_distributed()
+    # The distributed fixture fakes torch.distributed.get_rank; DeviceMesh resolves the real rank
+    # through distributed_c10d, so build the mesh from that.
+    return DeviceMesh('cpu', torch.tensor([distributed_c10d.get_rank()]), _init_backend=False)
+
+
 def _replicated_dtensor():
     """Build a real DTensor over a single-rank mesh that skips process-group setup."""
-    mesh = DeviceMesh('cpu', torch.arange(1), _init_backend=False, _rank=0)
+    mesh = _single_rank_mesh()
     local = torch.arange(6, dtype=torch.float32).reshape(2, 3)
     return DTensor.from_local(local, mesh, [Replicate()]), local
 
@@ -206,7 +221,7 @@ def test_full_tensor_if_necessary_returns_the_local_shard_when_replicated():
 
 
 def test_full_tensor_if_necessary_returns_the_local_shard_when_the_mesh_is_not_split():
-    mesh = DeviceMesh('cpu', torch.arange(1), _init_backend=False, _rank=0)
+    mesh = _single_rank_mesh()
     local = torch.arange(2, dtype=torch.float32).reshape(1, 2)
     dtensor = DTensor.from_local(local, mesh, [Shard(0)])
     assert torch.equal(get_full_tensor_if_necessary(dtensor), local)

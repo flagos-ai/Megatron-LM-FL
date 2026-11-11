@@ -27,8 +27,7 @@ def model_parallel():
 
 
 def _make_global_arange(rows, cols):
-    generator = torch.Generator().manual_seed(77)
-    tensor = torch.arange(rows * cols, dtype=torch.float32, generator=generator).reshape(rows, cols)
+    tensor = torch.arange(rows * cols, dtype=torch.float32).reshape(rows, cols)
     return tensor.cuda()
 
 

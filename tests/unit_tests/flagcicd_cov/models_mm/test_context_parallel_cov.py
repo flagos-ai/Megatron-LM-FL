@@ -169,8 +169,9 @@ def test_dynamic_res_split_assigns_whole_tubelets_per_rank(cp_two_ranks):
         torch.testing.assert_close(
             local_imgs_sizes, torch.tensor([[32, 32], [32, 32]], device='cuda')
         )
+        # The split is per frame: each rank keeps one cu_seqlens entry per frame it owns.
         torch.testing.assert_close(
-            local_params.cu_seqlens_q, torch.tensor([0, 8], dtype=torch.int32, device='cuda')
+            local_params.cu_seqlens_q, torch.tensor([0, 4, 8], dtype=torch.int32, device='cuda')
         )
         assert local_num_frames.tolist() == [2]
     else:
@@ -180,7 +181,7 @@ def test_dynamic_res_split_assigns_whole_tubelets_per_rank(cp_two_ranks):
             local_imgs_sizes, torch.tensor([[32, 32], [32, 32]], device='cuda')
         )
         torch.testing.assert_close(
-            local_params.cu_seqlens_q, torch.tensor([0, 8], dtype=torch.int32, device='cuda')
+            local_params.cu_seqlens_q, torch.tensor([0, 4, 8], dtype=torch.int32, device='cuda')
         )
         assert local_num_frames.tolist() == [2]
 

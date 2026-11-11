@@ -78,7 +78,7 @@ def test_distributed_optimizer_step_matches_reference_adam_on_full_params(model_
     assert success is True
     # ChainedOptimizer.step always computes the grad norm; each DP rank only
     # contributes its own shard, so the result is the norm of the full gradient.
-    assert grad_norm == pytest.approx(grad.double().pow(2).sum().sqrt().item(), rel=1e-4)
+    assert float(grad_norm) == pytest.approx(grad.double().pow(2).sum().sqrt().item(), rel=1e-4)
     assert num_zeros_in_grad is None
     torch.testing.assert_close(
         ddp_model.module.weight.detach(),
@@ -101,7 +101,7 @@ def test_distributed_optimizer_step_clips_to_full_grad_norm_and_counts_zeros(mod
     assert success is True
     # Each DP rank contributes its own shard, so the reduced norm equals the
     # norm of the full gradient.
-    assert grad_norm == pytest.approx(grad.double().pow(2).sum().sqrt().item(), rel=1e-4)
+    assert float(grad_norm) == pytest.approx(grad.double().pow(2).sum().sqrt().item(), rel=1e-4)
     assert num_zeros_in_grad == 4
     clip_coeff = 1.0 / (grad_norm + 1.0e-6)
     torch.testing.assert_close(

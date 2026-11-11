@@ -167,6 +167,19 @@ def test_finalize_model_grads_scales_grads_by_global_num_tokens(model_parallel):
     assert num_tokens.item() == 36.0
 
 
+def _pp_pair_embedding_groups():
+    """One process group per PP pair; each rank lists only its own pair.
+
+    The list form of the embedding group carries the groups the rank belongs
+    to (mirroring FSDPDistributedIndex), because torch.distributed.new_group
+    returns a non-member sentinel on the other ranks.
+    """
+    rank = torch.distributed.get_rank()
+    world_size = torch.distributed.get_world_size()
+    groups = [dist.new_group([r, r + world_size // 2]) for r in range(world_size // 2)]
+    return [groups[rank % (world_size // 2)]]
+
+
 def test_word_embedding_grads_allreduce_with_single_group_list(model_parallel):
     model_parallel(pipeline_model_parallel_size=2)
     config = TransformerConfig(num_layers=1, num_attention_heads=1)
@@ -174,19 +187,15 @@ def test_word_embedding_grads_allreduce_with_single_group_list(model_parallel):
     weight = chunk.embedding.weight
     rank = torch.distributed.get_rank()
     weight.main_grad = torch.full((8, 4), float(rank), device="cuda")
-    embd_groups = [dist.new_group([0, 4])]
+    embd_groups = _pp_pair_embedding_groups()
     pp_group = parallel_state.get_pipeline_model_parallel_group()
 
     _allreduce_word_embedding_grads([chunk], config, embd_groups, pp_group)
 
-    if rank in (0, 4):
-        torch.testing.assert_close(
-            weight.main_grad, torch.full((8, 4), 4.0, device="cuda"), rtol=0, atol=0
-        )
-    else:
-        torch.testing.assert_close(
-            weight.main_grad, torch.full((8, 4), float(rank), device="cuda"), rtol=0, atol=0
-        )
+    partner = _pp_partner_rank()
+    torch.testing.assert_close(
+        weight.main_grad, torch.full((8, 4), float(rank + partner), device="cuda"), rtol=0, atol=0
+    )
 
 
 def test_word_embedding_grads_allreduce_with_parallel_state_embd_group(model_parallel):
@@ -214,19 +223,19 @@ def test_word_embedding_grads_partial_reduce_shards_rows_by_dp_rank(model_parall
     weight = chunk.embedding.weight
     rank = torch.distributed.get_rank()
     weight.main_grad = torch.full((8, 4), float(rank), device="cuda")
-    embd_groups = [dist.new_group([0, 4])]
+    embd_groups = _pp_pair_embedding_groups()
     pp_group = parallel_state.get_pipeline_model_parallel_group()
 
     _allreduce_word_embedding_grads([chunk], config, embd_groups, pp_group)
 
-    if rank in (0, 4):
-        expected = torch.full((8, 4), float(rank), device="cuda")
-        expected[0:2] = 4.0
-        torch.testing.assert_close(weight.main_grad, expected, rtol=0, atol=0)
-    else:
-        torch.testing.assert_close(
-            weight.main_grad, torch.full((8, 4), float(rank), device="cuda"), rtol=0, atol=0
-        )
+    # Only the rows owned by this rank's DP group are reduced with the PP pair.
+    partner = _pp_partner_rank()
+    dp_world_size = parallel_state.get_data_parallel_world_size()
+    dp_rank = parallel_state.get_data_parallel_rank()
+    per_partition = weight.main_grad.shape[0] // dp_world_size
+    expected = torch.full((8, 4), float(rank), device="cuda")
+    expected[per_partition * dp_rank : per_partition * (dp_rank + 1)] = float(rank + partner)
+    torch.testing.assert_close(weight.main_grad, expected, rtol=0, atol=0)
 
 
 def test_router_grads_sum_across_pp_and_vpp_chunks(model_parallel):
@@ -253,7 +262,9 @@ def test_router_grads_sum_across_pp_and_vpp_chunks(model_parallel):
 
 def test_non_tensor_model_parallel_grads_average_and_sum(model_parallel):
     model_parallel(tensor_model_parallel_size=2)
-    config = TransformerConfig(num_layers=1, num_attention_heads=1, sequence_parallel=True)
+    config = TransformerConfig(
+        num_layers=1, num_attention_heads=2, sequence_parallel=True, tensor_model_parallel_size=2
+    )
     chunk = _SequenceParallelChunk().cuda()
     rank = torch.distributed.get_rank()
     chunk.average.weight.grad = torch.full((4, 4), float(rank + 1), device="cuda")
@@ -278,7 +289,9 @@ def test_non_tensor_model_parallel_grads_average_and_sum(model_parallel):
 
 def test_non_tensor_model_parallel_grads_with_megatron_fsdp_local_tensor(model_parallel):
     model_parallel(tensor_model_parallel_size=2)
-    config = TransformerConfig(num_layers=1, num_attention_heads=1, sequence_parallel=True)
+    config = TransformerConfig(
+        num_layers=1, num_attention_heads=2, sequence_parallel=True, tensor_model_parallel_size=2
+    )
     chunk = _SequenceParallelChunk().cuda()
     chunk.ddp_config.use_megatron_fsdp = True
     rank = torch.distributed.get_rank()
@@ -300,7 +313,9 @@ def test_non_tensor_model_parallel_grads_with_megatron_fsdp_local_tensor(model_p
 
 def test_non_tensor_model_parallel_grads_noop_for_single_tp_rank(model_parallel):
     model_parallel()
-    config = TransformerConfig(num_layers=1, num_attention_heads=1, sequence_parallel=True)
+    # Sequence parallelism requires TP>1 (model_parallel_config.py), and this
+    # test only covers the TP=1 early return, which is independent of it.
+    config = TransformerConfig(num_layers=1, num_attention_heads=1)
     chunk = _SequenceParallelChunk().cuda()
     chunk.seq_parallel.weight.grad = torch.full((4, 4), 7.0, device="cuda")
 

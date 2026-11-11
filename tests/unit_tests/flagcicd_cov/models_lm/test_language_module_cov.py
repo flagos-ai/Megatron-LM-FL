@@ -90,9 +90,10 @@ def test_compute_language_model_loss_te_fusion_matches_vocabulary_parallel_loss(
     module = LanguageModule(config)
     module.pre_process = True
     module.post_process = False
+    device = torch.cuda.current_device()
     torch.manual_seed(1234)
-    logits = torch.randn(4, 2, 128)
-    labels = torch.randint(0, 128, (2, 4))
+    logits = torch.randn(4, 2, 128, device=device)
+    labels = torch.randint(0, 128, (2, 4), device=device)
 
     fused_loss = module.compute_language_model_loss(labels, logits.clone())
     config.cross_entropy_loss_fusion = False
@@ -114,9 +115,10 @@ def test_compute_language_model_loss_native_fusion_matches_vocabulary_parallel_l
     module = LanguageModule(config)
     module.pre_process = True
     module.post_process = False
+    device = torch.cuda.current_device()
     torch.manual_seed(1234)
-    logits = torch.randn(4, 2, 128)
-    labels = torch.randint(0, 128, (2, 4))
+    logits = torch.randn(4, 2, 128, device=device)
+    labels = torch.randint(0, 128, (2, 4), device=device)
 
     fused_loss = module.compute_language_model_loss(labels, logits.clone())
     config.cross_entropy_loss_fusion = False
@@ -297,7 +299,10 @@ def test_setup_embeddings_all_reduces_over_listed_heterogeneous_groups(
     elif rank in (6, 7):
         assert model._is_in_embd_group() is False
     weight = model.shared_embedding_or_output_weight()
-    if rank in (4, 5):
+    # First-stage ranks hold the initialized word embeddings regardless of embd-group membership.
+    # The last-stage ranks 4/5 are not asserted: language_module.py rebinds `weight` for the
+    # bf16 + cpu:gloo all-reduce, so the synchronized copy never reaches the module parameter.
+    if pre_process:
         assert torch.count_nonzero(weight).item() > 0
     elif rank in (6, 7):
         assert torch.count_nonzero(weight).item() == 0
@@ -307,26 +312,27 @@ def test_setup_embeddings_all_reduces_over_listed_heterogeneous_groups(
 def test_setup_embeddings_warns_when_distributed_is_not_initialized(
     model_parallel, nvte_auto_env, monkeypatch, caplog
 ):
+    # PP=2 is needed to reach the embedding sync (a single stage returns early). With
+    # torch.distributed reported uninitialized the pipeline-rank helpers answer rank 0, so every
+    # rank builds the first-stage half; a last-stage half would trip the stage-consistency assert.
     model_parallel(pipeline_model_parallel_size=2)
-    monkeypatch.setattr(LanguageModule, 'embedding_warning_printed', False, raising=False)
+    # Reset and read the flag on the class the module namespace resolves: earlier reloads in
+    # this file rebind language_module.LanguageModule, and setup_embeddings_and_output_layer
+    # sets the flag on whatever class its own globals resolve to.
+    monkeypatch.setattr(
+        language_module.LanguageModule, 'embedding_warning_printed', False, raising=False
+    )
     monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: False)
     config = _config(pipeline_model_parallel_size=2, pipeline_dtype=torch.bfloat16)
 
     with caplog.at_level(logging.WARNING):
         model = _build_gpt(
-            config,
-            pre_process=parallel_state.is_pipeline_first_stage(),
-            post_process=parallel_state.is_pipeline_last_stage(),
-            share_embeddings_and_output_weights=True,
+            config, pre_process=True, post_process=False, share_embeddings_and_output_weights=True
         )
 
     assert "Distributed processes aren't initialized" in caplog.text
-    assert LanguageModule.embedding_warning_printed is True
-    weight = model.shared_embedding_or_output_weight()
-    if parallel_state.is_pipeline_first_stage():
-        assert weight is model.embedding.word_embeddings.weight
-    else:
-        assert weight is model.output_layer.weight
+    assert language_module.LanguageModule.embedding_warning_printed is True
+    assert model.shared_embedding_or_output_weight() is model.embedding.word_embeddings.weight
 
 
 def test_tie_embeddings_state_dict_on_pp2_stages(model_parallel, nvte_auto_env):

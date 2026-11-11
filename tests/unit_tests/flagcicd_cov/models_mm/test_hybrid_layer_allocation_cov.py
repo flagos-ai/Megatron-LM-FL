@@ -127,10 +127,10 @@ class TestSelectPipelineSegmentLegacySplit:
         pp_group = get_pipeline_model_parallel_group()
         pp_rank = pp_group.rank()
 
-        layers, offset = select_pipeline_segment("M-M*M*M", pp_group=pp_group, vp_stage=None)
+        layers, offset = select_pipeline_segment("M-M*M*M-", pp_group=pp_group, vp_stage=None)
 
-        assert layers == (["M", "-", "M"] if pp_rank == 0 else ["*", "M", "*"])
-        assert offset == pp_rank * 3
+        assert layers == (["M", "-", "M", "*"] if pp_rank == 0 else ["M", "*", "M", "-"])
+        assert offset == pp_rank * 4
 
     def test_uneven_first_stage_layers_shift_middle_ranks(self, model_parallel):
         model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=2)
@@ -145,7 +145,8 @@ class TestSelectPipelineSegmentLegacySplit:
             assert layers == ["M", "*", "M"]
             assert offset == 0
         else:
-            assert layers == ["*"]
+            # rank 1 is the single middle stage and takes the remaining 3 layers.
+            assert layers == ["*", "M", "*"]
             assert offset == 3
 
     def test_uneven_last_stage_layers_gives_tail_to_last_rank(self, model_parallel):
@@ -158,11 +159,12 @@ class TestSelectPipelineSegmentLegacySplit:
         )
 
         if pp_rank == 0:
-            assert layers == ["M", "*"]
+            # rank 0 is the single middle stage and takes the first 4 layers.
+            assert layers == ["M", "*", "M", "*"]
             assert offset == 0
         else:
-            assert layers == ["*", "M"]
-            assert offset == 2
+            assert layers == ["M", "*"]
+            assert offset == 4
 
     def test_first_and_last_stage_layers_leave_empty_middle(self, model_parallel):
         model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=2)
@@ -173,8 +175,8 @@ class TestSelectPipelineSegmentLegacySplit:
             "M*M*M*", pp_group=pp_group, vp_stage=None, first_stage_layers=2, last_stage_layers=2
         )
 
-        assert layers == (["M", "*"] if pp_rank == 0 else ["*", "M"])
-        assert offset == pp_rank * 2
+        assert layers == ["M", "*"]
+        assert offset == (0 if pp_rank == 0 else 4)
 
     def test_vpp_without_pipes_raises(self, model_parallel):
         model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=2)

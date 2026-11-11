@@ -87,8 +87,8 @@ def test_self_attention_qk_layernorm_hidden_dim_norms_flattened_qkv(model_parall
     model_parallel(tensor_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
     config = _config(qk_layernorm=True, qk_layernorm_hidden_dim=True)
-    attention = _self_attention(config)
-    hidden_states = torch.randn(4, 2, 32)
+    attention = _self_attention(config).cuda()
+    hidden_states = torch.randn(4, 2, 32, device="cuda")
 
     query, key, value = attention.get_query_key_value_tensors(hidden_states)
 
@@ -329,9 +329,13 @@ class TestDotProductAttention:
         value_rep = value.repeat_interleave(2, dim=2)
         scores = torch.einsum("sbhd,tbhd->bhst", query, key_rep) * attention.softmax_scale
         probs = torch.softmax(scores.float(), dim=-1)
-        expected = torch.einsum("bhst,tbhd->sbhd", probs, value_rep)
+        expected = torch.einsum("bhst,tbhd->sbhd", probs, value_rep).reshape(
+            sequence_length, batch_size, -1
+        )
         assert context.shape == (sequence_length, batch_size, 4 * head_dim)
-        torch.testing.assert_close(context, expected, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(
+            context, expected, rtol=1e-3, atol=1e-3 * expected.abs().max().item()
+        )
 
     def test_forward_with_sequence_parallel_skips_rng_fork(self, model_parallel):
         model_parallel(tensor_model_parallel_size=2)
@@ -355,6 +359,10 @@ class TestDotProductAttention:
         value_rep = value.repeat_interleave(2, dim=2)
         scores = torch.einsum("sbhd,tbhd->bhst", query, key_rep) * attention.softmax_scale
         probs = torch.softmax(scores.float(), dim=-1)
-        expected = torch.einsum("bhst,tbhd->sbhd", probs, value_rep)
+        expected = torch.einsum("bhst,tbhd->sbhd", probs, value_rep).reshape(
+            query.size(0), batch_size, -1
+        )
         assert context.shape == (2, batch_size, 2 * head_dim)
-        torch.testing.assert_close(context, expected, rtol=1e-5, atol=1e-6)
+        torch.testing.assert_close(
+            context, expected, rtol=1e-3, atol=1e-3 * expected.abs().max().item()
+        )

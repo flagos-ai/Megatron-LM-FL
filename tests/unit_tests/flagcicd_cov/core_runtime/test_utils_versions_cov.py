@@ -182,6 +182,8 @@ def test_experimental_fn_runs_and_logs_once_when_the_experimental_flag_is_set(
     experimental_flag, monkeypatch, caplog
 ):
     experimental_flag(True)
+    # Log on this process as rank 0: an initialized default group would make other ranks silent.
+    monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: False)
     monkeypatch.setenv('RANK', '0')
 
     @utils.experimental_fn('0.17.0')
@@ -195,6 +197,8 @@ def test_experimental_fn_runs_and_logs_once_when_the_experimental_flag_is_set(
 
 
 def test_experimental_fn_warns_when_the_feature_is_past_end_of_life(monkeypatch, caplog):
+    # Log on this process as rank 0: an initialized default group would make other ranks silent.
+    monkeypatch.setattr(torch.distributed, 'is_initialized', lambda: False)
     monkeypatch.setenv('RANK', '0')
     with caplog.at_level(logging.WARNING, logger='megatron.core.utils'):
 

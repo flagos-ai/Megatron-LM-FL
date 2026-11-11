@@ -37,9 +37,12 @@ def overlap_class_state(monkeypatch):
 def flex_deepep_stubs(monkeypatch):
     handle = object()
     state = {
-        "indices": torch.tensor([[0, 1], [1, 2], [2, 3], [3, 0], [0, 2], [1, 3], [2, 0], [3, 1]]),
-        "probs": torch.full((8, 2), 0.25),
-        "tokens_per_expert": torch.tensor([4, 4, 4, 4]),
+        # DeepEP returns its outputs on the current device.
+        "indices": torch.tensor(
+            [[0, 1], [1, 2], [2, 3], [3, 0], [0, 2], [1, 3], [2, 0], [3, 1]], device="cuda"
+        ),
+        "probs": torch.full((8, 2), 0.25, device="cuda"),
+        "tokens_per_expert": torch.tensor([4, 4, 4, 4], device="cuda"),
         "handle": handle,
     }
 
@@ -67,6 +70,8 @@ def flex_deepep_stubs(monkeypatch):
 
     monkeypatch.setattr(token_dispatcher, "fused_dispatch", _fake_fused_dispatch)
     monkeypatch.setattr(token_dispatcher, "fused_combine", _fake_fused_combine)
+    # DeepEP is absent on the CI image, so fused_a2a also leaves its SM-count setter as None.
+    monkeypatch.setattr(token_dispatcher, "set_deepep_num_sms", lambda num_sms: None)
     return state
 
 
@@ -205,7 +210,7 @@ def test_flex_overlap_roundtrip_adds_shared_expert_output(
         sorted_tokens, tokens_per_expert, sorted_probs = dispatcher.dispatch_postprocess(
             dispatched, dispatched_probs
         )
-        assert torch.equal(tokens_per_expert, torch.tensor([4, 4, 4, 4]))
+        assert tokens_per_expert.tolist() == [4, 4, 4, 4]
         assert sorted_tokens.shape == (16, 32)
 
         expert_output = sorted_tokens * sorted_probs.unsqueeze(-1)

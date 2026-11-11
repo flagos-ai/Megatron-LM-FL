@@ -120,11 +120,12 @@ class TestLLaVAPipelineParallelPadding:
         Utils.destroy_model_parallel()
 
     def test_pipeline_parallel_pads_sequence_to_max_length(self):
-        input_ids = torch.tensor([[10, 11, IMAGE_TOKEN_INDEX, 12]]).to(get_current_device())
-        labels = torch.tensor([[11, IMAGE_TOKEN_INDEX, 12, 13]]).to(get_current_device())
-        loss_mask = torch.ones(1, 4, device=get_current_device())
-        image_embeddings = torch.zeros(IMG_SEQ_LEN, 1, LANGUAGE_HIDDEN, device=get_current_device())
-        language_embeddings = torch.zeros(1, 4, LANGUAGE_HIDDEN, device=get_current_device())
+        device = get_current_device()
+        input_ids = torch.tensor([[10, 11, IMAGE_TOKEN_INDEX, 12]]).to(device)
+        labels = torch.tensor([[11, IMAGE_TOKEN_INDEX, 12, 13]]).to(device)
+        loss_mask = torch.ones(1, 4, device=device)
+        image_embeddings = torch.zeros(IMG_SEQ_LEN, 1, LANGUAGE_HIDDEN, device=device)
+        language_embeddings = torch.zeros(1, 4, LANGUAGE_HIDDEN, device=device)
 
         final_embedding, final_labels, final_loss_mask = self.model._preprocess_data(
             image_embeddings,
@@ -135,7 +136,7 @@ class TestLLaVAPipelineParallelPadding:
             use_inference_kv_cache=False,
             inference_context=None,
             image_token_index=IMAGE_TOKEN_INDEX,
-            num_image_tiles=torch.tensor([1], dtype=torch.int),
+            num_image_tiles=torch.tensor([1], dtype=torch.int, device=device),
         )
 
         expanded_len = IMG_SEQ_LEN - 1 + 4
@@ -143,9 +144,13 @@ class TestLLaVAPipelineParallelPadding:
         assert final_embedding.shape == torch.Size([64, 1, LANGUAGE_HIDDEN])
         assert torch.count_nonzero(final_embedding[expanded_len:]) == 0
         assert final_labels.shape == torch.Size([1, 64])
-        assert torch.equal(final_labels[0, expanded_len:], torch.full((64 - expanded_len,), -100))
+        assert torch.equal(
+            final_labels[0, expanded_len:], torch.full((64 - expanded_len,), -100, device=device)
+        )
         assert final_loss_mask.shape == torch.Size([1, 64])
-        assert torch.equal(final_loss_mask[0, expanded_len:], torch.zeros(64 - expanded_len))
+        assert torch.equal(
+            final_loss_mask[0, expanded_len:], torch.zeros(64 - expanded_len, device=device)
+        )
 
 
 class TestLLaVALoadStateDictHooks:
@@ -167,6 +172,8 @@ class TestLLaVALoadStateDictHooks:
         )
         state_dict = model.state_dict()
         for key, value in state_dict.items():
+            if value is None:
+                continue
             if torch.is_floating_point(value):
                 state_dict[key] = value + 1.0
         state_dict["language_model.decoder.layers.0.self_attention._extra_state"] = torch.zeros(1)
@@ -175,6 +182,8 @@ class TestLLaVALoadStateDictHooks:
 
         restored = model.state_dict()
         for key, value in state_dict.items():
+            if value is None:
+                continue
             if torch.is_floating_point(value):
                 torch.testing.assert_close(restored[key], value)
 
@@ -191,6 +200,8 @@ class TestLLaVALoadStateDictHooks:
         }
         state_dict = model.state_dict()
         for key, value in state_dict.items():
+            if value is None:
+                continue
             if torch.is_floating_point(value):
                 state_dict[key] = value + 1.0
         for key in list(state_dict.keys()):

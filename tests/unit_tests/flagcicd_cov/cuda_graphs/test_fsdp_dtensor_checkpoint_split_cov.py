@@ -87,12 +87,18 @@ def _fsdp_parameter(dtensor, dist_index, fsdp_slice):
 
 
 def _expected_split_piece(tp_local_flat, fsdp_slice, lo, hi):
-    """Reference for the split code's intersection/offset arithmetic on this rank."""
+    """This rank's expected shard of the tp-local flat range [lo, hi).
+
+    The split code slices the rank's own FSDP shard (tp_local_flat[fsdp_slice])
+    by its intersection with [lo, hi) and then offsets the slice back into the
+    shard, so in tp-local flat coordinates the expected values are exactly
+    tp_local_flat[start:stop].
+    """
     start = max(fsdp_slice.start, lo)
     stop = min(fsdp_slice.stop, hi)
     if start >= stop:
         return tp_local_flat[:0]
-    return tp_local_flat[start - fsdp_slice.start : stop - fsdp_slice.start]
+    return tp_local_flat[start:stop]
 
 
 class TestHandleSwigluInStateDict:

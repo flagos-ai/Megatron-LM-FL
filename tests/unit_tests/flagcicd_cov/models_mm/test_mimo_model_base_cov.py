@@ -23,6 +23,13 @@ SEQ_LEN = 16
 SPECIAL_IMAGE_TOKEN = 50
 
 
+class _KeywordLinear(nn.Linear):
+    """nn.Linear invoked with the ``x=`` keyword MIMO's encode() passes to encoders."""
+
+    def forward(self, x):
+        return super().forward(x)
+
+
 def _language_spec(**config_overrides):
     config = TransformerConfig(
         num_layers=2,
@@ -50,7 +57,7 @@ def _vision_spec():
         submodules={
             'encoders': {
                 'enc': ModuleSpec(
-                    module=nn.Linear, params={'in_features': 32, 'out_features': HIDDEN_SIZE}
+                    module=_KeywordLinear, params={'in_features': 32, 'out_features': HIDDEN_SIZE}
                 )
             },
             'input_projections': [

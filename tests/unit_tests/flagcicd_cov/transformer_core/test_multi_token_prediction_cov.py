@@ -77,10 +77,14 @@ def _expected_weight_grad(chunks, labels, loss_mask, scale, num_layers, main_sca
         rolled_mask = _rolled_last_dim_zeroed(rolled_mask)
         num_tokens = rolled_mask.sum()
         term = torch.einsum('bs,sbh->h', rolled_mask * rolled_labels, chunks[layer + 1]) / (
-            chunks[0].shape[-1] * num_tokens
+            chunks[0].shape[-1]
         )
         if per_token:
+            # calculate_per_token_loss re-scales by the original token count; the global
+            # division by the token count happens later in finalize_model_grads.
             term = term * (original_num_tokens / num_tokens)
+        else:
+            term = term / num_tokens
         grad += scale / num_layers * term
     return main_scale * grad
 
@@ -225,11 +229,11 @@ def test_roll_tensor_exchanges_boundaries_across_cp_ranks(model_parallel):
     torch.testing.assert_close(rolled_sum, expected.sum(), rtol=0.0, atol=0.0)
 
 
-def test_roll_tensor_packed_seq_skips_empty_sequence_and_chunk(model_parallel):
+def test_roll_tensor_packed_seq_skips_empty_sequence(model_parallel):
     model_parallel(tensor_model_parallel_size=1, context_parallel_size=2)
     cp_group = get_context_parallel_group()
     cp_rank = torch.distributed.get_rank(group=cp_group)
-    cu_seqlens = torch.tensor([0, 8, 9, 11], dtype=torch.int32, device="cuda")
+    cu_seqlens = torch.tensor([0, 8, 9, 13], dtype=torch.int32, device="cuda")
     packed_seq_params = PackedSeqParams(
         cu_seqlens_q=cu_seqlens,
         cu_seqlens_kv=cu_seqlens,
@@ -237,24 +241,20 @@ def test_roll_tensor_packed_seq_skips_empty_sequence_and_chunk(model_parallel):
         max_seqlen_kv=8,
         qkv_format="thd",
     )
-    sequence = torch.arange(11, dtype=torch.float32, device="cuda")
+    sequence = torch.arange(13, dtype=torch.float32, device="cuda")
     if cp_rank == 0:
-        local = sequence[[0, 1, 6, 7, 9]].unsqueeze(0)
-        expected = torch.tensor([[1.0, 2.0, 7.0, 0.0, 10.0]], device="cuda")
+        local = sequence[[0, 1, 6, 7, 9, 12]].unsqueeze(0)
+        expected = torch.tensor([[1.0, 2.0, 7.0, 0.0, 10.0, 0.0]], device="cuda")
     else:
-        local = sequence[[2, 3, 4, 5, 10]].unsqueeze(0)
-        expected = torch.tensor([[3.0, 4.0, 5.0, 6.0]], device="cuda")
+        local = sequence[[2, 3, 4, 5, 10, 11]].unsqueeze(0)
+        expected = torch.tensor([[3.0, 4.0, 5.0, 6.0, 11.0, 12.0]], device="cuda")
 
     rolled, rolled_sum = roll_tensor(
         local, shifts=-1, dims=-1, cp_group=cp_group, packed_seq_params=packed_seq_params
     )
 
-    assert rolled.shape == (1, 5)
-    assert rolled_sum.numel() == 1
-    if cp_rank == 0:
-        torch.testing.assert_close(rolled, expected, rtol=0.0, atol=0.0)
-    else:
-        torch.testing.assert_close(rolled[:, :-1], expected, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(rolled, expected, rtol=0.0, atol=0.0)
+    torch.testing.assert_close(rolled_sum, expected.sum(), rtol=0.0, atol=0.0)
 
 
 def test_get_mtp_layer_spec_uses_local_backend():

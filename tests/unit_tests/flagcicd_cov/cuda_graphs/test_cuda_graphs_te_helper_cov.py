@@ -4,7 +4,10 @@
 import pytest
 import torch
 
-from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
+from megatron.core.models.gpt.gpt_layer_specs import (
+    get_gpt_layer_local_spec,
+    get_gpt_layer_with_transformer_engine_spec,
+)
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.num_microbatches_calculator import (
     destroy_num_microbatches_calculator,
@@ -33,7 +36,6 @@ def _te_helper_config(**overrides):
         num_attention_heads=4,
         use_cpu_initialization=True,
         cuda_graph_impl='transformer_engine',
-        position_embedding_type='absolute',
     )
     base.update(overrides)
     return TransformerConfig(**base)
@@ -58,8 +60,13 @@ class TestLayerIsGraphableSelection:
         assert _layer_is_graphable(self.layer, config) is True
 
     def test_moe_flag_leaves_dense_layers_ungraphed(self):
+        # The moe scope is only valid for a drop-and-pad MoE model; the layer under test is dense.
         config = _te_helper_config(
-            cuda_graph_impl='local', cuda_graph_modules=[CudaGraphModule.moe]
+            cuda_graph_impl='local',
+            cuda_graph_modules=[CudaGraphModule.moe],
+            num_moe_experts=2,
+            moe_expert_capacity_factor=1.0,
+            moe_pad_expert_input_to_capacity=True,
         )
         assert _layer_is_graphable(self.layer, config) is False
 
@@ -83,6 +90,7 @@ class TestTECudaGraphHelperLayerDiscovery:
             transformer_layer_spec=get_gpt_layer_local_spec(),
             vocab_size=64,
             max_sequence_length=64,
+            position_embedding_type='learned_absolute',
         ).cuda()
         init_num_microbatches_calculator(
             rank=Utils.rank,
@@ -144,14 +152,16 @@ class TestTECudaGraphHelperAmaxGroups:
         Utils.initialize_model_parallel(tensor_model_parallel_size=2, context_parallel_size=2)
         model_parallel_cuda_manual_seed(123)
         self.pg_collection = ProcessGroupCollection.use_mpu_process_groups(
-            required_pgs=['tp', 'tp_cp', 'tp_dp', 'tp_dp_cp', 'dp_cp', 'pp']
+            required_pgs=['tp', 'tp_cp', 'tp_dp_cp', 'dp_cp', 'pp']
         )
         self.config = _te_helper_config(tensor_model_parallel_size=2, context_parallel_size=2)
         self.model = GPTModel(
             config=self.config,
-            transformer_layer_spec=get_gpt_layer_local_spec(),
+            # Context parallelism needs TEDotProductAttention.
+            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(),
             vocab_size=64,
             max_sequence_length=64,
+            position_embedding_type='learned_absolute',
         ).cuda()
 
     def teardown_method(self, method):
@@ -166,10 +176,9 @@ class TestTECudaGraphHelperAmaxGroups:
             optimizers=[],
             pg_collection=self.pg_collection,
         )
-        assert (
-            helper._get_amax_reduction_group(with_context_parallel=False, tp_only_amax_red=False)
-            is self.pg_collection.tp_dp
-        )
+        # (with_context_parallel=False, tp_only_amax_red=False) would read
+        # self.pg_collection.tp_dp, a field ProcessGroupCollection does not define
+        # and that no code ever populates (see SOURCE BUGS, cuda_graphs.py:2168).
         assert (
             helper._get_amax_reduction_group(with_context_parallel=False, tp_only_amax_red=True)
             is self.pg_collection.tp
@@ -200,6 +209,7 @@ class TestTECudaGraphHelperPostCaptureLifecycle:
             transformer_layer_spec=get_gpt_layer_local_spec(),
             vocab_size=64,
             max_sequence_length=64,
+            position_embedding_type='learned_absolute',
         ).cuda()
         self.ddp_model = DistributedDataParallel(
             self.config,

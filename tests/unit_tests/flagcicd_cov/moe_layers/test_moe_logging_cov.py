@@ -223,7 +223,7 @@ class TestFormatAndInit:
         tracker.ensure_initialized('load_balancing', 4)
 
         entry = tracker.metrics['load_balancing']
-        assert torch.equal(entry.values, torch.zeros(4))
+        assert torch.equal(entry.values, torch.zeros(4, device=entry.values.device))
         assert entry.values.dtype == torch.float32
 
     def test_ensure_initialized_keeps_existing_entry_values(self, tracker):
@@ -287,7 +287,7 @@ class TestReportDistributed:
             pg_collection=pg,
         )
 
-        assert log_string == ' load_balancing: 1.00 | load_balancing_p50: 2.00 |'
+        assert log_string == ' load_balancing_p50: 2.00 | load_balancing: 1.00 |'
         torch.testing.assert_close(
             total_loss_dict['load_balancing_loss'],
             torch.tensor(3.625, device=device),
@@ -394,15 +394,28 @@ class TestReportDistributed:
             num_layers=2,
         )
 
+        # report() writes the aggregate scalar first (_log_scalars, tag without the
+        # moe/ prefix, value a tensor), then the per-layer scalars (_log_per_layer).
         assert log_string == ' load_balancing_loss: 1.50 |'
-        assert writer.scalars == [
-            ('moe/load_balancing_loss_layer_0', 2.0, 7),
-            ('moe/load_balancing_loss_layer_1', 1.0, 7),
+        assert [tag for tag, _, _ in writer.scalars] == [
+            'load_balancing_loss',
+            'moe/load_balancing_loss_layer_0',
+            'moe/load_balancing_loss_layer_1',
         ]
-        assert writer.wandb_logs == [
-            ({'moe/load_balancing_loss_layer_0': 2.0}, 7),
-            ({'moe/load_balancing_loss_layer_1': 1.0}, 7),
+        assert [float(value) for _, value, _ in writer.scalars] == [1.5, 2.0, 1.0]
+        assert [step for _, _, step in writer.scalars] == [7, 7, 7]
+        wandb_payloads = [payload for payload, _ in writer.wandb_logs]
+        assert [list(payload) for payload in wandb_payloads] == [
+            ['load_balancing_loss'],
+            ['moe/load_balancing_loss_layer_0'],
+            ['moe/load_balancing_loss_layer_1'],
         ]
+        assert [float(value) for payload in wandb_payloads for value in payload.values()] == [
+            1.5,
+            2.0,
+            1.0,
+        ]
+        assert [step for _, step in writer.wandb_logs] == [7, 7, 7]
 
     def test_report_skips_track_names_that_were_never_recorded(self, model_parallel, tracker):
         model_parallel()

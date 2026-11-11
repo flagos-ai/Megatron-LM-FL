@@ -116,10 +116,12 @@ class TestRADIOFixedResolutionForward:
         model.to(get_current_device())
         model.train()
         patches = torch.randn(2, 256, 3 * PATCH_DIM * PATCH_DIM, device=get_current_device())
+        # apply_pos_enc expects embedded patches at the hidden size.
+        embedded, _ = model.embedder(patches)
 
-        patched, pos_enc = model.apply_pos_enc(patches, input_size=(IMG_SIZE, IMG_SIZE))
+        patched, pos_enc = model.apply_pos_enc(embedded, input_size=(IMG_SIZE, IMG_SIZE))
 
-        torch.testing.assert_close(patched, patches, rtol=1e-6, atol=1e-6)
+        torch.testing.assert_close(patched, embedded, rtol=1e-6, atol=1e-6)
         torch.testing.assert_close(pos_enc, model.position_embeddings, rtol=1e-5, atol=1e-5)
 
     def test_pos_dropout_training_zeroes_a_seeded_subset_of_positions(self):
@@ -137,13 +139,15 @@ class TestRADIOFixedResolutionForward:
         model.to(get_current_device())
         model.train()
         patches = torch.randn(2, 256, 3 * PATCH_DIM * PATCH_DIM, device=get_current_device())
+        # apply_pos_enc expects embedded patches at the hidden size.
+        embedded, _ = model.embedder(patches)
 
         torch.manual_seed(31)
-        dropped, _ = model.apply_pos_enc(patches, input_size=(IMG_SIZE, IMG_SIZE))
+        dropped, _ = model.apply_pos_enc(embedded, input_size=(IMG_SIZE, IMG_SIZE))
 
         torch.manual_seed(31)
         keeps = torch.rand(2, 1, 1, dtype=torch.float32, device=get_current_device()) > 0.5
-        expected = patches + torch.where(
+        expected = embedded + torch.where(
             keeps, model.position_embeddings, torch.zeros(1, device=get_current_device())
         )
         torch.testing.assert_close(dropped, expected, rtol=1e-6, atol=1e-6)
@@ -362,8 +366,13 @@ class TestRADIODynamicResolutionForward:
             .contiguous()
         )
         assert output.shape == torch.Size([1, 10, HIDDEN_SIZE])
-        torch.testing.assert_close(packed.cu_seqlens_q, torch.tensor([0, 5, 10], dtype=torch.int32))
-        torch.testing.assert_close(packed.max_seqlen_q, torch.tensor(5, dtype=torch.int32))
+        torch.testing.assert_close(
+            packed.cu_seqlens_q,
+            torch.tensor([0, 5, 10], dtype=torch.int32, device=get_current_device()),
+        )
+        torch.testing.assert_close(
+            packed.max_seqlen_q, torch.tensor(5, dtype=torch.int32, device=get_current_device())
+        )
         torch.testing.assert_close(output, expected, rtol=1e-5, atol=1e-5)
 
     def test_temporal_grouping_routes_frames_into_tubelets(self):

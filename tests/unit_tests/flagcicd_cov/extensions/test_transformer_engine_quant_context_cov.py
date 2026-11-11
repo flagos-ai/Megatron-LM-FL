@@ -26,13 +26,15 @@ class _QuantizedGlobalState:
         return True
 
 
-def _make_context_recorder(real_function, calls):
-    """Wrap a TE context constructor, recording keyword arguments of every call."""
+def _make_context_recorder(real_function, calls, returned):
+    """Wrap a TE context constructor, recording keyword arguments and the context it returns."""
 
     @functools.wraps(real_function)
     def recorder(**kwargs):
         calls.append(kwargs)
-        return real_function(**kwargs)
+        context = real_function(**kwargs)
+        returned.append(context)
+        return context
 
     return recorder
 
@@ -42,8 +44,12 @@ def _record_te_contexts(monkeypatch):
     recorders = {}
     for name in ('fp8_model_init', 'fp8_autocast'):
         calls = []
-        monkeypatch.setattr(te_ext, name, _make_context_recorder(getattr(te_ext, name), calls))
+        returned = []
+        monkeypatch.setattr(
+            te_ext, name, _make_context_recorder(getattr(te_ext, name), calls, returned)
+        )
         recorders[name] = calls
+        recorders[f'{name}:returned'] = returned
     return recorders
 
 
@@ -73,7 +79,7 @@ def test_fp8_model_init_selects_evaluation_recipe_when_not_training(monkeypatch)
         ),
     )
     context = te_ext._get_fp8_model_init_for_quant_params(params, training=False)
-    assert type(context).__name__ == 'fp8_model_init'
+    assert context is recorders['fp8_model_init:returned'][-1]
     (call,) = recorders['fp8_model_init']
     assert call['enabled'] is False
     assert type(call['recipe']).__name__ == 'Float8BlockScaling'
@@ -86,12 +92,12 @@ def test_fp8_model_init_selects_evaluation_recipe_when_not_training(monkeypatch)
 
 def test_fp8_model_init_falls_back_to_training_recipe_without_evaluation(monkeypatch):
     recorders = _record_te_contexts(monkeypatch)
-    params = TEQuantizationParams(training_recipe=TEQuantizationRecipe(**_TENSORWISE))
+    params = TEQuantizationParams(
+        training_recipe=TEQuantizationRecipe(**_TENSORWISE), evaluation_recipe=None
+    )
     for training in (True, False):
-        assert (
-            type(te_ext._get_fp8_model_init_for_quant_params(params, training)).__name__
-            == 'fp8_model_init'
-        )
+        context = te_ext._get_fp8_model_init_for_quant_params(params, training)
+        assert context is recorders['fp8_model_init:returned'][-1]
     assert len(recorders['fp8_model_init']) == 2
     for call in recorders['fp8_model_init']:
         assert type(call['recipe']).__name__ == 'Float8CurrentScaling'
@@ -155,7 +161,7 @@ def test_fp8_model_init_for_quant_recipe_passes_selected_recipe_to_te(
 ):
     recorders = _record_te_contexts(monkeypatch)
     context = te_ext._get_fp8_model_init_for_quant_recipe(TEQuantizationRecipe(**recipe))
-    assert type(context).__name__ == 'fp8_model_init'
+    assert context is recorders['fp8_model_init:returned'][-1]
     (call,) = recorders['fp8_model_init']
     assert call['enabled'] is False
     assert call['preserve_high_precision_init_val'] is True
@@ -167,7 +173,7 @@ def test_fp8_model_init_for_quant_recipe_enables_fp8_params_when_requested(monke
     recorders = _record_te_contexts(monkeypatch)
     recipe = TEQuantizationRecipe(**{**_TENSORWISE, 'fp8_param': True})
     context = te_ext._get_fp8_model_init_for_quant_recipe(recipe)
-    assert type(context).__name__ == 'fp8_model_init'
+    assert context is recorders['fp8_model_init:returned'][-1]
     (call,) = recorders['fp8_model_init']
     assert call['enabled'] is True
     assert type(call['recipe']).__name__ == 'Float8CurrentScaling'
@@ -176,7 +182,7 @@ def test_fp8_model_init_for_quant_recipe_enables_fp8_params_when_requested(monke
 def test_fp8_model_init_for_quant_recipe_builds_disabled_context_for_bf16_recipe(monkeypatch):
     recorders = _record_te_contexts(monkeypatch)
     context = te_ext._get_fp8_model_init_for_quant_recipe(TEQuantizationRecipe())
-    assert type(context).__name__ == 'fp8_model_init'
+    assert context is recorders['fp8_model_init:returned'][-1]
     (call,) = recorders['fp8_model_init']
     assert call == {'enabled': False, 'recipe': None, 'preserve_high_precision_init_val': True}
 
@@ -244,10 +250,10 @@ def test_fp8_autocast_selection_follows_override_flags(monkeypatch, recipe, expe
         assert recorders['fp8_autocast'] == []
         assert type(context) is nullcontext
     elif expected_selection == 'bf16-override':
-        assert type(context).__name__ == 'fp8_autocast'
+        assert context is recorders['fp8_autocast:returned'][-1]
         assert recorders['fp8_autocast'] == [{'enabled': False}]
     else:
-        assert type(context).__name__ == 'fp8_autocast'
+        assert context is recorders['fp8_autocast:returned'][-1]
         (call,) = recorders['fp8_autocast']
         assert call['enabled'] is True
         assert call['fp8_group'] is None
@@ -277,10 +283,8 @@ def test_fp8_autocast_selects_evaluation_recipe_when_not_training(monkeypatch):
         ),
     )
     for training in (True, False):
-        assert (
-            type(te_ext._get_fp8_autocast_for_quant_params(params, training)).__name__
-            == 'fp8_autocast'
-        )
+        context = te_ext._get_fp8_autocast_for_quant_params(params, training)
+        assert context is recorders['fp8_autocast:returned'][-1]
     (training_call, evaluation_call) = recorders['fp8_autocast']
     assert type(training_call['fp8_recipe']).__name__ == 'MXFP8BlockScaling'
     assert type(evaluation_call['fp8_recipe']).__name__ == 'Float8CurrentScaling'
@@ -348,7 +352,7 @@ def test_fp8_autocast_overrides_quantized_context_when_requested(monkeypatch):
     recorders = _record_te_contexts(monkeypatch)
     recipe = TEQuantizationRecipe(**{**_TENSORWISE, 'override_quantized_autocast': True})
     context = te_ext._get_fp8_autocast_for_quant_recipe(recipe)
-    assert type(context).__name__ == 'fp8_autocast'
+    assert context is recorders['fp8_autocast:returned'][-1]
     (call,) = recorders['fp8_autocast']
     assert call['enabled'] is True
     assert type(call['fp8_recipe']).__name__ == 'Float8CurrentScaling'
@@ -361,7 +365,7 @@ def test_fp8_autocast_uses_amax_group_when_parallel_initialized(model_parallel, 
         fp8_quantization_recipe=Fp8Recipe.tensorwise, override_nonquantized_autocast=True
     )
     context = te_ext._get_fp8_autocast_for_quant_recipe(recipe)
-    assert type(context).__name__ == 'fp8_autocast'
+    assert context is recorders['fp8_autocast:returned'][-1]
     (call,) = recorders['fp8_autocast']
     assert call['fp8_group'] is parallel_state.get_amax_reduction_group(
         with_context_parallel=True, tp_only_amax_red=False

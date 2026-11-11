@@ -2,6 +2,7 @@
 """MimoOptimizer: per-module optimizers with global gradient norms and overflow skipping, sharded checkpoint state with extracted param groups and grad scaler, and process-group collections from module grids."""
 import torch
 
+from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
 from megatron.core.hyper_comm_grid import HyperCommGrid
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_with_transformer_engine_spec
 from megatron.core.models.gpt.gpt_model import GPTModel
@@ -48,9 +49,18 @@ def _optimizer_config():
     )
 
 
+def _wrap_ddp(model):
+    """Wrap a model chunk in DistributedDataParallel so it carries ddp_config."""
+    return DistributedDataParallel(
+        TransformerConfig(num_attention_heads=1, num_layers=1),
+        DistributedDataParallelConfig(use_distributed_optimizer=False),
+        model,
+    )
+
+
 def _inner_optimizer(model, config):
     return get_megatron_optimizer(
-        config=config, model_chunks=[model], use_gloo_process_groups=False
+        config=config, model_chunks=[_wrap_ddp(model)], use_gloo_process_groups=False
     )
 
 
@@ -68,9 +78,14 @@ def _mimo_optimizer(model, config, pg_collection=None):
 
 
 def _set_grads(model, value_fn):
+    """Attach identical gradients to ``param.grad`` and the DDP ``main_grad`` buffer."""
     torch.manual_seed(3)
     for param in model.parameters():
-        param.grad = value_fn(param)
+        grad = value_fn(param)
+        param.grad = grad
+        main_grad = getattr(param, 'main_grad', None)
+        if main_grad is not None:
+            main_grad.copy_(grad)
 
 
 class TestMimoOptimizerStep:
@@ -87,24 +102,24 @@ class TestMimoOptimizerStep:
 
     def test_step_returns_global_grad_norm_and_zero_count(self):
         _set_grads(self.model, lambda param: torch.randn_like(param))
-        self.model.decoder.layers[0].self_attention.linear_qkv.weight.grad[0, 0] = 0.0
+        zero_weight = self.model.decoder.layers[0].self_attention.linear_qkv.weight
+        zero_weight.grad[0, 0] = 0.0
+        zero_weight.main_grad[0, 0] = 0.0
+        grads = [param.grad.detach().clone() for param in self.model.parameters()]
 
         success, grad_norm, num_zeros = self.optimizer.step()
 
         assert success is True
-        expected_norm_sq = sum(
-            param.grad.detach().float().pow(2).sum().item() for param in self.model.parameters()
-        )
+        expected_norm_sq = sum(grad.float().pow(2).sum().item() for grad in grads)
         torch.testing.assert_close(grad_norm, expected_norm_sq**0.5, rtol=1e-3, atol=1e-4)
-        expected_zeros = sum(
-            int((param.grad == 0).sum().item()) for param in self.model.parameters()
-        )
+        expected_zeros = sum(int((grad == 0).sum().item()) for grad in grads)
         assert num_zeros == expected_zeros
 
     def test_step_skips_update_when_gradients_overflow(self):
         _set_grads(self.model, lambda param: torch.randn_like(param))
         first_param = next(self.model.parameters())
         first_param.grad.fill_(float('inf'))
+        first_param.main_grad.fill_(float('inf'))
         params_before = [param.detach().clone() for param in self.model.parameters()]
 
         success, grad_norm, num_zeros = self.optimizer.step()
@@ -151,10 +166,10 @@ class TestMimoOptimizerStep:
 
         self.optimizer.reload_model_params()
 
-        main_params = [param.detach() for param in self.inner.get_parameters()]
-        model_params = [param.detach() for param in self.model.parameters()]
-        for main_param, model_p in zip(main_params, model_params):
-            torch.testing.assert_close(main_param.float(), model_p.float(), rtol=1e-2, atol=1e-2)
+        for param in self.model.parameters():
+            torch.testing.assert_close(
+                param.main_param.float(), param.float(), rtol=1e-2, atol=1e-2
+            )
 
     def test_state_dict_reports_per_module_state(self):
         _set_grads(self.model, lambda param: torch.randn_like(param))
@@ -358,6 +373,11 @@ class TestGetMimoOptimizer:
                 module_to_grid_map={'images': grid, MIMO_LANGUAGE_MODULE_KEY: grid},
             )
         ).to(get_current_device())
+        # get_megatron_optimizer requires model chunks that carry ddp_config.
+        mimo_model.language_model = _wrap_ddp(mimo_model.language_model)
+        mimo_model.modality_submodules['images'] = _wrap_ddp(
+            mimo_model.modality_submodules['images']
+        )
 
         optimizer = get_mimo_optimizer(mimo_model, _optimizer_config())
 

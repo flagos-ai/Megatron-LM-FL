@@ -5,7 +5,10 @@ import pytest
 import torch
 
 from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_spec
-from megatron.core.parallel_state import get_tensor_model_parallel_rank
+from megatron.core.parallel_state import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+)
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.heterogeneous.linear_replacements import (
     ColumnParallelLinearGathered,
@@ -68,25 +71,27 @@ def test_te_backward_dw_wrapper_registers_graphed_callable(model_parallel):
 def test_te_cuda_graph_capture_runs_plain_layer_forward(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
-    layer = _layer(_config()).eval()
-    hidden_states = torch.randn(8, 2, 16)
-    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool)
+    layer = _layer(_config()).eval().cuda()
+    hidden_states = torch.randn(8, 2, 16, device="cuda")
+    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool, device="cuda")
 
     with torch.no_grad():
         captured = layer._te_cuda_graph_capture(
             hidden_states=hidden_states, attention_mask=attention_mask
         )
-        expected = layer(hidden_states=hidden_states, attention_mask=attention_mask)
+        expected, context = layer(hidden_states=hidden_states, attention_mask=attention_mask)
 
-    torch.testing.assert_close(captured, expected, rtol=1e-5, atol=1e-6)
+    assert context is None
+    assert len(captured) == 1
+    torch.testing.assert_close(captured[0], expected, rtol=1e-5, atol=1e-6)
 
 
 def test_layer_call_runs_plain_forward_when_no_local_cudagraph_manager(model_parallel):
     model_parallel(tensor_model_parallel_size=1)
     model_parallel_cuda_manual_seed(123)
-    layer = _layer(_config()).eval()
-    hidden_states = torch.randn(8, 2, 16)
-    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool)
+    layer = _layer(_config()).eval().cuda()
+    hidden_states = torch.randn(8, 2, 16, device="cuda")
+    attention_mask = torch.ones((1, 1, 8, 8), dtype=bool, device="cuda")
 
     with torch.no_grad():
         called = layer(hidden_states=hidden_states, attention_mask=attention_mask)
@@ -134,24 +139,20 @@ def test_float16_module_dualpipev_fp32_output_false_keeps_model_dtype(model_para
     assert output.dtype == torch.bfloat16
 
 
-@pytest.mark.parametrize(
-    ("sequence_parallel", "expected_rows"),
-    [(False, 8), (True, 4)],
-    ids=["gather", "reduce-scatter"],
-)
-def test_gather_from_tensor_parallel_region_concatenates_rank_shards(
-    model_parallel, sequence_parallel, expected_rows
-):
+def test_gather_from_tensor_parallel_region_concatenates_rank_shards(model_parallel):
     model_parallel(tensor_model_parallel_size=2)
-    config = _config(tensor_model_parallel_size=2, sequence_parallel=sequence_parallel)
+    assert get_tensor_model_parallel_world_size() == 2
     rank = get_tensor_model_parallel_rank()
     x = torch.full((8, 2, 8), float(rank + 1), device="cuda")
 
-    gathered = _gather_from_tensor_parallel_region(x, config)
+    for sequence_parallel, expected_rows in ((False, 8), (True, 4)):
+        config = _config(tensor_model_parallel_size=2, sequence_parallel=sequence_parallel)
 
-    assert gathered.shape == (expected_rows, 2, 16)
-    assert torch.equal(gathered[..., :8], torch.full_like(gathered[..., :8], 1.0))
-    assert torch.equal(gathered[..., 8:], torch.full_like(gathered[..., 8:], 2.0))
+        gathered = _gather_from_tensor_parallel_region(x, config)
+
+        assert gathered.shape == (expected_rows, 2, 16)
+        assert torch.equal(gathered[..., :8], torch.full_like(gathered[..., :8], 1.0))
+        assert torch.equal(gathered[..., 8:], torch.full_like(gathered[..., 8:], 2.0))
 
 
 def test_column_parallel_linear_gathered_rejects_runtime_gather(model_parallel):

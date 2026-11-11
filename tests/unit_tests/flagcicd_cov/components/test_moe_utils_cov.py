@@ -274,9 +274,9 @@ def test_apply_biased_logits_adds_layer_shared_bias(single_rank_parallel_state):
 def test_random_stes_shared_reuses_cached_bias_per_layer(single_rank_parallel_state, monkeypatch):
     monkeypatch.setattr(moe_utils.RandomSTEShared, '_cache', {})
     logits = torch.zeros(3, 4)
-    first = moe_utils.RandomSTEShared.apply(logits, std=-0.5, layer_number=3)
+    first = moe_utils.RandomSTEShared.apply(logits, -0.5, 3)
     torch.testing.assert_close(moe_utils.RandomSTEShared._cache[3], (first - logits)[0])
-    second = moe_utils.RandomSTEShared.apply(logits, std=-0.5, layer_number=3)
+    second = moe_utils.RandomSTEShared.apply(logits, -0.5, 3)
     torch.testing.assert_close(second, first)
 
 
@@ -289,7 +289,7 @@ def test_random_ste_backward_passes_gradient_through(single_rank_parallel_state)
 
 def test_random_stes_shared_backward_returns_none_for_extra_inputs(single_rank_parallel_state):
     logits = torch.zeros(3, 4, requires_grad=True)
-    out = moe_utils.RandomSTEShared.apply(logits, std=0.5, layer_number=2)
+    out = moe_utils.RandomSTEShared.apply(logits, 0.5, 2)
     out.sum().backward()
     assert logits.grad.tolist() == [[1.0] * 4] * 3
 

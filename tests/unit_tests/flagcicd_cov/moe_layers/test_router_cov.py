@@ -285,7 +285,8 @@ class TestExpertBias:
                 [False, True, True, False],
                 [True, False, False, True],
                 [False, False, True, True],
-            ]
+            ],
+            device=pinned_device,
         )
 
         router._apply_expert_bias(routing_map)

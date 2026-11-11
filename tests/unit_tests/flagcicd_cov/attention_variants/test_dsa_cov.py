@@ -197,7 +197,7 @@ class TestDSAttentionConstruction:
     def test_softmax_scale_defaults_to_inverse_sqrt_of_kv_channels(self):
         config = _make_config()
         attn = _make_ds_attention(config, layer_number=1)
-        assert attn.softmax_scale == config.kv_channels**-0.5
+        assert attn.softmax_scale == pytest.approx(config.kv_channels**-0.5, rel=1e-12)
 
 
 class TestDSAttentionShareForward:

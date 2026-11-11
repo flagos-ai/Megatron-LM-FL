@@ -1,10 +1,13 @@
 # Copyright (c) 2026, BAAI. All rights reserved.
-"""BertModel: extended attention mask, cross-entropy loss reference, rope and pipeline-stage forwards."""
+"""BertModel: extended attention mask, cross-entropy loss reference, config-logger payload, rope and pipeline-stage forwards."""
+
+import json
 
 import pytest
 import torch
 import torch.nn.functional as F
 
+from megatron.core import parallel_state
 from megatron.core.models.bert.bert_layer_specs import bert_layer_local_spec
 from megatron.core.models.bert.bert_model import BertModel
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -72,7 +75,9 @@ def test_bert_extended_attention_mask_broadcasts_padding_to_b1ss(model_parallel,
 def test_bert_forward_returns_loss_matching_cross_entropy_reference(model_parallel, nvte_auto_env):
     model_parallel()
     model_parallel_cuda_manual_seed(123)
-    model = _build_bert(_bert_config(), parallel_output=False).eval().to(get_current_device())
+    # TP=1: parallel_output=True returns the same logits without the gather region, whose output
+    # view vocab_parallel_cross_entropy would otherwise modify in place for fp32 logits.
+    model = _build_bert(_bert_config(), parallel_output=True).eval().to(get_current_device())
     device = get_current_device()
     input_ids = torch.randint(0, 128, (2, 4), device=device)
     attention_mask = torch.ones(2, 4, device=device)
@@ -203,9 +208,15 @@ def test_bert_constructor_writes_config_logger_payload(model_parallel, nvte_auto
     model = _build_bert(_bert_config(config_logger_dir=str(tmp_path)))
 
     assert isinstance(model, BertModel)
+    # Each process writes exactly one payload carrying its own tp/dp/cp/pp/ep ranks
+    # (config_logger.py names it f'{prefix}.rank_{rank_str}.iter{count}.json').
+    rank_str = parallel_state.get_all_ranks()
     logged = [path.name for path in tmp_path.iterdir() if path.name.startswith('BertModel.rank_')]
-    assert len(logged) == Utils.world_size
-    assert all(name.endswith('.json') for name in logged)
+    assert logged == [f'BertModel.rank_{rank_str}.iter0.json']
+    payload = json.loads((tmp_path / logged[0]).read_text())
+    assert payload['vocab_size'] == 128
+    assert payload['max_sequence_length'] == 8
+    assert payload['num_tokentypes'] == 2
 
 
 def test_bert_forward_without_post_process_returns_last_layer_hidden_states(
