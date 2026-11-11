@@ -4013,7 +4013,10 @@ def test_training_log_passes_indexer_process_groups(monkeypatch):
             num_layers=1,
             csa_compress_ratios=[4],
             experimental_attention_variant='dsv4_hybrid',
+            hybrid_layer_pattern=None,
             csa_dense_mode=False,
+            cuda_graph_impl='none',
+            calculate_per_token_loss=False,
             log_interval=100,
         )
         monkeypatch.setattr(training, 'get_args', lambda: args)

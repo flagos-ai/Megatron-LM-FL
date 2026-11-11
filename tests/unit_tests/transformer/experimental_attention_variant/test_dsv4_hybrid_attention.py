@@ -97,7 +97,7 @@ def _make_config(
         rotary_percent=1.0,
         multi_latent_attention=True,
         experimental_attention_variant='dsv4_hybrid',
-        dsa_kernel_backend='none',
+        dsa_kernel_backend=extra_config_kwargs.pop('dsa_kernel_backend', 'none'),
         csa_compress_ratios=csa_compress_ratios,
         csa_window_size=csa_window_size,
         dsa_indexer_n_heads=dsa_indexer_n_heads,
@@ -239,6 +239,21 @@ class TestDSv4HybridAttentionConstructor:
 # ===========================================================================
 
 
+@pytest.fixture
+def deterministic_sparse_accumulation():
+    """Keep indexed accumulation order fixed when comparing deferred wgrad scheduling."""
+    previous = torch.are_deterministic_algorithms_enabled()
+    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    # Select deterministic indexed accumulation even when earlier tests initialized
+    # cuBLAS without a deterministic workspace. Exact assertions below still check
+    # the repeated GEMMs; warn-only mode avoids a late workspace-configuration error.
+    torch.use_deterministic_algorithms(True, warn_only=True)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(previous, warn_only=warn_only)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.skipif(not HAVE_TE, reason="transformer_engine not available")
 class TestDSv4HybridAttentionForwardBackward:
@@ -260,7 +275,9 @@ class TestDSv4HybridAttentionForwardBackward:
         Utils.destroy_model_parallel()
 
     @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
-    def test_deferred_weight_gradients_match_eager(self, compress_ratio, monkeypatch):
+    def test_deferred_weight_gradients_match_eager(
+        self, compress_ratio, monkeypatch, deterministic_sparse_accumulation
+    ):
         """Flushing delayed wgrads must include compressor and indexer projections."""
         from megatron.core.transformer.experimental_attention_variant.dsa import (
             DSAIndexerLossAutoScaler,

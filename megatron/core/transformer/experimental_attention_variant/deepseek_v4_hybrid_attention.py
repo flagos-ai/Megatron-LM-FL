@@ -269,6 +269,10 @@ class DSv4HybridAttention(Attention):
         inference_params=None,
     ):
         """Forward pass for DeepSeek-v4 Hybrid Attention"""
+        if self.pg_collection.cp.size() != 1:
+            raise ValueError(
+                "DSv4HybridAttention supports only context-parallel size 1 in the SBHD path."
+            )
         assert (
             rotary_pos_emb is None
         ), "Rotary position embeddings should not be passed into DSv4HybridAttention."

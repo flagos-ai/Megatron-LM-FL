@@ -249,7 +249,8 @@ def unfused_compressed_sparse_attn(
     # dense shape before reducing the stride-0 query dimension.
     n_kv = kv_full.size(0)
     topk = topk_indices.size(-1)
-    kv_flat = kv_full.permute(1, 0, 2).reshape(b * n_kv, hn)
+    # Accumulate repeated KV contributions in FP32 before casting back to the input dtype.
+    kv_flat = kv_full.float().permute(1, 0, 2).reshape(b * n_kv, hn)
     batch_offsets = (torch.arange(b, device=kv_full.device, dtype=torch.int64) * n_kv).view(b, 1, 1)
     safe_indices = topk_indices.clamp(min=0).to(dtype=torch.int64) + batch_offsets
     kv_gathered = kv_flat.index_select(0, safe_indices.reshape(-1)).view(b, sq, topk, hn)
@@ -1088,6 +1089,10 @@ class CompressedSparseAttention(MegatronModule):
         Returns:
             output: [sq, b, np * v_head_dim]
         """
+        if self.pg_collection.cp.size() != 1:
+            raise ValueError(
+                "CompressedSparseAttention supports only context-parallel size 1 in the SBHD path."
+            )
         if attention_mask is not None:
             raise ValueError(
                 "CompressedSparseAttention supports only an implicit causal mask in the "

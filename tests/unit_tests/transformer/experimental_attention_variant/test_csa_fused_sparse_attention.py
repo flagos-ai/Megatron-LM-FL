@@ -650,6 +650,7 @@ def test_ratio4_training_dispatch_never_touches_native_dense_fallback(monkeypatc
     module = csa_module.CompressedSparseAttention.__new__(csa_module.CompressedSparseAttention)
     nn.Module.__init__(module)
     module.use_fused_kernels = True
+    module.pg_collection = SimpleNamespace(cp=SimpleNamespace(size=lambda: 1))
     module.compress_ratio = 4
     module.window_size = 2
     module.softmax_scale = 0.5
@@ -814,13 +815,8 @@ def test_real_fused_sbhd_forward_backward_matches_native_reference(num_heads):
     )
 
 
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize(
-    "backend,sparse",
-    [("cudnn", True), ("none", True), ("none", False)],
-)
+@pytest.mark.parametrize("backend,sparse", [("cudnn", True), ("none", True), ("none", False)])
 @pytest.mark.parametrize("per_token", [False, True])
 def test_real_sbhd_indexer_loss_and_all_gradients(backend, sparse, per_token):
     torch.manual_seed(927)
@@ -1035,7 +1031,10 @@ def test_sbhd_model_preserves_backend_routes_and_gradients(ratio, training):
             csa_window_size=16,
             dsa_indexer_n_heads=64,
             dsa_indexer_head_dim=128,
-            dsa_indexer_topk=16,
+            # Compare identical causal key sets: BF16 score rounding can change
+            # near-tied top-k membership. Subset selection and all six input
+            # gradients are checked against a dense oracle in the kernel test.
+            dsa_indexer_topk=64,
             dsa_indexer_loss_coeff=0.2,
             dsa_indexer_use_sparse_loss=True,
             gradient_accumulation_fusion=False,
@@ -1085,5 +1084,70 @@ def test_sbhd_model_preserves_backend_routes_and_gradients(ratio, training):
                     atol=5e-2,
                     msg=lambda message: f"{backend}/{name}: {message}",
                 )
+    finally:
+        Utils.destroy_model_parallel()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+def test_native_bf16_repeated_kv_gradients_match_dense_fp64():
+    """Repeated sparse KV addresses must accumulate before the BF16 cast."""
+    from megatron.core.transformer.experimental_attention_variant.csa import (
+        unfused_compressed_sparse_attn,
+    )
+
+    torch.manual_seed(511)
+    seq, batch, heads, dim = 128, 2, 2, 16
+    query = (
+        torch.randn(seq, batch, heads, dim, device="cuda", dtype=torch.bfloat16) * 0.05
+    ).requires_grad_()
+    kv = (torch.randn(seq, batch, dim, device="cuda", dtype=torch.bfloat16) * 0.05).requires_grad_()
+    sink = torch.tensor([-0.5, 0.5], device="cuda", requires_grad=True)
+    indices = get_window_topk_idxs(seq, batch, seq, query.device).clone()
+    indices[:, 32] = -1
+    output = unfused_compressed_sparse_attn(query, kv, sink, indices, dim**-0.5)
+    output.sum().backward()
+
+    rq, rk, rs = [tensor.detach().double().requires_grad_() for tensor in (query, kv, sink)]
+    logits = torch.einsum("qbhd,kbd->bhqk", rq, rk) * dim**-0.5
+    visible = torch.ones(seq, seq, device="cuda", dtype=torch.bool).tril()
+    visible[32] = False
+    logits = logits.masked_fill(~visible, -torch.inf)
+    logits = torch.cat((logits, rs[None, :, None, None].expand(batch, heads, seq, 1)), dim=-1)
+    probabilities = logits.softmax(-1)[..., :seq]
+    reference = torch.einsum("bhqk,kbd->qbhd", probabilities, rk).flatten(2)
+    reference.sum().backward()
+
+    assert torch.count_nonzero(output[32]) == 0
+    torch.testing.assert_close(output.double(), reference, rtol=4e-3, atol=3e-4)
+    for actual, expected in ((query, rq), (kv, rk), (sink, rs)):
+        assert torch.isfinite(actual.grad).all()
+        relative_error = (actual.grad.double() - expected.grad).norm() / expected.grad.norm()
+        assert relative_error < 4e-3
+
+
+@pytest.mark.parametrize("entrypoint", ["core", "hybrid"])
+def test_sbhd_rejects_context_parallel_inputs(entrypoint):
+    """The SBHD-only stage must reject CP before dropping remote KV tokens."""
+    from megatron.core.process_groups_config import ProcessGroupCollection
+    from tests.unit_tests.test_utilities import Utils
+    from tests.unit_tests.transformer.experimental_attention_variant.test_dsv4_hybrid_attention import (
+        _build_attention,
+        _make_config,
+    )
+
+    if Utils.world_size < 2:
+        pytest.skip("requires two ranks")
+    Utils.initialize_model_parallel(context_parallel_size=2)
+    try:
+        cfg = _make_config(num_layers=1, csa_compress_ratios=[0], context_parallel_size=2)
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        model = _build_attention(cfg, 1, pg).cuda()
+        with pytest.raises(ValueError, match="context-parallel size 1"):
+            if entrypoint == "hybrid":
+                model(torch.zeros(16, 1, cfg.hidden_size, device="cuda"), attention_mask=None)
+            else:
+                query = torch.zeros(16, 1, cfg.num_attention_heads, cfg.v_head_dim, device="cuda")
+                key = torch.zeros(16, 1, 1, cfg.v_head_dim, device="cuda")
+                model.core_attention(query, key, key, None)
     finally:
         Utils.destroy_model_parallel()

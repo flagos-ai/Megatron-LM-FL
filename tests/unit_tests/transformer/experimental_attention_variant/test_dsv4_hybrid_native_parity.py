@@ -279,10 +279,10 @@ def _native_sparse_attn(
     softmax_scale: float,
 ) -> torch.Tensor:
     sq, batch_size, num_heads, head_dim = query.size()
-    kv_t = kv_full.permute(1, 0, 2)
+    kv_t = kv_full.float().permute(1, 0, 2)
     safe_indices = topk_indices.clamp(min=0).long()
-    gather_index = safe_indices.unsqueeze(-1).expand(-1, -1, -1, head_dim)
-    kv_gathered = torch.gather(kv_t.unsqueeze(1).expand(-1, sq, -1, -1), dim=2, index=gather_index)
+    batch_indices = torch.arange(batch_size, device=query.device).view(-1, 1, 1)
+    kv_gathered = kv_t[batch_indices, safe_indices]
 
     q = query.permute(1, 2, 0, 3).float()
     scores = torch.einsum("bnsh,bskh->bnsk", q, kv_gathered.float()) * softmax_scale
@@ -299,6 +299,25 @@ def _native_sparse_attn(
     return output.reshape(sq, batch_size, num_heads * head_dim)
 
 
+@torch.no_grad()
+def _native_window_sink_lse(query, kv, sink, indices, scale):
+    """Independent bounded reference for the omitted sliding-window and sink mass."""
+    batch_size = query.shape[1]
+    kv = kv.detach().float().permute(1, 0, 2)
+    batch_indices = torch.arange(batch_size, device=query.device).view(-1, 1, 1)
+    chunks = []
+    for start in range(0, query.shape[0], 128):
+        local_indices = indices[:, start : start + 128].long()
+        selected = kv[batch_indices, local_indices.clamp_min(0)]
+        logits = (
+            torch.einsum("qbhd,bqkd->bhqk", query[start : start + 128].detach().float(), selected)
+            * scale
+        )
+        logits = logits.masked_fill((local_indices < 0).unsqueeze(1), -torch.inf)
+        chunks.append(torch.logaddexp(logits.logsumexp(-1), sink.detach()[None, :, None]))
+    return torch.cat(chunks, dim=-1)
+
+
 def _native_fused_sparse_indexer_loss(
     index_scores: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -309,6 +328,7 @@ def _native_fused_sparse_indexer_loss(
     loss_coeff: float,
     sparse_loss: bool,
     calculate_per_token_loss: bool,
+    non_compressed_lse: torch.Tensor,
 ) -> torch.Tensor:
     batch_size, seqlen, _ = topk_indices.size()
     num_heads, head_dim = query.size(2), query.size(3)
@@ -362,10 +382,8 @@ def _native_fused_sparse_indexer_loss(
         attn_mask = finite_pos.unsqueeze(1).expand(-1, num_heads, -1, -1)
         attn_scores = attn_scores.masked_fill(~attn_mask, float("-inf"))
 
-    score_max = torch.max(attn_scores.max(dim=-1, keepdim=True).values, sink)
-    exp_scores = torch.exp(attn_scores - score_max)
-    exp_sink = torch.exp(sink - score_max)
-    attn_probs = exp_scores / (exp_scores.sum(dim=-1, keepdim=True) + exp_sink)
+    denominator = torch.logaddexp(attn_scores.logsumexp(-1), non_compressed_lse)
+    attn_probs = torch.exp(attn_scores - denominator.unsqueeze(-1))
     target = attn_probs.sum(dim=1)
     target = target / target.sum(dim=-1, keepdim=True).clamp(min=1e-10)
     target = target * row_valid.float()
@@ -389,6 +407,7 @@ def _native_unfused_sparse_indexer_loss(
     sparse_loss: bool,
     causal_mask: torch.Tensor,
     calculate_per_token_loss: bool,
+    non_compressed_lse: torch.Tensor,
 ) -> torch.Tensor:
     sq, batch_size, num_heads, _ = query.size()
     sk = compressed_kv.size(0)
@@ -415,13 +434,14 @@ def _native_unfused_sparse_indexer_loss(
     attention_scores = attention_scores.masked_fill(~attn_row_mask, 0.0)
     index_scores = index_scores.masked_fill(~idx_row_mask, 0.0)
 
-    attention_probs = F.softmax(attention_scores, dim=-1, dtype=torch.float32)
+    denominator = torch.logaddexp(attention_scores.logsumexp(-1), non_compressed_lse)
+    attention_probs = torch.exp(attention_scores - denominator.unsqueeze(-1))
     predict = F.softmax(index_scores, dim=-1, dtype=torch.float32)
     attention_probs = attention_probs * attn_row_mask.float()
     predict = predict * idx_row_mask.float()
 
     target = attention_probs.sum(dim=1)
-    target = target / target.sum(dim=-1, keepdim=True)
+    target = target / target.sum(dim=-1, keepdim=True).clamp_min(1e-30)
     eps = torch.finfo(torch.float32).tiny
     target = target.clamp(min=eps)
     predict = predict.clamp(min=eps)
@@ -644,6 +664,9 @@ class NativeCompressedSparseAttention(nn.Module):
                     topk_compressed >= 0, topk_compressed + offset, -1
                 )
 
+                non_compressed_lse = _native_window_sink_lse(
+                    query, kv, self.attn_sink, window_idxs, self.softmax_scale
+                )
                 if not self.apply_dsa_kernel_fusion:
                     causal_mask = (
                         torch.arange(n_compressed, device=x.device).unsqueeze(0).expand(sq, -1)
@@ -666,6 +689,7 @@ class NativeCompressedSparseAttention(nn.Module):
                         self.indexer_use_sparse_loss,
                         causal_mask,
                         self.calculate_per_token_loss,
+                        non_compressed_lse,
                     )
                 else:
                     indexer_loss = _native_fused_sparse_indexer_loss(
@@ -678,6 +702,7 @@ class NativeCompressedSparseAttention(nn.Module):
                         self.indexer_loss_coeff,
                         self.indexer_use_sparse_loss,
                         self.calculate_per_token_loss,
+                        non_compressed_lse,
                     )
             else:
                 topk_compressed_for_attn = _get_compress_topk_idxs(
