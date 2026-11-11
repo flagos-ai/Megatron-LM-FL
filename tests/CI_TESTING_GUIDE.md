@@ -95,7 +95,10 @@ Coverage data is isolated per group. Coverage measures `megatron/plugin/*` and
 The reported denominator leaves out `coverage.omit` in `.flagcicd/project.yaml`
 (plugin test code and sources owned by planned groups that no platform runs)
 plus the platform's `test_matrix.unit.coverage_omit` (other vendors' plugin
-directories). Omission applies only to reports: collection still measures every
+directories). Triton kernel functions (`@triton.jit`, `@triton.autotune`,
+`@triton.heuristics`) are excluded from the report as well: their bodies are
+compiled and executed on the device, so coverage.py cannot trace them on any
+platform; the Python launchers that call them remain measured. Omission applies only to reports: collection still measures every
 source file, and an omitted directory returns to the denominator once its entry
 is removed. Percentages are therefore comparable only between runs with the
 same omit lists. The

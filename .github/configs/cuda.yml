@@ -217,6 +217,51 @@ test_matrix:
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
 
+      # Supplementary coverage tests (flagcicd_cov)
+      # DistributedOptimizer save/load_parameter_state (dp_zero format): on 8xA100 DP ranks 1-7
+      # restore zeros while rank 0 restores its shard; the same test passes with one rank. The
+      # developer suite ignores tests/unit_tests/dist_checkpointing/test_optimizer.py on this stack too.
+      - tests/unit_tests/flagcicd_cov/optimizer/test_distrib_optimizer_ckpt_cov.py::test_distributed_optimizer_save_and_load_parameter_state
+      # The HuggingFace wrappers call transformers' private _load_pretrained_model with the old
+      # signature; the image's transformers/modelopt patch requires pretrained_model_name_or_path.
+      - tests/unit_tests/flagcicd_cov/models_lm/test_clip_model_cov.py::test_siglip_model_loads_local_vision_encoder
+      - tests/unit_tests/flagcicd_cov/models_lm/test_clip_model_cov.py::test_siglip_forward_returns_last_hidden_state_of_vision_encoder
+      - tests/unit_tests/flagcicd_cov/models_lm/test_huggingface_module_cov.py::test_auto_huggingface_model_loads_local_model_and_runs_forward
+      - tests/unit_tests/flagcicd_cov/models_lm/test_huggingface_module_cov.py::test_build_hf_model_constructs_qwen_and_siglip_wrappers
+      - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_model_loads_local_lm_and_flags_gradients_for_tp_averaging
+      - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_forward_returns_per_token_cross_entropy_loss
+      - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_embedding_transposes_input_embeddings_to_sequence_major
+      # paged_stash.allocate_stash_buffers references torch.float8_e8m0fnu, which the A100 image's
+      # PyTorch 2.7.0a0 (nv25.03) does not provide; re-enable once the image ships a torch with it.
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_hooks_cov.py::test_on_get_returns_the_reload_view_without_padding_once_captured
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_hooks_cov.py::test_on_get_raises_when_a_stashed_tensor_was_never_reloaded
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_stash_moves_pending_paged_tensors_into_the_reload_queue
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_stash_rejects_a_reload_queue_with_leftover_entries
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reload_restores_paged_tensors_from_the_stash[wait-stream]
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reload_restores_paged_tensors_from_the_stash[no-wait]
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_transitions_capture_to_captured_and_allocates_buffers
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_reallocates_released_buffers_while_captured
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_applies_default_size_factors_when_config_is_omitted
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_restores_free_lists_and_flags_between_iterations
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_cuda_tier_from_avg_tokens_for_positive_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_cuda_tier_from_actual_tokens_for_negative_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_zero_cuda_tier_when_capture_recorded_no_avg_hint
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_adds_pinned_host_tier_for_positive_cpu_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_host_tier_from_actual_tokens_for_negative_cpu_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_zeros_stale_overflow_and_recreates_buffers
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_groups_buffers_by_dtype_and_hidden_size
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_prepare_for_rerun_clears_capacity_budget_and_stash_flags
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_prepare_for_rerun_keeps_page_buffers_for_validation
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_call_reruns_once_after_a_stash_overflow
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_call_succeeds_without_rerun_when_only_a_host_spill_occurred
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_runner_cov.py::test_check_moe_overflow_reports_stash_overflow_across_ranks
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_runner_cov.py::test_check_moe_overflow_reports_host_spill_across_ranks
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_round_trips_the_interleaved_schedule_outputs
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_round_trips_input_gradients_after_reload
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_iteration_leaves_no_pending_work_behind
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_iteration_returns_all_pages_to_the_free_list
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_iteration_records_the_schedule_in_order
+
   functional:
     train:
       - model: gpt
