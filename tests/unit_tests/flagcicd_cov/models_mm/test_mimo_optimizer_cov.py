@@ -226,6 +226,9 @@ class TestMimoOptimizerCheckpoint:
         snapshot = self.optimizer.state_dict()['language']
         checkpoint = {
             'language': {
+                # Per-parameter state travels in the optimizer dict; param_groups and the grad
+                # scaler are the entries sharded_state_dict() moves out and load reassembles.
+                'optimizer': {'state': snapshot['optimizer']['state']},
                 'fp32_from_fp16_params': snapshot['fp32_from_fp16_params'],
                 '_mimo_param_groups': [
                     dict(group, params=[]) for group in snapshot['optimizer']['param_groups']
@@ -235,14 +238,14 @@ class TestMimoOptimizerCheckpoint:
             'images': {},
         }
 
+        # load_state_dict pops the reassembled entries out of the checkpoint dict.
+        saved_groups = checkpoint['language']['_mimo_param_groups']
         self.optimizer.load_state_dict(checkpoint)
 
         restored = self.optimizer.state_dict()['language']
         current_groups = self.inner.optimizer.state_dict()['param_groups']
         assert restored['optimizer']['param_groups'] == current_groups
-        for group_loaded, group_current in zip(
-            checkpoint['language']['_mimo_param_groups'], current_groups
-        ):
+        for group_loaded, group_current in zip(saved_groups, current_groups):
             assert group_loaded['params'] == group_current['params']
         assert restored['grad_scaler'] == snapshot['grad_scaler']
         loaded_state = restored['optimizer']['state']

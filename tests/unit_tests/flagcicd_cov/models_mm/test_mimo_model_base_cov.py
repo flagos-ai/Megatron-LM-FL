@@ -83,7 +83,10 @@ def _image_inputs(num_images):
     return {
         'images': {
             'enc': {
-                'x': torch.arange(num_images, dtype=torch.float32).unsqueeze(-1).repeat(1, 32) + 1.0
+                'x': torch.arange(num_images, dtype=torch.float32, device=get_current_device())
+                .unsqueeze(-1)
+                .repeat(1, 32)
+                + 1.0
             }
         }
     }

@@ -181,8 +181,11 @@ class TestLLaVALoadStateDictHooks:
         model.load_state_dict(state_dict, strict=True)
 
         restored = model.state_dict()
+        # The injected TE extra-state entry is dropped by the load hook, not loaded.
+        extra_key = "language_model.decoder.layers.0.self_attention._extra_state"
+        assert extra_key not in restored
         for key, value in state_dict.items():
-            if value is None:
+            if value is None or key == extra_key:
                 continue
             if torch.is_floating_point(value):
                 torch.testing.assert_close(restored[key], value)
@@ -211,9 +214,9 @@ class TestLLaVALoadStateDictHooks:
         result = model.load_state_dict(state_dict, strict=True)
 
         assert result.missing_keys == []
-        assert model.vision_projection.encoder.linear_fc1.weight.shape == (
-            LANGUAGE_HIDDEN * 4,
-            VISION_HIDDEN,
+        assert (
+            model.vision_projection.encoder.linear_fc1.weight.shape
+            == projection_before["encoder.linear_fc1.weight"].shape
         )
         for name, value in projection_before.items():
             torch.testing.assert_close(model.vision_projection.state_dict()[name], value)

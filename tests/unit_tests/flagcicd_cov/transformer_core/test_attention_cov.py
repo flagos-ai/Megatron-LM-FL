@@ -107,8 +107,9 @@ def test_self_attention_qk_layernorm_hidden_dim_norms_flattened_qkv(model_parall
     torch.testing.assert_close(query, expected_query, rtol=1e-5, atol=1e-6)
     torch.testing.assert_close(key, expected_key, rtol=1e-5, atol=1e-6)
     assert torch.equal(value, value_raw)
-    assert attention.q_layernorm.normalized_shape == (32,)
-    assert attention.k_layernorm.normalized_shape == (32,)
+    # FusedLayerNorm stores its normalized shape as hidden_size.
+    assert attention.q_layernorm.hidden_size == torch.Size([32])
+    assert attention.k_layernorm.hidden_size == torch.Size([32])
 
 
 def test_self_attention_applies_output_gate_after_core_attention(model_parallel):

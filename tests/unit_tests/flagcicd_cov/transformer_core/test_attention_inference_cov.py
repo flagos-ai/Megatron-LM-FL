@@ -165,8 +165,10 @@ def test_flash_decode_returns_new_value_and_caches_rotated_key(model_parallel):
     value_layer = torch.randn(1, batch_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     key_cache = torch.zeros(4, batch_size, heads, head_dim, device="cuda", dtype=torch.bfloat16)
     value_cache = torch.zeros_like(key_cache)
-    rotary_cos = torch.zeros(1, head_dim // 2, device="cuda", dtype=torch.bfloat16)
-    rotary_sin = torch.ones(1, head_dim // 2, device="cuda", dtype=torch.bfloat16)
+    # flash-attn needs a cos/sin table covering the whole KV cache (4 positions); every row is the
+    # same 90-degree rotation, so the expected values do not depend on the decode position.
+    rotary_cos = torch.zeros(4, head_dim // 2, device="cuda", dtype=torch.bfloat16)
+    rotary_sin = torch.ones(4, head_dim // 2, device="cuda", dtype=torch.bfloat16)
 
     out = attention.flash_decode(
         sequence_len_offset=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),

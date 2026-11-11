@@ -231,6 +231,10 @@ test_matrix:
       - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_model_loads_local_lm_and_flags_gradients_for_tp_averaging
       - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_forward_returns_per_token_cross_entropy_loss
       - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_embedding_transposes_input_embeddings_to_sequence_major
+      # Selective recompute of layernorm+mlp on a local-spec layer exhausts GPU memory on 8xA100
+      # (cuBLAS handle allocation fails, ~40 GB per rank) and pytest then stalls rendering the
+      # failure, which would block the whole group without an NCCL timeout. Root cause open.
+      - tests/unit_tests/flagcicd_cov/transformer_core/test_transformer_layer_cov.py::test_selective_recompute_layernorm_and_mlp_preserves_values_and_grads
       # paged_stash.allocate_stash_buffers references torch.float8_e8m0fnu, which the A100 image's
       # PyTorch 2.7.0a0 (nv25.03) does not provide; re-enable once the image ships a torch with it.
       - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_hooks_cov.py::test_on_get_returns_the_reload_view_without_padding_once_captured

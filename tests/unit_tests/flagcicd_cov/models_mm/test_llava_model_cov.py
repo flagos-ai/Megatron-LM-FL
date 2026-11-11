@@ -417,7 +417,7 @@ class TestLLaVAForward:
             input_ids=input_ids_text, position_ids=position_ids
         ).transpose(1, 0)
         combined, _, _ = self.model._preprocess_data(
-            torch.zeros(0, 0, 0),
+            torch.zeros(0, 0, 0, device=get_current_device()),
             language_embeddings,
             input_ids,
             None,
