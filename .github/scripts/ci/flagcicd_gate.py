@@ -131,7 +131,9 @@ def verify_plan(
     excluded = set(plan.get("stage_excluded_groups", []))
     for platform in plan.get("platforms", []):
         leaked = sorted(
-            group["name"] for group in platform.get("selected_groups", []) if group["name"] in excluded
+            group["name"]
+            for group in platform.get("selected_groups", [])
+            if group["name"] in excluded
         )
         if leaked:
             errors.append(

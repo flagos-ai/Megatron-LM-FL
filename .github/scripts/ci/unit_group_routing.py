@@ -122,7 +122,9 @@ class Catalog:
         if stage is None:
             return set()
         return {
-            name for name, group in self.groups.items() if group.stages and stage not in group.stages
+            name
+            for name, group in self.groups.items()
+            if group.stages and stage not in group.stages
         }
 
     def validate(self, root: pathlib.Path | None = None) -> list[str]:
@@ -142,8 +144,7 @@ class Catalog:
         for omitted in self.coverage_omit:
             # A whole source or a file glob here would hide the boundary itself.
             if not omitted.endswith("/") or not any(
-                omitted.startswith(source) and omitted != source
-                for source in self.coverage_sources
+                omitted.startswith(source) and omitted != source for source in self.coverage_sources
             ):
                 errors.append(
                     f"Coverage omit path must be a directory inside a coverage source: {omitted}"
