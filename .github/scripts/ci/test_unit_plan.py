@@ -95,7 +95,7 @@ class CatalogTests(unittest.TestCase):
     def test_non_platform_configs_are_not_platforms(self):
         self.assertEqual(
             set(self.platforms),
-            {"ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu"},
+            {"ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu", "iluvatar"},
         )
 
     def test_catalog_paths_and_dependencies_are_valid(self):
@@ -168,7 +168,7 @@ class CatalogTests(unittest.TestCase):
                 effective = group.execution_group or name
                 with self.subTest(platform=platform_name, group=name):
                     self.assertTrue(reason)
-                    self.assertEqual(group.status, "active")
+                    self.assertIn(group.status, {"active", "planned"})
                     if effective in platform.groups:
                         executed = platform.groups[effective]["path"]
                         test_paths = [
@@ -510,7 +510,7 @@ class SelectionTests(unittest.TestCase):
         self.assertIn("planned-inference", execution_names(mixed, "ascend"))
         self.assertNotIn("planned-inference", execution_names(mixed, "cuda"))
 
-    def test_dsa_kernel_tests_are_executable_on_cuda(self):
+    def test_dsa_kernel_tests_are_deferred_without_sm90_cuda(self):
         self.assertEqual(
             self.catalog.matches("tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py"),
             "dsa_kernel",
@@ -520,8 +520,12 @@ class SelectionTests(unittest.TestCase):
         )
         platform = platform_plan(plan, "cuda")
         self.assertEqual(platform["planned"], [])
-        self.assertIn("dsa_kernel", execution_names(plan, "cuda"))
-        self.assertEqual(plan["plan_status"], "ready")
+        self.assertNotIn("dsa_kernel", execution_names(plan, "cuda"))
+        self.assertEqual(plan["plan_status"], "partial")
+        self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["dsa_kernel"])
+        self.assertEqual(
+            [group["name"] for group in platform["planned_skipped"]], ["planned-dsa_kernel"]
+        )
 
     def test_newly_onboarded_groups_execute_for_mixed_pr_changes(self):
         plan = build_plan(
@@ -534,10 +538,12 @@ class SelectionTests(unittest.TestCase):
             ]
         )
         self.assertEqual(plan["plan_status"], "partial")
-        self.assertEqual(plan["direct_gaps"], [])
+        self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["dsa_kernel"])
+        self.assertEqual(plan["direct_gaps"][0]["status"], "planned")
         self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
-        groups = {"optimizer", "extensions", "a2a_overlap", "dsa_kernel"}
+        groups = {"optimizer", "extensions", "a2a_overlap"}
         self.assertTrue(groups <= execution_names(plan, "cuda"))
+        self.assertNotIn("dsa_kernel", execution_names(plan, "cuda"))
         for platform in plan["platforms"]:
             if platform["name"] != "cuda":
                 unsupported = {group["name"] for group in platform["unsupported"]}
@@ -549,11 +555,11 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
 
-    def test_onboarded_group_still_blocks_without_selected_executor(self):
+    def test_planned_group_without_selected_executor_is_advisory(self):
         plan = build_plan(
             ["tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py"], platforms=["musa"]
         )
-        self.assertEqual(plan["plan_status"], "blocked")
+        self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["dsa_kernel"])
 
     def test_shared_path_falls_back_to_every_group(self):
@@ -684,8 +690,8 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["scope"], "configured_matrix")
         self.assertEqual(plan["plan_status"], "ready")
         self.assertEqual(plan["catalog_completeness"], "partial")
-        self.assertEqual(len(plan["selected_logical_groups"]), 15)
-        self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 14)
+        self.assertEqual(len(plan["selected_logical_groups"]), 14)
+        self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 13)
 
     def test_configured_selection_excludes_planned_groups(self):
         plan = build_plan([], selection="configured", event="schedule", platforms=["cuda"])
@@ -711,7 +717,7 @@ class SelectionTests(unittest.TestCase):
             name for name, group in self.catalog.groups.items() if group.status == "planned"
         )
         self.assertEqual(plan["unwired_planned_groups"], expected)
-        self.assertEqual(len(plan["unwired_planned_groups"]), 8)
+        self.assertEqual(len(plan["unwired_planned_groups"]), 9)
 
     def test_nightly_plan_status_ready_with_partial_catalog(self):
         plan = build_plan([], selection="configured", event="schedule", platforms=["cuda"])
@@ -915,8 +921,7 @@ class MaterializationTests(unittest.TestCase):
         platform = platform_plan(plan, "musa")
         excluded = {group["name"]: group for group in platform["fallback_excluded"]}
         self.assertEqual(
-            sorted(excluded),
-            ["a2a_overlap", "dsa_kernel", "extensions", "optimizer", "plugin", "transformer"],
+            sorted(excluded), ["a2a_overlap", "extensions", "optimizer", "plugin", "transformer"]
         )
         self.assertEqual(excluded["plugin"]["status"], "unsupported")
         self.assertEqual(excluded["plugin"]["platform"], "musa")
@@ -1195,7 +1200,7 @@ class PlannerCliTests(unittest.TestCase):
             self.assertTrue(plan["gate_policy"]["allow_catalog_partial"])
             self.assertEqual(plan["plan_status"], "ready")
             self.assertEqual(plan["catalog_completeness"], "partial")
-            self.assertEqual(len(plan["unwired_planned_groups"]), 8)
+            self.assertEqual(len(plan["unwired_planned_groups"]), 9)
             text = summary.read_text()
             self.assertIn("Configured matrix: complete", text)
             self.assertIn("Logical catalog completeness: partial", text)

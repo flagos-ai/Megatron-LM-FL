@@ -91,12 +91,27 @@ test_matrix:
       - name: a2a_overlap
         path: tests/unit_tests/a2a_overlap/
         description: All-to-all overlap tests
-      - name: dsa_kernel
-        path: tests/unit_tests/plugin/
-        description: Plugin kernel tests
+    unsupported_groups:
+      dsa_kernel: "DSA Triton kernels require SM90+; CUDA CI currently runs on A100 (SM80)."
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
+      # All-to-all overlap
+      # A100 (SM80) cannot execute Transformer Engine FP8, which requires SM89+.
+      # Skip only the 12 FP8 cases on A100 while keeping the passing BF16 coverage active.
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag0-alltoall-512]
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag0-alltoall-None]
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag1-alltoall-512]
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag1-alltoall-None]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads-fp8_flag1-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads_params-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads_params-fp8_flag1-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads-fp8_flag1-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads_params-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads_params-fp8_flag1-alltoall]
+
       # Data
       # Requires the upstream HuggingFace tokenizer fixture, which is not present in FL CI assets.
       - tests/unit_tests/data/test_fim_dataset.py

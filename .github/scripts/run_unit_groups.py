@@ -36,6 +36,16 @@ def retry_limit(value: object) -> int:
     return int(value)
 
 
+def group_timeout(value: object, default: float = 3600) -> float:
+    """Resolve the per-group wall-clock budget, falling back to the default."""
+    if value in (None, ""):
+        return default
+    seconds = float(value)
+    if seconds <= 0:
+        raise ValueError("group_timeout_seconds must be positive")
+    return seconds
+
+
 def _retryable_exit(code: int) -> bool:
     return code > 0 and code not in (124, 130, 137, 143)
 
@@ -499,7 +509,9 @@ def main() -> int:
                 "GITHUB_PATH": os.devnull,
             }
             try:
-                code = run_group(environment)
+                code = run_group(
+                    environment, timeout=group_timeout(os.environ.get("CI_GROUP_TIMEOUT_SECONDS"))
+                )
             except BaseException:
                 print("::endgroup::", flush=True)
                 print(f"::warning::INCOMPLETE: Unit tests: {name}", flush=True)
