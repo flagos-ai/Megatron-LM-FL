@@ -33,6 +33,7 @@ from megatron.core.transformer.heterogeneous.heterogeneous_config import (
 from megatron.core.utils import (
     get_torch_version,
     is_flashinfer_min_version,
+    is_te_cross_entropy_supported,  # FlagScale Modify
     is_te_min_version,
     is_torch_min_version,
 )
@@ -1525,14 +1526,17 @@ def validate_args(args, defaults={}):
         assert args.fim_spm_rate, "--fim-spm-rate should be specified."
         assert all(token is not None for token in extra_tokens), "FIM extra tokens should be specified."
 
+    ######## FlagScale Begin ########
     assert not (
         args.cross_entropy_loss_fusion
         and args.cross_entropy_fusion_impl == 'te'
-        and not is_te_min_version("2.19.0")
+        and not is_te_cross_entropy_supported()
     ), (
-        "Transformer Engine cross entropy loss fusion is disabled due to stability issues. "
+        "Transformer Engine cross entropy loss fusion requires TE >= 2.19.0 or a backport "
+        "of TE #3193 and #3273 exposing overwrite_input (such as patched TE-FL 2.17). "
         "Use --cross-entropy-fusion-impl native, or omit --cross-entropy-loss-fusion."
     )
+    ######## FlagScale End ########
 
     # Deterministic mode
     if args.deterministic_mode:

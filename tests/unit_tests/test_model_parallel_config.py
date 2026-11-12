@@ -44,7 +44,7 @@ def test_native_cross_entropy_loss_fusion_is_allowed():
 
 def test_te_cross_entropy_loss_fusion_is_allowed_by_training_args(monkeypatch):
     args = _te_cross_entropy_training_args(monkeypatch)
-    monkeypatch.setattr('megatron.training.arguments.is_te_min_version', lambda version: True)
+    monkeypatch.setattr('megatron.training.arguments.is_te_cross_entropy_supported', lambda: True)  # FlagScale Modify
 
     validated_args = validate_args(args)
 
@@ -52,9 +52,12 @@ def test_te_cross_entropy_loss_fusion_is_allowed_by_training_args(monkeypatch):
     assert validated_args.cross_entropy_fusion_impl == 'te'
 
 
-def test_te_cross_entropy_loss_fusion_requires_te_2_19(monkeypatch):
+######## FlagScale Begin ########
+def test_te_cross_entropy_loss_fusion_rejects_unfixed_te(monkeypatch):
     args = _te_cross_entropy_training_args(monkeypatch)
-    monkeypatch.setattr('megatron.training.arguments.is_te_min_version', lambda version: False)
+    monkeypatch.setattr('megatron.training.arguments.is_te_cross_entropy_supported', lambda: False)
 
-    with pytest.raises(AssertionError, match="disabled due to stability issues"):
+    with pytest.raises(AssertionError, match="requires TE >= 2.19.0 or a backport"):
         validate_args(args)
+
+######## FlagScale End ########
