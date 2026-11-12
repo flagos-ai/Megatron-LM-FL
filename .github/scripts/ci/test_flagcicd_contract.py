@@ -111,6 +111,24 @@ class ContractTests(unittest.TestCase):
             with self.assertRaisesRegex(flagcicd_contract.ContractError, "unknown level"):
                 flagcicd_contract.load_project(path)
 
+    def _load_with_group_stages(self, name: str, stages: object) -> None:
+        project, _ = flagcicd_contract.load_project(ROOT / ".flagcicd/project.yaml")
+        next(group for group in project["test_groups"] if group["name"] == name)["stages"] = stages
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "project.yaml"
+            path.write_text(yaml.safe_dump(project, sort_keys=False))
+            flagcicd_contract.load_project(path)
+
+    def test_group_stages_must_name_declared_stages(self) -> None:
+        for stages in ([], ["release"], "nightly"):
+            with self.subTest(stages=stages):
+                with self.assertRaisesRegex(flagcicd_contract.ContractError, "declared stages"):
+                    self._load_with_group_stages("flagcicd_cov", stages)
+
+    def test_required_group_cannot_be_stage_restricted(self) -> None:
+        with self.assertRaisesRegex(flagcicd_contract.ContractError, "stage-restricted"):
+            self._load_with_group_stages("core", ["nightly"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -141,6 +141,28 @@ printf '[run]\nparallel = true\ndynamic_context = test_function\nsource =\n    %
   "$COVERAGE_CORE_SOURCE" \
   "$COVERAGE_DIR" \
   > "$COVERAGE_DIR/.coveragerc"
+# Triton kernel bodies are compiled and run on the device, so coverage.py can never trace them on
+# any platform; excluding the decorator line removes the whole kernel function from the report.
+# The Python launchers around the kernels stay measured.
+printf '[report]\nexclude_also =\n    ^\\s*@triton\\.(jit|autotune|heuristics)\\b\n' >> "$COVERAGE_DIR/.coveragerc"
+# Omitted directories stay in the collected data; they only leave the reported
+# denominator, for this group's JSON and the combined report alike.
+# Write through fd 3 and send stdout to stderr: some vendor images print from
+# interpreter startup hooks, and that text must not land in the rc file.
+CI_COVERAGE_OMIT="${CI_COVERAGE_OMIT:-[]}" "$PYTHON_BIN" -c '
+import json
+import os
+
+omit = json.loads(os.environ["CI_COVERAGE_OMIT"])
+if not (isinstance(omit, list) and all(isinstance(item, str) and item for item in omit)):
+    raise SystemExit(f"CI_COVERAGE_OMIT must be a JSON array of non-empty strings, got: {omit!r}")
+root = os.environ["GITHUB_WORKSPACE"]
+output = os.fdopen(3, "w")
+if omit:
+    print("omit =", file=output)
+    for item in omit:
+        print("    " + os.path.join(root, item.rstrip("/"), "*"), file=output)
+' 3>>"$COVERAGE_DIR/.coveragerc" 1>&2
 
 PYTEST_ARGS=(
   -v
@@ -192,7 +214,6 @@ fi
   "$COVERAGE_DIR" 2>/dev/null || true
 "$PYTHON_BIN" -m coverage json \
   --rcfile="$COVERAGE_DIR/.coveragerc" \
-  --show-contexts \
   -o "$COVERAGE_JSON" \
   --include="$COVERAGE_INCLUDE" 2>/dev/null || true
 

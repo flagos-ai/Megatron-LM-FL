@@ -167,6 +167,7 @@ def main() -> int:
         f"{len(platforms)} platforms, required level {args.level}"
     )
     print(f"Coverage sources: {', '.join(catalog.coverage_sources)}")
+    print(f"Coverage omit: {', '.join(catalog.coverage_omit) or 'none'}")
     for group_name in sorted(catalog.groups):
         group = catalog.groups[group_name]
         owners = executable.get(group_name, [])

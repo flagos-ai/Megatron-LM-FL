@@ -116,9 +116,11 @@ class RoutingIntegrityTests(unittest.TestCase):
         plan = build_plan([".pre-commit-config.yaml"])
         self.assertEqual(plan["plan_status"], "partial")
         self.assertFalse(plan["global_groups"]["unmapped_paths"])
+        excluded = set(plan["stage_excluded_groups"])
         for platform in plan["platforms"]:
             self.assertEqual(
-                plan["expected_unit_groups"][platform["name"]], platform["configured_groups"]
+                plan["expected_unit_groups"][platform["name"]],
+                [name for name in platform["configured_groups"] if name not in excluded],
             )
         mixed = build_plan([".pre-commit-config.yaml", "unmapped_config.yaml"])
         self.assertEqual(mixed["plan_status"], "blocked")
@@ -138,7 +140,7 @@ class RoutingIntegrityTests(unittest.TestCase):
         plan = build_plan([], selection="configured", level="L2", event="schedule")
         self.assertEqual(plan["plan_status"], "ready")
         self.assertEqual(len(plan["platforms"]), 9)
-        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 83)
+        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 84)
         for platform in plan["platforms"]:
             self.assertEqual(
                 plan["expected_unit_groups"][platform["name"]], platform["configured_groups"]
@@ -331,7 +333,7 @@ class CandidateConfigTests(unittest.TestCase):
             plan = json.loads(output.read_text())
             self.assertEqual(plan["gate_policy"], trusted_policy)
             self.assertIn("inference", plan["expected_unit_groups"]["cuda"])
-            self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 14)
+            self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 15)
             identity = planner.execution_matrix(plan)[0]["config_identity"]
             workflow = yaml.safe_load((ROOT / ".github/workflows/all_tests_common.yml").read_text())
             step = next(
