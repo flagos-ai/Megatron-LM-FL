@@ -5,13 +5,26 @@ from contextlib import nullcontext
 from typing import Any
 
 import torch
-import triton
-import triton.language as tl
 
 from megatron.core._rank_utils import log_single_rank
 from megatron.core.full_cuda_graph import FullCudaGraphWrapper
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from megatron.core.utils import get_attr_wrapped_model
+
+try:
+    import triton
+    import triton.language as tl
+
+    HAVE_TRITON = True
+except ImportError:
+    from unittest.mock import MagicMock
+
+    from megatron.core.utils import null_decorator
+
+    triton = MagicMock()
+    triton.jit = null_decorator
+    tl = MagicMock()
+    HAVE_TRITON = False
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +64,8 @@ class PagedStashBuffer:
             num_tokens_host: If > 0, allocate pinned host buffer with this many tokens for
                 spillover.
         """
+        if not HAVE_TRITON:
+            raise ImportError("MoE paged stash requires Triton")
         self.hidden_size = hidden_size
         self.page_size = page_size
         self.device = device
