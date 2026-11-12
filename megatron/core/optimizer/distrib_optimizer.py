@@ -2815,7 +2815,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
         self.ensure_master_weights_for_param_sync()
         self.assert_master_weights_resident("_copy_main_params_to_model_params")
 
-
         if self.ddp_config.fp8_param_gather:
             # Grouped quantized tensors expose one logical parameter backed by multiple TE
             # quantized members. Expand them so quantize_param_shard receives member-aligned
