@@ -68,8 +68,13 @@ TEST_TYPE=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.TEST_TYPE')
 TEST_EVALUATION=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.TEST_EVALUATION // "pass"')
-ENABLE_LIGHTWEIGHT_MODE=$(cat $TRAINING_PARAMS_PATH |
-    /usr/local/bin/yq '.ENV_VARS.ENABLE_LIGHTWEIGHT_MODE // "false"')
+# A value set in the case's model_config.yaml (including an explicit false)
+# takes precedence; otherwise keep the value passed by the caller.
+CASE_LIGHTWEIGHT_MODE=$(cat $TRAINING_PARAMS_PATH |
+    /usr/local/bin/yq '.ENV_VARS.ENABLE_LIGHTWEIGHT_MODE')
+if [[ "$CASE_LIGHTWEIGHT_MODE" != "null" ]]; then
+    ENABLE_LIGHTWEIGHT_MODE="$CASE_LIGHTWEIGHT_MODE"
+fi
 N_REPEAT=$(cat $TRAINING_PARAMS_PATH |
     /usr/local/bin/yq '.ENV_VARS.N_REPEAT // "'$N_REPEAT'"')
 MODE=$(cat $TRAINING_PARAMS_PATH |
