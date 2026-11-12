@@ -90,6 +90,11 @@ register(
 # =============================================================================
 register(
     target="megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication",
+    impl="megatron.plugin.hygon.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunicationHygon",
+    vendor="hygon",
+)
+register(
+    target="megatron.core.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunication",
     impl="megatron.plugin.kunlunxin.tensor_parallel.layers.LinearWithGradAccumulationAndAsyncCommunicationKunlunxin",
     vendor="kunlunxin",
 )
