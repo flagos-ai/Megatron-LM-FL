@@ -2,6 +2,7 @@
 
 import fnmatch
 import math
+import warnings
 from dataclasses import dataclass, field, replace
 from typing import Callable, Optional, Tuple, Union
 
@@ -483,9 +484,9 @@ class OptimizerConfig:
             max(fractions) if fractions is not None else self.optimizer_state_offload_fraction
         )
         if self.chunked_optimizer_state_offload and offload_fraction > 0.0:
-            assert self.optimizer == 'adam', (
-                "chunked optimizer state offload currently supports Adam only"
-            )
+            assert (
+                self.optimizer == 'adam'
+            ), "chunked optimizer state offload currently supports Adam only"
 
             assert (
                 not self.optimizer_cpu_offload
@@ -509,12 +510,12 @@ class OptimizerConfig:
                     "exp_avg_sq_dtype to be torch.float32 or torch.bfloat16"
                 )
 
-            assert not self.use_layer_wise_distributed_optimizer, (
-                "Adam optimizer state offload does not support LayerWiseDistributedOptimizer"
-            )
-            assert self.use_distributed_optimizer, (
-                "Adam optimizer state offload requires use_distributed_optimizer"
-            )
+            assert (
+                not self.use_layer_wise_distributed_optimizer
+            ), "Adam optimizer state offload does not support LayerWiseDistributedOptimizer"
+            assert (
+                self.use_distributed_optimizer
+            ), "Adam optimizer state offload requires use_distributed_optimizer"
 
         # The following condition is used to avoid repetition in distrib_optimizer.py.
         # This is because in distrib_optimizer.py, the process to handle parameters are
@@ -533,8 +534,6 @@ class OptimizerConfig:
 
         if self.fp8_recipe == "mxfp8":
             if not self.reuse_grad_buf_for_mxfp8_param_ag:
-                import warnings
-
                 warnings.warn(
                     "mxfp8 without using reuse_grad_buf_for_mxfp8_param_ag and fp8_param_gather"
                     "will use significant amount additional GPU memory."
