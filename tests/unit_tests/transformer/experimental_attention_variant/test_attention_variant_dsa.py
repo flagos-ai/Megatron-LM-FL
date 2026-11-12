@@ -91,6 +91,34 @@ class TestRotateActivation:
         with pytest.raises(AssertionError, match="only support bf16"):
             rotate_activation(x)
 
+    @pytest.mark.skipif(
+        not (hasattr(torch, "npu") and torch.npu.is_available()), reason="Ascend NPU required"
+    )
+    @pytest.mark.parametrize(
+        "shape", [(0, 2, 128), (16, 2, 128), (1025, 1, 64, 128), (4096, 1, 64, 128)]
+    )
+    @pytest.mark.parametrize("noncontiguous", [False, True])
+    def test_npu_hadamard_forward_backward(self, shape, noncontiguous):
+        """Check real BF16 rotation and gradients against an explicit CPU Hadamard."""
+        torch.manual_seed(42)
+        x = torch.randn(shape, dtype=torch.bfloat16, device="npu")
+        if noncontiguous:
+            x = x.transpose(0, -1).contiguous().transpose(0, -1)
+        x.requires_grad_()
+        grad = torch.randn_like(x)
+        out = rotate_activation(x)
+        dx = torch.autograd.grad(out, x, grad)[0]
+
+        h = torch.ones(1, 1, dtype=torch.float32, device="cpu")
+        while h.shape[0] < shape[-1]:
+            h = torch.cat((torch.cat((h, h), 1), torch.cat((h, -h), 1)), 0)
+        h *= shape[-1] ** -0.5
+        expected = (x.detach().cpu().float() @ h).to(torch.bfloat16)
+        expected_dx = (grad.cpu().float() @ h).to(torch.bfloat16)
+        assert out.shape == x.shape and out.dtype == x.dtype and out.device == x.device
+        torch.testing.assert_close(out.cpu(), expected, rtol=8e-3, atol=8e-3)
+        torch.testing.assert_close(dx.cpu(), expected_dx, rtol=8e-3, atol=8e-3)
+
 
 @pytest.mark.parametrize("seqlen_and_topk", [[16, 32], [64, 32]])
 class TestComputeDSAIndexerLoss:

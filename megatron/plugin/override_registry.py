@@ -215,3 +215,9 @@ register(
     impl="megatron.plugin.metax.distributed.fsdp.param_and_grad_buffer._get_communication_stream",
     vendor="metax",
 )
+
+register(
+    target="megatron.core.transformer.experimental_attention_variant.dsa.rotate_activation",
+    impl="megatron.plugin.Ascend.transformer.experimental_attention_variant.dsa.rotate_activation",
+    vendor="npu",
+)
