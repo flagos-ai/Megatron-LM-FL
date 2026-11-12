@@ -353,6 +353,32 @@ def is_te_min_version(version, check_equality=True):
     return get_te_version() > PkgVersion(version)
 
 
+######## FlagScale Begin ########
+def is_te_cross_entropy_supported() -> bool:
+    """Whether TE provides the fixed fused cross entropy implementation."""
+    try:
+        from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+    except ImportError:
+        return False
+
+    if is_te_min_version("2.19.0"):
+        return True
+
+    # TE-FL keeps its 2.17 version after backporting both upstream fixes:
+    # https://github.com/NVIDIA/TransformerEngine/pull/3193 (FP32 gradient arithmetic)
+    # https://github.com/NVIDIA/TransformerEngine/pull/3273 (compact saved statistics
+    # and input-storage reuse in backward). The latter adds overwrite_input.
+    # Recognize that API instead of lowering the version floor for all old TE builds.
+    # This assumes backports exposing this API include both fixes, as TE-FL does;
+    # the signature is a capability marker, not a numerical correctness check.
+    try:
+        return "overwrite_input" in inspect.signature(parallel_cross_entropy).parameters
+    except (TypeError, ValueError):
+        return False
+
+######## FlagScale End ########
+
+
 def get_torch_version():
     """Get torch version from __version__."""
 
