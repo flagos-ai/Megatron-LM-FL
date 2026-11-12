@@ -508,7 +508,7 @@ def select_groups(
             fallback_reason=None,
         )
     if selection in {"configured", "requested"}:
-        configured = {name for name, group in catalog.groups.items() if group.status == "active"}
+        configured = {name for name in all_groups if catalog.groups[name].status == "active"}
         selected = configured | required
         reasons: dict[str, list[dict[str, str]]] = {}
         for name in selected:
@@ -621,6 +621,7 @@ def materialize_groups(
     In that case the platform conservatively executes every active group it can
     run, so the plan never narrows coverage around a known gap.
     """
+    stage_excluded = frozenset(stage_excluded)
     executable: list[dict[str, Any]] = []
     planned: list[dict[str, Any]] = []
     unsupported: list[dict[str, Any]] = []

@@ -116,10 +116,11 @@ class RoutingIntegrityTests(unittest.TestCase):
         plan = build_plan([".pre-commit-config.yaml"])
         self.assertEqual(plan["plan_status"], "partial")
         self.assertFalse(plan["global_groups"]["unmapped_paths"])
+        excluded = set(plan["stage_excluded_groups"])
         for platform in plan["platforms"]:
             self.assertEqual(
                 plan["expected_unit_groups"][platform["name"]],
-                [name for name in platform["configured_groups"] if name != "flagcicd_cov"],
+                [name for name in platform["configured_groups"] if name not in excluded],
             )
         mixed = build_plan([".pre-commit-config.yaml", "unmapped_config.yaml"])
         self.assertEqual(mixed["plan_status"], "blocked")
