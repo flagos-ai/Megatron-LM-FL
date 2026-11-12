@@ -215,3 +215,24 @@ register(
     impl="megatron.plugin.metax.distributed.fsdp.param_and_grad_buffer._get_communication_stream",
     vendor="metax",
 )
+
+# =============================================================================
+# SSM - gated_delta_net (FLA kernels)
+# =============================================================================
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._normalize_qk",
+    impl="megatron.plugin.Ascend.ssm.chunk_gated_delta_rule.normalize_qk",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._gated_delta_rule",
+    impl="megatron.plugin.Ascend.ssm.chunk_gated_delta_rule.gated_delta_rule",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._causal_conv1d",
+    impl="megatron.plugin.Ascend.ssm.causal_conv1d.gated_delta_net_conv1d",
+    vendor="npu",
+)
