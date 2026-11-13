@@ -29,7 +29,12 @@ from megatron.core.tensor_parallel.inference_layers import (
     inference_all_gather_from_tensor_model_parallel_region,
 )
 from megatron.core.transformer.enums import AttnMaskType, LayerType
-from megatron.core.transformer.hyper_connection import learned_output_contract  # FlagScale Modify
+from megatron.core.transformer.experimental_attention_variant.dsa_index_sharing import (
+    DSAIndexSharingState,
+    dsa_index_sharing_context,
+    get_dsa_index_sharing_state,
+)
+from megatron.core.transformer.hyper_connection import learned_output_contract
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.torch_norm import LayerNormBuilder
@@ -1274,6 +1279,13 @@ class MultiTokenPredictionLayer(MegatronModule):
           ``outer_quantization_context`` block below.
         """
 
+        # GPT MTP checkpoints each depth independently, so retain the block's
+        # microbatch state across depths and restore it when each depth replays.
+        dsa_index_sharing_state = get_dsa_index_sharing_state()
+        if dsa_index_sharing_state is None:
+            dsa_index_sharing_state = DSAIndexSharingState()
+
+        @dsa_index_sharing_context(dsa_index_sharing_state)
         def custom_forward(
             hidden_states,
             decoder_input,
@@ -1778,23 +1790,25 @@ class MultiTokenPredictionBlock(MegatronModule):
             ######## FlagScale End ########
         else:
             hidden_states = hidden_states_list[offset]
+        dsa_index_sharing_state = DSAIndexSharingState()
         for iteration in range(self.config.mtp_num_layers):
             layer_idx = 0 if self.mtp_use_repeated_layer else iteration
-            (hidden_states, input_ids, position_ids, padding_mask) = self.layers[layer_idx](
-                input_ids=input_ids,
-                position_ids=position_ids,
-                hidden_states=hidden_states,
-                attention_mask=attention_mask,
-                padding_mask=padding_mask,
-                inference_params=inference_params,
-                rotary_pos_emb=rotary_pos_emb,
-                rotary_pos_cos=rotary_pos_cos,
-                rotary_pos_sin=rotary_pos_sin,
-                packed_seq_params=packed_seq_params,
-                sequence_len_offset=sequence_len_offset,
-                embedding=embedding,
-                **(extra_block_kwargs or {}),
-            )
+            with dsa_index_sharing_context(dsa_index_sharing_state):
+                (hidden_states, input_ids, position_ids, padding_mask) = self.layers[layer_idx](
+                    input_ids=input_ids,
+                    position_ids=position_ids,
+                    hidden_states=hidden_states,
+                    attention_mask=attention_mask,
+                    padding_mask=padding_mask,
+                    inference_params=inference_params,
+                    rotary_pos_emb=rotary_pos_emb,
+                    rotary_pos_cos=rotary_pos_cos,
+                    rotary_pos_sin=rotary_pos_sin,
+                    packed_seq_params=packed_seq_params,
+                    sequence_len_offset=sequence_len_offset,
+                    embedding=embedding,
+                    **(extra_block_kwargs or {}),
+                )
 
             if mhc_multistream is not None:
                 ######## FlagScale Begin ########
