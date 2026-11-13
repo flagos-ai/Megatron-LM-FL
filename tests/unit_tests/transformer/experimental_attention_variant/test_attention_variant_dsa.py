@@ -2110,9 +2110,11 @@ class TestFusedDSAIndexerLossGradient:
                     mask,
                     sparse_loss,
                     self.pg_collection,
-                    None,
-                    None,
-                    None,
+                    None,  # varlen_starts
+                    None,  # varlen_ends
+                    None,  # key_positions
+                    None,  # query_valid_rows
+                    False,  # calculate_per_token_loss
                 )
                 loss_fused.backward()
 
@@ -2210,9 +2212,11 @@ class TestFusedDSAIndexerLossGradientTP:
                 mask,
                 sparse_loss,
                 pg_collection_tp1,
-                None,
-                None,
-                None,
+                None,  # varlen_starts
+                None,  # varlen_ends
+                None,  # key_positions
+                None,  # query_valid_rows
+                False,
             )
             loss_tp1.backward()
 
@@ -2269,9 +2273,11 @@ class TestFusedDSAIndexerLossGradientTP:
                     mask,
                     sparse_loss,
                     pg_collection_tpn,
-                    None,
-                    None,
-                    None,
+                    None,  # varlen_starts
+                    None,  # varlen_ends
+                    None,  # key_positions
+                    None,  # query_valid_rows
+                    False,
                 )
                 loss_tpn.backward()
 
