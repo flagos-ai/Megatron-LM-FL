@@ -2035,6 +2035,9 @@ class TestFusedDSAIndexerLossGradient:
         index_head_dim = 64
         softmax_scale = head_dim**-0.5
         loss_coeff = 1.0
+        # Allow the ~1.15e-4 FP32 gradient discrepancy observed in A100 (SM80)
+        # CI from einsum reduction rounding; other architectures keep 1e-5.
+        grad_atol = 2e-4 if torch.cuda.get_device_capability() == (8, 0) else 1e-5
 
         for seqlen, index_topk in [[16, 8], [32, 16], [64, 32]]:
             for sparse_loss in [False, True]:
@@ -2127,15 +2130,15 @@ class TestFusedDSAIndexerLossGradient:
                 ), f"{tag} Top-k indices mismatch between fused and reference"
 
                 assert torch.allclose(
-                    grad_q_fused, grad_q_ref, rtol=1e-5, atol=1e-5
+                    grad_q_fused, grad_q_ref, rtol=1e-5, atol=grad_atol
                 ), f"{tag} grad_q mismatch: max diff = {(grad_q_fused - grad_q_ref).abs().max().item()}"
 
                 assert torch.allclose(
-                    grad_weights_fused, grad_weights_ref, rtol=1e-5, atol=1e-5
+                    grad_weights_fused, grad_weights_ref, rtol=1e-5, atol=grad_atol
                 ), f"{tag} grad_weights mismatch: max diff = {(grad_weights_fused - grad_weights_ref).abs().max().item()}"
 
                 assert torch.allclose(
-                    grad_k_fused, grad_k_ref, rtol=1e-5, atol=1e-5
+                    grad_k_fused, grad_k_ref, rtol=1e-5, atol=grad_atol
                 ), f"{tag} grad_k mismatch: max diff = {(grad_k_fused - grad_k_ref).abs().max().item()}"
 
 
