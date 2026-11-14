@@ -137,8 +137,8 @@ class RoutingIntegrityTests(unittest.TestCase):
     def test_configured_nightly_still_selects_every_configured_group(self) -> None:
         plan = build_plan([], selection="configured", level="L2", event="schedule")
         self.assertEqual(plan["plan_status"], "ready")
-        self.assertEqual(len(plan["platforms"]), 8)
-        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 75)
+        self.assertEqual(len(plan["platforms"]), 9)
+        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 83)
         for platform in plan["platforms"]:
             self.assertEqual(
                 plan["expected_unit_groups"][platform["name"]], platform["configured_groups"]
@@ -331,7 +331,7 @@ class CandidateConfigTests(unittest.TestCase):
             plan = json.loads(output.read_text())
             self.assertEqual(plan["gate_policy"], trusted_policy)
             self.assertIn("inference", plan["expected_unit_groups"]["cuda"])
-            self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 15)
+            self.assertEqual(len(plan["expected_unit_groups"]["cuda"]), 14)
             identity = planner.execution_matrix(plan)[0]["config_identity"]
             workflow = yaml.safe_load((ROOT / ".github/workflows/all_tests_common.yml").read_text())
             step = next(

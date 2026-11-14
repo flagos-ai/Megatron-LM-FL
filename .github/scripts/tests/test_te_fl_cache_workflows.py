@@ -35,7 +35,17 @@ class WheelCacheWorkflowTests(unittest.TestCase):
             pipeline["jobs"]["test"]["with"]["te_fl_artifact"],
             "${{ needs.te_fl_prepare.outputs.wheel_artifact }}",
         )
-        for platform in ("ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu"):
+        for platform in (
+            "ascend",
+            "cuda",
+            "enflame",
+            "hygon",
+            "kunlunxin",
+            "metax",
+            "musa",
+            "ppu",
+            "iluvatar",
+        ):
             name = f"all_tests_{platform}.yml"
             data = workflow(name)
             self.assertEqual(set(data["jobs"]), {"lint", "run_tests"})

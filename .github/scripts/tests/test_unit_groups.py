@@ -384,7 +384,7 @@ class UnitGroupTests(unittest.TestCase):
             "CI_PYTHON_BIN": sys.executable,
         }
 
-        def run_group(env):
+        def run_group(env, timeout=3600):
             directory = Path(env["CI_COVERAGE_DIRECTORY"])
             directory.mkdir()
             config = directory / ".coveragerc"
@@ -740,7 +740,17 @@ class UnitWorkflowTests(unittest.TestCase):
         self.assertIn("Verify unit plan across platforms", complete)
 
     def test_all_platforms_have_install_free_group_hooks(self):
-        for name in ("cuda", "musa", "ascend", "enflame", "hygon", "kunlunxin", "metax", "ppu"):
+        for name in (
+            "cuda",
+            "musa",
+            "ascend",
+            "enflame",
+            "hygon",
+            "kunlunxin",
+            "metax",
+            "ppu",
+            "iluvatar",
+        ):
             script = (ROOT / f".github/scripts/set_env_{name}.sh").read_text()
             hook = script.split("  unit_group)\n", 1)[1].split("    ;;", 1)[0]
             self.assertNotIn("pip", hook)

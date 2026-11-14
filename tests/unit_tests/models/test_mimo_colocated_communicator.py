@@ -9,6 +9,7 @@ import torch.distributed as dist
 
 from megatron.core.hyper_comm_grid import HyperCommGrid
 from megatron.core.models.mimo.comm.colocated_communicator import ColocatedBridgeCommunicator
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 logging.basicConfig(level=logging.DEBUG, stream=sys.stderr)
@@ -39,6 +40,12 @@ def make_comm(*args, **kwargs):
 
 
 def destroy_all_grids():
+    if dist.is_initialized():
+        # Drain the device before dropping the process groups: a queued collective
+        # that outlives the Python call would otherwise reference a freed group.
+        # Kept rank-local on purpose - see test_mimo_1f1b_schedule.destroy_all_grids
+        # for why a WORLD barrier here deadlocks on multi-grid suites.
+        get_platform().synchronize()
     # Destroy communicators first so their NCCL subgroups are freed before we
     # tear down the parent grids. NCCL caps concurrent communicators at ~500;
     # leaked PGs from per-test fixtures blow that budget quickly.
