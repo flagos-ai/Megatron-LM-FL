@@ -40,6 +40,8 @@ def dispatch(monkeypatch):
             core.swiglu.__wrapped__,
             core.swiglu_back.__wrapped__,
             core.weighted_swiglu_back.__wrapped__,
+            core.bias_swiglu_impl.__wrapped__,
+            core.weighted_bias_swiglu_impl.__wrapped__,
         )
         for func in primitives:
             decorators._plugin_impl_cache.pop(func, None)
@@ -289,7 +291,7 @@ def test_fp32_bias_promotion(dispatch, npu_ops, record_property):
 
 
 @pytest.mark.parametrize('kind', ['plain', 'bias', 'weighted_fp32'])
-def test_clamp_stays_in_core(dispatch, npu_ops, record_property, kind):
+def test_clamp_bypasses_unclamped_native_ops(dispatch, npu_ops, record_property, kind):
     """Clamp branches preserve outputs and all gradients without native calls."""
     x = _sample((4, 2, 64), torch.bfloat16, npu_ops.device) * 4
     g = _sample((4, 2, 32), torch.bfloat16, npu_ops.device, 72)

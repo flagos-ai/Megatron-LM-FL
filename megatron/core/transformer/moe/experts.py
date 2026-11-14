@@ -355,7 +355,7 @@ class TEGroupedMLP(MegatronModule):
         if not (use_glu_fusion or use_srelu_fusion):
             return False
         if self.config.activation_func == F.silu:
-            return True
+            return self.config.activation_func_clamp_value is None
         if self.config.activation_func == quick_gelu:
             try:
                 from transformer_engine.pytorch.ops import ScaledClampedQGeGLU  # noqa: F401
@@ -719,6 +719,7 @@ class TEGroupedMLP(MegatronModule):
                         bias_parallel,
                         permuted_probs,
                         self.config.activation_func_fp8_input_store,
+                        clamp_value=self.config.activation_func_clamp_value,
                     )
                 elif self.activation_func == quick_gelu and self.config.gated_linear_unit:
                     intermediate_parallel = weighted_bias_quick_geglu_impl(
