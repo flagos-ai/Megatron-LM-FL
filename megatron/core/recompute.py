@@ -9,6 +9,10 @@ from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.fp4_utils import get_fp4_context
 from megatron.core.fp8_utils import get_fp8_context
 from megatron.core.packed_seq_params import PackedSeqParams
+from megatron.core.transformer.experimental_attention_variant.dsa_index_sharing import (
+    DSAIndexSharingState,
+    dsa_index_sharing_context,
+)
 from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.transformer_layer import TransformerLayer
 
@@ -52,7 +56,15 @@ def checkpointed_forward(
         extract_layer_indices = set()
     intermediate_hidden_states: List[Tensor] = []
 
+    # Each invocation represents a separate microbatch (or nested stack). Keep
+    # its top-k tensors alive in the chunk closures: a shared layer may be
+    # recomputed before its source layer, after later microbatches ran forward.
+    # Capturing both indices and valid lengths avoids reading mutable state on
+    # the model config, attention mask, or packed metadata during backward.
+    dsa_index_sharing_state = DSAIndexSharingState()
+
     def custom(start: int, end: int):
+        @dsa_index_sharing_context(dsa_index_sharing_state)
         def custom_forward(
             hidden_states, attention_mask, context, context_mask, rotary_pos_emb, padding_mask=None
         ):
