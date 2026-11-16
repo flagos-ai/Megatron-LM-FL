@@ -100,6 +100,7 @@ class TestAscendClampedSwiGLU:
 
         self.device = get_platform().device(get_platform().current_device())
         self.calls = []
+        self.monkeypatch = monkeypatch
         forward, backward = kernels.clamped_swiglu_forward, kernels.clamped_swiglu_backward
 
         def record_forward(x, weights, limit):
@@ -112,17 +113,28 @@ class TestAscendClampedSwiGLU:
             self.calls.append(("backward", weights is not None))
             return result
 
+        weighted_backward = kernels.weighted_swiglu_backward
+
+        def record_weighted_backward(*args):
+            result = weighted_backward(*args)
+            self.calls.append(("backward", True))
+            return result
+
+        monkeypatch.setattr(kernels, "weighted_swiglu_backward", record_weighted_backward)
         monkeypatch.setattr(kernels, "clamped_swiglu_forward", record_forward)
         monkeypatch.setattr(kernels, "clamped_swiglu_backward", record_backward)
         with torch.random.fork_rng(devices=[get_platform().current_device()], device_type="npu"):
             torch.manual_seed(1234)
             yield
 
-    @staticmethod
-    def reference(x, weights, limit):
-        if weights is None:
-            return bias_swiglu_impl.__wrapped__(x, None, clamp_value=limit)
-        return weighted_bias_swiglu_impl.__wrapped__(x, None, weights, clamp_value=limit)
+    def reference(self, x, weights, limit):
+        from megatron.core.fusions import fused_bias_swiglu as core
+
+        with self.monkeypatch.context() as reference:
+            reference.setattr(core, "weighted_swiglu", core.weighted_swiglu.__wrapped__)
+            if weights is None:
+                return bias_swiglu_impl.__wrapped__(x, None, clamp_value=limit)
+            return weighted_bias_swiglu_impl.__wrapped__(x, None, weights, clamp_value=limit)
 
     def compare(self, x, weights, limit, recompute=False):
         from torch.utils.checkpoint import checkpoint
@@ -278,8 +290,8 @@ class TestAscendClampedSwiGLU:
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         assert self.calls == []
 
-    @pytest.mark.parametrize("shared", [False, True])
-    def test_real_mlp_and_shared_expert_with_recompute(self, shared, monkeypatch):
+    @pytest.mark.parametrize("shared, limit", [(False, 10.0), (True, 10.0), (False, None)])
+    def test_real_mlp_and_shared_expert_with_recompute(self, shared, limit, monkeypatch):
         from torch.utils.checkpoint import checkpoint
 
         from megatron.core.models.gpt.gpt_layer_specs import get_gpt_layer_local_submodules
@@ -306,7 +318,7 @@ class TestAscendClampedSwiGLU:
                 add_bias_linear=False,
                 gated_linear_unit=True,
                 activation_func=F.silu,
-                activation_func_clamp_value=10.0,
+                activation_func_clamp_value=limit,
                 bias_activation_fusion=True,
                 params_dtype=torch.bfloat16,
                 bf16=True,
@@ -344,6 +356,9 @@ class TestAscendClampedSwiGLU:
             grad = torch.randn_like(actual) / 32
             actual.backward(grad)
             with monkeypatch.context() as core_ops:
+                from megatron.core.fusions import fused_bias_swiglu as core
+
+                core_ops.setattr(core, "weighted_swiglu", core.weighted_swiglu.__wrapped__)
                 core_ops.setattr(mlp_module, "bias_swiglu_impl", bias_swiglu_impl.__wrapped__)
                 core_ops.setattr(
                     mlp_module, "weighted_bias_swiglu_impl", weighted_bias_swiglu_impl.__wrapped__
@@ -468,3 +483,74 @@ class TestAscendClampedSwiGLU:
                 torch.testing.assert_close(value, baseline, rtol=0, atol=0)
         assert calls == [1]
         assert self.calls == []
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("prob_dtype", [torch.bfloat16, torch.float16, torch.float32])
+    @pytest.mark.parametrize("shape", [(17, 130), (7, 3, 1024), (3, 8704)])
+    def test_unclamped_forward_and_gradients(self, dtype, prob_dtype, shape):
+        x = torch.randn(shape, device=self.device, dtype=dtype)
+        weights = torch.rand(x.shape[:-1].numel(), 1, device=self.device, dtype=prob_dtype)
+        self.compare(x, weights, None, recompute=True)
+
+    @pytest.mark.parametrize("probability", ["scalar", "shared", "per_token"])
+    def test_unclamped_strided_broadcast(self, probability):
+        x = torch.randn(7, 3, 260, device=self.device, dtype=torch.bfloat16)[..., ::2]
+        shape = {"scalar": (), "shared": (1, 1), "per_token": (21, 1)}[probability]
+        weights = torch.full(shape, 0.317, device=self.device)
+        self.compare(x, weights, None, recompute=True)
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+    def test_unclamped_nonfinite_and_rounding_values(self, dtype):
+        values = torch.tensor(
+            [-float("inf"), -100.0, -1.0, -0.0, 0.0, 1.0, 100.0, float("inf"), float("nan")],
+            device=self.device,
+            dtype=dtype,
+        )
+        x = torch.cat((values[:, None].expand(-1, 32), values.flip(0)[:, None].expand(-1, 32)), -1)
+        x = x.contiguous().requires_grad_()
+        p = torch.linspace(0, 1, x.shape[0], device=self.device)[:, None].requires_grad_()
+        actual = weighted_bias_swiglu_impl(x, None, p)
+        expected = self.reference(x, p, None)
+        torch.testing.assert_close(actual, expected, rtol=2e-3, atol=2e-5, equal_nan=True)
+        assert ("forward", True) in self.calls
+
+    @pytest.mark.parametrize(
+        "fallback", ["cpu", "empty", "direct_autograd", "no_triton", "columns"]
+    )
+    def test_unclamped_fallback(self, fallback):
+        from megatron.core.fusions import fused_bias_swiglu as core
+        from megatron.plugin.Ascend.fusions import fused_bias_swiglu as npu
+
+        device = "cpu" if fallback == "cpu" else self.device
+        x = torch.randn(0 if fallback == "empty" else 7, 130, device=device, requires_grad=True)
+        p = torch.rand(
+            x.shape[0], 65 if fallback == "columns" else 1, device=device, requires_grad=True
+        )
+        if fallback == "no_triton":
+            self.monkeypatch.setattr(npu, "_triton_available", lambda: False)
+        if fallback == "direct_autograd":
+            actual = core.weighted_swiglu(x, p)
+            expected = core.weighted_swiglu.__wrapped__(x, p)
+            first = torch.autograd.grad(actual.sum(), (x, p), retain_graph=True)
+            reference = torch.autograd.grad(expected.sum(), (x, p))
+            for value, baseline in zip(first, reference):
+                torch.testing.assert_close(value, baseline, rtol=0, atol=0)
+        else:
+            with torch.no_grad():
+                actual = core.weighted_swiglu(x, p)
+                expected = core.weighted_swiglu.__wrapped__(x, p)
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        assert self.calls == []
+
+    def test_unclamped_repeated_backward(self):
+        x = torch.randn(11, 1024, device=self.device, dtype=torch.bfloat16).requires_grad_()
+        p = torch.rand(11, 1, device=self.device, requires_grad=True)
+        before = x.detach().clone()
+        output = weighted_bias_swiglu_impl(x, None, p)
+        grad = torch.randn_like(output)
+        first = torch.autograd.grad(output, (x, p), grad, retain_graph=True)
+        second = torch.autograd.grad(output, (x, p), grad)
+        torch.testing.assert_close(x, before, rtol=0, atol=0)
+        for a, b in zip(first, second):
+            torch.testing.assert_close(a, b, rtol=0, atol=0)
+        assert ("forward", True) in self.calls and ("backward", True) in self.calls

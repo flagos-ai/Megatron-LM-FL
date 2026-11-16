@@ -51,6 +51,28 @@ def swiglu_back(g, y):
     return op(g.contiguous(), y.contiguous(), dim=-1)
 
 
+def weighted_swiglu(y, weights):
+    """Fuse probability multiplication while retaining native activation rounding."""
+    from megatron.core.fusions.fused_bias_swiglu import weighted_swiglu as original
+
+    if (
+        _native_op(y, "npu_swiglu") is None
+        or weights.device != y.device
+        or weights.layout != torch.strided
+        or weights.dtype not in _FLOAT_DTYPES
+        or (torch.is_grad_enabled() and (y.requires_grad or weights.requires_grad))
+        or (weights.ndim > 0 and weights.shape[-1] != 1)
+        or torch.broadcast_shapes((*y.shape[:-1], y.shape[-1] // 2), weights.shape)
+        != (*y.shape[:-1], y.shape[-1] // 2)
+        or not _triton_available()
+    ):
+        return original.__wrapped__(y, weights)
+    from .weighted_swiglu_kernels import clamped_swiglu_forward
+
+    # Infinite bounds reuse the tiled forward without clipping either input.
+    return clamped_swiglu_forward(y.contiguous(), weights, float("inf"))
+
+
 def weighted_swiglu_back(g, y, weights):
     """Fuse weighted input gradients and the per-row weight-gradient reduction."""
     from megatron.core.fusions.fused_bias_swiglu import weighted_swiglu_back as original

@@ -39,6 +39,7 @@ def dispatch(monkeypatch):
         primitives = (
             core.swiglu.__wrapped__,
             core.swiglu_back.__wrapped__,
+            core.weighted_swiglu.__wrapped__,
             core.weighted_swiglu_back.__wrapped__,
             core.bias_swiglu_impl.__wrapped__,
             core.weighted_bias_swiglu_impl.__wrapped__,
@@ -223,20 +224,21 @@ def _evaluate(core, x, g, kind, clamp=None, offload=False):
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32])
 @pytest.mark.parametrize('kind', ['plain', 'direct', 'bias', 'weighted', 'weighted_fp32'])
-def test_core_autograd(dispatch, npu_ops, record_property, dtype, kind):
+def test_core_autograd(dispatch, npu_ops, forward_launches, record_property, dtype, kind):
     """Cover SwiGLUFunction, bias reduction, and FP32 weighted type promotion."""
     x = _sample((4, 2, 64), dtype, npu_ops.device)
     g = _sample((4, 2, 32), dtype, npu_ops.device, 72)
     with dispatch.reference():
         with dispatch.reference():
             expected, expected_grads = _evaluate(dispatch.core, x, g, kind)
+    assert forward_launches == []
     actual, actual_grads = _evaluate(dispatch.core, x, g, kind)
     _close(actual, expected, dtype, record_property, 'output')
     for label, expected_grad in expected_grads.items():
         _close(actual_grads[label], expected_grad, dtype, record_property, label)
-    forward = 1
-    backward = int(not kind.startswith('weighted'))
-    assert npu_ops.counts == {'forward': forward, 'backward': backward}
+    native = int(not kind.startswith('weighted'))
+    assert npu_ops.counts == {'forward': native, 'backward': native}
+    assert forward_launches == ([float('inf')] if kind.startswith('weighted') else [])
 
 
 @pytest.mark.parametrize('dtype', [torch.float16, torch.bfloat16, torch.float32])
@@ -611,6 +613,23 @@ def test_weighted_kernel_error_propagates(dispatch, npu_ops, monkeypatch):
 
 
 @pytest.fixture
+def forward_launches(monkeypatch):
+    """Record completed real fused forwards, including their clamp bounds."""
+    from megatron.plugin.Ascend.fusions import weighted_swiglu_kernels as kernels
+
+    calls = []
+    forward = kernels.clamped_swiglu_forward
+
+    def counted(x, weights, limit):
+        result = forward(x, weights, limit)
+        calls.append(limit)
+        return result
+
+    monkeypatch.setattr(kernels, 'clamped_swiglu_forward', counted)
+    return calls
+
+
+@pytest.fixture
 def launches(monkeypatch):
     from megatron.plugin.Ascend.fusions import weighted_swiglu_kernels as kernels
 
@@ -673,16 +692,20 @@ def test_width4352_layouts(dispatch, npu_ops, launches, record_property, dtype, 
 
 
 def test_width4352_target_weighted_autograd(
-    dispatch, npu_ops, launches, record_property, monkeypatch
+    dispatch, npu_ops, launches, forward_launches, record_property, monkeypatch
 ):
     y = _sample((16384, 8704), torch.bfloat16, npu_ops.device)
     g = _sample((16384, 4352), y.dtype, npu_ops.device, 72)
+    # Retain the pre-fusion native activation rounding for this large-shape comparison.
     with monkeypatch.context() as context:
+        context.setattr(dispatch.core, 'weighted_swiglu', dispatch.core.weighted_swiglu.__wrapped__)
         context.setattr(
             dispatch.core, 'weighted_swiglu_back', dispatch.core.weighted_swiglu_back.__wrapped__
         )
         expected, refs = _evaluate(dispatch.core, y, g, 'weighted_fp32')
+    assert forward_launches == []
     actual, grads = _evaluate(dispatch.core, y, g, 'weighted_fp32')
+    assert forward_launches == [float('inf')]
     _close(actual, expected, y.dtype, record_property, 'output')
     for label, value in grads.items():
         _close(value, refs[label], y.dtype, record_property, label)

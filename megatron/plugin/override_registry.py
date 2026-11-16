@@ -71,6 +71,11 @@ register(
     vendor="npu",
 )
 register(
+    target="megatron.core.fusions.fused_bias_swiglu.weighted_swiglu",
+    impl="megatron.plugin.Ascend.fusions.fused_bias_swiglu.weighted_swiglu",
+    vendor="npu",
+)
+register(
     target="megatron.core.fusions.fused_bias_swiglu.weighted_swiglu_back",
     impl="megatron.plugin.Ascend.fusions.fused_bias_swiglu.weighted_swiglu_back",
     vendor="npu",

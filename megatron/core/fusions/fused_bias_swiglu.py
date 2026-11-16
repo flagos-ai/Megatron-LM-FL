@@ -43,6 +43,7 @@ def bias_swiglu(y, bias):
     return swiglu(y)
 
 
+@overridable
 @jit_fuser
 def weighted_swiglu(y, weights):
     dtype = y.dtype
