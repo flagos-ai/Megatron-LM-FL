@@ -45,7 +45,7 @@ _FUSED_ATTN_SINK_GRAD_SIMILARITY_EPS = 2e-2
 # not absorbed by a softmax boundary. Combined with TE-vs-nn linear/RoPE
 # drift on q_indexer/k_indexer/weights, the indexer param-grad cosine sim
 # floors around 1e-3 here. Applied only to ``.indexer.`` params when
-# ``apply_dsa_kernel_fusion=True`` and ``dsa_indexer_use_sparse_loss=False``.
+# ``dsa_kernel_backend='cudnn'`` and ``dsa_indexer_use_sparse_loss=False``.
 # Kept distinct from ``_FUSED_SIMILARITY_EPS`` so the per-param branch
 # stays readable, even though both currently sit in the same order.
 _FUSED_DENSE_INDEXER_GRAD_SIMILARITY_EPS = 3e-3
@@ -154,7 +154,7 @@ def _make_config(
         delay_wgrad_compute=False,
         tp_comm_overlap=False,
         softmax_scale=None,
-        apply_dsa_kernel_fusion=apply_dsa_kernel_fusion,
+        dsa_kernel_backend="cudnn" if apply_dsa_kernel_fusion else "none",
         apply_rope_fusion=apply_dsa_kernel_fusion,
     )
     return config
@@ -523,7 +523,7 @@ class NativeCSAIndexer(nn.Module):
         self.index_topk = config.dsa_indexer_topk
         self.qk_pos_emb_head_dim = config.qk_pos_emb_head_dim
         self.softmax_scale = self.index_head_dim**-0.5
-        self.apply_dsa_kernel_fusion = config.apply_dsa_kernel_fusion
+        self.apply_dsa_kernel_fusion = config.dsa_kernel_backend != "none"
         self.rope_base = config.csa_compress_rotary_base
         # CSA indexer is only instantiated for ``compress_ratio == 4``, which is
         # always the YaRN-enabled branch on the production side.
@@ -597,7 +597,7 @@ class NativeCompressedSparseAttention(nn.Module):
         self.indexer_loss_coeff = config.dsa_indexer_loss_coeff
         self.indexer_use_sparse_loss = config.dsa_indexer_use_sparse_loss
         self.calculate_per_token_loss = config.calculate_per_token_loss
-        self.apply_dsa_kernel_fusion = config.apply_dsa_kernel_fusion
+        self.apply_dsa_kernel_fusion = config.dsa_kernel_backend != "none"
 
         self.attn_sink = nn.Parameter(torch.zeros(self.num_heads, dtype=torch.float32))
         self.compressor = (
