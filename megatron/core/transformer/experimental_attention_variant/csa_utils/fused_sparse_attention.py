@@ -736,19 +736,6 @@ def _compute_indexer_predict(
     return result["predict"]
 
 
-def _pad_cudnn_indexer_topk(indices: Tensor) -> Tensor:
-    """Align SM90 score and indexer-backward slots to a 128-thread warp group."""
-    if not indices.is_cuda or torch.cuda.get_device_capability(indices.device)[0] != 9:
-        return indices
-    width = indices.shape[-1]
-    padded_width = max(128, ((width + 127) // 128) * 128)
-    # Invalid keys contribute neither probability mass nor indexer gradients.
-    # Only pad the loss inputs; attention keeps its original selected keys.
-    if padded_width == width:
-        return indices
-    return torch.nn.functional.pad(indices, (0, padded_width - width), value=-1)
-
-
 def _compute_attn_target(
     q_attn_bshd: Tensor,
     k_attn_bsd: Tensor,
@@ -1026,7 +1013,6 @@ class FusedCSAIndexerSparseAttnFunc(torch.autograd.Function):
             )
 
             if sparse_loss:
-                topk_indices_cmp = _pad_cudnn_indexer_topk(topk_indices_cmp)
                 # Derive predict: gather topk scores from indexer_scores → softmax.
                 safe_indices = topk_indices_cmp.clamp(min=0).long()
                 gathered_scores = torch.gather(indexer_scores, dim=2, index=safe_indices)

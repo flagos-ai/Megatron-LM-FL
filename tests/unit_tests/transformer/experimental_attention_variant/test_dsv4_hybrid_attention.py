@@ -891,3 +891,16 @@ class TestDSv4HybridRopeFusion:
         for name, param in attn_fused.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"No gradient for parameter {name}"
+
+
+@pytest.mark.parametrize(
+    "kwargs, message",
+    [
+        ({"output_projection_groups": 0}, "o_groups to be positive"),
+        ({"output_projection_lora_rank": 0}, "o_lora_rank to be positive"),
+        ({"output_projection_groups": 3}, "must be divisible by o_groups"),
+    ],
+)
+def test_config_rejects_invalid_output_projection_dimensions(kwargs, message):
+    with pytest.raises(AssertionError, match=message):
+        _make_config(**kwargs)
