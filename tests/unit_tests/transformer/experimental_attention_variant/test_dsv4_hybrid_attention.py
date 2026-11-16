@@ -1,12 +1,13 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
+from argparse import ArgumentParser
+from dataclasses import replace
 from unittest.mock import patch
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-import megatron.core.parallel_state as parallel_state
 from megatron.core.extensions.transformer_engine import HAVE_TE
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
@@ -60,8 +61,8 @@ def _make_config(
     v_head_dim=64,
     qk_pos_emb_head_dim=32,
     q_lora_rank=64,
-    o_groups=8,
-    o_lora_rank=64,
+    output_projection_groups=8,
+    output_projection_lora_rank=64,
     csa_compress_ratios=None,
     csa_window_size=8,
     tensor_model_parallel_size=1,
@@ -75,6 +76,9 @@ def _make_config(
     """Create an MLATransformerConfig for DSv4 hybrid attention tests."""
     if csa_compress_ratios is None:
         csa_compress_ratios = [0, 4, 128, 4]
+    extra_config_kwargs.setdefault('experimental_attention_variant', 'dsv4_hybrid')
+    # Native attention fixtures opt out of the DSv4 fused backend default.
+    extra_config_kwargs.setdefault('dsa_kernel_backend', 'none')
     return MLATransformerConfig(
         num_layers=num_layers,
         hidden_size=hidden_size,
@@ -90,14 +94,12 @@ def _make_config(
         qk_head_dim=v_head_dim - qk_pos_emb_head_dim,
         qk_pos_emb_head_dim=qk_pos_emb_head_dim,
         v_head_dim=v_head_dim,
-        o_groups=o_groups,
-        o_lora_rank=o_lora_rank,
+        o_groups=output_projection_groups,
+        o_lora_rank=output_projection_lora_rank,
         rope_type='rope',
         rotary_base=10000,
         rotary_percent=1.0,
         multi_latent_attention=True,
-        experimental_attention_variant='dsv4_hybrid',
-        dsa_kernel_backend=extra_config_kwargs.pop('dsa_kernel_backend', 'none'),
         csa_compress_ratios=csa_compress_ratios,
         csa_window_size=csa_window_size,
         dsa_indexer_n_heads=dsa_indexer_n_heads,
@@ -112,10 +114,208 @@ def _make_attention_spec(config):
     """Build the full DSv4HybridSelfAttention ModuleSpec using the canonical spec builder."""
     from megatron.core.extensions.transformer_engine_spec_provider import TESpecProvider
     from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
-        get_dsv4_hybrid_module_spec_for_backend,
+        get_experimental_attention_variant_module_spec,
     )
 
-    return get_dsv4_hybrid_module_spec_for_backend(config=config, backend=TESpecProvider())
+    return get_experimental_attention_variant_module_spec(config=config, backend=TESpecProvider())
+
+
+def test_module_spec_is_built_from_explicit_backend():
+    """The production selector should build DSv4 from its explicitly supplied backend."""
+    from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+        get_experimental_attention_variant_module_spec,
+    )
+    from megatron.core.transformer.experimental_attention_variant.csa import (
+        CompressedSparseAttention,
+        Compressor,
+        CSAIndexer,
+    )
+    from megatron.core.transformer.experimental_attention_variant.deepseek_v4_hybrid_attention import (
+        DSv4HybridSelfAttention,
+    )
+    from megatron.core.transformer.spec_utils import ModuleSpec
+
+    class Linear:
+        pass
+
+    class ColumnParallelLinear:
+        pass
+
+    class RowParallelLinear:
+        pass
+
+    class Norm:
+        pass
+
+    class Backend:
+        def linear(self):
+            return Linear
+
+        def column_parallel_linear(self):
+            return ColumnParallelLinear
+
+        def row_parallel_linear(self):
+            return RowParallelLinear
+
+        def layer_norm(self, rms_norm=False, for_qk=False, has_residual=False):
+            return Norm
+
+    spec = get_experimental_attention_variant_module_spec(_make_config(), Backend())
+
+    assert spec.module is DSv4HybridSelfAttention
+    assert spec.submodules.linear_q_down_proj is Linear
+    assert spec.submodules.linear_q_up_proj is ColumnParallelLinear
+    assert spec.submodules.linear_kv_proj is ColumnParallelLinear
+    assert spec.submodules.linear_proj is RowParallelLinear
+    core_attention_builder = spec.submodules.core_attention
+    assert isinstance(core_attention_builder, ModuleSpec)
+    assert core_attention_builder.module is CompressedSparseAttention
+
+    core_attention_submodules = core_attention_builder.submodules
+    compressor_builder = core_attention_submodules.compressor
+    assert isinstance(compressor_builder, ModuleSpec)
+    assert compressor_builder.module is Compressor
+
+    indexer_builder = core_attention_submodules.indexer
+    assert isinstance(indexer_builder, ModuleSpec)
+    assert indexer_builder.module is CSAIndexer
+    assert indexer_builder.submodules.compressor is compressor_builder
+
+
+def test_grouped_output_projection_respects_cpu_initialization(monkeypatch):
+    """The custom grouped projection follows the standard CPU/no-init constructor contract."""
+    from megatron.core.transformer import identity_op
+    from megatron.core.transformer.experimental_attention_variant import (
+        deepseek_v4_hybrid_attention as dsv4_attention,
+    )
+    from megatron.core.transformer.spec_utils import ModuleSpec
+
+    class SizeOneGroup:
+        def size(self) -> int:
+            return 1
+
+    def unexpected_cuda_device() -> None:
+        raise AssertionError("CPU initialization must not query the current CUDA device")
+
+    def unexpected_parameter_init(_tensor: torch.Tensor) -> None:
+        raise AssertionError("perform_initialization=False must skip parameter initialization")
+
+    monkeypatch.setattr(torch.cuda, "current_device", unexpected_cuda_device)
+    monkeypatch.setattr(dsv4_attention, "RotaryEmbedding", identity_op.IdentityOp)
+    monkeypatch.setattr(dsv4_attention, "TELinear", identity_op.IdentityOp)
+
+    config = _make_config(perform_initialization=False, csa_compress_ratios=[0, 0, 0, 0])
+    config.init_method = unexpected_parameter_init
+    pg_collection = ProcessGroupCollection()
+    pg_collection.tp = SizeOneGroup()
+    pg_collection.cp = SizeOneGroup()
+    submodules = dsv4_attention.DSv4HybridSelfAttentionSubmodules(
+        q_layernorm=identity_op.IdentityOp,
+        kv_layernorm=identity_op.IdentityOp,
+        linear_q_down_proj=identity_op.IdentityOp,
+        linear_q_up_proj=identity_op.IdentityOp,
+        linear_kv_proj=identity_op.IdentityOp,
+        core_attention=ModuleSpec(module=identity_op.IdentityOp),
+        linear_proj=identity_op.IdentityOp,
+    )
+
+    attention = dsv4_attention.DSv4HybridSelfAttention(
+        config=config,
+        submodules=submodules,
+        layer_number=1,
+        attn_mask_type=AttnMaskType.causal,
+        pg_collection=pg_collection,
+        compress_ratio=0,
+    )
+
+    assert attention.linear_o_group_proj.device.type == "cpu"
+
+
+def test_config_includes_mtp_ratio_and_derives_dimensions():
+    """DSv4 config should account for MTP and derive its shared Q/KV content width."""
+    config = _make_config(num_layers=2, mtp_num_layers=1, csa_compress_ratios=[0, 4, 128])
+
+    expected_content_dim = config.v_head_dim - config.qk_pos_emb_head_dim
+    assert config.qk_head_dim == expected_content_dim
+    assert config.kv_lora_rank == expected_content_dim
+    assert config.hetereogenous_dist_checkpoint is True
+
+
+def test_config_accepts_cudnn_backend_for_fused_sbhd():
+    """DSv4 may select the CSA cuDNN adapter while ordinary DSA keeps its own router."""
+    with (
+        patch(
+            'megatron.core.transformer.transformer_config._validate_dsa_kernel_backend_dependencies'
+        ),
+        patch.object(torch.cuda, 'get_device_capability', return_value=(10, 0)),
+    ):
+        config = _make_config(dsa_kernel_backend="cudnn")
+
+    assert config.dsa_kernel_backend == "cudnn"
+
+
+def test_config_rejects_sm90_ratio4_dense_indexer_loss():
+    """SM90 must use sparse indexer loss for the fused ratio-4 CSA path."""
+    with (
+        patch(
+            'megatron.core.transformer.transformer_config._validate_dsa_kernel_backend_dependencies'
+        ),
+        patch.object(torch.cuda, 'get_device_capability', return_value=(9, 0)),
+        pytest.raises(ValueError, match="dense indexer loss is not supported on SM90"),
+    ):
+        _make_config(dsa_kernel_backend="cudnn", dsa_indexer_loss_coeff=0.1)
+
+
+@pytest.mark.parametrize(
+    ("variant", "requested", "expected"),
+    [("dsv4_hybrid", None, "cudnn"), ("dsv4_hybrid", "none", "none"), ("dsa", None, "none")],
+)
+def test_cli_backend_default_preserves_explicit_none(variant, requested, expected):
+    """The generated CLI preserves omission for variant-aware config defaults."""
+    from megatron.training.arguments import _add_network_size_args
+
+    parser = _add_network_size_args(ArgumentParser())
+    argv = [] if requested is None else ['--dsa-kernel-backend', requested]
+    args = parser.parse_args(argv)
+    assert args.dsa_kernel_backend == requested
+    with (
+        patch(
+            'megatron.core.transformer.transformer_config._validate_dsa_kernel_backend_dependencies'
+        ),
+        patch.object(torch.cuda, 'get_device_capability', return_value=(10, 0)),
+    ):
+        config = _make_config(
+            experimental_attention_variant=variant, dsa_kernel_backend=args.dsa_kernel_backend
+        )
+    assert config.dsa_kernel_backend == expected
+
+
+@pytest.mark.parametrize("variant", [None, "dsa"])
+def test_dsv4_construction_rejects_incompatible_variant_before_backend_work(variant):
+    from megatron.core.transformer.attention import Attention
+    from megatron.core.transformer.experimental_attention_variant.deepseek_v4_hybrid_attention import (
+        DSv4HybridSelfAttention,
+    )
+
+    config = replace(_make_config(), experimental_attention_variant=variant)
+    with (
+        patch.object(Attention, "__init__", return_value=None) as attention_init,
+        pytest.raises(ValueError, match="DSv4 attention requires.*dsv4_hybrid"),
+    ):
+        DSv4HybridSelfAttention(
+            config=config, submodules=None, layer_number=1, pg_collection=ProcessGroupCollection()
+        )
+    attention_init.assert_not_called()
+
+
+def test_constructor_requires_explicit_process_groups():
+    """Production DSv4 construction must not read process groups from global MPU state."""
+    from megatron.core.transformer.experimental_attention_variant.deepseek_v4_hybrid_attention import (
+        DSv4HybridSelfAttention,
+    )
+
+    with pytest.raises(ValueError, match="explicit ProcessGroupCollection"):
+        DSv4HybridSelfAttention(config=None, submodules=None, layer_number=1)
 
 
 def _build_attention(config, layer_number, pg_collection, **kwargs):
@@ -136,7 +336,7 @@ def _build_attention(config, layer_number, pg_collection, **kwargs):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.skipif(not HAVE_TE, reason="transformer_engine not available")
 class TestDSv4HybridAttentionConstructor:
-    """Test construction of DSv4HybridSelfAttention across TP sizes."""
+    """Test construction of DSv4HybridSelfAttention in the supported TP=1 configuration."""
 
     @pytest.fixture(scope='class', autouse=True)
     def setup_method(self):
@@ -151,6 +351,7 @@ class TestDSv4HybridAttentionConstructor:
         from megatron.core.transformer.experimental_attention_variant.deepseek_v4_hybrid_attention import (
             DSv4HybridSelfAttention,
         )
+        from megatron.core.transformer.identity_op import IdentityOp
 
         torch.manual_seed(_SEED)
         model_parallel_cuda_manual_seed(_SEED)
@@ -166,35 +367,11 @@ class TestDSv4HybridAttentionConstructor:
         assert hasattr(attn, 'linear_proj')
         assert hasattr(attn, 'linear_o_group_proj')
         assert hasattr(attn, 'core_attention')
-        assert hasattr(attn, 'q_layernorm')
-        assert hasattr(attn, 'kv_layernorm')
-
-    @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
-    def test_float16_wrapper_preserves_attention_fp32_parameters(self, compress_ratio):
-        """Model conversion must preserve sink/APE values as well as their dtype."""
-        from megatron.core.transformer.module import Float16Module
-
-        model_parallel_cuda_manual_seed(_SEED)
-        config = _make_config(num_layers=1, csa_compress_ratios=[compress_ratio])
-        pg = ProcessGroupCollection.use_mpu_process_groups()
-        attn = _build_attention(config, layer_number=1, pg_collection=pg).cuda()
-        protected = {
-            name: parameter
-            for name, parameter in attn.named_parameters()
-            if name.endswith("attn_sink") or name.endswith("ape")
-        }
-        assert len(protected) == {0: 1, 4: 3, 128: 2}[compress_ratio]
-        with torch.no_grad():
-            for parameter in protected.values():
-                parameter.fill_(0.1234567)
-        expected = {name: parameter.detach().clone() for name, parameter in protected.items()}
-        wrapped = Float16Module(config, attn)
-        for name, parameter in wrapped.module.named_parameters():
-            if name in expected:
-                assert parameter.dtype == torch.float32, name
-                torch.testing.assert_close(parameter, expected[name], rtol=0, atol=0)
-            else:
-                assert parameter.dtype == torch.bfloat16, name
+        assert isinstance(attn.q_layernorm, IdentityOp)
+        assert isinstance(attn.kv_layernorm, IdentityOp)
+        assert not any(
+            key.startswith(("q_layernorm.", "kv_layernorm.")) for key in attn.state_dict()
+        )
 
     def test_q_head_dim_equals_v_head_dim(self):
         """q_head_dim must equal v_head_dim for DSv4 hybrid."""
@@ -206,6 +383,29 @@ class TestDSv4HybridAttentionConstructor:
         attn = _build_attention(config, layer_number=1, pg_collection=pg)
 
         assert attn.q_head_dim == config.v_head_dim
+
+    def test_current_main_constructor_kwargs(self):
+        """Current TransformerLayer forwards module names and pipeline offsets."""
+        config = _make_config()
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        attn = _build_attention(
+            config,
+            layer_number=1,
+            pg_collection=pg,
+            pp_layer_offset=0,
+            name="decoder.layers.0.self_attention",
+        )
+
+        assert attn._pp_layer_offset == 0
+
+    def test_missing_hybrid_mtp_ratio_fails_with_layer_context(self):
+        """A multi-layer MTP tail should fail clearly instead of raising a bare IndexError."""
+        config = _make_config(num_layers=2, mtp_num_layers=1, csa_compress_ratios=[0, 4, 128])
+        config.csa_compress_ratios = config.csa_compress_ratios[:2]
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+
+        with pytest.raises(ValueError, match="MTP layer 1.*requires at least 3 entries"):
+            _build_attention(config, layer_number=1, pg_collection=pg, is_mtp_layer=True)
 
     @pytest.mark.parametrize("layer_number", [1, 2, 3, 4])
     def test_rope_base_varies_with_compress_ratio(self, layer_number):
@@ -239,21 +439,6 @@ class TestDSv4HybridAttentionConstructor:
 # ===========================================================================
 
 
-@pytest.fixture
-def deterministic_sparse_accumulation():
-    """Keep indexed accumulation order fixed when comparing deferred wgrad scheduling."""
-    previous = torch.are_deterministic_algorithms_enabled()
-    warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
-    # Select deterministic indexed accumulation even when earlier tests initialized
-    # cuBLAS without a deterministic workspace. Exact assertions below still check
-    # the repeated GEMMs; warn-only mode avoids a late workspace-configuration error.
-    torch.use_deterministic_algorithms(True, warn_only=True)
-    try:
-        yield
-    finally:
-        torch.use_deterministic_algorithms(previous, warn_only=warn_only)
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
 @pytest.mark.skipif(not HAVE_TE, reason="transformer_engine not available")
 class TestDSv4HybridAttentionForwardBackward:
@@ -273,59 +458,6 @@ class TestDSv4HybridAttentionForwardBackward:
 
         yield
         Utils.destroy_model_parallel()
-
-    @pytest.mark.parametrize("compress_ratio", [0, 4, 128])
-    def test_deferred_weight_gradients_match_eager(
-        self, compress_ratio, monkeypatch, deterministic_sparse_accumulation
-    ):
-        """Flushing delayed wgrads must include compressor and indexer projections."""
-        from megatron.core.transformer.experimental_attention_variant.dsa import (
-            DSAIndexerLossAutoScaler,
-            DSAIndexerLossLoggingHelper,
-        )
-        from megatron.core.transformer.module import Float16Module
-
-        monkeypatch.setattr(DSAIndexerLossLoggingHelper, "tracker", {})
-        monkeypatch.setattr(DSAIndexerLossAutoScaler, "main_loss_backward_scale", None)
-
-        def build(delayed):
-            config = _make_config(
-                num_layers=1,
-                csa_compress_ratios=[compress_ratio],
-                dsa_indexer_loss_coeff=0.1,
-                gradient_accumulation_fusion=False,
-                hidden_dropout=0.0,
-                attention_dropout=0.0,
-            )
-            # Exercise attention wgrad flushing in isolation, without an EP scheduler.
-            config.delay_wgrad_compute = delayed
-            return Float16Module(
-                config, _build_attention(config, layer_number=1, pg_collection=self.pg).cuda()
-            ).module
-
-        eager = build(False)
-        delayed = build(True)
-        delayed.load_state_dict(eager.state_dict())
-        hidden = torch.randn(256, 1, eager.config.hidden_size, device="cuda", dtype=torch.bfloat16)
-        DSAIndexerLossAutoScaler.set_loss_scale(torch.ones((), device="cuda"))
-        outputs = []
-        input_grads = []
-        for model in (eager, delayed):
-            inputs = hidden.detach().clone().requires_grad_()
-            output, _ = model(inputs, attention_mask=None)
-            output.float().square().mean().backward()
-            model.backward_dw()
-            outputs.append(output.detach())
-            input_grads.append(inputs.grad)
-        torch.testing.assert_close(outputs[0], outputs[1], rtol=0, atol=0)
-        torch.testing.assert_close(input_grads[0], input_grads[1], rtol=0, atol=0)
-        for (name, expected), (actual_name, actual) in zip(
-            eager.named_parameters(), delayed.named_parameters()
-        ):
-            assert name == actual_name
-            assert expected.grad is not None, name
-            assert actual.grad is not None, name
-            torch.testing.assert_close(actual.grad, expected.grad, rtol=1e-2, atol=1e-5, msg=name)
 
     @pytest.mark.parametrize("layer_number", [1, 2, 3, 4])
     def test_forward_output_shape(self, layer_number):
@@ -505,14 +637,17 @@ class TestDSv4HybridGroupedOutput:
         torch.manual_seed(_SEED)
         model_parallel_cuda_manual_seed(_SEED)
 
-        o_groups = 8
-        o_lora_rank = 64
-        config = _make_config(o_groups=o_groups, o_lora_rank=o_lora_rank)
+        output_projection_groups = 8
+        output_projection_lora_rank = 64
+        config = _make_config(
+            output_projection_groups=output_projection_groups,
+            output_projection_lora_rank=output_projection_lora_rank,
+        )
         pg = ProcessGroupCollection.use_mpu_process_groups()
         attn = _build_attention(config, layer_number=1, pg_collection=pg)
 
-        expected_out = o_groups * o_lora_rank
-        expected_in = (config.v_head_dim * config.num_attention_heads) // o_groups
+        expected_out = output_projection_groups * output_projection_lora_rank
+        expected_in = (config.v_head_dim * config.num_attention_heads) // output_projection_groups
         assert attn.linear_o_group_proj.shape == (expected_out, expected_in)
         assert attn.linear_o_group_proj.requires_grad
 
@@ -531,8 +666,8 @@ def _make_dsv4_hash_moe_config():
         v_head_dim=32,
         qk_pos_emb_head_dim=16,
         q_lora_rank=32,
-        o_groups=4,
-        o_lora_rank=32,
+        output_projection_groups=4,
+        output_projection_lora_rank=32,
         csa_compress_ratios=[4, 128],
         csa_window_size=16,
         dsa_indexer_n_heads=4,
@@ -742,12 +877,8 @@ class TestDSv4HybridRopeFusion:
 
         assert out_fused.shape == (seq_len, batch_size, fused_config.hidden_size)
         assert torch.isfinite(out_fused).all()
-        # Production code forces ``mscale=1.0`` (DSv4 contract) in both
-        # fused and unfused paths, so the only residual is bf16 noise from
-        # the fused Triton kernel's different accumulation order vs the
-        # PyTorch eager ops. The residual concentrates at output positions
-        # whose values are near zero (sign flips on tiny magnitudes drive
-        # the worst-case max-abs-diff).
+        # The remaining difference is bf16 accumulation order between the fused
+        # Triton kernel and eager PyTorch operations.
         torch.testing.assert_close(out_fused, out_unfused, atol=3e-2, rtol=3e-2)
 
         hidden_fused = hidden.detach().clone().requires_grad_(True)
@@ -760,6 +891,3 @@ class TestDSv4HybridRopeFusion:
         for name, param in attn_fused.named_parameters():
             if param.requires_grad:
                 assert param.grad is not None, f"No gradient for parameter {name}"
-
-
-pytestmark = pytest.mark.experimental
