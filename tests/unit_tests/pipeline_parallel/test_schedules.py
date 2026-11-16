@@ -804,10 +804,10 @@ def test_dsa_aux_gradient_scaling_with_context_parallel(per_token, cp_size):
             is_last_stage=True,
         )
         output.sum().backward()
-        # An averaged CP loss compensates for the later CP reduction; a summed,
-        # per-token loss receives its normalization from final model-grad handling.
+        # A local mean is averaged across CP shards by DDP. Per-token loss
+        # receives its normalization from final model-grad handling.
         torch.testing.assert_close(
-            aux_loss.grad, torch.tensor(1.0 if per_token else cp_size / 4, device="cuda")
+            aux_loss.grad, torch.tensor(1.0 if per_token else 1.0 / 4, device="cuda")
         )
     finally:
         DSAIndexerLossAutoScaler.main_loss_backward_scale = old_scale

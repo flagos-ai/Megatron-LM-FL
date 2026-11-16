@@ -379,6 +379,15 @@ class MultiLatentAttention(Attention):
 
         thd_packed_seq = packed_seq_params is not None and packed_seq_params.qkv_format == "thd"
 
+        extra_kwargs = {}
+        if self.config.experimental_attention_variant == "dsa":
+            # DSA needs the original hidden states and normalized query latent in both paths.
+            extra_kwargs["x"] = hidden_states
+            extra_kwargs["qr"] = q_compressed
+            extra_kwargs["prev_topk_indices"] = getattr(
+                self.core_attention, "current_topk_indices", None
+            )
+
         # ==================================
         # core attention computation
         # ==================================
@@ -386,19 +395,15 @@ class MultiLatentAttention(Attention):
         needs_output_trim = False
         if self.checkpoint_core_attention and self.training:
             core_attn_out = self._checkpointed_attention_forward(
-                query, key, value, attention_mask, packed_seq_params=packed_seq_params
+                query,
+                key,
+                value,
+                attention_mask,
+                packed_seq_params=packed_seq_params,
+                core_attention_extra_kwargs=extra_kwargs,
             )
         else:
             if inference_context is None or inference_context.is_static_batching():
-                extra_kwargs = {}
-                if self.config.experimental_attention_variant == "dsa":
-                    # For dsa we need to pass in the original hidden states and the compressed
-                    # query representation.
-                    extra_kwargs["x"] = hidden_states
-                    extra_kwargs["qr"] = q_compressed
-                    extra_kwargs["prev_topk_indices"] = getattr(
-                        self.core_attention, "current_topk_indices", None
-                    )  # FlagScale Modify
                 with off_interface(
                     self.offload_core_attention and self.training, query, "core_attn"
                 ) as query:
