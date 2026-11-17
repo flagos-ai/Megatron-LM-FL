@@ -34,6 +34,7 @@ global:
   - .rst
   shared_paths:
   - tests/unit_tests/conftest.py
+  - .gitignore
   - .flagcicd/
   - .github/
   - .pre-commit-config.yaml

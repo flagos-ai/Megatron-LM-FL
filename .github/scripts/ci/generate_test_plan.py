@@ -190,28 +190,43 @@ def build_plan(
             materialized = unit_group_routing.materialize_groups(
                 catalog, platform, group_selection["selected"], group_selection["reasons"], required
             )
-            # Changed planned test files get an ephemeral execution group. Their
-            # catalog status remains planned; ordinary configured/nightly runs
-            # do not acquire these groups.
+            # Changes to planned tests or their source files get an ephemeral
+            # execution group. Their catalog status remains planned; ordinary
+            # configured/nightly runs do not acquire these groups.
             planned_execution = []
             planned_skipped = []
             if selection == "affected":
                 source_root = catalog.path.parent.parent
+                tracked_paths = unit_group_routing.tracked_paths(source_root) or ()
                 for group in materialized["planned"] + materialized["unsupported"]:
                     group_name = group["name"]
                     if catalog.groups[group_name].status != "planned":
                         continue
                     if group_name in required:
                         continue
+                    changed_test_paths = {
+                        path
+                        for path in changed
+                        if path.startswith("tests/unit_tests/")
+                        and pathlib.PurePosixPath(path).match("test_*.py")
+                        and catalog.matches_all(path) == [group_name]
+                        and (source_root / path).is_file()
+                    }
+                    changed_source = any(
+                        not path.startswith("tests/unit_tests/")
+                        and group_name in catalog.matches_all(path)
+                        for path in changed
+                    )
+                    related_test_paths = {
+                        path
+                        for path in tracked_paths
+                        if path.startswith("tests/unit_tests/")
+                        and pathlib.PurePosixPath(path).match("test_*.py")
+                        and catalog.matches_all(path) == [group_name]
+                    }
                     paths = sorted(
-                        {
-                            path
-                            for path in changed
-                            if path.startswith("tests/unit_tests/")
-                            and pathlib.PurePosixPath(path).match("test_*.py")
-                            and catalog.matches_all(path) == [group_name]
-                            and (source_root / path).is_file()
-                        }
+                        changed_test_paths
+                        | (related_test_paths if changed_source else set())
                     )
                     if not paths:
                         continue

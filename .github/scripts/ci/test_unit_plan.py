@@ -624,26 +624,24 @@ class SelectionTests(unittest.TestCase):
         self.assertTrue(plan["global_groups"]["fallback"])
         self.assertEqual(plan["direct_groups"], [])
 
-    def test_direct_planned_group_is_advisory(self):
+    def test_direct_planned_source_group_executes_related_tests(self):
         plan = build_plan(["megatron/core/inference/engine.py"], platforms=["cuda"])
         self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual(plan["direct_groups"], ["inference"])
         self.assertEqual(plan["global_groups"]["direct_groups"], ["inference"])
-        gap = plan["direct_gaps"][0]
-        self.assertEqual(gap["group"], "inference")
-        self.assertEqual(gap["status"], "planned")
-        self.assertEqual(gap["platforms"][0]["status"], "planned")
+        self.assertEqual(plan["direct_gaps"], [])
+        platform = platform_plan(plan, "cuda")
+        self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
+        self.assertIn("planned-inference", execution_names(plan, "cuda"))
         self.assertEqual(
-            [group["name"] for group in platform_plan(plan, "cuda")["planned"]], ["inference"]
+            plan["platforms"][0]["config_identity"]["planned_execution"][0]["name"],
+            "planned-inference",
         )
         with tempfile.TemporaryDirectory() as directory:
             summary = pathlib.Path(directory) / "summary.md"
             planner.write_summary(summary, plan)
             text = summary.read_text()
-        self.assertIn("Directly affected planned groups were not executed.", text)
-        self.assertIn("these coverage gaps are advisory and do not fail CI", text)
         self.assertNotIn("**Plan blocked:", text)
-        self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
 
     def test_direct_unsupported_group_blocks_the_plan(self):
         plan = build_plan(["megatron/plugin/Ascend/ascend_plugin.py"], platforms=["musa"])
@@ -911,7 +909,7 @@ class MaterializationTests(unittest.TestCase):
         plan = build_plan(
             ["megatron/core/inference/engine.py"], platforms=["temp"], units={"temp": unit}
         )
-        self.assertEqual(execution_names(plan, "temp"), {"core", "models"})
+        self.assertEqual(execution_names(plan, "temp"), {"core", "models", "planned-inference"})
         self.assertNotIn(
             "plugin", [group["name"] for group in platform_plan(plan, "temp")["selected_groups"]]
         )
@@ -940,9 +938,14 @@ class MaterializationTests(unittest.TestCase):
         plan = build_plan(["megatron/core/inference/engine.py"], platforms=["cuda"])
         platform = platform_plan(plan, "cuda")
         self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
-        self.assertEqual(execution_names(plan, "cuda"), set(platform["configured_groups"]))
+        self.assertEqual(
+            execution_names(plan, "cuda"), set(platform["configured_groups"]) | {"planned-inference"}
+        )
         self.assertTrue(
-            all(group["reasons"][0]["type"] == "fallback" for group in platform["selected_groups"])
+            all(
+                group["reasons"][0]["type"] in {"fallback", "direct"}
+                for group in platform["selected_groups"]
+            )
         )
 
     def test_active_group_missing_without_declaration_is_unresolved(self):
