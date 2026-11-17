@@ -675,7 +675,7 @@ class SelectionTests(unittest.TestCase):
         self.assertNotIn("**Plan blocked:", text)
         self.assertEqual(
             execution_names(plan, "cuda"),
-            set(load_platforms()["cuda"].groups) | {"planned-inference"},
+            (set(load_platforms()["cuda"].groups) - PR_EXCLUDED) | {"planned-inference"},
         )
 
     def test_direct_unsupported_group_blocks_the_plan(self):
@@ -999,7 +999,7 @@ class MaterializationTests(unittest.TestCase):
         self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
         self.assertEqual(
             execution_names(plan, "cuda"),
-            set(platform["configured_groups"]) | {"planned-inference"},
+            (set(platform["configured_groups"]) - PR_EXCLUDED) | {"planned-inference"},
         )
         self.assertTrue(
             all(
