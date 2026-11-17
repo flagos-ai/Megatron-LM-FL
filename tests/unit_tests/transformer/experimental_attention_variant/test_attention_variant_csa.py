@@ -533,10 +533,15 @@ class TestUnfusedCompressedSparseAttn:
         (expected * grad_output).sum().backward()
 
         torch.testing.assert_close(actual, expected)
-        for actual_grad, expected_grad in zip(
-            actual_grads, (query_ref.grad, kv_ref.grad, sink_ref.grad)
+        ##### FlagScale Begin #####
+        # A100 (SM80) CI shows ~3.34e-4 KV-gradient error consistent with
+        # TF32 rounding in batched matmuls; keep other FP32 comparisons strict.
+        kv_grad_atol = 5e-4 if torch.cuda.get_device_capability() == (8, 0) else 1e-5
+        for actual_grad, expected_grad, atol in zip(
+            actual_grads, (query_ref.grad, kv_ref.grad, sink_ref.grad), (1e-5, kv_grad_atol, 1e-5)
         ):
-            torch.testing.assert_close(actual_grad, expected_grad)
+            torch.testing.assert_close(actual_grad, expected_grad, atol=atol, rtol=1.3e-6)
+        ##### FlagScale End #####
 
 
 # ===========================================================================
