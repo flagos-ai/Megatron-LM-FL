@@ -2995,6 +2995,24 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_kitchen
 
         if self.experimental_attention_variant == "dsa":
+            dsa_index_sharing = (
+                any(kind == "shared" for kind in self.indexer_types)
+                if self.indexer_types is not None
+                else self.dsa_indexer_topk_freq > 1
+            )
+            # TODO: Remove this guard and the matching test skip after per-microbatch
+            # index-sharing isolation is integrated here and output/gradient parity passes
+            # with seq_len > top-k and multiple outstanding microbatches.
+            # Upstream tracking: https://github.com/NVIDIA/Megatron-LM/pull/7107
+            assert not (
+                dsa_index_sharing
+                and self.recompute_granularity == "selective"
+                and "core_attn" in self.recompute_modules
+            ), (
+                "DSA index sharing with selective core_attn recomputation is not supported: "
+                "shared top-k indices can be overwritten by another microbatch. "
+                "Disable index sharing or use full recomputation."
+            )
             if self.context_parallel_size > 1:
                 cp_comm_types = (
                     self.cp_comm_type

@@ -83,7 +83,20 @@ def _build_gpt(config):
     ).cuda()
 
 
-@pytest.mark.parametrize("topk_freq", [1, 2])
+@pytest.mark.parametrize(
+    "topk_freq",
+    [
+        1,
+        # TODO: Remove with the config guard after selective core_attn sharing is fixed here
+        # and seq_len > top-k, multi-microbatch output/gradient parity passes (#7107 upstream).
+        pytest.param(
+            2,
+            marks=pytest.mark.skip(
+                reason="DSA index sharing with selective core_attn is temporarily disabled."
+            ),
+        ),
+    ],
+)
 def test_dsa_core_checkpoint_matches_eager_outputs_and_gradients(topk_freq):
     """Checkpoint x/qr and shared indices for two outstanding microbatches."""
     Utils.initialize_model_parallel(1, 1)
