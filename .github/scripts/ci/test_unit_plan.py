@@ -939,7 +939,8 @@ class MaterializationTests(unittest.TestCase):
         platform = platform_plan(plan, "cuda")
         self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
         self.assertEqual(
-            execution_names(plan, "cuda"), set(platform["configured_groups"]) | {"planned-inference"}
+            execution_names(plan, "cuda"),
+            set(platform["configured_groups"]) | {"planned-inference"},
         )
         self.assertTrue(
             all(

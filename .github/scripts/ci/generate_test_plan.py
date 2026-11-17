@@ -225,8 +225,7 @@ def build_plan(
                         and catalog.matches_all(path) == [group_name]
                     }
                     paths = sorted(
-                        changed_test_paths
-                        | (related_test_paths if changed_source else set())
+                        changed_test_paths | (related_test_paths if changed_source else set())
                     )
                     if not paths:
                         continue
