@@ -355,7 +355,8 @@ def test_packed_cp_matches_full_attention_and_gradients(
     not (torch.cuda.is_available() and HAVE_TE and HAVE_HADAMARD),
     reason="requires CUDA, TE and Hadamard",
 )
-def test_packed_cp2_optimizer_steps_match_cp1():
+@pytest.mark.parametrize("per_token", [False, True])
+def test_packed_cp2_optimizer_steps_match_cp1(per_token):
     """Two real cuDNN training steps preserve replicated parameters and the CP1 update."""
     if Utils.world_size < 2 or Utils.world_size % 2:
         pytest.skip("requires a multiple of two ranks for independent CP2 groups")
@@ -363,6 +364,8 @@ def test_packed_cp2_optimizer_steps_match_cp1():
         DSAIndexerLossAutoScaler,
     )
 
+    old_scale = DSAIndexerLossAutoScaler.main_loss_backward_scale
+    DSAIndexerLossAutoScaler.main_loss_backward_scale = None
     Utils.initialize_model_parallel(
         tensor_model_parallel_size=1, pipeline_model_parallel_size=1, context_parallel_size=2
     )
@@ -388,13 +391,15 @@ def test_packed_cp2_optimizer_steps_match_cp1():
             dsa_indexer_use_sparse_loss=True,
             dsa_kernel_backend="cudnn",
             context_parallel_size=2,
+            calculate_per_token_loss=per_token,
             attention_cp_layout="contiguous",
             qk_layernorm=True,
             apply_rope_fusion=True,
             gradient_accumulation_fusion=False,
         )
         model = _build_attention(cfg, 1, pg).cuda()
-        reference = _build_attention(replace(cfg, context_parallel_size=1), 1, ref_pg).cuda()
+        ref_cfg = replace(cfg, context_parallel_size=1, calculate_per_token_loss=False)
+        reference = _build_attention(ref_cfg, 1, ref_pg).cuda()
         reference.load_state_dict(model.state_dict())
         actual_optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
         reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
@@ -415,13 +420,17 @@ def test_packed_cp2_optimizer_steps_match_cp1():
             whole = torch.randn(256, 1, 256, dtype=torch.bfloat16, device="cuda")
             actual_optimizer.zero_grad(set_to_none=True)
             reference_optimizer.zero_grad(set_to_none=True)
-            DSAIndexerLossAutoScaler.set_loss_scale(torch.ones((), device="cuda"))
             output, _ = model(whole[rows], attention_mask=None, packed_seq_params=packed)
             expected, _ = reference(whole, attention_mask=None, packed_seq_params=packed)
             actual_loss = output.float().square().sum() / expected.numel()
             expected_loss = expected.float().square().mean()
             assert torch.isfinite(actual_loss) and torch.isfinite(expected_loss)
+            # Compare a token sum divided by real rows with the CP1 global mean.
+            unit_scale = torch.ones((), device=real.device)
+            actual_scale = unit_scale / real[-1] if per_token else unit_scale
+            DSAIndexerLossAutoScaler.set_loss_scale(actual_scale)
             actual_loss.backward()
+            DSAIndexerLossAutoScaler.set_loss_scale(unit_scale)
             expected_loss.backward()
             model.backward_dw()
             reference.backward_dw()
@@ -442,10 +451,12 @@ def test_packed_cp2_optimizer_steps_match_cp1():
                 torch.testing.assert_close(param, replica, rtol=0, atol=0)
         assert any(not torch.equal(before[name], value) for name, value in model.named_parameters())
     finally:
+        DSAIndexerLossAutoScaler.main_loss_backward_scale = old_scale
         Utils.destroy_model_parallel()
 
 
-@pytest.mark.parametrize("packed,per_token", [(False, False), (False, True), (True, False), (True, True)])
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("per_token", [False, True])
 def test_indexer_logging_across_cp_and_empty_pipeline_stage(packed, per_token):
     from megatron.core.transformer.experimental_attention_variant.dsa import (
         DSAIndexerLossLoggingHelper as logger,
@@ -463,7 +474,9 @@ def test_indexer_logging_across_cp_and_empty_pipeline_stage(packed, per_token):
         if pg.pp.rank() == 0:
             loss = torch.tensor(float(pg.cp.rank() + 1), device="cuda")
             logger.save_loss_to_tracker(
-                loss, 1, 2,
+                loss,
+                1,
+                2,
                 reduce_group=pg.cp if packed or per_token else None,
                 avg_group=pg.cp if not (packed or per_token) else None,
             )
