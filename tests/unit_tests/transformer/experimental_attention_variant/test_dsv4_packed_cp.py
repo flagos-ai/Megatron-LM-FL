@@ -140,17 +140,19 @@ def _assert_match(actual, expected):
     assert tensor_sim > 0.999, f"tensor similarity {tensor_sim:.8f} must exceed 0.999"
 
 
-def _forward_per_document(model, hidden, physical, real):
-    """Run the configured SBHD backend without packed layout or CP helpers."""
+def _forward_backward_per_document(model, hidden, grad, physical, real):
+    """Accumulate per-document gradients in forward order, including TE main_grad."""
     outputs = []
     for i, (start, end) in enumerate(zip(physical, physical[1:])):
         length = real[i + 1] - real[i]
         if length:
             output, _ = model(hidden[start : start + length], attention_mask=None)
-            outputs.append(output)
+            # TE overwrites main_grad on the first microbatch and adds on later ones.
+            output.backward(grad[start : start + length])
+            outputs.append(output.detach())
         if start + length < end:
             # Keep padding gradients explicitly zero in the reference input.
-            outputs.append(hidden[start + length : end] * 0)
+            outputs.append(hidden[start + length : end].detach() * 0)
     return torch.cat(outputs, dim=0)
 
 
@@ -164,9 +166,9 @@ def _run_attention(model, hidden, grad, packed, *, documents=None, cp_group=None
     hidden = hidden.detach().clone().requires_grad_()
     if documents is None:
         output, _ = model(hidden, attention_mask=None, packed_seq_params=packed)
+        output.backward(grad)
     else:
-        output = _forward_per_document(model, hidden, *documents)
-    output.backward(grad)
+        output = _forward_backward_per_document(model, hidden, grad, *documents)
     result = {"output": output.detach(), "input_grad": hidden.grad.detach()}
     for name, param in model.named_parameters():
         value = param.main_grad if id(param) in fused_weights else param.grad
