@@ -47,40 +47,19 @@
 
 ## 运行测试
 
-### 使用测试脚本（推荐）
-
 ```bash
-# 运行所有测试（2 GPUs - 只能测试 CP only, cp_size=2 的场景）
-cd /share/project/lixianduo/codes/Megatron-LM-FL
-./tests/unit_tests/extensions/run_fsa_tests.sh 2
-
-# 运行所有测试（4 GPUs - 测试大部分场景）
-./tests/unit_tests/extensions/run_fsa_tests.sh 4
-
-# 运行所有测试（8 GPUs - 覆盖所有场景，包括 TP+CP 组合）
-./tests/unit_tests/extensions/run_fsa_tests.sh 8
-
-# 运行特定测试场景
-./tests/unit_tests/extensions/run_fsa_tests.sh 4 "test_cp_vs_no_cp_numerical_equivalence[1-4-16-2"
-```
-
-### 手动运行
-
-```bash
-# 激活环境
-source /share/project/lixianduo/envs/fsa-train/bin/activate
-
-# 设置 GPU 数量
-export NUM_GPUS=4
-export CUDA_VISIBLE_DEVICES=0,1,2,3
-export WORLD_SIZE=4
-
-# 运行测试
+# 在仓库根目录下运行，NUM_GPUS 取 2 / 4 / 8，GPU 不足的场景会自动跳过
+export NUM_GPUS=8
 torchrun --nproc_per_node=$NUM_GPUS \
     -m pytest \
     -v \
     -s \
     tests/unit_tests/extensions/test_fsa_headwise_cp.py
+
+# 运行特定测试场景
+torchrun --nproc_per_node=4 -m pytest -v -s \
+    tests/unit_tests/extensions/test_fsa_headwise_cp.py \
+    -k "test_cp_vs_no_cp_numerical_equivalence and 1-4-16-2"
 ```
 
 ## 测试输出示例
@@ -193,7 +172,9 @@ pip install flash-sparse-attn
 **调试方法**：
 ```bash
 # 运行单个失败的测试，查看详细输出
-./tests/unit_tests/extensions/run_fsa_tests.sh 4 "test_cp_vs_no_cp_numerical_equivalence[1-4-16-2"
+torchrun --nproc_per_node=4 -m pytest -v -s \
+    tests/unit_tests/extensions/test_fsa_headwise_cp.py \
+    -k "test_cp_vs_no_cp_numerical_equivalence and 1-4-16-2"
 ```
 
 ### 问题 3：CUDA out of memory
