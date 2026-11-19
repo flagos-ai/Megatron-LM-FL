@@ -91,7 +91,8 @@ test_matrix:
       optimizer: "Optimizer tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
       extensions: "Extension tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
       a2a_overlap: "All-to-all overlap tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
-      dsa_kernel: "Plugin kernel tests are not onboarded or validated in the ascend CI runtime; CUDA provides execution coverage."
+      flagcicd_cov: "FlagCICD supplementary coverage cases are written and validated against CUDA only."
+      dsa_kernel: "DSA Triton tests require SM90+ CUDA hardware; this runtime has no compatible runner."
       transformer: "Transformer unit tests currently run only on CUDA."
     ignored_tests:
       # LayerWise optimizer suites require the optional Emerging Optimizers package.
@@ -319,10 +320,10 @@ test_matrix:
       - tests/unit_tests/models/test_base_embedding.py::TestBaseEmbedding::test_constructor
       # Needs CUDA/TE-specific features; metax also ignores
       - tests/unit_tests/models/test_gpt_model.py::TestGPTModelWithCustomPG::test_gpt_model_with_custom_pg
-      # DSA MoE-GPT-Mamba logprobs test hits same mamba_ssm + causal_conv1d
-      # CUDA kernel dependency as test_mamba.py, causing ImportError at
-      # collection time and cascading into other parametrized variants.
-      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py::TestDSAMoEGPTMambaEquivalence::test_dsa_moe_logprobs_match[1-2]
+      # Running this suite causes subsequent test processes to crash inside
+      # Ascend device kernels with an unknown error. Skip the entire file
+      # until the root cause is understood and resolved.
+      - tests/unit_tests/models/test_dsa_gpt_mamba_equivalence.py
       # TE-FL misses get_fused_attn_backend
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward
       - tests/unit_tests/models/test_llava_model.py::TestLLaVAModel::test_forward_fsdp

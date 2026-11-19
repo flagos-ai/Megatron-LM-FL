@@ -51,3 +51,9 @@ jobs:
     uses: ./.github/workflows/prepare_te_fl.yml
     with:
       platform: enflame
+
+  prepare-iluvatar:
+    name: prepare-iluvatar
+    uses: ./.github/workflows/prepare_te_fl.yml
+    with:
+      platform: iluvatar

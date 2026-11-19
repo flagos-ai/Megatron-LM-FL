@@ -78,6 +78,10 @@ def selected_names(plan: dict, name: str) -> list[str]:
     return [group["name"] for group in platform_plan(plan, name)["selected_groups"]]
 
 
+# Groups whose contract keeps them out of pull-request runs.
+PR_EXCLUDED = {"flagcicd_cov"}
+
+
 def execution_names(plan: dict, name: str) -> set[str]:
     return {
         group["execution_group"]
@@ -95,7 +99,7 @@ class CatalogTests(unittest.TestCase):
     def test_non_platform_configs_are_not_platforms(self):
         self.assertEqual(
             set(self.platforms),
-            {"ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu"},
+            {"ascend", "cuda", "enflame", "hygon", "kunlunxin", "metax", "musa", "ppu", "iluvatar"},
         )
 
     def test_catalog_paths_and_dependencies_are_valid(self):
@@ -128,6 +132,31 @@ class CatalogTests(unittest.TestCase):
 
     def test_catalog_defines_the_coverage_boundary(self):
         self.assertEqual(self.catalog.coverage_sources, ("megatron/plugin/", "megatron/core/"))
+
+    def test_coverage_omits_only_test_code_and_planned_group_sources(self):
+        planned = {
+            path
+            for group in self.catalog.groups.values()
+            if group.status == "planned"
+            for path in group.paths
+        }
+        for path in self.catalog.coverage_omit:
+            with self.subTest(path=path):
+                self.assertTrue(path == "megatron/plugin/tests/" or path in planned)
+
+    def test_platform_coverage_omit_is_limited_to_vendor_plugin_directories(self):
+        for name, platform in self.platforms.items():
+            omitted = platform.data["test_matrix"]["unit"].get("coverage_omit", [])
+            for path in omitted:
+                with self.subTest(platform=name, path=path):
+                    self.assertRegex(path, r"^megatron/plugin/[^/]+/$")
+                    self.assertTrue(routing.path_exists(ROOT, path))
+
+    def test_coverage_omit_must_be_a_directory_inside_a_source(self):
+        for path in ("megatron/core/", "megatron/training/", "megatron/core/utils.py"):
+            with self.subTest(path=path):
+                catalog = dataclasses.replace(self.catalog, coverage_omit=(path,))
+                self.assertTrue(any("Coverage omit path" in e for e in catalog.validate(ROOT)))
 
     def test_active_groups_have_a_platform_owner(self):
         for name, group in self.catalog.groups.items():
@@ -168,7 +197,7 @@ class CatalogTests(unittest.TestCase):
                 effective = group.execution_group or name
                 with self.subTest(platform=platform_name, group=name):
                     self.assertTrue(reason)
-                    self.assertEqual(group.status, "active")
+                    self.assertIn(group.status, {"active", "planned"})
                     if effective in platform.groups:
                         executed = platform.groups[effective]["path"]
                         test_paths = [
@@ -470,7 +499,7 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
         self.assertEqual(
             execution_names(plan, "cuda"),
-            set(platform["configured_groups"]) | {"planned-inference"},
+            (set(platform["configured_groups"]) - PR_EXCLUDED) | {"planned-inference"},
         )
         self.assertEqual(plan["direct_gaps"], [])
 
@@ -503,14 +532,14 @@ class SelectionTests(unittest.TestCase):
         )
         self.assertEqual(platform["planned"], [])
         self.assertIn("inference", {group["name"] for group in platform["unsupported"]})
-        self.assertEqual(execution_names(plan, "cuda"), set(units["cuda"].groups))
+        self.assertEqual(execution_names(plan, "cuda"), set(units["cuda"].groups) - PR_EXCLUDED)
         # Another selected platform still executes the temporary group.
         mixed = build_plan([path], platforms=["cuda", "ascend"], units=units)
         self.assertEqual(mixed["direct_gaps"], [])
         self.assertIn("planned-inference", execution_names(mixed, "ascend"))
         self.assertNotIn("planned-inference", execution_names(mixed, "cuda"))
 
-    def test_dsa_kernel_tests_are_executable_on_cuda(self):
+    def test_dsa_kernel_tests_are_deferred_without_sm90_cuda(self):
         self.assertEqual(
             self.catalog.matches("tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py"),
             "dsa_kernel",
@@ -520,8 +549,12 @@ class SelectionTests(unittest.TestCase):
         )
         platform = platform_plan(plan, "cuda")
         self.assertEqual(platform["planned"], [])
-        self.assertIn("dsa_kernel", execution_names(plan, "cuda"))
-        self.assertEqual(plan["plan_status"], "ready")
+        self.assertNotIn("dsa_kernel", execution_names(plan, "cuda"))
+        self.assertEqual(plan["plan_status"], "partial")
+        self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["dsa_kernel"])
+        self.assertEqual(
+            [group["name"] for group in platform["planned_skipped"]], ["planned-dsa_kernel"]
+        )
 
     def test_newly_onboarded_groups_execute_for_mixed_pr_changes(self):
         plan = build_plan(
@@ -534,10 +567,12 @@ class SelectionTests(unittest.TestCase):
             ]
         )
         self.assertEqual(plan["plan_status"], "partial")
-        self.assertEqual(plan["direct_gaps"], [])
+        self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["dsa_kernel"])
+        self.assertEqual(plan["direct_gaps"][0]["status"], "planned")
         self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
-        groups = {"optimizer", "extensions", "a2a_overlap", "dsa_kernel"}
+        groups = {"optimizer", "extensions", "a2a_overlap"}
         self.assertTrue(groups <= execution_names(plan, "cuda"))
+        self.assertNotIn("dsa_kernel", execution_names(plan, "cuda"))
         for platform in plan["platforms"]:
             if platform["name"] != "cuda":
                 unsupported = {group["name"] for group in platform["unsupported"]}
@@ -547,21 +582,26 @@ class SelectionTests(unittest.TestCase):
         plan = build_plan(["tests/unit_tests/conftest.py"], platforms=["cuda"])
         self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
         self.assertEqual(plan["plan_status"], "partial")
-        self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
+        self.assertEqual(
+            execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups) - PR_EXCLUDED
+        )
 
-    def test_onboarded_group_still_blocks_without_selected_executor(self):
+    def test_planned_group_without_selected_executor_is_advisory(self):
         plan = build_plan(
             ["tests/unit_tests/plugin/dsa_kernel/test_fused_dsa.py"], platforms=["musa"]
         )
-        self.assertEqual(plan["plan_status"], "blocked")
+        self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual([gap["group"] for gap in plan["direct_gaps"]], ["dsa_kernel"])
 
     def test_shared_path_falls_back_to_every_group(self):
         plan = build_plan([".github/workflows/ci.yml"], platforms=["cuda"])
         self.assertTrue(plan["global_groups"]["fallback"])
-        self.assertEqual(set(plan["global_groups"]["selected"]), set(self.catalog.groups))
         self.assertEqual(
-            execution_names(plan, "cuda"), set(platform_plan(plan, "cuda")["configured_groups"])
+            set(plan["global_groups"]["selected"]), set(self.catalog.groups) - PR_EXCLUDED
+        )
+        self.assertEqual(
+            execution_names(plan, "cuda"),
+            set(platform_plan(plan, "cuda")["configured_groups"]) - PR_EXCLUDED,
         )
 
     def test_build_inputs_fall_back_to_every_group(self):
@@ -637,7 +677,9 @@ class SelectionTests(unittest.TestCase):
         self.assertIn("Directly affected planned groups were not executed.", text)
         self.assertIn("these coverage gaps are advisory and do not fail CI", text)
         self.assertNotIn("**Plan blocked:", text)
-        self.assertEqual(execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups))
+        self.assertEqual(
+            execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups) - PR_EXCLUDED
+        )
 
     def test_direct_unsupported_group_blocks_the_plan(self):
         plan = build_plan(["megatron/plugin/Ascend/ascend_plugin.py"], platforms=["musa"])
@@ -677,6 +719,30 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["scope"], "all_catalog")
         self.assertEqual(plan["plan_status"], "partial")
 
+    def test_stage_restricted_group_runs_only_in_its_stages(self):
+        self.assertEqual(self.catalog.groups["flagcicd_cov"].stages, ("nightly", "manual"))
+        nightly = build_plan([], selection="configured", event="schedule", platforms=["cuda"])
+        self.assertIn("flagcicd_cov", execution_names(nightly, "cuda"))
+        self.assertEqual(nightly["stage_excluded_groups"], [])
+
+    def test_stage_restricted_group_never_enters_a_pull_request(self):
+        changes = {
+            "its own tests": ["tests/unit_tests/flagcicd_cov/core/test_config_logger_cov.py"],
+            "a dependency": ["megatron/core/config.py"],
+            "shared fallback": [".github/workflows/ci.yml"],
+            "planned fallback": ["megatron/core/inference/engine.py"],
+            "shared runtime": ["megatron/core/utils.py"],
+        }
+        for reason, changed in changes.items():
+            with self.subTest(reason=reason):
+                plan = build_plan(changed, platforms=["cuda"])
+                self.assertEqual(plan["stage_excluded_groups"], ["flagcicd_cov"])
+                self.assertNotIn("flagcicd_cov", execution_names(plan, "cuda"))
+                self.assertNotIn("flagcicd_cov", plan["selected_logical_groups"])
+                self.assertNotIn("flagcicd_cov", plan["direct_groups"])
+                self.assertNotEqual(plan["plan_status"], "blocked")
+                self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
+
     def test_nightly_uses_configured_selection(self):
         plan = build_plan([], selection="configured", event="schedule", platforms=["cuda"])
         self.assertEqual(plan["stage"], "nightly")
@@ -711,7 +777,7 @@ class SelectionTests(unittest.TestCase):
             name for name, group in self.catalog.groups.items() if group.status == "planned"
         )
         self.assertEqual(plan["unwired_planned_groups"], expected)
-        self.assertEqual(len(plan["unwired_planned_groups"]), 8)
+        self.assertEqual(len(plan["unwired_planned_groups"]), 9)
 
     def test_nightly_plan_status_ready_with_partial_catalog(self):
         plan = build_plan([], selection="configured", event="schedule", platforms=["cuda"])
@@ -915,8 +981,7 @@ class MaterializationTests(unittest.TestCase):
         platform = platform_plan(plan, "musa")
         excluded = {group["name"]: group for group in platform["fallback_excluded"]}
         self.assertEqual(
-            sorted(excluded),
-            ["a2a_overlap", "dsa_kernel", "extensions", "optimizer", "plugin", "transformer"],
+            sorted(excluded), ["a2a_overlap", "extensions", "optimizer", "plugin", "transformer"]
         )
         self.assertEqual(excluded["plugin"]["status"], "unsupported")
         self.assertEqual(excluded["plugin"]["platform"], "musa")
@@ -935,7 +1000,9 @@ class MaterializationTests(unittest.TestCase):
         plan = build_plan(["megatron/core/inference/engine.py"], platforms=["cuda"])
         platform = platform_plan(plan, "cuda")
         self.assertEqual([group["name"] for group in platform["planned"]], ["inference"])
-        self.assertEqual(execution_names(plan, "cuda"), set(platform["configured_groups"]))
+        self.assertEqual(
+            execution_names(plan, "cuda"), set(platform["configured_groups"]) - PR_EXCLUDED
+        )
         self.assertTrue(
             all(group["reasons"][0]["type"] == "fallback" for group in platform["selected_groups"])
         )
@@ -1195,7 +1262,7 @@ class PlannerCliTests(unittest.TestCase):
             self.assertTrue(plan["gate_policy"]["allow_catalog_partial"])
             self.assertEqual(plan["plan_status"], "ready")
             self.assertEqual(plan["catalog_completeness"], "partial")
-            self.assertEqual(len(plan["unwired_planned_groups"]), 8)
+            self.assertEqual(len(plan["unwired_planned_groups"]), 9)
             text = summary.read_text()
             self.assertIn("Configured matrix: complete", text)
             self.assertIn("Logical catalog completeness: partial", text)

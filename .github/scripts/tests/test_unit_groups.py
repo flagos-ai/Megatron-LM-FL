@@ -1,3 +1,4 @@
+import configparser
 import importlib.util
 import json
 import os
@@ -384,7 +385,7 @@ class UnitGroupTests(unittest.TestCase):
             "CI_PYTHON_BIN": sys.executable,
         }
 
-        def run_group(env):
+        def run_group(env, timeout=3600):
             directory = Path(env["CI_COVERAGE_DIRECTORY"])
             directory.mkdir()
             config = directory / ".coveragerc"
@@ -462,6 +463,45 @@ class UnitGroupTests(unittest.TestCase):
                     self.assertEqual((first[1], second[1]), ("29601", "29600"))
                 if platform == "metax":
                     self.assertEqual((first[2], second[2]), ("1", ""))
+
+    def test_real_runner_rc_file_ignores_interpreter_startup_output(self):
+        # Vendor images (e.g. Enflame TE-FL) print a banner to stdout at interpreter
+        # startup; the generated coverage rc file must still parse.
+        python = self.root / "python"
+        python.write_text(
+            "#!/usr/bin/env bash\n"
+            'if [ "${1:-}" = -m ]; then exit 0; fi\n'
+            "echo 'CUDA vendor backend skipped (CUDA build was disabled at build time)'\n"
+            f'exec "{sys.executable}" "$@"\n'
+        )
+        python.chmod(0o755)
+        coverage = self.root / "coverage"
+        result = subprocess.run(
+            ["bash", str(ROOT / "tests/test_utils/runners/run_ci_unit_tests.sh")],
+            env={
+                **self.env,
+                "CI_PYTHON_BIN": str(python),
+                "CI_PYTEST_BIN": str(python),
+                "CI_TEST_GROUP": "core",
+                "CI_TEST_PATH": "test_success.py",
+                "CI_NPROC_PER_NODE": "1",
+                "CI_IGNORED_TESTS": "[]",
+                "CI_PYTEST_EXTRA_ARGS": '["-q"]',
+                "CI_COVERAGE_DIRECTORY": str(coverage),
+                "CI_COVERAGE_OMIT": json.dumps(["megatron/plugin/Ascend/"]),
+            },
+            cwd=self.root,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        parser = configparser.ConfigParser()
+        parser.read_string((coverage / ".coveragerc").read_text())
+        self.assertEqual(
+            parser.get("report", "omit").split(), [str(self.root / "megatron/plugin/Ascend/*")]
+        )
+        self.assertIn("@triton", parser.get("report", "exclude_also"))
 
     def test_transient_retry_keeps_only_final_coverage_and_reports_flakiness(self):
         script = self.root / "tests/test_utils/runners/run_ci_unit_tests.sh"
@@ -740,7 +780,17 @@ class UnitWorkflowTests(unittest.TestCase):
         self.assertIn("Verify unit plan across platforms", complete)
 
     def test_all_platforms_have_install_free_group_hooks(self):
-        for name in ("cuda", "musa", "ascend", "enflame", "hygon", "kunlunxin", "metax", "ppu"):
+        for name in (
+            "cuda",
+            "musa",
+            "ascend",
+            "enflame",
+            "hygon",
+            "kunlunxin",
+            "metax",
+            "ppu",
+            "iluvatar",
+        ):
             script = (ROOT / f".github/scripts/set_env_{name}.sh").read_text()
             hook = script.split("  unit_group)\n", 1)[1].split("    ;;", 1)[0]
             self.assertNotIn("pip", hook)

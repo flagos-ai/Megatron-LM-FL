@@ -26,6 +26,7 @@ from megatron.core.process_groups_config import (
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_block import TransformerBlock
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils
 
 # ============================================================================
@@ -59,14 +60,24 @@ def destroy_all_grids():
     """Destroy all tracked grids and bridge communicator PGs."""
     if dist.is_initialized():
         # Keep all ranks on the same test before tearing down shared NCCL groups.
-        dist.barrier()
+        # Device collectives can outlive the Python call, so drain them first. A
+        # rank that already died makes the barrier raise, in which case the
+        # cleanup below still has to run.
+        try:
+            get_platform().synchronize()
+            dist.barrier()
+        except Exception:
+            pass
     for grid in _active_grids:
         grid.destroy()
     _active_grids.clear()
     BridgeCommunicator.destroy_broadcast_pgs()
     if dist.is_initialized():
         # Do not let fast ranks create the next test's groups during teardown.
-        dist.barrier()
+        try:
+            dist.barrier()
+        except Exception:
+            pass
 
 
 def get_pg_collection(grid):
@@ -85,23 +96,38 @@ def get_pg_collection(grid):
 _embedding_pg_cache: dict = {}
 
 
+def create_all_embedding_groups(grid):
+    """Create the embedding PGs derived from a grid's PP groups.
+
+    dist.new_group is a collective — ALL ranks must call it, even ranks that do
+    not belong to the grid. Deriving the membership from grid.get_rank_enum
+    instead of the caller's own PP subgroup keeps the call arguments and their
+    order identical on every rank, which asymmetric calls would deadlock on.
+    """
+    for pp_group_ranks in grid.get_rank_enum("pp"):
+        # get_rank_enum does not promise ascending order, so sort before picking
+        # the first and last pipeline stage.
+        pp_ranks = sorted(pp_group_ranks)
+        cache_key = tuple(pp_ranks)
+
+        if cache_key not in _embedding_pg_cache:
+            pos_embd_ranks = [pp_ranks[0]]
+            embd_ranks = [pp_ranks[0]]
+            if pp_ranks[-1] != pp_ranks[0]:
+                embd_ranks.append(pp_ranks[-1])
+            _embedding_pg_cache[cache_key] = (
+                dist.new_group(ranks=pos_embd_ranks),
+                dist.new_group(ranks=embd_ranks),
+            )
+
+
 def add_embedding_groups(pg_collection):
-    """Add embedding groups to process group collection."""
+    """Attach the cached embedding groups. Call create_all_embedding_groups first."""
     if not pg_collection.pp:
         return pg_collection
 
     pp_ranks = sorted(dist.get_process_group_ranks(pg_collection.pp))
     cache_key = tuple(pp_ranks)
-
-    if cache_key not in _embedding_pg_cache:
-        pos_embd_ranks = [pp_ranks[0]]
-        embd_ranks = [pp_ranks[0]]
-        if pp_ranks[-1] != pp_ranks[0]:
-            embd_ranks.append(pp_ranks[-1])
-        _embedding_pg_cache[cache_key] = (
-            dist.new_group(ranks=pos_embd_ranks),
-            dist.new_group(ranks=embd_ranks),
-        )
 
     pos_embd_pg, embd_pg = _embedding_pg_cache[cache_key]
 
@@ -163,6 +189,10 @@ def create_module_with_grid(tp, pp, dp, grid_offset, hidden_size):
     """Create a module (transformer block) with its grid."""
     rank = dist.get_rank()
     grid = create_hypercomm_grid(offset=grid_offset, tp=tp, pp=pp, dp=dp)
+
+    # Outside the membership check on purpose: dist.new_group is a collective and
+    # every rank has to issue the same calls, members and non-members alike.
+    create_all_embedding_groups(grid)
 
     if grid.rank_offset <= rank < grid.rank_offset + grid.size:
         pg_collection = add_embedding_groups(get_pg_collection(grid))

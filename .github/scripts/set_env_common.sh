@@ -222,14 +222,24 @@ ci_install_uv_compatibility_shim() {
   local force_shim="${1:-false}"
 
   if [ "$force_shim" != "true" ] && command -v uv >/dev/null 2>&1; then
-    uv --version
-    return
+    # Some vendor images ship a compatibility shim at the uv path. Treat an
+    # executable that cannot answer --version as unusable and replace it below.
+    if uv --version >/dev/null 2>&1; then
+      uv --version
+      return
+    fi
+    echo "uv executable is unavailable; installing the CI compatibility shim"
   fi
 
   local python_bin="${CI_PYTHON_BIN:-$(command -v python3)}"
-  cat > /usr/local/bin/uv <<UVEOF
+  local shim_dir=/usr/local/bin
+  cat > "$shim_dir/uv" <<UVEOF
 #!/usr/bin/env bash
 set -euo pipefail
+if [ "\${1:-}" = "--version" ]; then
+  echo "uv 0.0.0-ci-shim"
+  exit 0
+fi
 if [ "\${1:-}" = "run" ]; then
   shift
   if [ "\${1:-}" = "--no-sync" ]; then
@@ -248,7 +258,14 @@ fi
 echo "uv shim: unsupported command: \$*" >&2
 exit 1
 UVEOF
-  chmod 0755 /usr/local/bin/uv
+  chmod 0755 "$shim_dir/uv"
+
+  # Vendor images may put their own (incomplete) uv earlier in PATH.  Make
+  # the compatibility shim the command that this shell and later CI steps use.
+  if [ "${PATH%%:*}" != "$shim_dir" ]; then
+    ci_export_env PATH "$shim_dir:$PATH"
+  fi
+  hash -r 2>/dev/null || true
 }
 
 ci_setup_functional_environment() {
@@ -272,7 +289,8 @@ ci_setup_functional_environment() {
 ci_install_local_tokenizer_dependencies() {
   # Transformers >= 4.47 validates mounted local tokenizer paths as Hub repo
   # ids. Keep the functional images on the version that accepts local paths.
-  python3 -m pip install \
+  local python_bin="${CI_PYTHON_BIN:-$(command -v python3)}"
+  "$python_bin" -m pip install \
     "transformers<4.47.0" \
     "huggingface_hub<0.27.0" \
     --no-cache-dir --quiet

@@ -1,6 +1,6 @@
 # Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
 
-"""Unit tests for ``megatron.core.transformer.experimental_attention_variant.dsa_kernels``.
+"""Unit tests for ``megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels``.
 
 Coverage:
 
@@ -28,8 +28,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from megatron.core.transformer.experimental_attention_variant import dsa_kernels as dk
-from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+from megatron.core.transformer.experimental_attention_variant import dsa_sbhd_kernels as dk
+from megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels import (
     FusedIndexerSparseAttnFunc,
     SparseAttnFunc,
     _dsa_fwd_flash_mla,
@@ -1846,7 +1846,7 @@ class TestRealKernelScoreHelpers:
             with_topk=case.startswith('sparse_'),
         )
 
-        from megatron.core.transformer.experimental_attention_variant import dsa_kernels as _dk
+        from megatron.core.transformer.experimental_attention_variant import dsa_sbhd_kernels as _dk
 
         if case == 'sparse_indexer_predict':
             # The kernel takes sm_scale=1.0; scale is applied via weights
@@ -1980,7 +1980,7 @@ class TestRealKernelKLLossDense:
     @pytest.mark.parametrize("dummy", [None])
     def test_real_dense_kl_loss_matches_reference(self, dummy, reset_lazy_kernel_state):
         _skip_if_real_kernels_unavailable(sm_min=10)
-        from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+        from megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels import (
             _compute_dense_attn_score,
             _compute_dense_indexer_score,
             _kl_loss_from_dense_scores,
@@ -2042,7 +2042,7 @@ class TestRealKernelIndexerTopk:
     @pytest.mark.parametrize("dummy", [None])
     def test_real_indexer_topk_set_matches_reference(self, dummy, reset_lazy_kernel_state):
         _skip_if_real_kernels_unavailable(sm_min=10)  # IndexerForward is SM100+
-        from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+        from megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels import (
             indexer_topk,
         )
 
@@ -2316,7 +2316,7 @@ class TestRealKernelFusedIndexerSparseAttn:
         #     (no internal masking). Masking the reference would shift the
         #     ``attn_score / attn_l1norm`` normalization and the indexer LSE
         #     basis, producing a different KL than the kernel's.
-        from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+        from megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels import (
             _dsa_fwd_flash_mla,
             _indexer_topk_bshd,
             _kl_loss_from_dense_scores,
@@ -2455,7 +2455,7 @@ class TestRealKernelDenseIndexerBackward:
 
         # ---- Reference: capture the kernel's attn-side / lse_indexer (treated
         # as constants) and run autograd through the analytical dense KL.
-        from megatron.core.transformer.experimental_attention_variant.dsa_kernels import (
+        from megatron.core.transformer.experimental_attention_variant.dsa_sbhd_kernels import (
             _compute_dense_attn_score,
             _dsa_fwd_flash_mla,
             _indexer_topk_bshd,
@@ -2573,7 +2573,9 @@ class TestPublicApi:
     """
 
     def test_public_surface(self):
-        from megatron.core.transformer.experimental_attention_variant import dsa_kernels
+        from megatron.core.transformer.experimental_attention_variant import (
+            dsa_sbhd_kernels as dsa_kernels,
+        )
 
         for name in dsa_kernels.__all__:
             assert hasattr(dsa_kernels, name), f"__all__ lists {name!r} but it is missing"
