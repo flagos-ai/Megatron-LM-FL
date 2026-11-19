@@ -20,9 +20,10 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer import TransformerConfig
-from megatron.core.transformer.attention import SelfAttention
+from megatron.core.transformer.attention import Attention, SelfAttention
 from megatron.core.transformer.enums import AttnMaskType
 from megatron.core.utils import is_te_min_version, unwrap_model
+from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args
 from megatron.training.checkpointing import load_checkpoint, save_checkpoint
 from megatron.training.global_vars import set_args
@@ -805,3 +806,102 @@ def test_qk_layernorm_spec_config_mismatch_raises():
             SelfAttention(config, submodules, layer_number=1)
     finally:
         Utils.destroy_model_parallel()
+
+
+def _output_gate_reference(x, gate):
+    return (x * torch.sigmoid(gate.contiguous().view(x.shape).float())).to(x.dtype)
+
+
+def _output_gate_device(device_type):
+    if device_type == "npu":
+        platform = get_platform()
+        if platform.device_name() != "npu":
+            pytest.skip("Requires the NPU platform")
+        return platform.device(platform.current_device())
+    return torch.device("cpu")
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "npu"])
+@pytest.mark.parametrize("requires_grad", [(True, True), (True, False), (False, True)])
+@pytest.mark.parametrize(
+    "dtype,layout",
+    [
+        (torch.float32, "contiguous"),
+        (torch.bfloat16, "contiguous"),
+        (torch.float16, "contiguous"),
+        (torch.bfloat16, "strided_gate"),
+        (torch.bfloat16, "strided_x"),
+        (torch.float32, "empty"),
+    ],
+)
+def test_attention_output_gate_forward_backward(device_type, requires_grad, dtype, layout):
+    device = _output_gate_device(device_type)
+    shape = (0, 2, 37) if layout == "empty" else (11, 2, 37)
+    x = torch.randn((*shape, 2), device=device, dtype=dtype)[..., 0]
+    gate = torch.randn((*shape, 2), device=device, dtype=dtype)[..., 0]
+    if layout != "strided_x":
+        x = x.contiguous()
+    if layout != "strided_gate":
+        gate = gate.contiguous()
+    x = x.detach().requires_grad_(requires_grad[0])
+    gate = gate.view(*shape[:2], 1, shape[-1]).detach().requires_grad_(requires_grad[1])
+    ref_x = x.detach().clone().requires_grad_(requires_grad[0])
+    ref_gate = gate.detach().clone().requires_grad_(requires_grad[1])
+    actual = Attention._apply_output_gate(None, x, gate)
+    expected = _output_gate_reference(ref_x, ref_gate)
+    torch.testing.assert_close(actual, expected)
+    grad = torch.randn_like(actual)
+    inputs = tuple(t for t in (x, gate) if t.requires_grad)
+    ref_inputs = tuple(t for t in (ref_x, ref_gate) if t.requires_grad)
+    # Retaining the graph must not let the first backward alter saved inputs.
+    for _ in range(2):
+        grads = torch.autograd.grad(actual, inputs, grad, retain_graph=True)
+        ref_grads = torch.autograd.grad(expected, ref_inputs, grad, retain_graph=True)
+        for observed, reference in zip(grads, ref_grads):
+            torch.testing.assert_close(observed, reference)
+
+
+@pytest.mark.parametrize("device_type", ["cpu", "npu"])
+def test_attention_output_gate_higher_order(device_type):
+    device = _output_gate_device(device_type)
+    x = torch.randn((5, 2, 17), device=device, requires_grad=True)
+    gate = torch.randn_like(x, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    ref_gate = gate.detach().clone().requires_grad_()
+    actual = Attention._apply_output_gate(None, x, gate)
+    expected = _output_gate_reference(ref_x, ref_gate)
+    grads = torch.autograd.grad(actual.sum(), (x, gate), create_graph=True)
+    ref_grads = torch.autograd.grad(expected.sum(), (ref_x, ref_gate), create_graph=True)
+    second = torch.autograd.grad(sum(g.square().sum() for g in grads), (x, gate))
+    ref_second = torch.autograd.grad(sum(g.square().sum() for g in ref_grads), (ref_x, ref_gate))
+    for observed, reference in zip((*grads, *second), (*ref_grads, *ref_second)):
+        torch.testing.assert_close(observed, reference)
+
+
+@pytest.mark.parametrize("use_reentrant", [False, True])
+def test_attention_output_gate_checkpoint(use_reentrant):
+    from torch.utils.checkpoint import checkpoint
+
+    device = _output_gate_device("npu")
+    x = torch.randn((7, 2, 19), device=device, dtype=torch.bfloat16, requires_grad=True)
+    gate = torch.randn_like(x, requires_grad=True)
+    ref_x = x.detach().clone().requires_grad_()
+    ref_gate = gate.detach().clone().requires_grad_()
+    actual = checkpoint(
+        lambda a, b: Attention._apply_output_gate(None, a, b), x, gate, use_reentrant=use_reentrant
+    )
+    expected = checkpoint(_output_gate_reference, ref_x, ref_gate, use_reentrant=use_reentrant)
+    grad = torch.randn_like(actual)
+    actual.backward(grad)
+    expected.backward(grad)
+    torch.testing.assert_close(actual, expected)
+    torch.testing.assert_close(x.grad, ref_x.grad)
+    torch.testing.assert_close(gate.grad, ref_gate.grad)
+
+
+def test_attention_output_gate_cpu_fp64():
+    x = torch.randn((3, 2, 7), dtype=torch.float64, requires_grad=True)
+    gate = torch.randn_like(x, requires_grad=True)
+    actual = Attention._apply_output_gate(None, x, gate)
+    expected = _output_gate_reference(x, gate)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)

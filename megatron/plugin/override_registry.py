@@ -185,6 +185,12 @@ register(
 )
 
 
+register(
+    target="megatron.core.transformer.attention.Attention._apply_output_gate",
+    impl="megatron.plugin.Ascend.transformer.attention.apply_output_gate",
+    vendor="npu",
+)
+
 # MUSA compatibility overrides follow the same lazy registration as Ascend.
 register(
     target="megatron.core.transformer.moe.moe_utils.permute",
