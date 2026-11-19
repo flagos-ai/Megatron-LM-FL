@@ -1603,13 +1603,10 @@ class SelfAttention(Attention):
             #    responsible for (e.g., q1).
             # The block of code below performs steps 1 and 2.
             mixed_qkv = all_gather_last_dim_from_tensor_parallel_region(
-                mixed_qkv, group=self.pg_collection.tp
+                mixed_qkv,
+                group=self.pg_collection.tp,
+                output_split_count=self.config.num_query_groups,
             )
-            idx = get_pg_rank(self.pg_collection.tp) // (
-                self.world_size // self.config.num_query_groups
-            )
-            size = mixed_qkv.size()[-1] // self.config.num_query_groups
-            mixed_qkv = mixed_qkv[:, :, idx * size : (idx + 1) * size]
 
         # If no output gate: [sq, b, hp] --> [sq, b, ng, (np/ng + 2) * hn]
         # If have output gate: [sq, b, hp] --> [sq, b, ng, (2 * np/ng + 2) * hn]
