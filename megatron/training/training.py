@@ -3630,7 +3630,6 @@ def train(
             ),
             on_trace_ready=trace_handler,
             record_shapes=args.pytorch_profiler_collect_shapes,
-            profile_memory=args.pytorch_profiler_collect_memory,
             with_stack=args.pytorch_profiler_collect_callstack,
             execution_trace_observer=et,
         )
