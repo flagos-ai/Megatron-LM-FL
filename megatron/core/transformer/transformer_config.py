@@ -134,7 +134,9 @@ class TransformerConfig(ModelParallelConfig):
     Effective depth = prelude + loop_span * num_loop_iterations + coda.
     Only used when loop_start_layer is not None."""
 
-    loop_residual_scale: Optional[float] = field(default=None, metadata={"argparse_meta": {"type": float, "nargs": "+"}})
+    loop_residual_scale: Optional[float] = field(
+        default=None, metadata={"argparse_meta": {"type": float, "nargs": "+"}}
+    )
     """Scale factor applied to sublayer outputs (attention & MLP) within the looped span.
 
     Accepted formats (via YAML config):
@@ -281,7 +283,6 @@ class TransformerConfig(ModelParallelConfig):
     """Whether to enable kernel autotuning in flash-sparse-attention.
     Only used when attention_backend is flash_sparse."""
     ## dma related configuration
-
 
     softmax_scale: Optional[float] = None
     """Softmax scale for attention scaling."""
@@ -1550,7 +1551,8 @@ class TransformerConfig(ModelParallelConfig):
         if self.loop_start_layer is not None:
             if not (0 <= self.loop_start_layer < self.loop_end_layer <= self.num_layers):
                 raise ValueError(
-                    f"Loop range must satisfy 0 <= loop_start_layer < loop_end_layer <= num_layers. "
+                    f"Loop range must satisfy "
+                    f"0 <= loop_start_layer < loop_end_layer <= num_layers. "
                     f"Got loop_start_layer={self.loop_start_layer}, "
                     f"loop_end_layer={self.loop_end_layer}, num_layers={self.num_layers}."
                 )
@@ -1571,9 +1573,7 @@ class TransformerConfig(ModelParallelConfig):
                 self._loop_residual_scales = None
             elif isinstance(raw, (int, float)):
                 if raw <= 0:
-                    raise ValueError(
-                        f"loop_residual_scale must be positive, got {raw}."
-                    )
+                    raise ValueError(f"loop_residual_scale must be positive, got {raw}.")
                 self._loop_residual_scales = [
                     {"attn": float(raw), "mlp": float(raw)} for _ in range(R)
                 ]
@@ -1603,9 +1603,7 @@ class TransformerConfig(ModelParallelConfig):
                                     f"loop_residual_scale[{i}]['{key}'] must be "
                                     f"positive, got {entry[key]}."
                                 )
-                        scales.append(
-                            {"attn": float(entry["attn"]), "mlp": float(entry["mlp"])}
-                        )
+                        scales.append({"attn": float(entry["attn"]), "mlp": float(entry["mlp"])})
                     else:
                         raise ValueError(
                             f"loop_residual_scale[{i}] must be a number or a dict "
@@ -1636,9 +1634,7 @@ class TransformerConfig(ModelParallelConfig):
                 self.loop_block_size = 1
             if self.loop_type == "block-wise":
                 if self.loop_block_size is None:
-                    raise ValueError(
-                        "loop_block_size must be set when loop_type='block-wise'."
-                    )
+                    raise ValueError("loop_block_size must be set when loop_type='block-wise'.")
                 loop_span = self.loop_end_layer - self.loop_start_layer
                 if self.loop_block_size <= 0 or self.loop_block_size > loop_span:
                     raise ValueError(
@@ -1665,9 +1661,7 @@ class TransformerConfig(ModelParallelConfig):
 
                 _pattern = get_linear_attention_pattern(self)
                 _n_sdpa = sum(
-                    1
-                    for g in range(self.loop_start_layer, self.loop_end_layer)
-                    if _pattern[g] == 0
+                    1 for g in range(self.loop_start_layer, self.loop_end_layer) if _pattern[g] == 0
                 )
                 if _n_sdpa == 0:
                     raise ValueError(
@@ -1966,8 +1960,9 @@ class TransformerConfig(ModelParallelConfig):
                         logging.WARNING,
                         f"FSA headwise CP: num_query_groups per TP rank ({num_kv_heads_per_tp}) "
                         f"< context_parallel_size ({self.context_parallel_size}). "
-                        f"K/V will use AllGather for sequence dimension (higher communication cost). "
-                        f"This is expected when cp_size > num_kv_heads_per_tp."
+                        f"K/V will use AllGather for sequence dimension "
+                        f"(higher communication cost). "
+                        f"This is expected when cp_size > num_kv_heads_per_tp.",
                     )
 
         if self.fp8:

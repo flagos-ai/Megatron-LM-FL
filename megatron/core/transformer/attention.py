@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import inspect
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from typing import Callable, Optional, Protocol, Tuple, Union
@@ -133,16 +134,15 @@ try:
     from flash_sparse_attn.ops.triton.interface import (
         flash_sparse_attn_func,
         flash_sparse_attn_varlen_func,
-        flash_sparse_attn_with_kvcache_func,
         flash_sparse_attn_varlen_with_kvcache_func,
+        flash_sparse_attn_with_kvcache_func,
     )
     from flash_sparse_attn.ops.triton.utils import window_sizes_heuristic
-
 
     HAVE_FSA = True
     HAVE_FSA_TRITON = True
 except ImportError as e:
-    print(f"[WARNING] flash_sparse_attn Triton backend not available: {e}")
+    logging.getLogger(__name__).info("flash_sparse_attn Triton backend not available: %s", e)
     flash_sparse_attn_func = None
     flash_sparse_attn_varlen_func = None
     flash_sparse_attn_with_kvcache_func = None
@@ -153,15 +153,18 @@ except ImportError as e:
 
 # Check for CUDA backend availability
 try:
+    from flash_sparse_attn.ops.cute.interface import flash_attn_func as flash_attn_func_cuda
     from flash_sparse_attn.ops.cute.interface import (
-        flash_attn_func as flash_attn_func_cuda,
         flash_attn_varlen_func as flash_attn_varlen_func_cuda,
     )
+
     HAVE_FSA_CUDA = True
     # If we have CUDA backend, FSA is available
     if not HAVE_FSA:
         HAVE_FSA = True
-        print("[INFO] flash_sparse_attn CUDA backend available (Triton backend not found)")
+        logging.getLogger(__name__).info(
+            "flash_sparse_attn CUDA backend available (Triton backend not found)"
+        )
 except ImportError:
     flash_attn_func_cuda = None
     flash_attn_varlen_func_cuda = None
@@ -1064,11 +1067,8 @@ class Attention(MegatronModule, ABC):
         packed_seq_params: Optional[PackedSeqParams] = None,
     ) -> Tensor:
         import sys
-        # print(f"_flash_sparse_attention called: {query.shape=}, {key.shape=}, {value.shape=}", flush=True)
-        assert HAVE_FSA, (
-            "flash-sparse-attn is not installed. "
-            "pip install flash-sparse-attn"
-        )
+
+        assert HAVE_FSA, "flash-sparse-attn is not installed. " "pip install flash-sparse-attn"
         softmax_scale = self.config.softmax_scale
         softmax_threshold = self.config.softmax_threshold
         is_quant = self.config.is_quant
@@ -1123,7 +1123,9 @@ class Attention(MegatronModule, ABC):
             query = query.squeeze(0)
 
             output = flash_sparse_attn_with_kvcache_func(
-                query, key, value,
+                query,
+                key,
+                value,
                 softmax_scale=softmax_scale,
                 softmax_threshold=softmax_threshold,
                 is_local=is_local,
@@ -1144,15 +1146,16 @@ class Attention(MegatronModule, ABC):
             tp_rank = get_tensor_model_parallel_rank()
 
             # Verify TP partitioning
-            assert global_num_q_heads % tp_size == 0, (
-                f"global num_q_heads ({global_num_q_heads}) must be divisible by tp_size ({tp_size})"
-            )
+            assert (
+                global_num_q_heads % tp_size == 0
+            ), f"global num_q_heads ({global_num_q_heads}) must be divisible by tp_size ({tp_size})"
             assert global_num_kv_heads % tp_size == 0 or global_num_kv_heads < tp_size, (
-                f"global num_kv_heads ({global_num_kv_heads}) must be divisible by tp_size ({tp_size}) "
-                f"or less than tp_size"
+                f"global num_kv_heads ({global_num_kv_heads}) must be divisible by "
+                f"tp_size ({tp_size}) or less than tp_size"
             )
             assert num_q_heads == global_num_q_heads // tp_size, (
-                f"local num_q_heads ({num_q_heads}) != global ({global_num_q_heads}) / tp_size ({tp_size})"
+                f"local num_q_heads ({num_q_heads}) != "
+                f"global ({global_num_q_heads}) / tp_size ({tp_size})"
             )
             assert num_kv_heads == self.num_query_groups_per_partition, (
                 f"local num_kv_heads ({num_kv_heads}) != num_query_groups_per_partition "
@@ -1176,16 +1179,13 @@ class Attention(MegatronModule, ABC):
                     tp_rank=tp_rank,
                     tp_size=tp_size,
                 )
-                print(f"flash sparse attention, setting fsa window sizes...")
             local_window_sizes = self._fsa_cached_window_sizes
 
             # Context parallel routing
             cp_size = self.config.context_parallel_size
             if cp_size > 1 and self.config.fsa_cp_mode == "headwise":
                 # Use headwise CP wrapper (SBHD in, SBHD out)
-                from megatron.core.extensions.flash_sparse_attention import (
-                    _fsa_headwise_cp_forward,
-                )
+                from megatron.core.extensions.flash_sparse_attention import _fsa_headwise_cp_forward
 
                 output = _fsa_headwise_cp_forward(
                     query=query,
@@ -1268,10 +1268,7 @@ class Attention(MegatronModule, ABC):
         Mirrors flash_decode_and_prefill() but uses FSA kernels.
         Note: paged KV cache (block_table) is not supported by FSA.
         """
-        assert HAVE_FSA, (
-            "flash-sparse-attn is not installed. "
-            "pip install flash-sparse-attn"
-        )
+        assert HAVE_FSA, "flash-sparse-attn is not installed. " "pip install flash-sparse-attn"
         assert not self.training
 
         softmax_scale = self.config.softmax_scale
@@ -1605,7 +1602,9 @@ class Attention(MegatronModule, ABC):
                 query,
                 key,
                 value,
-                attn_mask_type=attn_mask_type if attn_mask_type is not None else self.attn_mask_type,
+                attn_mask_type=(
+                    attn_mask_type if attn_mask_type is not None else self.attn_mask_type
+                ),
                 packed_seq_params=packed_seq_params,
             )
         elif self.checkpoint_core_attention and self.training:

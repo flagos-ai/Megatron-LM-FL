@@ -67,10 +67,9 @@ te_checkpoint = None
 
 if HAVE_TE:
     from megatron.core.extensions.transformer_engine import (
-        TENorm,
-        get_cpu_offload_context,
         te_checkpoint,  # FlagScale Modify: used by the loop-aware _checkpointed_forward
     )
+    from megatron.core.extensions.transformer_engine import TENorm, get_cpu_offload_context
 
     LayerNormImpl = TENorm
 
@@ -95,11 +94,13 @@ class _GradScale(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, scale):
+        """Return x unchanged and remember the gradient scale."""
         ctx.scale = scale
         return x
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Scale the incoming gradient."""
         return grad_output * ctx.scale, None
 
 
@@ -574,9 +575,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             # with A=GDN, B=SDPA, ABC → ABBC. Layer order is never changed and GDN
             # layers always execute exactly once, so the sequential state each GDN
             # layer carries is never recomputed on an already-transformed input.
-            sdpa_locals = self._get_sdpa_local_indices(
-                global_start, overlap_start, overlap_end
-            )
+            sdpa_locals = self._get_sdpa_local_indices(global_start, overlap_start, overlap_end)
             for i in range(rank_in_loop_start, rank_in_loop_end):
                 if i in sdpa_locals:
                     for iteration in range(num_iters):
@@ -586,9 +585,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     # part of the loop, so -1 keeps its residual at full strength.
                     plan.append((i, -1))
         else:
-            raise ValueError(
-                f"Unsupported loop_type='{loop_type}'."
-            )
+            raise ValueError(f"Unsupported loop_type='{loop_type}'.")
 
         # Coda (see prelude above for why -1)
         for i in range(rank_in_loop_end, local_layer_count):
@@ -617,9 +614,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         if loop_type == "sdpa-wise":
             # Only the SDPA layers repeat, so report how many did.
             from collections import Counter as _Counter
-            _repeated = sum(
-                1 for _, c in _Counter(i for i, _ in plan).items() if c > 1
-            )
+
+            _repeated = sum(1 for _, c in _Counter(i for i, _ in plan).items() if c > 1)
             loop_info = f"loop={_repeated}of{loop_span}x{num_iters}, "
         else:
             loop_info = f"loop={loop_span}x{num_iters}, "
@@ -711,9 +707,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                 f"attn={attn_type:<30s} | mlp={mlp_type:<15s} | {region}"
             )
 
-        logger.info(
-            f"Expanded model structure ({len(plan)} steps):\n" + "\n".join(lines)
-        )
+        logger.info(f"Expanded model structure ({len(plan)} steps):\n" + "\n".join(lines))
 
     def has_final_layernorm_in_this_stage(self):
         """
@@ -810,6 +804,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             When loop is enabled, start/end refer to indices in self._execution_plan.
             Each step maps to (local_layer_idx, loop_iteration).
             """
+
             def custom_forward(
                 hidden_states,
                 attention_mask,
@@ -833,7 +828,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
                     loop_residual_scale = (
                         self._loop_residual_scales[loop_iter]
-                        if self._loop_enabled and loop_iter >= 0
+                        if self._loop_enabled
+                        and loop_iter >= 0
                         and self._loop_residual_scales is not None
                         else None
                     )
@@ -910,9 +906,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             # A method to further reduce memory usage reducing checkpoints.
             exec_idx = 0
             while exec_idx < num_exec_steps:
-                chunk_end = min(
-                    exec_idx + self.config.recompute_num_layers, num_exec_steps
-                )
+                chunk_end = min(exec_idx + self.config.recompute_num_layers, num_exec_steps)
                 hidden_states, context = checkpoint_handler(custom(exec_idx, chunk_end))
 
                 # Feature extraction for uniform recompute: collect at end of each chunk
@@ -1264,13 +1258,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             if self.config.recompute_granularity == 'full' and self.training:
                 assert engram_hash_input_ids is None  # FlagScale Modify
                 if self._loop_enabled:
-                    print(
-                        f"[Loop] loop execution (checkpointed), "
-                        f"loop_type='{self.config.loop_type}', "
-                        f"exec_steps={len(self._execution_plan)}, "
-                        f"scales={self._loop_residual_scales}",
-                        flush=True,
-                    )
                     # checkpointed_forward does not know the loop execution plan.
                     checkpointed_result = self._checkpointed_forward(
                         hidden_states=hidden_states,
@@ -1287,7 +1274,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         input_ids=input_ids,
                     )
                 else:
-                    print("[Loop] without loop execution (checkpointed)", flush=True)
                     checkpointed_result = checkpointed_forward(
                         self,
                         hidden_states=hidden_states,
@@ -1311,16 +1297,6 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     # No intermediate_hidden_states requested: just hidden_states
                     hidden_states = checkpointed_result
             else:
-                if self._loop_enabled:
-                    print(
-                        f"[Loop] loop execution (non-checkpointed), "
-                        f"loop_type='{self.config.loop_type}', "
-                        f"exec_steps={len(self._execution_plan)}, "
-                        f"scales={self._loop_residual_scales}",
-                        flush=True,
-                    )
-                else:
-                    print("[Loop] without loop execution (non-checkpointed)", flush=True)
                 ######## FlagScale Begin ########
                 _dsa_prev_topk_indices = None
                 # The first local layer has no preceding layer on this PP/VPP stage
@@ -1348,7 +1324,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     # Determine loop residual scale for this execution step
                     loop_residual_scale = (
                         self._loop_residual_scales[loop_iter]
-                        if self._loop_enabled and loop_iter >= 0
+                        if self._loop_enabled
+                        and loop_iter >= 0
                         and self._loop_residual_scales is not None
                         else None
                     )

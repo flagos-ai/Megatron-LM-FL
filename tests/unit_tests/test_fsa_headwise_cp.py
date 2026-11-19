@@ -34,32 +34,34 @@ class TestFSAHeadwiseCP:
         "tp_size, cp_size, num_q_heads_global, num_kv_heads_global, seq_len, batch_size, head_dim",
         [
             # Case 1: CP only (tp_size=1), sufficient KV heads
-            (1, 2, 16, 8, 128, 2, 64),   # cp_size < num_kv_heads_per_tp (8)
+            (1, 2, 16, 8, 128, 2, 64),  # cp_size < num_kv_heads_per_tp (8)
             (1, 4, 32, 16, 256, 1, 64),  # cp_size < num_kv_heads_per_tp (16)
-
             # Case 2: CP only (tp_size=1), insufficient KV heads
-            (1, 4, 16, 2, 128, 2, 64),   # cp_size (4) > num_kv_heads_per_tp (2)
+            (1, 4, 16, 2, 128, 2, 64),  # cp_size (4) > num_kv_heads_per_tp (2)
             (1, 8, 32, 4, 256, 1, 128),  # cp_size (8) > num_kv_heads_per_tp (4)
-
             # Case 3: TP + CP, sufficient KV heads
-            (2, 2, 16, 8, 128, 2, 64),   # num_kv_heads_per_tp (4) >= cp_size (2)
+            (2, 2, 16, 8, 128, 2, 64),  # num_kv_heads_per_tp (4) >= cp_size (2)
             (4, 2, 32, 16, 256, 1, 64),  # num_kv_heads_per_tp (4) >= cp_size (2)
-
             # Case 4: TP + CP, insufficient KV heads
-            (2, 4, 16, 4, 128, 2, 64),   # num_kv_heads_per_tp (2) < cp_size (4)
+            (2, 4, 16, 4, 128, 2, 64),  # num_kv_heads_per_tp (2) < cp_size (4)
             (4, 4, 32, 8, 256, 1, 128),  # num_kv_heads_per_tp (2) < cp_size (4)
-
             # Case 5: 35B model config variants
             # Real config: Q=16, KV=2, tp=4 → per TP rank: 4 Q heads, 1 KV head
             # seq=32768, batch=1, head_dim=256 (scaled down for test)
-            (2, 1, 16, 2, 16384, 1, 64), # CP=1, no CP baseline, 4 Q per TP rank
-            (2, 2, 16, 2, 16384, 1, 64), # CP=2, kv_per_tp(1) < cp(2), 2 Q per CP rank
-            (2, 4, 16, 2, 16384, 1, 64), # TP=2, CP=4, kv_per_tp(1) < cp(4), 2 Q per CP rank
+            (2, 1, 16, 2, 16384, 1, 64),  # CP=1, no CP baseline, 4 Q per TP rank
+            (2, 2, 16, 2, 16384, 1, 64),  # CP=2, kv_per_tp(1) < cp(2), 2 Q per CP rank
+            (2, 4, 16, 2, 16384, 1, 64),  # TP=2, CP=4, kv_per_tp(1) < cp(4), 2 Q per CP rank
         ],
     )
     def test_cp_vs_no_cp_numerical_equivalence(
-        self, tp_size, cp_size, num_q_heads_global, num_kv_heads_global,
-        seq_len, batch_size, head_dim
+        self,
+        tp_size,
+        cp_size,
+        num_q_heads_global,
+        num_kv_heads_global,
+        seq_len,
+        batch_size,
+        head_dim,
     ):
         """
         Test numerical equivalence between CP and no-CP execution.
@@ -94,38 +96,31 @@ class TestFSAHeadwiseCP:
         num_q_heads_per_tp = num_q_heads_global // tp_size
         num_kv_heads_per_tp = num_kv_heads_global // tp_size
 
-        assert num_q_heads_per_tp % cp_size == 0, (
-            f"Q heads per TP ({num_q_heads_per_tp}) must be divisible by CP size ({cp_size})"
-        )
+        assert (
+            num_q_heads_per_tp % cp_size == 0
+        ), f"Q heads per TP ({num_q_heads_per_tp}) must be divisible by CP size ({cp_size})"
 
         # ==================================================================
         # Case 1: No CP (baseline) - cp_size=1
         # ==================================================================
-        Utils.initialize_model_parallel(
-            tensor_model_parallel_size=tp_size,
-            context_parallel_size=1
-        )
+        Utils.initialize_model_parallel(tensor_model_parallel_size=tp_size, context_parallel_size=1)
 
         tp_rank = parallel_state.get_tensor_model_parallel_rank()
 
         # Create full sequence inputs
         torch.manual_seed(42 + tp_rank)  # Same seed per TP rank
         query_full = torch.randn(
-            seq_len, batch_size, num_q_heads_per_tp, head_dim,
-            device=device, dtype=dtype
+            seq_len, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
         )
         key_full = torch.randn(
-            seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-            device=device, dtype=dtype
+            seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
         )
         value_full = torch.randn(
-            seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-            device=device, dtype=dtype
+            seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
         )
 
         window_sizes = torch.tensor(
-            [[32, 0, 32, 0]] * num_kv_heads_per_tp,
-            device=device, dtype=torch.int32
+            [[32, 0, 32, 0]] * num_kv_heads_per_tp, device=device, dtype=torch.int32
         )
 
         # Run without CP
@@ -159,8 +154,7 @@ class TestFSAHeadwiseCP:
         # Case 2: With CP
         # ==================================================================
         Utils.initialize_model_parallel(
-            tensor_model_parallel_size=tp_size,
-            context_parallel_size=cp_size
+            tensor_model_parallel_size=tp_size, context_parallel_size=cp_size
         )
 
         tp_rank = parallel_state.get_tensor_model_parallel_rank()
@@ -175,16 +169,13 @@ class TestFSAHeadwiseCP:
         # Use same seed to ensure same inputs
         torch.manual_seed(42 + tp_rank)
         query_full_cp = torch.randn(
-            seq_len, batch_size, num_q_heads_per_tp, head_dim,
-            device=device, dtype=dtype
+            seq_len, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
         )
         key_full_cp = torch.randn(
-            seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-            device=device, dtype=dtype
+            seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
         )
         value_full_cp = torch.randn(
-            seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-            device=device, dtype=dtype
+            seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
         )
 
         # Apply zigzag reordering (sequential -> zigzag) to match production layout.
@@ -223,9 +214,9 @@ class TestFSAHeadwiseCP:
         # ==================================================================
         if cp_rank == 0:
             # Check shapes
-            assert output_no_cp.shape == output_cp_full.shape, (
-                f"Shape mismatch: no_cp {output_no_cp.shape} vs cp {output_cp_full.shape}"
-            )
+            assert (
+                output_no_cp.shape == output_cp_full.shape
+            ), f"Shape mismatch: no_cp {output_no_cp.shape} vs cp {output_cp_full.shape}"
 
             # Compute differences
             abs_diff = torch.abs(output_no_cp - output_cp_full)
@@ -242,7 +233,9 @@ class TestFSAHeadwiseCP:
             print(f"TP={tp_size}, CP={cp_size}")
             print(f"Q heads: {num_q_heads_global} global, {num_q_heads_per_tp} per TP")
             print(f"KV heads: {num_kv_heads_global} global, {num_kv_heads_per_tp} per TP")
-            print(f"Communication mode: {'AllGather' if num_kv_heads_per_tp < cp_size else 'all-to-all'}")
+            print(
+                f"Communication mode: {'AllGather' if num_kv_heads_per_tp < cp_size else 'all-to-all'}"
+            )
             print(f"{'-'*60}")
             print(f"Max absolute diff: {max_abs_diff:.6e}")
             print(f"Mean absolute diff: {mean_abs_diff:.6e}")
@@ -253,12 +246,12 @@ class TestFSAHeadwiseCP:
             # Assert numerical equivalence
             # For bfloat16, use 5e-3 tolerance (matching Megatron GDN tests)
             atol, rtol = 5e-3, 5e-3
-            assert max_abs_diff < atol, (
-                f"Max absolute difference {max_abs_diff} exceeds threshold {atol}"
-            )
-            assert max_rel_diff < rtol, (
-                f"Max relative difference {max_rel_diff} exceeds threshold {rtol}"
-            )
+            assert (
+                max_abs_diff < atol
+            ), f"Max absolute difference {max_abs_diff} exceeds threshold {atol}"
+            assert (
+                max_rel_diff < rtol
+            ), f"Max relative difference {max_rel_diff} exceeds threshold {rtol}"
 
         Utils.destroy_model_parallel()
 
@@ -272,8 +265,7 @@ class TestFSAHeadwiseCP:
         ],
     )
     def test_cp_memory_reduction(
-        self, cp_size, num_q_heads_global, num_kv_heads_global,
-        seq_len, batch_size, head_dim
+        self, cp_size, num_q_heads_global, num_kv_heads_global, seq_len, batch_size, head_dim
     ):
         """
         Test that enabling CP reduces per-GPU memory usage compared to no-CP.
@@ -288,9 +280,7 @@ class TestFSAHeadwiseCP:
           and intermediate activations are [seq_len, b, 1, hn] (single head)
         """
         if torch.cuda.device_count() < cp_size:
-            pytest.skip(
-                f"Requires {cp_size} GPUs, but only {torch.cuda.device_count()} available"
-            )
+            pytest.skip(f"Requires {cp_size} GPUs, but only {torch.cuda.device_count()} available")
 
         try:
             from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
@@ -311,22 +301,21 @@ class TestFSAHeadwiseCP:
             mem_before = torch.cuda.memory_allocated(device)
 
             # Simulate no-CP: full sequence, all heads on one GPU
-            query = torch.randn(seq_len, batch_size, num_q_heads_per_tp, head_dim,
-                               device=device, dtype=dtype)
-            key = torch.randn(seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-                             device=device, dtype=dtype)
-            value = torch.randn(seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-                               device=device, dtype=dtype)
+            query = torch.randn(
+                seq_len, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
+            )
+            key = torch.randn(
+                seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+            )
+            value = torch.randn(
+                seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+            )
             window_sizes = torch.tensor(
-                [[64, 0, 64, 0]] * num_kv_heads_per_tp,
-                device=device, dtype=torch.int32
+                [[64, 0, 64, 0]] * num_kv_heads_per_tp, device=device, dtype=torch.int32
             )
 
             output = flash_sparse_attn_func(
-                query, key, value,
-                window_sizes=window_sizes,
-                softmax_threshold=0.5,
-                pack_gqa=False,
+                query, key, value, window_sizes=window_sizes, softmax_threshold=0.5, pack_gqa=False
             )
 
             torch.cuda.synchronize()
@@ -351,21 +340,28 @@ class TestFSAHeadwiseCP:
 
             # With CP: each rank holds local sequence slice
             seq_len_local = seq_len // cp_size
-            query = torch.randn(seq_len_local, batch_size, num_q_heads_per_tp, head_dim,
-                               device=device, dtype=dtype)
-            key = torch.randn(seq_len_local, batch_size, num_kv_heads_per_tp, head_dim,
-                             device=device, dtype=dtype)
-            value = torch.randn(seq_len_local, batch_size, num_kv_heads_per_tp, head_dim,
-                               device=device, dtype=dtype)
+            query = torch.randn(
+                seq_len_local, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
+            )
+            key = torch.randn(
+                seq_len_local, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+            )
+            value = torch.randn(
+                seq_len_local, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+            )
             window_sizes = torch.tensor(
-                [[64, 0, 64, 0]] * num_kv_heads_per_tp,
-                device=device, dtype=torch.int32
+                [[64, 0, 64, 0]] * num_kv_heads_per_tp, device=device, dtype=torch.int32
             )
 
             output = _fsa_headwise_cp_forward(
-                query, key, value, window_sizes,
-                cp_group, cp_size,
-                num_q_heads_per_tp, num_kv_heads_per_tp
+                query,
+                key,
+                value,
+                window_sizes,
+                cp_group,
+                cp_size,
+                num_q_heads_per_tp,
+                num_kv_heads_per_tp,
             )
 
             torch.cuda.synchronize()
@@ -391,9 +387,11 @@ class TestFSAHeadwiseCP:
 
             print(f"\n{'='*60}")
             print(f"Memory Usage Comparison (cp_size={cp_size})")
-            print(f"  seq_len={seq_len}, batch={batch_size}, "
-                  f"q_heads={num_q_heads_per_tp}, kv_heads={num_kv_heads_per_tp}, "
-                  f"head_dim={head_dim}")
+            print(
+                f"  seq_len={seq_len}, batch={batch_size}, "
+                f"q_heads={num_q_heads_per_tp}, kv_heads={num_kv_heads_per_tp}, "
+                f"head_dim={head_dim}"
+            )
             print(f"{'='*60}")
             print(f"  No CP peak memory:   {mem_no_cp_mb:.2f} MB")
             print(f"  With CP peak memory: {mem_with_cp_mb:.2f} MB")
@@ -410,8 +408,10 @@ class TestFSAHeadwiseCP:
             if peak_mem_with_cp < peak_mem_no_cp:
                 print(f"  ✓ CP reduces memory by {reduction_pct:.1f}%")
             else:
-                print(f"  ✗ CP increases memory by {-reduction_pct:.1f}% "
-                      f"(expected for short sequences with communication overhead)")
+                print(
+                    f"  ✗ CP increases memory by {-reduction_pct:.1f}% "
+                    f"(expected for short sequences with communication overhead)"
+                )
 
     def test_fsa_headwise_cp_q_heads_not_divisible(self):
         """Test that error is raised when Q heads are not divisible by CP size."""
@@ -430,22 +430,31 @@ class TestFSAHeadwiseCP:
         batch_size = 1
         head_dim = 64
 
-        query = torch.randn(seq_len_local, batch_size, num_q_heads_per_tp, head_dim,
-                           device=device, dtype=dtype)
-        key = torch.randn(seq_len_local, batch_size, num_kv_heads_per_tp, head_dim,
-                         device=device, dtype=dtype)
-        value = torch.randn(seq_len_local, batch_size, num_kv_heads_per_tp, head_dim,
-                           device=device, dtype=dtype)
-        window_sizes = torch.tensor([[32, 0, 32, 0]] * num_kv_heads_per_tp,
-                                    device=device, dtype=torch.int32)
+        query = torch.randn(
+            seq_len_local, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        key = torch.randn(
+            seq_len_local, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        value = torch.randn(
+            seq_len_local, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        window_sizes = torch.tensor(
+            [[32, 0, 32, 0]] * num_kv_heads_per_tp, device=device, dtype=torch.int32
+        )
 
         cp_group = parallel_state.get_context_parallel_group()
 
         with pytest.raises(ValueError, match="Q heads per TP.*must be divisible"):
             _fsa_headwise_cp_forward(
-                query, key, value, window_sizes,
-                cp_group, cp_size,
-                num_q_heads_per_tp, num_kv_heads_per_tp
+                query,
+                key,
+                value,
+                window_sizes,
+                cp_group,
+                cp_size,
+                num_q_heads_per_tp,
+                num_kv_heads_per_tp,
             )
 
         Utils.destroy_model_parallel()
@@ -475,8 +484,7 @@ class TestFSAHeadwiseCPIntegration:
         ],
     )
     def test_sbhd_bshd_format_consistency(
-        self, cp_size, num_q_heads_global, num_kv_heads_global,
-        seq_len, batch_size, head_dim
+        self, cp_size, num_q_heads_global, num_kv_heads_global, seq_len, batch_size, head_dim
     ):
         """
         Verify that _fsa_headwise_cp_forward correctly handles SBHD format:
@@ -508,26 +516,25 @@ class TestFSAHeadwiseCPIntegration:
         torch.manual_seed(42)
 
         # Generate full-sequence tensors on all ranks (for reference)
-        query_full = torch.randn(seq_len, batch_size, num_q_heads_per_tp, head_dim,
-                                 device=device, dtype=dtype)
-        key_full = torch.randn(seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-                               device=device, dtype=dtype)
-        value_full = torch.randn(seq_len, batch_size, num_kv_heads_per_tp, head_dim,
-                                 device=device, dtype=dtype)
+        query_full = torch.randn(
+            seq_len, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        key_full = torch.randn(
+            seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        value_full = torch.randn(
+            seq_len, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
 
         # Reference: run FSA on full sequence with BSHD (correct format)
         window_sizes = torch.tensor(
-            [[seq_len, 0, seq_len, 0]] * num_kv_heads_per_tp,
-            device=device, dtype=torch.int32
+            [[seq_len, 0, seq_len, 0]] * num_kv_heads_per_tp, device=device, dtype=torch.int32
         )
         q_bshd = query_full.transpose(0, 1).contiguous()
         k_bshd = key_full.transpose(0, 1).contiguous()
         v_bshd = value_full.transpose(0, 1).contiguous()
         ref_output_bshd = flash_sparse_attn_func(
-            q_bshd, k_bshd, v_bshd,
-            window_sizes=window_sizes,
-            softmax_threshold=0.5,
-            pack_gqa=False,
+            q_bshd, k_bshd, v_bshd, window_sizes=window_sizes, softmax_threshold=0.5, pack_gqa=False
         )
         ref_output = ref_output_bshd.transpose(0, 1).contiguous()  # Back to SBHD
 
@@ -543,8 +550,12 @@ class TestFSAHeadwiseCPIntegration:
         value_local = value_zigzag[seq_start:seq_end].contiguous()
 
         # Verify input is SBHD
-        assert query_local.shape == (seq_len_local, batch_size, num_q_heads_per_tp, head_dim), \
-            f"Input should be SBHD, got {query_local.shape}"
+        assert query_local.shape == (
+            seq_len_local,
+            batch_size,
+            num_q_heads_per_tp,
+            head_dim,
+        ), f"Input should be SBHD, got {query_local.shape}"
 
         output_cp_local = _fsa_headwise_cp_forward(
             query=query_local,
@@ -559,8 +570,12 @@ class TestFSAHeadwiseCPIntegration:
         )
 
         # Verify output is SBHD
-        assert output_cp_local.shape == (seq_len_local, batch_size, num_q_heads_per_tp, head_dim), \
-            f"Output should be SBHD [sq_local, b, np, hn], got {output_cp_local.shape}"
+        assert output_cp_local.shape == (
+            seq_len_local,
+            batch_size,
+            num_q_heads_per_tp,
+            head_dim,
+        ), f"Output should be SBHD [sq_local, b, np, hn], got {output_cp_local.shape}"
 
         # Gather and compare with reference
         output_cp_full_zigzag = _gather_tensor_across_cp_group(output_cp_local, cp_group)
@@ -582,22 +597,21 @@ class TestFSAHeadwiseCPIntegration:
             # If we passed this as "SBHD", the function would interpret b as sq and sq as b
             # Shape: [b=batch_size, sq_local, np, hn] interpreted as [sq=batch_size, b=sq_local, np, hn]
             # This is the bug we fixed — just verify the shapes don't accidentally work
-            assert query_wrong_bshd.shape[0] != query_local.shape[0], \
-                "BSHD and SBHD should have different dim0 when batch != seq_local"
+            assert (
+                query_wrong_bshd.shape[0] != query_local.shape[0]
+            ), "BSHD and SBHD should have different dim0 when batch != seq_local"
 
         Utils.destroy_model_parallel()
 
     @pytest.mark.parametrize(
         "cp_size, seq_len, num_kv_heads_per_tp",
         [
-            (1, 512, 4),    # CP=1: seqlen_k should be seq_len itself
-            (2, 512, 4),    # CP=2: seqlen_k should be 512 (not 256)
-            (4, 1024, 2),   # CP=4: seqlen_k should be 1024 (not 256)
+            (1, 512, 4),  # CP=1: seqlen_k should be seq_len itself
+            (2, 512, 4),  # CP=2: seqlen_k should be 512 (not 256)
+            (4, 1024, 2),  # CP=4: seqlen_k should be 1024 (not 256)
         ],
     )
-    def test_window_sizes_use_global_seqlen(
-        self, cp_size, seq_len, num_kv_heads_per_tp
-    ):
+    def test_window_sizes_use_global_seqlen(self, cp_size, seq_len, num_kv_heads_per_tp):
         """
         Verify that window_sizes_heuristic receives the global sequence length
         (sq_local * cp_size), not just sq_local.
@@ -627,25 +641,26 @@ class TestFSAHeadwiseCPIntegration:
 
         # Compute window sizes with incorrect (local) seqlen — the old bug
         ws_local = window_sizes_heuristic(
-            seqlen_k=sq_local,
-            num_heads_kv=num_kv_heads_per_tp,
-            device=device,
-            equal_bandwidth=True,
+            seqlen_k=sq_local, num_heads_kv=num_kv_heads_per_tp, device=device, equal_bandwidth=True
         )
 
         # Verify shape: [num_kv_heads, 4]
-        assert ws_global.shape == (num_kv_heads_per_tp, 4), \
-            f"window_sizes shape should be [num_kv_heads, 4], got {ws_global.shape}"
+        assert ws_global.shape == (
+            num_kv_heads_per_tp,
+            4,
+        ), f"window_sizes shape should be [num_kv_heads, 4], got {ws_global.shape}"
 
         if cp_size > 1:
             # Window sizes should differ when computed with different seqlen_k
             # (unless the window heuristic is completely seqlen-independent,
             # which would be unusual but not incorrect)
             # At minimum, window values should not exceed the global seqlen
-            assert (ws_global[:, 0] <= sq_global).all(), \
-                f"Window sizes exceed global seqlen: {ws_global[:, 0]} > {sq_global}"
-            assert (ws_global[:, 2] <= sq_global).all(), \
-                f"Window sizes exceed global seqlen: {ws_global[:, 2]} > {sq_global}"
+            assert (
+                ws_global[:, 0] <= sq_global
+            ).all(), f"Window sizes exceed global seqlen: {ws_global[:, 0]} > {sq_global}"
+            assert (
+                ws_global[:, 2] <= sq_global
+            ).all(), f"Window sizes exceed global seqlen: {ws_global[:, 2]} > {sq_global}"
 
             # The bug would produce windows based on sq_local, which are smaller
             # For most heuristics, larger seqlen produces larger or equal windows
@@ -671,8 +686,7 @@ class TestFSAHeadwiseCPIntegration:
         ],
     )
     def test_output_shape_matches_input_sequence_dim(
-        self, cp_size, num_q_heads_per_tp, num_kv_heads_per_tp,
-        seq_len, batch_size, head_dim
+        self, cp_size, num_q_heads_per_tp, num_kv_heads_per_tp, seq_len, batch_size, head_dim
     ):
         """
         Verify that the output sequence dimension equals sq_local (not batch or 1).
@@ -695,15 +709,17 @@ class TestFSAHeadwiseCPIntegration:
         device = torch.device("cuda")
         seq_len_local = seq_len // cp_size
 
-        query = torch.randn(seq_len_local, batch_size, num_q_heads_per_tp, head_dim,
-                           device=device, dtype=dtype)
-        key = torch.randn(seq_len_local, batch_size, num_kv_heads_per_tp, head_dim,
-                         device=device, dtype=dtype)
-        value = torch.randn(seq_len_local, batch_size, num_kv_heads_per_tp, head_dim,
-                           device=device, dtype=dtype)
+        query = torch.randn(
+            seq_len_local, batch_size, num_q_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        key = torch.randn(
+            seq_len_local, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
+        value = torch.randn(
+            seq_len_local, batch_size, num_kv_heads_per_tp, head_dim, device=device, dtype=dtype
+        )
         window_sizes = torch.tensor(
-            [[seq_len, 0, seq_len, 0]] * num_kv_heads_per_tp,
-            device=device, dtype=torch.int32
+            [[seq_len, 0, seq_len, 0]] * num_kv_heads_per_tp, device=device, dtype=torch.int32
         )
 
         output = _fsa_headwise_cp_forward(
@@ -748,10 +764,7 @@ class TestFSAHeadwiseCPIntegration:
 
     @pytest.mark.parametrize(
         "cp_size, num_q_heads_per_tp, num_kv_heads_per_tp, seq_len, head_dim",
-        [
-            (2, 8, 4, 256, 64),   # sufficient KV heads
-            (4, 16, 2, 256, 64),  # insufficient KV heads
-        ],
+        [(2, 8, 4, 256, 64), (4, 16, 2, 256, 64)],  # sufficient KV heads  # insufficient KV heads
     )
     def test_window_sizes_passed_to_kernel_match_global_seq(
         self, cp_size, num_q_heads_per_tp, num_kv_heads_per_tp, seq_len, head_dim
@@ -777,8 +790,7 @@ class TestFSAHeadwiseCPIntegration:
         # where query.shape[0] is sq_local
         simulated_seqlen_k = sq_local * cp_size
         assert simulated_seqlen_k == sq_global, (
-            f"seqlen_k computation should yield sq_global={sq_global}, "
-            f"got {simulated_seqlen_k}"
+            f"seqlen_k computation should yield sq_global={sq_global}, " f"got {simulated_seqlen_k}"
         )
 
         # Compute window sizes as attention.py would
@@ -796,12 +808,12 @@ class TestFSAHeadwiseCPIntegration:
         for i in range(num_kv_heads_per_tp):
             window_left = ws[i, 0].item()
             window_right = ws[i, 2].item()
-            assert window_left <= sq_global, (
-                f"KV head {i}: window_left={window_left} exceeds sq_global={sq_global}"
-            )
-            assert window_right <= sq_global, (
-                f"KV head {i}: window_right={window_right} exceeds sq_global={sq_global}"
-            )
+            assert (
+                window_left <= sq_global
+            ), f"KV head {i}: window_left={window_left} exceeds sq_global={sq_global}"
+            assert (
+                window_right <= sq_global
+            ), f"KV head {i}: window_right={window_right} exceeds sq_global={sq_global}"
 
         print(f"\n  CP={cp_size}, sq_local={sq_local}, sq_global={sq_global}")
         print(f"  window_sizes: {ws.tolist()}")

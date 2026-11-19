@@ -159,9 +159,7 @@ class Router(ABC, MegatronModule):
         if self.config.loop_start_layer is None:
             return False
         layer_idx_0based = self.layer_number - 1
-        return (
-            self.config.loop_start_layer <= layer_idx_0based < self.config.loop_end_layer
-        )
+        return self.config.loop_start_layer <= layer_idx_0based < self.config.loop_end_layer
 
     def _num_executions_per_forward(self) -> int:
         """How many times this layer runs in one forward pass.
@@ -642,9 +640,7 @@ class TopKRouter(Router):
             if self._is_in_loop_range():
                 tracker_z_loss = tracker_z_loss / self.config.num_loop_iterations
 
-            get_moe_metrics_tracker().record(
-                "z_loss", tracker_z_loss, layer_number, num_layers
-            )
+            get_moe_metrics_tracker().record("z_loss", tracker_z_loss, layer_number, num_layers)
         return logits
 
     def apply_input_jitter(self, input: torch.Tensor):

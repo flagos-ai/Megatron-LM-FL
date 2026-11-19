@@ -504,9 +504,7 @@ class GatedDeltaNet(MegatronModule):
                 lora_input = gather_from_sequence_parallel_region(
                     normed, tensor_parallel_output_grad=True, group=self.pg_collection.tp
                 )
-            delta = (lora_input @ self.key_lora_down[loop_iter]) @ self.key_lora_up[
-                loop_iter
-            ]
+            delta = (lora_input @ self.key_lora_down[loop_iter]) @ self.key_lora_up[loop_iter]
             # k occupies the second slice of the fused projection output.
             start = self.qk_dim_local_tp
             qkvzba = torch.cat(
@@ -913,11 +911,7 @@ class GatedDeltaNet(MegatronModule):
         # Apply per-iteration dt_bias offset. loop_iter < 0 means this layer is
         # outside the loop (prelude/coda, or a GDN layer under 'sdpa-wise'), so it
         # gets no offset — indexing with -1 would silently pick the last iteration.
-        if (
-            self.loop_dt_offset is not None
-            and loop_iter is not None
-            and loop_iter >= 0
-        ):
+        if self.loop_dt_offset is not None and loop_iter is not None and loop_iter >= 0:
             dt_offset = get_parameter_local_cp_headwise(
                 self.loop_dt_offset[loop_iter], dim=0, cp_group=cp_group_headwise
             )
@@ -1073,11 +1067,7 @@ class GatedDeltaNet(MegatronModule):
         )
         # Apply per-iteration dt_bias offset (see the other call site: loop_iter < 0
         # means outside the loop, and -1 would silently index the last iteration).
-        if (
-            self.loop_dt_offset is not None
-            and loop_iter is not None
-            and loop_iter >= 0
-        ):
+        if self.loop_dt_offset is not None and loop_iter is not None and loop_iter >= 0:
             dt_offset_local_cp = get_parameter_local_cp_headwise(
                 self.loop_dt_offset[loop_iter], dim=0, cp_group=cp_group_headwise
             )
@@ -1271,10 +1261,7 @@ class GatedDeltaNet(MegatronModule):
         sharded_state_dict = {}
         # Parameters
         self._save_to_state_dict(sharded_state_dict, "", keep_vars=True)
-        tp_axis_map = {
-            "A_log": 0,
-            "dt_bias": 0,
-        }
+        tp_axis_map = {"A_log": 0, "dt_bias": 0}
         # loop_dt_offset has shape [R, num_v_heads_local_tp], TP along dim 1.
         if self.loop_dt_offset is not None:
             tp_axis_map["loop_dt_offset"] = 1

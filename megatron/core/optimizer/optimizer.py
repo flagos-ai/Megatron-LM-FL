@@ -313,15 +313,19 @@ class MegatronOptimizer(ABC):
     # Matching is by substring, so 'in_proj' also covers the 'in_proj_norm' /
     # 'in_proj_linear' pair used when loop_gdn_key_lora_rank splits the fused
     # projection. 'key_lora' is listed for the per-iteration delta parameters.
-    _GDN_SUBMODULES = (
-        'in_proj', 'conv1d', 'dt_bias', 'A_log', 'out_norm', 'out_proj', 'key_lora',
-    )
+    _GDN_SUBMODULES = ('in_proj', 'conv1d', 'dt_bias', 'A_log', 'out_norm', 'out_proj', 'key_lora')
 
     # All sub-category keys used by _classify_module.
     _MODULE_SUBCATEGORIES = (
-        'attn/gdn', 'attn/sdpa',
-        'mlp/experts', 'mlp/shared_experts', 'mlp/router',
-        'other/layernorm', 'other/embed', 'other/lm_head', 'other/unmapped',
+        'attn/gdn',
+        'attn/sdpa',
+        'mlp/experts',
+        'mlp/shared_experts',
+        'mlp/router',
+        'other/layernorm',
+        'other/embed',
+        'other/lm_head',
+        'other/unmapped',
     )
 
     # Mapping from sub-category prefix to its parent category.
@@ -375,7 +379,7 @@ class MegatronOptimizer(ABC):
 
     @staticmethod
     def _aggregate_parent_norms(
-        sub_norms: Dict[str, float], detailed: bool = False,
+        sub_norms: Dict[str, float], detailed: bool = False
     ) -> Dict[str, float]:
         """Given sub-category norms, compute parent-category norms and merge.
 
@@ -390,7 +394,7 @@ class MegatronOptimizer(ABC):
         result: Dict[str, float] = {}
         for parent in MegatronOptimizer._PARENT_CATEGORIES:
             prefix = parent + '/'
-            sq_sum = sum(v ** 2 for k, v in sub_norms.items() if k.startswith(prefix))
+            sq_sum = sum(v**2 for k, v in sub_norms.items() if k.startswith(prefix))
             result[parent] = math.sqrt(sq_sum)
             if detailed:
                 for k in sub_norms:
@@ -414,9 +418,7 @@ class MegatronOptimizer(ABC):
 
         # Collect grads per sub-category, applying the same filtering as
         # get_main_grads_for_grad_norm (skip None / shared / TP-duplicate).
-        grouped_grads: Dict[str, List[torch.Tensor]] = {
-            k: [] for k in self._MODULE_SUBCATEGORIES
-        }
+        grouped_grads: Dict[str, List[torch.Tensor]] = {k: [] for k in self._MODULE_SUBCATEGORIES}
         params = self.get_parameters()
         for param in params:
             grad = param.grad
@@ -442,7 +444,7 @@ class MegatronOptimizer(ABC):
             # local grads (e.g. TP-replicated params only on rank 0) causes
             # mismatched collectives → NCCL hang.
             sub_norms[module_type] = get_grad_norm_fp32(
-                grads, grad_stats_parallel_group=grad_stats_parallel_group,
+                grads, grad_stats_parallel_group=grad_stats_parallel_group
             )
         return sub_norms
 
@@ -472,6 +474,7 @@ class MegatronOptimizer(ABC):
             return None
 
         import re
+
         layer_pat = re.compile(r'layers\.(\d+)')
 
         # First pass: discover all layer indices present in the name map
@@ -486,8 +489,9 @@ class MegatronOptimizer(ABC):
         n_layers = max_layer + 1
         # 4 module types per layer: gdn=0, sdpa=1, mlp=2, other=3
         _MOD_IDX = {'gdn': 0, 'sdpa': 1, 'mlp': 2, 'other': 3}
-        local_sq = torch.zeros(n_layers * 4, dtype=torch.float32,
-                               device=torch.cuda.current_device())
+        local_sq = torch.zeros(
+            n_layers * 4, dtype=torch.float32, device=torch.cuda.current_device()
+        )
 
         params = self.get_parameters()
         for param in params:
@@ -520,15 +524,14 @@ class MegatronOptimizer(ABC):
 
         # Single allreduce for all layer×module pairs
         grad_stats_parallel_group = self.get_grad_stats_parallel_group()
-        torch.distributed.all_reduce(
-            local_sq, group=grad_stats_parallel_group)
+        torch.distributed.all_reduce(local_sq, group=grad_stats_parallel_group)
 
         result = {}
         for li in range(n_layers):
             for mod, mi in _MOD_IDX.items():
                 val = local_sq[li * 4 + mi].item()
                 if val > 0:
-                    result[f'L{li}/{mod}'] = val ** 0.5
+                    result[f'L{li}/{mod}'] = val**0.5
         return result
 
     @abstractmethod
@@ -1478,21 +1481,22 @@ class ChainedOptimizer(MegatronOptimizer):
         Calls _compute_sub_norms on each sub-optimizer (always sub-category
         granularity), merges via sum-of-squares, then applies the detailed flag.
         """
-        merged_sq: Dict[str, float] = {
-            k: 0.0 for k in MegatronOptimizer._MODULE_SUBCATEGORIES
-        }
+        merged_sq: Dict[str, float] = {k: 0.0 for k in MegatronOptimizer._MODULE_SUBCATEGORIES}
         any_result = False
         for optimizer in self.chained_optimizers:
             result = optimizer._compute_sub_norms()
             if result is not None:
                 any_result = True
                 for k, v in result.items():
-                    merged_sq[k] += v ** 2
+                    merged_sq[k] += v**2
         if not any_result:
             return None
         sub_norms = {k: math.sqrt(v) for k, v in merged_sq.items()}
-        detailed = getattr(self.config, 'log_per_module_grad_norm_detailed', False) \
-            if self.config is not None else False
+        detailed = (
+            getattr(self.config, 'log_per_module_grad_norm_detailed', False)
+            if self.config is not None
+            else False
+        )
         return MegatronOptimizer._aggregate_parent_norms(sub_norms, detailed=detailed)
 
     def compute_per_layer_grad_norm(self) -> Optional[Dict[str, float]]:
@@ -1504,7 +1508,7 @@ class ChainedOptimizer(MegatronOptimizer):
             if result is not None:
                 any_result = True
                 for k, v in result.items():
-                    merged_sq[k] = merged_sq.get(k, 0.0) + v ** 2
+                    merged_sq[k] = merged_sq.get(k, 0.0) + v**2
         if not any_result:
             return None
         return {k: math.sqrt(v) for k, v in merged_sq.items()}

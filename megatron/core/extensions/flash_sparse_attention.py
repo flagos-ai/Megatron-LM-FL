@@ -2,22 +2,22 @@
 
 """Flash Sparse Attention Context Parallel Support."""
 
-import torch
-from torch import Tensor
 import torch.distributed as dist
+from torch import Tensor
 from torch.distributed import ProcessGroup
 
 from megatron.core.ssm.mamba_context_parallel import (
     _all_to_all_cp2hp,
     _all_to_all_hp2cp,
-    _undo_attention_load_balancing,
     _redo_attention_load_balancing,
+    _undo_attention_load_balancing,
 )
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
 
 # Check CUDA backend availability
 try:
     from flash_sparse_attn.ops.cute.interface import flash_attn_func as flash_attn_func_cuda
+
     HAVE_FSA_CUDA = True
 except ImportError:
     HAVE_FSA_CUDA = False
@@ -25,10 +25,10 @@ except ImportError:
 
 
 def _fsa_headwise_cp_forward(
-    query: Tensor,           # [sq_local, b, np_local, hn]
-    key: Tensor,             # [sq_local, b, nkv_local, hn]
-    value: Tensor,           # [sq_local, b, nkv_local, hn]
-    window_sizes: Tensor,    # [nkv_local, 4] — TP-local complete config
+    query: Tensor,  # [sq_local, b, np_local, hn]
+    key: Tensor,  # [sq_local, b, nkv_local, hn]
+    value: Tensor,  # [sq_local, b, nkv_local, hn]
+    window_sizes: Tensor,  # [nkv_local, 4] — TP-local complete config
     cp_group: ProcessGroup,
     cp_size: int,
     num_q_heads_per_tp: int,
@@ -74,6 +74,7 @@ def _fsa_headwise_cp_forward(
     else:
         try:
             from flash_sparse_attn.ops.triton.interface import flash_sparse_attn_func
+
             flash_attn_kernel = flash_sparse_attn_func
         except ImportError as exc:
             raise ImportError(
@@ -84,8 +85,8 @@ def _fsa_headwise_cp_forward(
     # Optionally import fused kernels
     if use_fused_kernel:
         from megatron.core.extensions.fsa_cp_fused_kernels import (
-            fused_zigzag_undo_sbhd_to_bshd,
             fused_bshd_to_sbhd_zigzag_redo,
+            fused_zigzag_undo_sbhd_to_bshd,
         )
 
     cp_rank = dist.get_rank(cp_group)
@@ -96,8 +97,7 @@ def _fsa_headwise_cp_forward(
     # Reshape: [sq_local, b, np_local, hn] -> [sq_local, b, np_local * hn]
     if num_q_heads_per_tp % cp_size != 0:
         raise ValueError(
-            f"Q heads per TP ({num_q_heads_per_tp}) must be divisible by "
-            f"CP size ({cp_size})"
+            f"Q heads per TP ({num_q_heads_per_tp}) must be divisible by " f"CP size ({cp_size})"
         )
     q_3d = query.reshape(sq_local, b, np_local * hn)
     q_full_seq_3d = _all_to_all_cp2hp(q_3d, cp_group)
@@ -173,17 +173,19 @@ def _fsa_headwise_cp_forward(
         num_q_per_kv = num_q_heads_per_tp // num_kv_heads_per_tp
         kv_head_idx = first_q_head_global_idx // num_q_per_kv
 
-        k_bshd = k_bshd_full[:, :, kv_head_idx:kv_head_idx+1, :]
-        v_bshd = v_bshd_full[:, :, kv_head_idx:kv_head_idx+1, :]
+        k_bshd = k_bshd_full[:, :, kv_head_idx : kv_head_idx + 1, :]
+        v_bshd = v_bshd_full[:, :, kv_head_idx : kv_head_idx + 1, :]
         # [b, sq_global, 1, hn]
 
-        window_sizes_local = window_sizes[kv_head_idx:kv_head_idx+1, :]
+        window_sizes_local = window_sizes[kv_head_idx : kv_head_idx + 1, :]
 
     # Step 3: FSA kernel (Q, K, V are all in BSHD layout now)
     # Both Triton and CUDA backends share the same call signature for this path,
     # but CUDA returns (out, lse) while Triton returns out only.
     result = flash_attn_kernel(
-        q_bshd, k_bshd, v_bshd,
+        q_bshd,
+        k_bshd,
+        v_bshd,
         window_sizes=window_sizes_local,
         softmax_threshold=softmax_threshold,
         pack_gqa=False,
