@@ -8,14 +8,13 @@ from typing import Callable, List, Literal, Optional, Tuple, Union
 import torch
 import torch.nn.functional as F
 
+from megatron.core._rank_utils import log_single_rank
 from megatron.core.enums import Fp4Recipe, Fp8Recipe
+from megatron.core.fusions.fused_bias_geglu import quick_gelu
+from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.quantization.quant_config import RecipeConfig
 from megatron.core.transformer.enums import AttnBackend, CudaGraphScope, LayerType
 from megatron.core.transformer.pipeline_parallel_layer_layout import PipelineParallelLayerLayout
-
-from megatron.core._rank_utils import log_single_rank
-from megatron.core.fusions.fused_bias_geglu import quick_gelu
-from megatron.core.model_parallel_config import ModelParallelConfig
 from megatron.core.utils import (
     get_te_version,
     init_method_normal,
@@ -845,12 +844,6 @@ class NPUTransformerConfig(TransformerConfig):
     """Padded actual vocabulary size. Required when moe_n_hash_layers > 0 for the
     tid2eid lookup buffer in hash-based MoE routing."""
 
-    dense_grouped_gemm: bool = False
-    """Use GroupedLinear(num_groups=1) for dense MLP to trigger the
-    ForwardGroupedMLP_CuTeGEMMSwiGLU_MXFP8 fusion on SM100+ with MXFP8 recipe.
-    Requires ``use_te_op_fuser=True`` and SwiGLU activation.
-    """
-
     log_moe_overload_factor: bool = False
     """When True, log MoE overload metrics (avg/max vs balanced token count per step; max cum
     overload = peak cumulative actual tokens / peak cumulative balanced count over interleaved
@@ -1676,27 +1669,11 @@ class NPUTransformerConfig(TransformerConfig):
                 "recompute_modules with selective recompute to reduce activation memory."
             )
 
-        # Validation for use_fused_mhc
+        # Backend validation is handled by super().__post_init__(); the fused
+        # dispatcher checks availability according to mhc_fused_backend.
         if self.use_fused_mhc:
             if not self.enable_hyper_connections:
                 raise ValueError("use_fused_mhc requires enable_hyper_connections=True.")
-            try:
-                from megatron.core.fusions.fused_mhc_kernels import is_cutile_available
-
-                if not is_cutile_available():
-                    warnings.warn(
-                        "use_fused_mhc is enabled but cuda.tile (cuTile) is not installed. "
-                        "Falling back to reference mHC implementations.",
-                        UserWarning,
-                    )
-                    self.use_fused_mhc = False
-            except ImportError:
-                warnings.warn(
-                    "use_fused_mhc is enabled but fused_mhc_kernels module could not be "
-                    "imported. Falling back to reference mHC implementations.",
-                    UserWarning,
-                )
-                self.use_fused_mhc = False
 
         if self.fine_grained_activation_offloading:
             assert (

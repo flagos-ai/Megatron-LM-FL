@@ -1,7 +1,7 @@
 # Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-import os
 import gc
+import os
 import time
 from datetime import timedelta
 from pathlib import Path
@@ -16,6 +16,15 @@ from megatron.plugin.platform import get_platform
 from tests.test_utils.python_scripts.download_unit_tests_dataset import download_and_extract_asset
 from tests.unit_tests.dist_checkpointing import TempNamedDir
 from tests.unit_tests.test_utilities import Utils
+
+
+def pytest_configure(config):
+    """Pytest configuration hook for platform-specific setup."""
+    platform = os.getenv("MEGATRON_TEST_PLATFORM")
+
+    # Metax requires CUBLAS_WORKSPACE_CONFIG for deterministic algorithms
+    if platform == "metax":
+        os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
 
 
 def pytest_addoption(parser):
@@ -65,10 +74,11 @@ def bind_local_device():
 
 @pytest.fixture(scope="session", autouse=True)
 def cleanup():
+    """Destroy default process group after all tests complete."""
     yield
     if torch.distributed.is_initialized():
         try:
-            torch.distributed.barrier(timeout=timedelta(seconds=300))
+            torch.distributed.barrier()
         except Exception:
             return
         torch.distributed.destroy_process_group()
@@ -117,30 +127,19 @@ def ensure_test_data():
         )
 
     def ensure_data_on_rank_zero():
-        # Check if data directory exists and has content
-        if not data_available():
-            print("Test data not found at /opt/data. Downloading...")
-
-            try:
-                # Download assets to /opt/data
-                download_and_extract_asset(assets_dir=data_path)
-
-                print("Test data downloaded successfully.")
-
-            except ImportError as e:
-                print(f"Failed to import download function: {e}")
-                # Don't fail the tests, just warn
-            except Exception as e:
-                print(f"Failed to download test data: {e}")
-                # Don't fail the tests, just warn
-        else:
-            print("Test data already available at /opt/data")
-
+        ######## FlagScale Begin ########
         try:
-            data_path.mkdir(parents=True, exist_ok=True)
-            ready_file.touch()
+            if not data_available():
+                print("Test data not found at /opt/data. Downloading...")
+                download_and_extract_asset(assets_dir=data_path)
+                print("Test data downloaded successfully.")
+            else:
+                print("Test data already available at /opt/data")
         except Exception as e:
-            print(f"Failed to mark test data readiness: {e}")
+            print(f"Failed to prepare test data: {e}")
+        finally:
+            ready_file.touch()
+        ######## FlagScale End ########
 
     if world_size <= 1 or rank == 0:
         ensure_data_on_rank_zero()
@@ -166,9 +165,13 @@ def reset_env_vars():
     # Run the test
     yield
 
-    # After the test, restore the original environment
-    os.environ.clear()
-    os.environ.update(original_env)
+    # Restore only changed entries. Clearing the whole environment temporarily
+    # removes runtime settings that native communication threads may still read.
+    for name in os.environ.keys() - original_env.keys():
+        del os.environ[name]
+    for name, value in original_env.items():
+        if os.environ.get(name) != value:
+            os.environ[name] = value
 
 
 @pytest.fixture(autouse=True)
@@ -176,7 +179,19 @@ def cleanup_gpu_memory():
     """Clean up GPU memory after each test to prevent OOM in CI."""
     yield
     # Metax can abort inside cyclic GC during multi-rank pytest teardown.
-    if os.getenv("MEGATRON_TEST_PLATFORM") != "metax":
+    # Kunlunxin torch_xmlir has a bug: its CUDACachingAllocator incorrectly calls
+    # c10::cuda::ExchangeDevice during tensor destruction, causing crashes on XPU-only systems.
+    platform = os.getenv("MEGATRON_TEST_PLATFORM")
+    if platform not in ("metax", "kunlunxin"):
         gc.collect()
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+
+    # Use platform-specific device cleanup instead of hardcoded torch.cuda
+    try:
+        from megatron.plugin import cur_platform
+
+        if cur_platform.is_available():
+            cur_platform.empty_cache()
+    except (ImportError, AttributeError):
+        # Fallback to torch.cuda if platform abstraction not available
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()

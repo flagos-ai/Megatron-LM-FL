@@ -11,7 +11,6 @@ import pytest
 import requests
 
 from megatron.core.datasets.indexed_dataset import IndexedDataset
-from megatron.core.tokenizers.text.libraries.megatron_hf_tokenizer import MEGATRON_CONFIG_MAP
 from tools.merge_datasets import main as merge_main
 from tools.preprocess_data import Encoder
 from tools.preprocess_data import get_args as build_args
@@ -23,9 +22,11 @@ __HUGGINGFACE_BERT_BASE_UNCASED_VOCAB = (
 
 __LOCAL_BERT_VOCAB = "/home/gitlab-runner/data/bert_data/vocab.txt"
 
-__LOCAL_GPT2_MERGE = "/home/gitlab-runner/data/gpt3_data/gpt2-merges.txt"
+######## FlagScale Begin ########
+__LOCAL_GPT2_MERGE = "/opt/data/tokenizers/megatron/gpt2-merges.txt"
 
-__LOCAL_GPT2_VOCAB = "/home/gitlab-runner/data/gpt3_data/gpt2-vocab.json"
+__LOCAL_GPT2_VOCAB = "/opt/data/tokenizers/megatron/gpt2-vocab.json"
+######## FlagScale End ########
 
 
 def dummy_jsonl(odir):
@@ -164,21 +165,11 @@ def do_test_preprocess_data(temp_dir, extra_args=[]):
 
 
 def gpt2_vocab(odir):
-    if os.path.exists(__LOCAL_GPT2_VOCAB):
-        return __LOCAL_GPT2_VOCAB
-    path = os.path.join(odir, "vocab.json")
-    with open(path, "wb") as writer:
-        writer.write(requests.get(MEGATRON_CONFIG_MAP['GPT2BPETokenizer']['vocab']).content)
-    return path
+    return __LOCAL_GPT2_VOCAB
 
 
 def gpt2_merge(odir):
-    if os.path.exists(__LOCAL_GPT2_MERGE):
-        return __LOCAL_GPT2_MERGE
-    path = os.path.join(odir, "merge.txt")
-    with open(path, "wb") as writer:
-        writer.write(requests.get(MEGATRON_CONFIG_MAP['GPT2BPETokenizer']['merges_file']).content)
-    return path
+    return __LOCAL_GPT2_MERGE
 
 
 def test_preprocess_data_gpt():
@@ -204,11 +195,15 @@ def test_preprocess_data_gpt():
 
 def test_preprocess_data_gpt_optimal_workers():
     with tempfile.TemporaryDirectory() as temp_dir:
+        input_path = os.path.join(temp_dir, "optimal_workers_input.jsonl")
+        with open(input_path, "w", encoding="utf-8") as writer:
+            for index in range(1002):
+                writer.write(json.dumps({"text": f"Sample document {index}"}) + "\n")
 
         # gpt specific args
         gpt_args = [
             "--input",
-            "/opt/data/datasets/dclm/dclm.jsonl",
+            input_path,
             "--output-prefix",
             f"{temp_dir}/optimal_workers",
             "--tokenizer-type",
@@ -230,8 +225,13 @@ def test_preprocess_data_gpt_optimal_workers():
             "--max-documents",
             "1002",
         ]
-        sys.argv = ["/opt/megatron-lm/tools/preprocess_data.py"] + gpt_args
-        runpy.run_path("/opt/megatron-lm/tools/preprocess_data.py", run_name="__main__")
+        ######## FlagScale Begin ########
+        preprocess_data_script = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "../../../tools/preprocess_data.py")
+        )
+        sys.argv = [preprocess_data_script] + gpt_args
+        runpy.run_path(preprocess_data_script, run_name="__main__")
+        ######## FlagScale End ########
 
 
 def bert_vocab(odir):

@@ -260,10 +260,14 @@ class PlatformNPU(PlatformBase):
         pass
 
     # Graph operations
+    def graph_pool_handle(self):
+        graph_pool_handle = getattr(torch_npu.npu, 'graph_pool_handle', None)
+        return graph_pool_handle() if graph_pool_handle is not None else None
+
     def create_graph(self):
         return torch.npu.NPUGraph()
 
-    def capture_to_graph(self, graph, pool=None, stream=None):
+    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
         return torch.npu.graph(graph, pool, stream)
 
     def replay_graph(self, graph):
@@ -380,35 +384,34 @@ def dummy_function(*args, **kwargs):
 
 def torch_all_reduce_double_dtype_bypass_wrapper(fn):
     @wraps(fn)
-    def wrapper(*args, **kwargs):
-        if torch.is_tensor(args[0]) and args[0].dtype == torch.double:
-            args = list(args)
-            args[0] = args[0].float()
-            handle = fn(*args, **kwargs)
+    def wrapper(tensor, *args, **kwargs):
+        if torch.is_tensor(tensor) and tensor.dtype == torch.double:
+            reduced = tensor.float()
+            handle = fn(reduced, *args, **kwargs)
             if handle is not None:
                 handle.wait()
-            args[0] = args[0].double()
-            return None
+            # all_reduce is in-place: conversion must not discard the result.
+            # Keep this dtype fallback blocking even for async requests, and
+            # preserve the Work handle expected by asynchronous callers.
+            with torch.no_grad():
+                tensor.copy_(reduced)
+            return handle
 
-        return fn(*args, **kwargs)
+        return fn(tensor, *args, **kwargs)
 
     return wrapper
 
 
 def dummy_compile(*args, **kwargs):
+    # Compilation is disabled on this backend. Preserve the original object
+    # so nn.Module methods, parameters and state_dict remain accessible.
     if len(args) > 0 and callable(args[0]):
-        def wrapper(*fn_args, **fn_kwargs):
-            return args[0](*fn_args, **fn_kwargs)
+        return args[0]
 
-        return wrapper
-    else:
-        def compile_wrapper(fn):
-            def wrapper(*fn_args, **fn_kwargs):
-                return fn(*fn_args, **fn_kwargs)
+    def compile_wrapper(fn):
+        return fn
 
-            return wrapper
-
-        return compile_wrapper
+    return compile_wrapper
 
 
 def version_wrapper(fn):
@@ -460,17 +463,22 @@ class Patch:
 
     def set_patch_func(self, new_func, force_patch=False):
         if hasattr(new_func, '__name__') and new_func.__name__.endswith(('wrapper', 'decorator')):
-            if new_func not in self.wrappers:
-                self.wrappers.append(new_func)
+            if new_func in self.wrappers:
+                return
+            self.wrappers.append(new_func)
         else:
-            if self.patch_func and not force_patch:
+            if self.patch_func is new_func:
+                return
+            if self.patch_func is not None and not force_patch:
                 raise RuntimeError('the patch of {} exist !'.format(self.orig_func_name))
             self.patch_func = new_func
         self.is_applied = False
 
     def remove_wrappers(self, wrapper_names: Union[str, List[str]] = None):
         if wrapper_names is None:
-            self.wrappers.clear()
+            if self.wrappers:
+                self.wrappers.clear()
+                self.is_applied = False
             return
         if isinstance(wrapper_names, str):
             wrapper_names = [wrapper_names]
@@ -479,6 +487,7 @@ class Patch:
             while i < len(self.wrappers):
                 if self.wrappers[i].__name__ == name:
                     self.wrappers.pop(i)
+                    self.is_applied = False
                 else:
                     i += 1
 
@@ -561,8 +570,8 @@ class PatchesManager:
         2. If `orig_func_name` is not None, `orig_func_name` is replaced with `new_func`.
         3. If the `new_func` function name ends with `wrapper` or `decorator`, then `new_func` is decorated on
         `orig_func_name` as a decorator, and the decorator can be superimposed repeatedly.
-        4. When force_patch=False, a function cannot be replaced repeatedly (but can be decorated repeatedly),
-        otherwise the replacement is overwritten.
+        4. Registering the same replacement or wrapper again is a no-op. Replacing an existing
+        replacement with a different function requires force_patch=True.
         """
         if orig_func_name not in PatchesManager.patches_info:
             PatchesManager.patches_info[orig_func_name] = Patch(orig_func_name, new_func, create_dummy)

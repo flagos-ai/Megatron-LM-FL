@@ -1,34 +1,21 @@
 name: metax_tests
 
 on:
-  push:
-    branches: ["main"]
-  pull_request:
-    branches: ["main"]
   workflow_dispatch: # Allows manual triggering
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}-${{ github.actor }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
+  lint:
+    name: Common CI checks
+    uses: ./.github/workflows/lint_common.yml
+
   run_tests:
-    # Package manager and environment settings are read from .github/configs/metax.yml
-    uses: ./.github/workflows/all_tests_common.yml
+    needs: lint
+    uses: ./.github/workflows/_platform_pipeline.yml
+    secrets:
+      FLAGCICD_API_TOKEN: ${{ secrets.FLAGCICD_API_TOKEN }}
     with:
       platform: metax
-      run_unit_tests: true
-      run_functional_tests: true
-
-  all_tests:
-    needs: run_tests
-    runs-on: ubuntu-latest
-    if: always()
-    steps:
-      - name: Verify workflow status
-        run: |
-          if [ "${{ needs.run_tests.result }}" != "success" ]; then
-            echo "❌ Tests workflow failed"
-            exit 1
-          fi
-          echo "✅ All tests passed!"

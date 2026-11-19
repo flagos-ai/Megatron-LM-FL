@@ -14,11 +14,12 @@ from megatron.core.models.common.embeddings.rope_utils import get_pos_emb_on_thi
 from megatron.core.models.common.embeddings.rotary_pos_embedding import RotaryEmbedding
 from megatron.core.transformer import TransformerConfig
 from megatron.core.utils import internal_api
-# FlagScale Begin
+
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 logger = logging.getLogger(__name__)
 
@@ -78,7 +79,9 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         self.mscale_all_dim = mscale_all_dim
         self.correction_range_round_to_int = correction_range_round_to_int
 
-        device = 'cpu' if use_cpu_initialization else cur_platform.current_device()  # FlagScale Add
+        device = (
+            'cpu' if use_cpu_initialization else cur_platform.current_device()
+        )  # FlagScale Modify
 
         with torch.device(device):
             self.inv_freq_extra = 1.0 / (
@@ -124,11 +127,15 @@ class YarnRotaryEmbedding(RotaryEmbedding):
 
         if self.inv_freq_extra.device.type == 'cpu':
             # move `inv_freq_extra` to GPU once at the first micro-batch forward pass
-            self.inv_freq_extra = self.inv_freq_extra.to(device=cur_platform.current_device())  # FlagScale Add
+            self.inv_freq_extra = self.inv_freq_extra.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Modify
 
         if self.inv_freq_inter.device.type == 'cpu':
             # move `inv_freq_inter` to GPU once at the first micro-batch forward pass
-            self.inv_freq_inter = self.inv_freq_inter.to(device=cur_platform.current_device())  # FlagScale Add
+            self.inv_freq_inter = self.inv_freq_inter.to(
+                device=cur_platform.current_device()
+            )  # FlagScale Modify
 
         low, high = _yarn_find_correction_range(
             self.beta_fast,
@@ -191,6 +198,7 @@ class YarnRotaryEmbedding(RotaryEmbedding):
             emb = get_pos_emb_on_this_cp_rank(emb, 0, cp_group)
         return emb, _mscale
 
+    ######## FlagScale Begin ########
     def _set_cos_sin_cache(
         self, seq_len, offset, dtype, packed_seq=False, cp_group=None, mscale=None
     ):
@@ -240,6 +248,8 @@ class YarnRotaryEmbedding(RotaryEmbedding):
         ):
             self._set_cos_sin_cache(seq_len, offset, dtype, packed_seq, cp_group, mscale)
         return (self.cos_cached[:seq_len, ...], self.sin_cached[:seq_len, ...])
+
+    ######## FlagScale End ########
 
 
 # Inverse dim formula to find dim based on number of rotations

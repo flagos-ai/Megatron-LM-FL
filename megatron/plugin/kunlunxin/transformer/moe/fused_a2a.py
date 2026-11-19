@@ -7,6 +7,7 @@ from megatron.core.transformer.moe.fused_a2a import (
     FusedDispatch as _CoreFusedDispatch,
 )
 from megatron.plugin.platform import get_platform
+from megatron.plugin.kunlunxin.debug import debug_patch, log_patch
 
 try:
     from deep_ep import BufferV2
@@ -17,6 +18,7 @@ _buffer_v2 = None
 cur_platform = get_platform()
 
 
+@debug_patch("transformer.moe.fused_a2a.get_buffer")
 def get_buffer(group: torch.distributed.ProcessGroup, hidden_bytes: int):
     """Get or create a KunLunXin DeepEP BufferV2 communication buffer.
 
@@ -39,6 +41,7 @@ class FusedDispatchKunlunxin(_CoreFusedDispatch):
     @staticmethod
     def forward(*args, **kwargs):
         """Forward pass of fused dispatch."""
+        log_patch("transformer.moe.fused_a2a.FusedDispatchKunlunxin.forward")
         cur_platform.synchronize()
         ret = _CoreFusedDispatch.forward(*args, **kwargs)
         cur_platform.synchronize()
@@ -47,12 +50,14 @@ class FusedDispatchKunlunxin(_CoreFusedDispatch):
     @staticmethod
     def backward(*args, **kwargs):
         """Backward pass of fused dispatch."""
+        log_patch("transformer.moe.fused_a2a.FusedDispatchKunlunxin.backward")
         cur_platform.synchronize()
         ret = _CoreFusedDispatch.backward(*args, **kwargs)
         cur_platform.synchronize()
         return ret
 
 
+@debug_patch("transformer.moe.fused_a2a.fused_dispatch")
 def fused_dispatch(
     x,
     token_indices,
@@ -90,6 +95,7 @@ class FusedCombineKunlunxin(_CoreFusedCombine):
     @staticmethod
     def forward(*args, **kwargs):
         """Forward pass of fused combine."""
+        log_patch("transformer.moe.fused_a2a.FusedCombineKunlunxin.forward")
         cur_platform.synchronize()
         ret = _CoreFusedCombine.forward(*args, **kwargs)
         cur_platform.synchronize()
@@ -98,12 +104,14 @@ class FusedCombineKunlunxin(_CoreFusedCombine):
     @staticmethod
     def backward(*args, **kwargs):
         """Backward pass of fused combine."""
+        log_patch("transformer.moe.fused_a2a.FusedCombineKunlunxin.backward")
         cur_platform.synchronize()
         ret = _CoreFusedCombine.backward(*args, **kwargs)
         cur_platform.synchronize()
         return ret
 
 
+@debug_patch("transformer.moe.fused_a2a.fused_combine")
 def fused_combine(x, group, handle, async_finish=False, allocate_on_comm_stream=False):
     """Perform fused combine operation with KunLunXin synchronization guards.
 

@@ -10,11 +10,11 @@ from torch.autograd import Variable
 
 from megatron.core.utils import get_pg_rank, get_pg_size, log_single_rank, make_viewless_tensor
 
-########## FlagScale Begin ##########
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-########## FlagScale End ##########
+######## FlagScale End ########
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +52,7 @@ def is_vp_last_stage(vp_stage: int, vp_size: int | None):
 
 
 def is_dualpipev_first_stage(dualpipev_stage: int, dualpipev_size: int | None):
+    """Return whether this is the first DualPipeV virtual pipeline stage."""
     if dualpipev_size is None or dualpipev_size <= 1:
         assert dualpipev_stage is None or dualpipev_stage == 0, (
             f"Expected dualpipev_stage to be 0 or None when dualpipev_size is <= 1 or None, "
@@ -59,6 +60,7 @@ def is_dualpipev_first_stage(dualpipev_stage: int, dualpipev_size: int | None):
         )
         return True
     return dualpipev_stage == 0
+
 
 def is_dualpipev_last_stage(dualpipev_stage: int, dualpipev_size: int | None):
     """Return True if in the last virtual pipeline model-parallel stage, False otherwise."""
@@ -170,10 +172,10 @@ class ScheduleNode:
     def __init__(
         self,
         forward_func: Callable,
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         stream: cur_platform.Stream,
         event: cur_platform.Event,
-        # FlagScale End
+        ######## FlagScale End ########
         backward_func: Optional[Callable] = None,
         free_input: bool = False,
         name: str = "schedule_node",
@@ -203,8 +205,6 @@ class ScheduleNode:
         self.free_input = free_input
         self.inputs = None
         self.outputs = None
-        self.delay_grads_release = False
-        self.manual_release_grads = False
 
     def default_backward_func(self, outputs, output_grad):
         """Default backward function"""
@@ -284,12 +284,6 @@ class ScheduleNode:
             for g in output_grad:
                 if g is not None:
                     g.record_stream(self.stream)
-                    # Manually trigger the memory release of dgrad tensor
-                    # to avoid delayed garbage collection. If
-                    # delay_grads_release is True, dgrad is last used in
-                    # wgrad compute and skip the release here.
-                    if self.manual_release_grads and not self.delay_grads_release:
-                        g.untyped_storage().resize_(0)
 
         grads = self.get_grad()
         self._release_state()
@@ -319,13 +313,13 @@ class ScheduleNode:
         """
         self.event.wait(self.stream)
         if name:
-            cur_platform.range_push(name)  # FlagScale Add
+            cur_platform.range_push(name)  # FlagScale Modify
         try:
-            with cur_platform.stream(self.stream):  # FlagScale Add
+            with cur_platform.stream(self.stream):  # FlagScale Modify
                 yield
         finally:
             if name:
-                cur_platform.range_pop()  # FlagScale Add
+                cur_platform.range_pop()  # FlagScale Modify
             self.event.record(self.stream)
 
     def _release_state(self):
@@ -363,20 +357,26 @@ _COMP_STREAM = None
 _COMM_STREAM = None
 
 
-def set_streams(comm_stream=None):
+def set_streams(comm_stream=None, high_priority=False):
     """Set the stream for communication operations."""
     global _COMM_STREAM
 
     # Set communication stream
     if _COMM_STREAM is None:
         if comm_stream is None:
-            comm_stream = cur_platform.Stream(device=cur_platform.device_name())  # FlagScale Add
+            ######## FlagScale Begin ########
+            if high_priority:
+                _, high = cur_platform.Stream.priority_range()
+                comm_stream = cur_platform.Stream(device=cur_platform.device_name(), priority=high)
+            else:
+                comm_stream = cur_platform.Stream(device=cur_platform.device_name())
+            ######## FlagScale End ########
         _COMM_STREAM = comm_stream
 
 
 def get_comp_stream():
     """Get the stream for computation"""
-    return cur_platform.current_stream()  # FlagScale Add
+    return cur_platform.current_stream()  # FlagScale Modify
 
 
 def get_comm_stream():

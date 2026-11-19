@@ -1,0 +1,220 @@
+#!/usr/bin/env bash
+
+# Platform-neutral distributed unit-test runner used by GitHub Actions.
+set -euo pipefail
+
+require_env() {
+  local name="$1"
+  if [ -z "${!name:-}" ]; then
+    echo "::error::Required environment variable is empty: $name"
+    exit 1
+  fi
+}
+
+for name in \
+  CI_PLATFORM \
+  CI_DEVICE \
+  CI_TEST_GROUP \
+  CI_TEST_PATH \
+  CI_NPROC_PER_NODE \
+  CI_IGNORED_TESTS \
+  CI_PYTEST_EXTRA_ARGS; do
+  require_env "$name"
+done
+
+if ! [[ "$CI_NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then
+  echo "::error::CI_NPROC_PER_NODE must be a positive integer"
+  exit 1
+fi
+
+PYTHON_BIN="${CI_PYTHON_BIN:-$(command -v python3)}"
+if [ ! -x "$PYTHON_BIN" ]; then
+  echo "::error::python3 executable not found: $PYTHON_BIN"
+  exit 1
+fi
+
+# Optional workflow inputs may be explicitly passed as an empty string.
+export CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS="${CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS:-[]}"
+
+"$PYTHON_BIN" -c \
+  "import json, os; value = json.loads(os.environ['CI_IGNORED_TESTS']); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
+"$PYTHON_BIN" -c \
+  "import json, os; value = json.loads(os.environ['CI_PYTEST_EXTRA_ARGS']); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
+"$PYTHON_BIN" -c \
+  "import json, os; value = json.loads(os.environ.get('CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS', '[]')); assert isinstance(value, list) and all(isinstance(item, str) for item in value)"
+
+TEST_PATHS=()
+while IFS= read -r item; do
+  [ -n "$item" ] && TEST_PATHS+=("$item")
+done < <(
+  "$PYTHON_BIN" -c '
+import glob
+import json
+import os
+import shlex
+
+ignored = json.loads(os.environ["CI_IGNORED_TESTS"])
+ignored_files = {item for item in ignored if "::" not in item}
+selected = []
+for item in shlex.split(os.environ["CI_TEST_PATH"]):
+    matches = sorted(glob.glob(item)) if glob.has_magic(item) else [item]
+    selected.extend(path for path in matches if path not in ignored_files)
+print("\n".join(selected), file=os.fdopen(3, "w"))
+' 3>&1 1>&2
+)
+
+IGNORE_OPTS=()
+while IFS= read -r item; do
+  [ -n "$item" ] && IGNORE_OPTS+=("$item")
+done < <(
+  "$PYTHON_BIN" -c '
+import json
+import os
+
+output = os.fdopen(3, "w")
+for item in json.loads(os.environ["CI_IGNORED_TESTS"]):
+    prefix = "--deselect=" if "::" in item else "--ignore="
+    print(prefix + item, file=output)
+' 3>&1 1>&2
+)
+
+EXTRA_ARGS=()
+while IFS= read -r item; do
+  [ -n "$item" ] && EXTRA_ARGS+=("$item")
+done < <(
+  "$PYTHON_BIN" -c '
+import json
+import os
+
+print("\n".join(json.loads(os.environ["CI_PYTEST_EXTRA_ARGS"])), file=os.fdopen(3, "w"))
+' 3>&1 1>&2
+)
+
+EXPERIMENTAL_ARGS=()
+while IFS= read -r item; do
+  [ -n "$item" ] && EXPERIMENTAL_ARGS+=("$item")
+done < <(
+  "$PYTHON_BIN" -c '
+import json
+import os
+
+print(
+    "\n".join(json.loads(os.environ.get("CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS", "[]"))),
+    file=os.fdopen(3, "w"),
+)
+' 3>&1 1>&2
+)
+
+if [ "${#TEST_PATHS[@]}" -eq 0 ]; then
+  echo "::error::No tests selected for $CI_TEST_GROUP from CI_TEST_PATH='$CI_TEST_PATH'"
+  exit 1
+fi
+
+PYTEST_BIN="${CI_PYTEST_BIN:-$(command -v pytest)}"
+if [ ! -x "$PYTEST_BIN" ]; then
+  echo "::error::pytest executable not found: $PYTEST_BIN"
+  exit 1
+fi
+
+export PYTHONPATH="$GITHUB_WORKSPACE:${PYTHONPATH:-}"
+export TORCHINDUCTOR_CACHE_DIR="${TORCHINDUCTOR_CACHE_DIR:-/tmp/.torch_inductor_cache}"
+export MEGATRON_TEST_PLATFORM="$CI_PLATFORM"
+mkdir -p "$TORCHINDUCTOR_CACHE_DIR"
+
+echo "Running unit tests: $CI_TEST_GROUP"
+echo "Test path: $CI_TEST_PATH"
+echo "Platform: $CI_PLATFORM"
+echo "Device: $CI_DEVICE"
+echo "Distributed processes: $CI_NPROC_PER_NODE"
+printf 'Selected test arguments:'
+printf ' %q' "${TEST_PATHS[@]}"
+printf '\n'
+
+COVERAGE_DIR="${CI_COVERAGE_DIRECTORY:-$GITHUB_WORKSPACE/coverage-report}"
+COVERAGE_PLUGIN_SOURCE="$GITHUB_WORKSPACE/megatron/plugin"
+COVERAGE_CORE_SOURCE="$GITHUB_WORKSPACE/megatron/core"
+COVERAGE_INCLUDE="megatron/plugin/*,megatron/core/*"
+COVERAGE_JSON="$COVERAGE_DIR/coverage-$CI_PLATFORM-$CI_DEVICE-$CI_TEST_GROUP.json"
+mkdir -p "$COVERAGE_DIR"
+printf '[run]\nparallel = true\ndynamic_context = test_function\nsource =\n    %s\n    %s\ndata_file = %s/.coverage\n' \
+  "$COVERAGE_PLUGIN_SOURCE" \
+  "$COVERAGE_CORE_SOURCE" \
+  "$COVERAGE_DIR" \
+  > "$COVERAGE_DIR/.coveragerc"
+# Triton kernel bodies are compiled and run on the device, so coverage.py can never trace them on
+# any platform; excluding the decorator line removes the whole kernel function from the report.
+# The Python launchers around the kernels stay measured.
+printf '[report]\nexclude_also =\n    ^\\s*@triton\\.(jit|autotune|heuristics)\\b\n' >> "$COVERAGE_DIR/.coveragerc"
+# Omitted directories stay in the collected data; they only leave the reported
+# denominator, for this group's JSON and the combined report alike.
+# Write through fd 3 and send stdout to stderr: some vendor images print from
+# interpreter startup hooks, and that text must not land in the rc file.
+CI_COVERAGE_OMIT="${CI_COVERAGE_OMIT:-[]}" "$PYTHON_BIN" -c '
+import json
+import os
+
+omit = json.loads(os.environ["CI_COVERAGE_OMIT"])
+if not (isinstance(omit, list) and all(isinstance(item, str) and item for item in omit)):
+    raise SystemExit(f"CI_COVERAGE_OMIT must be a JSON array of non-empty strings, got: {omit!r}")
+root = os.environ["GITHUB_WORKSPACE"]
+output = os.fdopen(3, "w")
+if omit:
+    print("omit =", file=output)
+    for item in omit:
+        print("    " + os.path.join(root, item.rstrip("/"), "*"), file=output)
+' 3>>"$COVERAGE_DIR/.coveragerc" 1>&2
+
+PYTEST_ARGS=(
+  -v
+  "${TEST_PATHS[@]}"
+  --ignore=tests/functional_tests
+)
+if [ "${#IGNORE_OPTS[@]}" -gt 0 ]; then
+  PYTEST_ARGS+=("${IGNORE_OPTS[@]}")
+fi
+PYTEST_ARGS+=(
+  -p
+  no:randomly
+  -o
+  addopts="--durations=15 -s -rA"
+)
+
+export CI_COVERAGE_DIRECTORY="$COVERAGE_DIR"
+export CI_JUNIT_DIRECTORY="${CI_JUNIT_DIRECTORY:-$COVERAGE_DIR/junit}"
+mkdir -p "$CI_JUNIT_DIRECTORY"
+
+run_pytest() {
+  "$PYTHON_BIN" -m torch.distributed.run --nproc_per_node="$CI_NPROC_PER_NODE" \
+    --master_port="${MASTER_PORT:-29500}" \
+    "$GITHUB_WORKSPACE/.github/scripts/run_unit_groups.py" pytest-worker \
+    "$PYTEST_BIN" \
+    "${PYTEST_ARGS[@]}" \
+    "$@"
+}
+
+set +e
+CI_JUNIT_PHASE=normal run_pytest "${EXTRA_ARGS[@]}"
+normal_exit_code=$?
+
+experimental_exit_code=0
+if [ "${#EXPERIMENTAL_ARGS[@]}" -gt 0 ]; then
+  echo "Running experimental unit tests: $CI_TEST_GROUP"
+  CI_JUNIT_PHASE=experimental run_pytest "${EXPERIMENTAL_ARGS[@]}"
+  experimental_exit_code=$?
+fi
+set -e
+
+test_exit_code=$normal_exit_code
+if [ "$test_exit_code" -eq 0 ] && [ "$experimental_exit_code" -ne 0 ]; then
+  test_exit_code=$experimental_exit_code
+fi
+
+"$PYTHON_BIN" -m coverage combine \
+  --rcfile="$COVERAGE_DIR/.coveragerc" \
+  "$COVERAGE_DIR" 2>/dev/null || true
+"$PYTHON_BIN" -m coverage json \
+  --rcfile="$COVERAGE_DIR/.coveragerc" \
+  -o "$COVERAGE_JSON" \
+  --include="$COVERAGE_INCLUDE" 2>/dev/null || true
+
+exit "$test_exit_code"

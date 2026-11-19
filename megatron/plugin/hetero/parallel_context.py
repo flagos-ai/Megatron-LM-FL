@@ -1640,11 +1640,12 @@ class ParallelContext:
             return 0
 
     def get_expert_data_parallel_world_size(self):
-        """Return caller's rank in the expert data parallel group."""
+        """Return the world size of the expert data parallel group."""
         if torch.distributed.is_available() and torch.distributed.is_initialized():
-            return torch.distributed.get_rank(group=self.get_expert_data_parallel_group()).size()
-        else:
-            return 0
+            return torch.distributed.get_world_size(
+                group=self.get_expert_data_parallel_group()
+            )
+        return 1
 
     ### End of expert-related functions region
 

@@ -94,6 +94,20 @@ class TestProcessGroupsConfig:
         assert f"tp({tp_size})" in repr_str
         assert f"pp({pp_size})" in repr_str
 
+    def test_repr_with_list_process_groups(self, mocker):
+        """Test __repr__ handles list-typed process groups like hcp."""
+        mock_pg1 = mocker.Mock(spec=dist.ProcessGroup)
+        mock_pg1.size.return_value = 2
+        mock_pg2 = mocker.Mock(spec=dist.ProcessGroup)
+        mock_pg2.size.return_value = 4
+
+        model_pgs = ProcessGroupCollection()
+        model_pgs.hcp = [mock_pg1, mock_pg2]
+
+        repr_str = repr(model_pgs)
+        assert "ProcessGroupCollection(" in repr_str
+        assert "hcp([2, 4])" in repr_str
+
 
 class TestPGConfigDefaultInitialization:
 
@@ -149,9 +163,8 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
     model = SimpleNamespace(
         config=SimpleNamespace(context_parallel_size=1),
         ddp_config=SimpleNamespace(
-            num_distributed_optimizer_instances=1,
-            use_distributed_optimizer=False,
-        )
+            num_distributed_optimizer_instances=1, use_distributed_optimizer=False
+        ),
     )
     pg_collection = ProcessGroupCollection(
         dp=_Group("dp"),
@@ -164,9 +177,7 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
     )
 
     optimizer_groups = ProcessGroupCollection.setup_process_groups_for_optimizer(
-        pg_collection,
-        [model],
-        use_gloo_process_groups=False,
+        pg_collection, [model], use_gloo_process_groups=False
     )
     assert optimizer_groups["dp_cp_group"] is pg_collection.dp
     assert optimizer_groups["intra_dp_cp_group"] is pg_collection.dp
@@ -174,9 +185,7 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
     assert optimizer_groups["engram_dp_group"] is None
 
     ddp_groups = ProcessGroupCollection.setup_process_groups_for_ddp(
-        pg_collection,
-        SimpleNamespace(context_parallel_size=1),
-        model.ddp_config,
+        pg_collection, SimpleNamespace(context_parallel_size=1), model.ddp_config
     )
     assert ddp_groups["dp_cp_group"] is pg_collection.dp
     assert ddp_groups["expt_dp_group"].name == "new-3"
@@ -195,7 +204,9 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
 
     with pytest.raises(ValueError, match="dp_cp process group"):
         ProcessGroupCollection.setup_process_groups_for_ddp(
-            ProcessGroupCollection(dp=_Group("dp"), expt_dp=None, tp=_Group("tp"), pp=_Group("pp"), ep=_Group("ep")),
+            ProcessGroupCollection(
+                dp=_Group("dp"), expt_dp=None, tp=_Group("tp"), pp=_Group("pp"), ep=_Group("ep")
+            ),
             SimpleNamespace(context_parallel_size=2),
             model.ddp_config,
         )
@@ -203,9 +214,8 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
     multi_instance_model = SimpleNamespace(
         config=SimpleNamespace(context_parallel_size=1),
         ddp_config=SimpleNamespace(
-            num_distributed_optimizer_instances=2,
-            use_distributed_optimizer=True,
-        )
+            num_distributed_optimizer_instances=2, use_distributed_optimizer=True
+        ),
     )
     complete_pg = ProcessGroupCollection(
         dp=_Group("dp"),
@@ -225,9 +235,7 @@ def test_process_group_collection_setup_optimizer_and_ddp_custom_paths(monkeypat
         engram_mp=_Group("engram_mp"),
     )
     multi_groups = ProcessGroupCollection.setup_process_groups_for_optimizer(
-        complete_pg,
-        [multi_instance_model],
-        use_gloo_process_groups=False,
+        complete_pg, [multi_instance_model], use_gloo_process_groups=False
     )
     assert multi_groups["intra_dist_opt_group"] is complete_pg.intra_dist_opt
     assert multi_groups["inter_dist_opt_group"] is complete_pg.inter_dist_opt
@@ -244,8 +252,7 @@ def test_multi_module_process_group_collection_paths():
     encoder = ProcessGroupCollection(cp=_Group(1))
     llm = ProcessGroupCollection(cp=_Group(4))
     collection = MultiModuleProcessGroupCollection(
-        module_pgs={"encoder": encoder, "llm": llm},
-        language_model_module_name="llm",
+        module_pgs={"encoder": encoder, "llm": llm}, language_model_module_name="llm"
     )
 
     assert collection.has_language_model() is True
@@ -263,7 +270,9 @@ def test_multi_module_process_group_collection_paths():
     with pytest.raises(ValueError, match="cannot be empty"):
         MultiModuleProcessGroupCollection(module_pgs={})
     with pytest.raises(ValueError, match="not found"):
-        MultiModuleProcessGroupCollection(module_pgs={"encoder": encoder}, language_model_module_name="llm")
+        MultiModuleProcessGroupCollection(
+            module_pgs={"encoder": encoder}, language_model_module_name="llm"
+        )
     no_llm = MultiModuleProcessGroupCollection(module_pgs={"encoder": encoder})
     assert no_llm.has_language_model() is False
     with pytest.raises(ValueError, match="No language model"):

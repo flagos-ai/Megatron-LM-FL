@@ -3,8 +3,10 @@
 import torch
 
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
+from megatron.plugin.kunlunxin.debug import debug_patch
 
 
+@debug_patch("transformer.multi_token_prediction.reduce_loss_in_tracker")
 def reduce_loss_in_tracker():
     """Collect and reduce the MTP losses across ranks for KunLunXin."""
     tracker = MTPLossLoggingHelper.tracker

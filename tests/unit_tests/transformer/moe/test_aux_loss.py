@@ -627,9 +627,8 @@ class TestPaddingMaskAuxLoss:
         """Create a new router with updated configuration."""
         pg_collection = get_default_pg_collection()
         new_transformer_config = dataclasses.replace(self.default_transformer_config, **kwargs)
-        router = TopKRouter(
-            config=new_transformer_config, pg_collection=pg_collection, layer_number=0
-        )
+        router = TopKRouter(config=new_transformer_config, pg_collection=pg_collection)
+        router.set_layer_number(0)
         return router
 
     @pytest.mark.internal

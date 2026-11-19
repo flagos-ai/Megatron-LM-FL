@@ -26,12 +26,17 @@ class PlatformCUDA(PlatformBase):
     def is_available(self):
         try:
             import torch
+
             # Determine if we are on a GPU or x86 CPU with torch.
-            if torch.cuda.device_count() > 0 and torch.cuda.is_available():  #ignore-cuda
-                return True
-            else:
+            if not (torch.cuda.device_count() > 0 and torch.cuda.is_available()):  #ignore-cuda
                 return False
-        except Exception as e:
+
+            # Some accelerator compatibility layers expose a torch.cuda facade even
+            # though `torch.device("cuda")` resolves to their native device type.
+            # Registering PlatformCUDA in that case makes device_name() disagree with
+            # tensors created by device(), which breaks device-specific optimizer paths.
+            return torch.device('cuda', 0).type == self.device_name()
+        except Exception:
             return False
 
     def get_device_properties(self, device_index=None):
@@ -258,11 +263,16 @@ class PlatformCUDA(PlatformBase):
             return False
 
     # Graph operations
+    def graph_pool_handle(self):
+        return torch.cuda.graph_pool_handle()
+
     def create_graph(self):
         return torch.cuda.CUDAGraph()
 
-    def capture_to_graph(self, graph, pool=None, stream=None):
-        return torch.cuda.graph(graph, pool, stream)
+    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
+        if capture_error_mode is None:
+            return torch.cuda.graph(graph, pool, stream)
+        return torch.cuda.graph(graph, pool, stream, capture_error_mode=capture_error_mode)
 
     def replay_graph(self, graph):
         graph.replay()
@@ -273,37 +283,30 @@ class PlatformCUDA(PlatformBase):
     @property
     def BFloat16Tensor(self):
         return torch.cuda.BFloat16Tensor
-        # return functools.partial(torch.tensor, dtype=torch.bfloat16, device='cuda')
 
     @property
     def ByteTensor(self):
         return torch.cuda.ByteTensor
-        # return functools.partial(torch.tensor, dtype=torch.uint8, device='cuda')
 
     @property
     def DoubleTensor(self):
         return torch.cuda.DoubleTensor
-        # return functools.partial(torch.tensor, dtype=torch.double, device='cuda')
 
     @property
     def FloatTensor(self):
         return torch.cuda.FloatTensor
-        # return functools.partial(torch.tensor, dtype=torch.float, device='cuda')
 
     @property
     def HalfTensor(self):
         return torch.cuda.HalfTensor
-        # return functools.partial(torch.tensor, dtype=torch.half, device='cuda')
 
     @property
     def IntTensor(self):
         return torch.cuda.IntTensor
-        # return functools.partial(torch.tensor, dtype=torch.int, device='cuda')
 
     @property
     def LongTensor(self):
         return torch.cuda.LongTensor
-        # return functools.partial(torch.tensor, dtype=torch.long, device='cuda')
 
     def pin_memory(self, tensor, align_bytes=1):
         return tensor.pin_memory()
@@ -338,7 +341,7 @@ class PlatformCUDA(PlatformBase):
             self._compile_backend = backend
         else:
             raise ValueError(
-                f"{backend} not supported by {self.device_name()}. Supported Backends are {supported_backends}")
+                f"{backend} not supported by {self.platform_name()}. Supported Backends are {supported_backends}")
 
     def temperature(self):
         return torch.cuda.temperature()

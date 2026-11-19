@@ -8,10 +8,12 @@ import torch.nn.functional as F
 
 from megatron.core.jit import jit_fuser
 from megatron.core.utils import nvtx_decorator
+from megatron.plugin.decorators import overridable  # FlagScale Modify
 
 ###### BIAS SWIGLU FUSION/ NO AUTOGRAD ################
 
 
+@overridable  # FlagScale Modify
 @jit_fuser
 def swiglu(y):
     """Performs SwiGLU (Swish-Gated Linear Unit) activation function.
@@ -48,6 +50,7 @@ def weighted_swiglu(y, weights):
     return res.to(dtype)
 
 
+######## FlagScale Begin ########
 @jit_fuser
 def clamped_swiglu(y, clamp_value):
     dtype = y.dtype
@@ -69,6 +72,9 @@ def clamped_weighted_swiglu(y, weights, clamp_value):
     dtype = y.dtype
     res = clamped_swiglu(y, clamp_value) * weights
     return res.to(dtype)
+
+
+######## FlagScale End ########
 
 
 # gradient of tanh approximation of gelu
@@ -120,6 +126,7 @@ def weighted_swiglu_back(g, y, weights):
     return input_grad.to(input_dtype), weights_grad.to(w_dtype)
 
 
+######## FlagScale Begin ########
 @jit_fuser
 def clamped_swiglu_back(g, y, clamp_value):
     dtype = y.dtype
@@ -156,6 +163,10 @@ def clamped_weighted_swiglu_back(g, y, weights, clamp_value):
     return input_grad.to(input_dtype), weights_grad.to(w_dtype)
 
 
+######## FlagScale End ########
+
+
+######## FlagScale Begin ########
 class BiasSwiGLUFunction(torch.autograd.Function):
     """Custom autograd function for SwiGLU activation with bias support."""
 
@@ -296,6 +307,11 @@ class WeightedSwiGLUFunction(torch.autograd.Function):
         return tmp, wgrad, None, None
 
 
+######## FlagScale End ########
+
+
+######## FlagScale Begin ########
+@overridable
 def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False, clamp_value=None):
     """Implementation of biased SwiGLU that handles different input shapes.
 
@@ -333,6 +349,11 @@ def bias_swiglu_impl(input, bias, fp8_input_store=False, cpu_offload_input=False
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
 
 
+######## FlagScale End ########
+
+
+######## FlagScale Begin ########
+@overridable
 def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp_value=None):
     """
     Token-wise-weighted bias swiglu fusion.
@@ -346,6 +367,9 @@ def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp
         output = WeightedSwiGLUFunction.apply(input, weights, fp8_input_store, clamp_value)
 
     return output if len(ori_shape) == 2 else output.view(ori_shape[0], ori_shape[1], -1)
+
+
+######## FlagScale End ########
 
 
 # bias_swiglu_impl = BiasSwiGLUFunction.apply

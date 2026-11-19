@@ -82,7 +82,17 @@ def _get_preferred_vendor() -> Optional[str]:
 
         platform = platform_manager.cur_platform
         if platform is not None:
-            return platform.device_name()
+            # platform_name(), not device_name(): override_registry entries are
+            # keyed by vendor ('kunlunxin'), while device_name() is the torch
+            # device type ('cuda' under torch_xmlir).
+            vendor = platform.platform_name()
+            if vendor == "cuda":
+                import torch
+
+                # MACA exposes CUDA devices but has its own plugin implementations.
+                if getattr(torch.version, "maca", None):
+                    return "metax"
+            return vendor
     except Exception as e:
         logger.debug(f"Failed to infer override vendor from platform: {e}")
 
@@ -310,6 +320,15 @@ def _overridable_class(cls):
                 # No override: create instance of the proxy itself
                 # (which inherits cls's __init__ and all methods)
                 return object.__new__(OverridableClassProxy)
+
+        @classmethod
+        def apply(proxy_cls, *args, **kwargs):
+            """Dispatch class-level apply calls to the override class when present."""
+            if proxy_cls is OverridableClassProxy:
+                override_cls = _resolve_override_class()
+                if override_cls is not None and hasattr(override_cls, "apply"):
+                    return override_cls.apply(*args, **kwargs)
+            return super(OverridableClassProxy, proxy_cls).apply(*args, **kwargs)
 
         def __init_subclass__(subcls, **kwargs):
             # Allow normal subclassing without interference

@@ -63,7 +63,7 @@ class ProfilingConfig:
     """Specifies where to dump the memory history pickle."""
 
     record_shapes: bool = False
-    """Record shapes of tensors."""
+    """Record shapes of tensors in `torch.autograd.profiler.emit_nvtx` for the Nsys profiler."""
 
     nvtx_ranges: bool = False
     """Enable NVTX range annotations for profiling. When enabled, inserts NVTX markers
@@ -74,7 +74,7 @@ class ProfilingConfig:
 class DistributedInitConfig:
     """Configuration settings for distributed training initialization."""
 
-    distributed_backend: Literal["nccl", "gloo"] = "nccl"
+    distributed_backend: Literal["nccl", "gloo", "mccl"] = "nccl"
     """Which backend to use for distributed training."""
 
     distributed_timeout_minutes: int = 10

@@ -220,11 +220,14 @@ class PlatformTXDA(PlatformBase):
         pass
 
     # Graph operations
+    def graph_pool_handle(self):
+        return None
+
     def create_graph(self):
         #return torch.cuda.CUDAGraph()
         return None
 
-    def capture_to_graph(self, graph, pool=None, stream=None):
+    def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
         return torch.cuda.graph(graph, pool, stream)
 
     def replay_graph(self, graph):

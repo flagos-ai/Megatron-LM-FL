@@ -1,18 +1,16 @@
-# Copyright (c) 2025, BAAI. All rights reserved.
+# Copyright (c) 2026, BAAI. All rights reserved.
 #
 # Unit tests for chunked vocab parallel cross entropy.
 #
-# Usage (4 GPUs required for TP=4):
-#   CUDA_VISIBLE_DEVICES=0,1,2,3 CUDA_DEVICE_MAX_CONNECTIONS=1 NCCL_NVLS_ENABLE=0 NCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 torchrun --nproc_per_node 4 tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py
+# Usage (4+ GPUs required, TP=4, supports 4 or 8 GPUs):
+#   torchrun --nproc_per_node 8 tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py
 #
 # Or via pytest with distributed launcher:
 #   pytest -xvs tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py
 
-# CUDA_VISIBLE_DEVICES=0,1,2,3 CUDA_DEVICE_MAX_CONNECTIONS=1 NCCL_NVLS_ENABLE=0 NCCL_SOCKET_IFNAME=bond0 GLOO_SOCKET_IFNAME=bond0 torchrun --nproc_per_node 4 tests/unit_tests/tensor_parallel/test_cross_entropy_chunked.py
 
-
-import sys
 import os
+import sys
 import time
 from typing import Tuple
 
@@ -21,16 +19,21 @@ import torch
 # Add project root to path so 'tests' package is importable
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', '..', '..'))
 
+from megatron.core import parallel_state
 from megatron.core.tensor_parallel.cross_entropy import (
     vocab_parallel_cross_entropy,
     vocab_parallel_cross_entropy_chunked,
 )
-from tests.unit_tests.test_utilities import Utils
+from megatron.plugin.platform import get_platform
+from tests.unit_tests.test_utilities import Utils, get_current_device
+
+cur_platform = get_platform()
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _generate_inputs(
     seq_len: int,
@@ -46,35 +49,27 @@ def _generate_inputs(
         logits: [seq_len, batch_size, vocab_size / tp_size], dtype
         target: [seq_len, batch_size], int64
     """
-    device = torch.cuda.current_device()
-    rank = torch.distributed.get_rank()
-
-    # Use same seed on all ranks to generate consistent full logits,
-    # then slice by rank to simulate TP partition.
-    gen = torch.Generator(device="cpu").manual_seed(seed)
-    full_logits = torch.randn(
-        seq_len, batch_size, vocab_size, generator=gen, dtype=dtype
-    )
-    target = torch.randint(
-        0, vocab_size, (seq_len, batch_size), generator=gen
-    )
-
-    # Slice vocab dimension for this TP rank
+    # Use TP rank so data-parallel replicas generate the same vocab shard.
+    tp_rank = parallel_state.get_tensor_model_parallel_rank()
     partition_size = vocab_size // tp_size
-    start = rank * partition_size
-    end = start + partition_size
-    logits = full_logits[:, :, start:end].contiguous().cuda()
-    target = target.cuda()
+
+    # Both implementations consume this same shard. Generating only the local
+    # partition avoids replicating the full vocabulary tensor on every CPU rank.
+    logits_gen = torch.Generator(device="cpu").manual_seed(seed + tp_rank)
+    logits = torch.randn(seq_len, batch_size, partition_size, generator=logits_gen, dtype=dtype).to(
+        get_current_device()
+    )
+
+    # Targets must match across TP ranks regardless of their logits RNG state.
+    target_gen = torch.Generator(device="cpu").manual_seed(seed)
+    target = torch.randint(0, vocab_size, (seq_len, batch_size), generator=target_gen).to(
+        get_current_device()
+    )
 
     return logits, target
 
 
-def _measure_peak_memory(
-    fn,
-    *args,
-    warmup: int = 2,
-    **kwargs,
-) -> Tuple[torch.Tensor, float]:
+def _measure_peak_memory(fn, *args, warmup: int = 2, **kwargs) -> Tuple[torch.Tensor, float]:
     """Run fn and measure peak GPU memory allocated during execution.
 
     Returns:
@@ -88,9 +83,9 @@ def _measure_peak_memory(
             result.sum().backward()
 
     # Reset peak stats
-    torch.cuda.synchronize()
-    torch.cuda.reset_peak_memory_stats()
-    mem_before = torch.cuda.memory_allocated()
+    cur_platform.synchronize()
+    cur_platform.reset_peak_memory_stats()
+    mem_before = cur_platform.memory_allocated()
 
     # Forward
     result = fn(*args, **kwargs)
@@ -98,18 +93,14 @@ def _measure_peak_memory(
     if result.requires_grad:
         result.sum().backward()
 
-    torch.cuda.synchronize()
-    peak_memory = torch.cuda.max_memory_allocated() - mem_before
+    cur_platform.synchronize()
+    peak_memory = cur_platform.max_memory_allocated() - mem_before
 
     return result, peak_memory / (1024 * 1024)  # Convert to MiB
 
 
 def _measure_time(
-    fn,
-    *args,
-    warmup: int = 3,
-    repeats: int = 10,
-    **kwargs,
+    fn, *args, warmup: int = 3, repeats: int = 10, **kwargs
 ) -> Tuple[torch.Tensor, float]:
     """Measure average execution time (forward + backward) in milliseconds.
 
@@ -123,14 +114,14 @@ def _measure_time(
         if result.requires_grad:
             result.sum().backward()
 
-    torch.cuda.synchronize()
+    cur_platform.synchronize()
     times = []
     for _ in range(repeats):
         start = time.perf_counter()
         result = fn(*args, **kwargs)
         if result.requires_grad:
             result.sum().backward()
-        torch.cuda.synchronize()
+        cur_platform.synchronize()
         times.append((time.perf_counter() - start) * 1000)
 
     avg_time_ms = sum(times) / len(times)
@@ -141,6 +132,7 @@ def _measure_time(
 # Test 1: Correctness — chunked output matches baseline
 # ---------------------------------------------------------------------------
 
+
 def test_chunked_cross_entropy_correctness():
     """Verify chunked cross entropy produces identical results to baseline."""
     tp_size = 4
@@ -148,7 +140,7 @@ def test_chunked_cross_entropy_correctness():
 
     seq_len = 8192
     batch_size = 1
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
 
     logits, target = _generate_inputs(seq_len, batch_size, vocab_size, tp_size)
 
@@ -157,9 +149,7 @@ def test_chunked_cross_entropy_correctness():
     logits_chunked = logits.clone().requires_grad_(True)
 
     loss_baseline = vocab_parallel_cross_entropy(logits_baseline, target)
-    loss_chunked = vocab_parallel_cross_entropy_chunked(
-        logits_chunked, target, chunk_size=2048
-    )
+    loss_chunked = vocab_parallel_cross_entropy_chunked(logits_chunked, target, chunk_size=2048)
 
     # Check forward outputs match
     forward_max_diff = (loss_baseline - loss_chunked).abs().max().item()
@@ -180,10 +170,14 @@ def test_chunked_cross_entropy_correctness():
         print("\n" + "=" * 70)
         print("TEST 1: Correctness")
         print("=" * 70)
-        print(f"  Forward  max diff: {forward_max_diff:.2e}  "
-              f"{'PASSED' if forward_passed else 'FAILED'}")
-        print(f"  Backward max diff: {backward_max_diff:.2e}  "
-              f"{'PASSED' if backward_passed else 'FAILED'}")
+        print(
+            f"  Forward  max diff: {forward_max_diff:.2e}  "
+            f"{'PASSED' if forward_passed else 'FAILED'}"
+        )
+        print(
+            f"  Backward max diff: {backward_max_diff:.2e}  "
+            f"{'PASSED' if backward_passed else 'FAILED'}"
+        )
         print("=" * 70)
 
     assert forward_passed, f"Forward mismatch: max_diff={forward_max_diff}"
@@ -196,6 +190,7 @@ def test_chunked_cross_entropy_correctness():
 # Test 2: Correctness with label smoothing
 # ---------------------------------------------------------------------------
 
+
 def test_chunked_cross_entropy_label_smoothing():
     """Verify chunked cross entropy matches baseline with label smoothing."""
     tp_size = 4
@@ -203,7 +198,7 @@ def test_chunked_cross_entropy_label_smoothing():
 
     seq_len = 4096
     batch_size = 2
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
     label_smoothing = 0.1
 
     logits, target = _generate_inputs(seq_len, batch_size, vocab_size, tp_size)
@@ -232,10 +227,14 @@ def test_chunked_cross_entropy_label_smoothing():
         print("\n" + "=" * 70)
         print("TEST 2: Correctness with label smoothing")
         print("=" * 70)
-        print(f"  Forward  max diff: {forward_max_diff:.2e}  "
-              f"{'PASSED' if forward_passed else 'FAILED'}")
-        print(f"  Backward max diff: {backward_max_diff:.2e}  "
-              f"{'PASSED' if backward_passed else 'FAILED'}")
+        print(
+            f"  Forward  max diff: {forward_max_diff:.2e}  "
+            f"{'PASSED' if forward_passed else 'FAILED'}"
+        )
+        print(
+            f"  Backward max diff: {backward_max_diff:.2e}  "
+            f"{'PASSED' if backward_passed else 'FAILED'}"
+        )
         print("=" * 70)
 
     assert forward_passed, f"Forward mismatch: max_diff={forward_max_diff}"
@@ -248,6 +247,7 @@ def test_chunked_cross_entropy_label_smoothing():
 # Test 3: Correctness with different chunk sizes
 # ---------------------------------------------------------------------------
 
+
 def test_chunked_cross_entropy_various_chunk_sizes():
     """Verify different chunk sizes all produce correct results."""
     tp_size = 4
@@ -255,7 +255,7 @@ def test_chunked_cross_entropy_various_chunk_sizes():
 
     seq_len = 8192
     batch_size = 1
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
     chunk_sizes = [1024, 2048, 4096, 8192]  # Including chunk == seq_len
 
     logits, target = _generate_inputs(seq_len, batch_size, vocab_size, tp_size)
@@ -285,8 +285,10 @@ def test_chunked_cross_entropy_various_chunk_sizes():
 
         if rank == 0:
             status = "PASSED" if passed else "FAILED"
-            print(f"  chunk_size={chunk_size:5d}: "
-                  f"fwd_diff={fwd_diff:.2e}, bwd_diff={bwd_diff:.2e}  {status}")
+            print(
+                f"  chunk_size={chunk_size:5d}: "
+                f"fwd_diff={fwd_diff:.2e}, bwd_diff={bwd_diff:.2e}  {status}"
+            )
 
         all_passed = all_passed and passed
 
@@ -302,6 +304,7 @@ def test_chunked_cross_entropy_various_chunk_sizes():
 # Test 4: Performance — execution time comparison
 # ---------------------------------------------------------------------------
 
+
 def test_chunked_cross_entropy_performance():
     """Compare execution time of baseline vs chunked implementations."""
     tp_size = 4
@@ -316,9 +319,7 @@ def test_chunked_cross_entropy_performance():
     # Baseline timing
     logits_baseline = logits.clone().requires_grad_(True)
     _, baseline_time = _measure_time(
-        vocab_parallel_cross_entropy,
-        logits_baseline, target,
-        warmup=3, repeats=10,
+        vocab_parallel_cross_entropy, logits_baseline, target, warmup=3, repeats=10
     )
 
     # Chunked timing (various chunk sizes)
@@ -329,23 +330,29 @@ def test_chunked_cross_entropy_performance():
         print("\n" + "=" * 70)
         print("TEST 4: Performance (forward + backward)")
         print("=" * 70)
-        print(f"  Config: seq_len={seq_len}, batch={batch_size}, "
-              f"vocab/TP={vocab_size // tp_size}, TP={tp_size}")
+        print(
+            f"  Config: seq_len={seq_len}, batch={batch_size}, "
+            f"vocab/TP={vocab_size // tp_size}, TP={tp_size}"
+        )
         print(f"  Baseline:               {baseline_time:8.2f} ms")
 
     for chunk_size in chunk_sizes:
         logits_chunked = logits.clone().requires_grad_(True)
         _, chunked_time = _measure_time(
             vocab_parallel_cross_entropy_chunked,
-            logits_chunked, target,
-            warmup=3, repeats=10,
+            logits_chunked,
+            target,
+            warmup=3,
+            repeats=10,
             chunk_size=chunk_size,
         )
         slowdown = chunked_time / baseline_time
 
         if rank == 0:
-            print(f"  Chunked (chunk={chunk_size:5d}): {chunked_time:8.2f} ms  "
-                  f"(slowdown: {slowdown:.2f}x)")
+            print(
+                f"  Chunked (chunk={chunk_size:5d}): {chunked_time:8.2f} ms  "
+                f"(slowdown: {slowdown:.2f}x)"
+            )
 
     if rank == 0:
         print("=" * 70)
@@ -356,6 +363,7 @@ def test_chunked_cross_entropy_performance():
 # ---------------------------------------------------------------------------
 # Test 5: Memory — peak memory comparison
 # ---------------------------------------------------------------------------
+
 
 def test_chunked_cross_entropy_memory():
     """Compare peak memory usage of baseline vs chunked implementations."""
@@ -376,9 +384,7 @@ def test_chunked_cross_entropy_memory():
     # Baseline memory
     logits_baseline = logits.clone().requires_grad_(True)
     _, baseline_peak_mib = _measure_peak_memory(
-        vocab_parallel_cross_entropy,
-        logits_baseline, target,
-        warmup=2,
+        vocab_parallel_cross_entropy, logits_baseline, target, warmup=2
     )
 
     # Chunked memory (various chunk sizes)
@@ -389,17 +395,22 @@ def test_chunked_cross_entropy_memory():
         print("\n" + "=" * 70)
         print("TEST 5: Peak Memory (forward + backward)")
         print("=" * 70)
-        print(f"  Config: seq_len={seq_len}, batch={batch_size}, "
-              f"vocab/TP={partition_vocab_size}, TP={tp_size}")
-        print(f"  Reference: bf16 input = {bf16_input_mib:.1f} MiB, "
-              f"fp32 full = {fp32_full_mib:.1f} MiB")
+        print(
+            f"  Config: seq_len={seq_len}, batch={batch_size}, "
+            f"vocab/TP={partition_vocab_size}, TP={tp_size}"
+        )
+        print(
+            f"  Reference: bf16 input = {bf16_input_mib:.1f} MiB, "
+            f"fp32 full = {fp32_full_mib:.1f} MiB"
+        )
         print(f"  Baseline:               {baseline_peak_mib:10.1f} MiB")
 
     for chunk_size in chunk_sizes:
         logits_chunked = logits.clone().requires_grad_(True)
         _, chunked_peak_mib = _measure_peak_memory(
             vocab_parallel_cross_entropy_chunked,
-            logits_chunked, target,
+            logits_chunked,
+            target,
             warmup=2,
             chunk_size=chunk_size,
         )
@@ -407,8 +418,10 @@ def test_chunked_cross_entropy_memory():
         saved_pct = (saved_mib / baseline_peak_mib * 100) if baseline_peak_mib > 0 else 0
 
         if rank == 0:
-            print(f"  Chunked (chunk={chunk_size:5d}): {chunked_peak_mib:10.1f} MiB  "
-                  f"(saved {saved_mib:.1f} MiB / {saved_pct:.1f}%)")
+            print(
+                f"  Chunked (chunk={chunk_size:5d}): {chunked_peak_mib:10.1f} MiB  "
+                f"(saved {saved_mib:.1f} MiB / {saved_pct:.1f}%)"
+            )
 
     if rank == 0:
         print("=" * 70)
@@ -419,6 +432,7 @@ def test_chunked_cross_entropy_memory():
 # ---------------------------------------------------------------------------
 # Test 6: Edge cases
 # ---------------------------------------------------------------------------
+
 
 def test_chunked_cross_entropy_edge_cases():
     """Test edge cases: seq_len not divisible by chunk_size, chunk > seq_len."""
@@ -433,7 +447,7 @@ def test_chunked_cross_entropy_edge_cases():
         (1, 4096, "seq_len == 1"),
     ]
 
-    vocab_size = 248320
+    vocab_size = 1024 if cur_platform.platform_name() == "enflame" else 248320
     batch_size = 1
 
     rank = torch.distributed.get_rank()

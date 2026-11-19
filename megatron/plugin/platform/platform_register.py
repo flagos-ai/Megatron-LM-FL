@@ -23,7 +23,7 @@ def register_platforms() -> None:
     if platform_cuda.is_available():
         PLATFORMS["cuda"] = platform_cuda # use lower keys: cuda
         print(f"Megatron-LM-FL Platform: cuda Registered")
-    
+
     # Register MUSA Platform
     from .platform_musa import PlatformMUSA
     platform_musa = PlatformMUSA()
@@ -59,3 +59,10 @@ def register_platforms() -> None:
     if platform_kunlunxin.is_available():
         PLATFORMS["kunlunxin"] = platform_kunlunxin
         print(f"Megatron-LM-FL Platform: kunlunxin Registered")
+
+    # Register SUPA Platform
+    from .platform_supa import PlatformSUPA
+    platform_supa = PlatformSUPA()
+    if platform_supa.is_available():
+        PLATFORMS["supa"] = platform_supa
+        print(f"Megatron-LM-FL Platform: supa Registered")

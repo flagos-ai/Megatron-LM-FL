@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/set_env_common.sh"
+
+# Keep CUDA CI aligned with NVIDIA Transformer Engine semantics. TE-FL defaults
+# to FlagOS-first dispatch, so set the preference explicitly instead of relying
+# on the container's inherited environment.
+ci_export_env TE_FL_PREFER vendor
+
+validate_cuda_capacity() {
+  local device_count
+  device_count=$(python3 -c \
+    "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)")
+  ci_validate_device_capacity "$device_count"
+}
+
+install_nvrx() {
+  local attempt
+  local download_root
+
+  if ! command -v timeout >/dev/null 2>&1; then
+    echo "::error::GNU timeout is required for the NVRx download" >&2
+    return 1
+  fi
+
+  for attempt in 1 2 3; do
+    # A fresh directory prevents a partial clone from breaking subsequent attempts.
+    download_root=$(mktemp -d /tmp/megatron-nvrx.XXXXXX)
+    echo "Downloading NVRx: attempt $attempt/3"
+
+    if timeout --kill-after=10s 300s \
+      git -c http.version=HTTP/1.1 clone \
+        --depth 1 \
+        --single-branch \
+        --branch v0.6.0-main \
+        https://github.com/NVIDIA/nvidia-resiliency-ext.git \
+        "$download_root/source"; then
+      python3 -m pip install -e "$download_root/source" --no-cache-dir || return $?
+      return 0
+    fi
+
+    if [ "$attempt" -lt 3 ]; then
+      sleep 10
+    fi
+  done
+
+  echo "::error::NVRx download failed after 3 attempts" >&2
+  return 1
+}
+
+setup_unit_environment() {
+  # Deterministic unit tests must configure cuBLAS before any Python process
+  # can initialize a cuBLAS handle. Export through GITHUB_ENV for the pytest step.
+  ci_export_env CUBLAS_WORKSPACE_CONFIG :4096:8
+
+  ci_activate_python_environment
+  ci_export_env NCCL_MAX_NCHANNELS 1
+  ci_export_env NCCL_NVLS_ENABLE 0
+  ci_ensure_curl
+
+  local test_dependencies=(
+    mock
+    pytest-mock
+    coverage
+    pytest-asyncio
+    anyio
+    wandb
+    openai
+    httpx
+    nltk
+    msgpack
+  )
+  python3 -m pip install torch boto3 "${test_dependencies[@]}" --no-cache-dir
+
+  install_nvrx
+  python3 -m pip install protobuf==6.33.1
+  python3 -m pip install \
+    git+https://github.com/NVIDIA-NeMo/Emerging-Optimizers.git@v0.2.0 \
+    --no-cache-dir
+
+  ci_install_project
+  python3 -c \
+    "from megatron.core.dist_checkpointing.strategies.torch import get_async_strategy; get_async_strategy('nvrx'); print('NVRx async checkpoint import passed')"
+  validate_cuda_capacity
+}
+
+setup_build_environment() {
+  ci_activate_python_environment
+  ci_install_project
+  validate_cuda_capacity
+}
+
+ci_require_env CI_TEST_SUITE
+case "$CI_TEST_SUITE" in
+  unit_group)
+    ;;
+  unit)
+    setup_unit_environment
+    ;;
+  functional)
+    ci_setup_functional_environment
+    install_nvrx
+    validate_cuda_capacity
+    ;;
+  build)
+    setup_build_environment
+    ;;
+  *)
+    echo "::error::Unsupported CI_TEST_SUITE: $CI_TEST_SUITE"
+    exit 1
+    ;;
+esac

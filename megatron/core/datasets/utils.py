@@ -22,9 +22,8 @@ def compile_helpers():
     import os
     import subprocess
 
-    src_dir = os.path.abspath(os.path.dirname(__file__))  # FlagScale Add
-
-    # FlagScale Begin
+    ######## FlagScale Begin ########
+    src_dir = os.path.abspath(os.path.dirname(__file__))
     # Skip compilation if the shared library already exists (e.g. pip-installed package
     # where the .so is pre-built but the Makefile is not included in the wheel).
     ext_suffix = subprocess.check_output(
@@ -33,9 +32,9 @@ def compile_helpers():
     so_path = os.path.join(src_dir, f"helpers_cpp{ext_suffix}")
     if os.path.isfile(so_path):
         return
-    # FlagScale End
+    command = ["make", "-C", src_dir]
+    ######## FlagScale End ########
 
-    command = ["make", "-C", src_dir]  # FlagScale Add
     if subprocess.run(command).returncode != 0:
         import sys
 

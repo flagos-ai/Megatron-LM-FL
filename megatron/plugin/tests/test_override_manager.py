@@ -271,11 +271,15 @@ class TestGetPreferredVendor(unittest.TestCase):
         from megatron.plugin.platform import platform_manager
 
         class KunlunxinPlatform:
-            """Stub platform returning kunlunxin device name."""
+            """Stub platform mirroring the real kunlunxin identity/device split."""
+
+            def platform_name(self):
+                """Return the vendor identity used to select overrides."""
+                return "kunlunxin"
 
             def device_name(self):
-                """Return the kunlunxin device name."""
-                return "kunlunxin"
+                """Return the torch device type: torch_xmlir exposes XPU as CUDA."""
+                return "cuda"
 
         original_platform = platform_manager.cur_platform
         platform_manager.cur_platform = KunlunxinPlatform()
@@ -529,6 +533,26 @@ class TestOverridableClass(unittest.TestCase):
             pass
 
         self.assertEqual(FancyClass.__name__, "FancyClass")
+
+    def test_class_apply_dispatches_to_override(self):
+        """Class-level apply calls route to the override class when registered."""
+        @overridable
+        class OriginalFunction:
+            @classmethod
+            def apply(cls, value):
+                return f"original:{value}"
+
+        class OverrideFunction(OriginalFunction):
+            @classmethod
+            def apply(cls, value):
+                return f"override:{value}"
+
+        module_parts = OriginalFunction.__module__.split('.')
+        module_name = module_parts[-1]
+        method_key = f"{module_name}.OriginalFunction"
+        register_override_method(method_key, OverrideFunction)
+
+        self.assertEqual(OriginalFunction.apply("x"), "override:x")
 
     def test_lazy_register_class(self):
         """register() with class target resolves lazily."""

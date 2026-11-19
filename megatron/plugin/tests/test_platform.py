@@ -7,11 +7,11 @@ import sys
 import types
 import unittest
 from contextlib import ExitStack
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock, patch
 
+from megatron.plugin.platform import platform_manager, platform_register
 from megatron.plugin.platform.platform_base import PlatformBase
 from megatron.plugin.platform.platform_cpu import PlatformCPU
-from megatron.plugin.platform import platform_register, platform_manager
 
 
 def _reset_platform_manager():
@@ -128,6 +128,14 @@ class TestPlatformManager(unittest.TestCase):
         platform_manager.set_platform(mock_platform)
         self.assertIs(platform_manager.get_platform(), mock_platform)
 
+    def test_is_current_platform_supported_uses_registered_platform(self):
+        """Support checks use platform identity, not differing device and registry names."""
+        enflame = _create_mock_platform("enflame")
+        platform_register.PLATFORMS["enflame"] = enflame
+        platform_manager.set_platform(enflame)
+
+        self.assertTrue(platform_manager.is_current_platform_supported())
+
     def test_set_platform_then_get(self):
         """After set_platform, get_platform returns the set value."""
         cpu = PlatformCPU()
@@ -138,6 +146,8 @@ class TestPlatformManager(unittest.TestCase):
 
     def test_get_platform_prefers_cuda_over_cpu(self):
         """When cuda is available, get_platform should prefer cuda over cpu."""
+        platform_register.PLATFORMS.clear()
+        platform_register.PLATFORMS["cpu"] = PlatformCPU()
         mock_cuda = _create_mock_platform("cuda")
         mock_cuda.is_available = lambda: True
         platform_register.PLATFORMS["cuda"] = mock_cuda
@@ -164,18 +174,33 @@ class TestPlatformManager(unittest.TestCase):
         with self.assertRaises(ValueError):
             platform_manager.get_platform()
 
-    def test_platform_selection_priority(self):
-        """Platforms are selected in priority order: cuda > musa > txda > npu > enflame > cpu."""
-        # Register mock platforms for musa and cpu only
+    def test_native_vendor_wins_over_cuda_compatibility_api(self):
+        """A native vendor backend wins when its runtime also exposes CUDA APIs."""
         platform_register.PLATFORMS.clear()
-        mock_musa = _create_mock_platform("musa")
-        mock_musa.is_available = lambda: True
-        platform_register.PLATFORMS["musa"] = mock_musa
+        platform_register.PLATFORMS["cuda"] = _create_mock_platform("cuda")
+        platform_register.PLATFORMS["enflame"] = _create_mock_platform("enflame")
         platform_register.PLATFORMS["cpu"] = PlatformCPU()
 
-        _reset_platform_manager()
+        platform = platform_manager.get_platform()
+        self.assertEqual(platform._name, "enflame")
+
+    def test_single_native_vendor_wins_over_cpu(self):
+        """A native vendor backend is selected without explicit configuration."""
+        platform_register.PLATFORMS.clear()
+        platform_register.PLATFORMS["musa"] = _create_mock_platform("musa")
+        platform_register.PLATFORMS["cpu"] = PlatformCPU()
+
         platform = platform_manager.get_platform()
         self.assertEqual(platform._name, "musa")
+
+    def test_multiple_native_vendors_are_rejected(self):
+        """Automatic selection refuses to guess between native vendor backends."""
+        platform_register.PLATFORMS.clear()
+        platform_register.PLATFORMS["enflame"] = _create_mock_platform("enflame")
+        platform_register.PLATFORMS["musa"] = _create_mock_platform("musa")
+
+        with self.assertRaisesRegex(RuntimeError, "enflame, musa"):
+            platform_manager.get_platform()
 
 
 class TestPlatformCPU(unittest.TestCase):
@@ -313,6 +338,7 @@ class TestPlatformCPU(unittest.TestCase):
         """get/set compile_backend round-trips."""
         try:
             import torch
+
             # inductor is typically available
             self.cpu.set_compile_backend("inductor")
             self.assertEqual(self.cpu.get_compile_backend(), "inductor")
@@ -382,6 +408,19 @@ class _FakeMstx:
         return "pop"
 
 
+class _FakeBrtx:
+    """Stand-in for torch_supa.supa.brtx range markers."""
+
+    def range(self, msg, *args, **kwargs):
+        return ("range", msg)
+
+    def range_push(self, msg, *args, **kwargs):
+        return ("push", msg)
+
+    def range_pop(self, *args, **kwargs):
+        return "pop"
+
+
 class _FakeAccelerator:
     Stream = "stream-type"
     Event = "event-type"
@@ -396,6 +435,7 @@ class _FakeAccelerator:
     MUSAGraph = _FakeGraph
     TopsGraph = _FakeGraph
     NPUGraph = _FakeGraph
+    SUPAGraph = _FakeGraph
     default_generators = ("gen0",)
 
     def __init__(self, available=True, fp16=True, bf16=True):
@@ -404,6 +444,7 @@ class _FakeAccelerator:
         self._bf16 = bf16
         self.amp = "amp"
         self.mstx = _FakeMstx()
+        self.brtx = _FakeBrtx()
 
     def is_available(self):
         return self._available
@@ -499,6 +540,15 @@ class _FakeAccelerator:
         return ("capture", graph, pool, stream)
 
 
+class _FakeDevice:
+    def __init__(self, device_type, index=None):
+        self.type = device_type
+        self.index = index
+
+    def __str__(self):
+        return self.type if self.index is None else f"{self.type}:{self.index}"
+
+
 def _fake_torch_for_platform(accelerator_name, accelerator):
     fake_nvtx = types.SimpleNamespace(
         range=lambda msg: ("nvtx_range", msg),
@@ -506,13 +556,18 @@ def _fake_torch_for_platform(accelerator_name, accelerator):
         range_pop=lambda: "nvtx_pop",
     )
     fake_cuda = types.SimpleNamespace(nvtx=fake_nvtx)
+
+    def _fake_device(name, index=None):
+        """Mock torch.device() with torch.device-like attributes and formatting."""
+        return _FakeDevice(name, index)
+
     fake_torch = types.SimpleNamespace(
         float="float",
         half="half",
         bfloat16="bf16",
         random="random-module",
         cuda=fake_cuda,
-        device=lambda name, index=None: f"{name}:{index}" if index is not None else name,
+        device=_fake_device,
     )
     setattr(fake_torch, accelerator_name, accelerator)
     if accelerator_name == "cuda":
@@ -524,6 +579,36 @@ def _fake_torch_for_platform(accelerator_name, accelerator):
 class TestMockedVendorPlatforms(unittest.TestCase):
     """Cover platform wrappers without requiring real vendor hardware."""
 
+    def test_cuda_platform_rejects_compatibility_facade_with_native_device_type(self):
+        """A torch.cuda compatibility facade must not register as native CUDA."""
+        module = __import__(
+            "megatron.plugin.platform.platform_cuda", fromlist=["PlatformCUDA"]
+        )
+
+        accelerator = _FakeAccelerator()
+        fake_torch = _fake_torch_for_platform("cuda", accelerator)
+        fake_torch.device = lambda name, index=None: types.SimpleNamespace(type="gcu")
+
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            self.assertFalse(module.PlatformCUDA().is_available())
+
+    def test_cuda_platform_accepts_matching_native_device_type(self):
+        """Native CUDA remains available when the device identity is consistent."""
+        module = __import__(
+            "megatron.plugin.platform.platform_cuda", fromlist=["PlatformCUDA"]
+        )
+
+        accelerator = _FakeAccelerator()
+        fake_torch = _fake_torch_for_platform("cuda", accelerator)
+        fake_torch.device = lambda name, index=None: types.SimpleNamespace(type="cuda")
+
+        with patch.dict(sys.modules, {"torch": fake_torch}), patch.object(
+            module, "torch", fake_torch
+        ):
+            self.assertTrue(module.PlatformCUDA().is_available())
+
     def _exercise_accelerator_platform(
         self,
         module_path,
@@ -533,6 +618,8 @@ class TestMockedVendorPlatforms(unittest.TestCase):
         visible_env,
         graph_ctor_name,
         extra_modules=None,
+        triton_supported=None,
+        range_expected=(("nvtx_range", "msg"), ("nvtx_push", "msg"), "nvtx_pop"),
     ):
         module = __import__(module_path, fromlist=[class_name])
         platform_cls = getattr(module, class_name)
@@ -560,7 +647,11 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertFalse(platform.handles_memory_backpressure())
             self.assertEqual(platform.device_name(), device_prefix)
             self.assertEqual(platform.device_name(3), f"{device_prefix}:3")
-            self.assertEqual(platform.device(2), f"{device_prefix}:2")
+            # platform.device(2) returns a torch.device object, check its string representation
+            device_obj = platform.device(2)
+            self.assertEqual(str(device_obj), f"{device_prefix}:2")
+            self.assertEqual(device_obj.type, device_prefix)
+            self.assertEqual(device_obj.index, 2)
             self.assertEqual(platform.current_device(), 1)
             self.assertEqual(platform.current_device_name(), f"{device_prefix}:1")
             self.assertEqual(platform.device_count(), 2)
@@ -599,9 +690,9 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertTrue(platform.is_bf16_supported())
             self.assertEqual(platform.supported_dtypes(), ["float", "half", "bf16"])
             self.assertEqual(platform.amp(), "amp")
-            self.assertEqual(platform.range("msg"), ("nvtx_range", "msg"))
-            self.assertEqual(platform.range_push("msg"), ("nvtx_push", "msg"))
-            self.assertEqual(platform.range_pop(), "nvtx_pop")
+            self.assertEqual(platform.range("msg"), range_expected[0])
+            self.assertEqual(platform.range_push("msg"), range_expected[1])
+            self.assertEqual(platform.range_pop(), range_expected[2])
             graph = platform.create_graph()
             if graph is None:
                 graph = _FakeGraph()
@@ -627,7 +718,7 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertEqual(platform.visible_devices_envs(), [visible_env])
             self.assertEqual(env[visible_env], "1,3")
             self.assertIsNone(platform.lazy_call(lambda: None))
-            self.assertIsNone(platform.is_triton_supported())
+            self.assertEqual(platform.is_triton_supported(), triton_supported)
             self.assertIsNone(platform.get_compile_backend())
             self.assertIsNone(platform.set_compile_backend("inductor"))
             self.assertIsNone(platform.temperature())
@@ -636,6 +727,7 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertIsNone(platform.clock_rate())
 
             accelerator._available = False
+            accelerator._bf16 = False
             self.assertFalse(platform.is_fp16_supported())
             self.assertFalse(platform.is_bf16_supported())
 
@@ -676,6 +768,22 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             extras,
         )
 
+    def test_supa_platform_wrapper_contract_with_mock_backend(self):
+        def extras(accelerator):
+            return {"torch_supa": types.SimpleNamespace(supa=accelerator)}
+
+        self._exercise_accelerator_platform(
+            "megatron.plugin.platform.platform_supa",
+            "PlatformSUPA",
+            "supa",
+            "supa",
+            "SUPA_VISIBLE_DEVICES",
+            "SUPAGraph",
+            extras,
+            triton_supported=False,
+            range_expected=(("range", "msg"), ("push", "msg"), "pop"),
+        )
+
     def test_npu_platform_wrapper_contract_with_mock_backend(self):
         module = __import__("megatron.plugin.platform.platform_npu", fromlist=["PlatformNPU"])
         accelerator = _FakeAccelerator()
@@ -687,7 +795,7 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             platform = module.PlatformNPU()
             self.assertTrue(platform.is_available())
             self.assertEqual(platform.device_name(2), "npu:2")
-            self.assertEqual(platform.device(2), "npu:2")
+            self.assertEqual(str(platform.device(2)), "npu:2")
             self.assertEqual(platform.default_generators, ("gen0",))
             self.assertEqual(platform.MemPool, "pool-type")
             self.assertEqual(platform.use_mem_pool("pool"), ("pool", "pool"))
@@ -703,6 +811,153 @@ class TestMockedVendorPlatforms(unittest.TestCase):
             self.assertTrue(graph.replayed)
             self.assertEqual(platform.visible_devices_envs(), ["ASCEND_RT_VISIBLE_DEVICES"])
 
+
+class TestNPUPatchesManager(unittest.TestCase):
+    """NPU patch registration must be repeatable without hiding conflicting replacements."""
+
+    def setUp(self):
+        module = __import__("megatron.plugin.platform.platform_npu", fromlist=["PatchesManager"])
+        self.manager = module.PatchesManager
+        registry = patch.object(self.manager, "patches_info", {})
+        registry.start()
+        self.addCleanup(registry.stop)
+
+        self.target = types.ModuleType("_megatron_test_npu_patch_target")
+        self.target.function = lambda value: value
+        modules = patch.dict(sys.modules, {self.target.__name__: self.target})
+        modules.start()
+        self.addCleanup(modules.stop)
+        self.target_name = f"{self.target.__name__}.function"
+
+    def test_repeated_replacement_registration_is_noop(self):
+        def replacement(value):
+            return value + 1
+
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.apply_patches()
+        registered_patch = self.manager.get_patch(self.target_name)
+
+        self.manager.register_patch(self.target_name, replacement)
+        self.assertTrue(registered_patch.is_applied)
+        self.manager.apply_patches()
+        self.assertIs(self.target.function, replacement)
+        self.assertEqual(self.target.function(2), 3)
+
+    def test_different_replacement_requires_force(self):
+        def first(value):
+            return value + 1
+
+        def second(value):
+            return value + 2
+
+        def double_wrapper(function):
+            def wrapped(value):
+                return function(value) * 2
+
+            return wrapped
+
+        self.manager.register_patch(self.target_name, first)
+        self.manager.register_patch(self.target_name, double_wrapper)
+        self.manager.apply_patches()
+        applied_function = self.target.function
+        with self.assertRaisesRegex(RuntimeError, "the patch of function exist"):
+            self.manager.register_patch(self.target_name, second)
+        self.assertIs(self.target.function, applied_function)
+        self.assertIs(self.manager.get_patch(self.target_name).patch_func, first)
+        self.assertEqual(self.target.function(2), 6)
+
+        self.manager.register_patch(self.target_name, second, force_patch=True)
+        self.manager.apply_patches()
+        self.assertIs(self.manager.get_patch(self.target_name).patch_func, second)
+        self.assertEqual(self.target.function(2), 8)
+
+        self.manager.register_patch(self.target_name, None, force_patch=True)
+        self.manager.apply_patches()
+        self.assertIsNone(self.manager.get_patch(self.target_name).patch_func)
+        self.assertEqual(self.target.function(2), 4)
+
+    def test_repeated_wrapper_registration_preserves_applied_function(self):
+        wrapped_functions = []
+
+        def increment_wrapper(function):
+            wrapped_functions.append(function)
+
+            def wrapped(value):
+                return function(value) + 1
+
+            return wrapped
+
+        self.manager.register_patch(self.target_name, increment_wrapper)
+        self.manager.apply_patches()
+        applied_function = self.target.function
+
+        self.manager.register_patch(self.target_name, increment_wrapper)
+        self.manager.apply_patches()
+        self.assertIs(self.target.function, applied_function)
+        self.assertEqual(len(wrapped_functions), 1)
+        self.assertEqual(self.target.function(2), 3)
+
+    def test_wrapper_removal_reapplies_remaining_wrappers(self):
+        def replacement(value):
+            return value + 1
+
+        def add_ten_wrapper(function):
+            def wrapped(value):
+                return function(value) + 10
+
+            return wrapped
+
+        def double_wrapper(function):
+            def wrapped(value):
+                return function(value) * 2
+
+            return wrapped
+
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.register_patch(self.target_name, add_ten_wrapper)
+        self.manager.register_patch(self.target_name, double_wrapper)
+        self.manager.apply_patches()
+        self.assertEqual(self.target.function(1), 24)
+
+        self.manager.remove_wrappers(self.target_name, "add_ten_wrapper")
+        self.manager.register_patch(self.target_name, replacement)
+        self.manager.register_patch(self.target_name, double_wrapper)
+        self.manager.apply_patches()
+        self.assertEqual(self.target.function(1), 4)
+
+        self.manager.remove_wrappers(self.target_name, None)
+        self.manager.apply_patches()
+        self.assertIs(self.target.function, replacement)
+        self.assertEqual(self.target.function(1), 2)
+
+        self.manager.remove_wrappers(self.target_name, None, remove_check=False)
+        self.assertTrue(self.manager.get_patch(self.target_name).is_applied)
+        with self.assertRaisesRegex(RuntimeError, "has not remove anything"):
+            self.manager.remove_wrappers(self.target_name, "missing_wrapper")
+        self.assertTrue(self.manager.get_patch(self.target_name).is_applied)
+
+    def test_remove_patches_allows_reregistering_same_functions(self):
+        original = self.target.function
+
+        def replacement(value):
+            return value + 1
+
+        def double_wrapper(function):
+            def wrapped(value):
+                return function(value) * 2
+
+            return wrapped
+
+        for _ in range(2):
+            self.manager.register_patch(self.target_name, replacement)
+            self.manager.register_patch(self.target_name, double_wrapper)
+            self.manager.apply_patches()
+            self.assertEqual(self.target.function(2), 6)
+
+            self.manager.remove_patches()
+            self.assertIs(self.target.function, original)
+            self.assertEqual(self.target.function(2), 2)
 
 # ---------- Auto-discovery: Interface Contract Tests for ALL Registered Platforms ----------
 
@@ -772,11 +1027,71 @@ class TestAllRegisteredPlatformsContract(unittest.TestCase):
             self.assertGreater(len(result), 0)
         self._for_each_platform(check)
 
+    def test_device_name_is_accepted_by_torch(self):
+        """device_name() must be a device string torch can parse.
+
+        megatron/core passes this value straight into torch.tensor(device=...)
+        and torch.device(...). A vendor-branded name torch has no backend for
+        raises "Expected one of cpu, cuda, ... at start of device string".
+        """
+        import torch
+
+        def check(name, p):
+            for value in (p.device_name(), p.device_name(0)):
+                try:
+                    torch.device(value)
+                except RuntimeError as exc:
+                    self.fail(
+                        f"{name}.device_name() returned {value!r}, which torch "
+                        f"rejects: {exc}. Return the torch device type this "
+                        f"platform actually runs on and expose the vendor name "
+                        f"via platform_name() instead."
+                    )
+        self._for_each_platform(check)
+
+    def test_device_name_matches_device_type(self):
+        """device_name() must resolve to the type returned by device()."""
+        import torch
+
+        def check(name, p):
+            device = p.device(0)
+            if device is None:  # cpu platform returns None by design
+                return
+            device_type = torch.device(p.device_name()).type
+            self.assertEqual(
+                device.type,
+                device_type,
+                f"{name}: device_name() {p.device_name()!r} resolves to "
+                f"{device_type!r} but device(0) is {device.type!r}.",
+            )
+        self._for_each_platform(check)
+
     def test_current_device_name_returns_string(self):
         """current_device_name() must return a string."""
         def check(name, p):
             result = p.current_device_name()
             self.assertIsInstance(result, str)
+        self._for_each_platform(check)
+
+    def test_current_device_name_is_accepted_by_torch(self):
+        """current_device_name() feeds torch.device() in nccl_allocator/FSDP."""
+        import torch
+
+        def check(name, p):
+            value = p.current_device_name()
+            try:
+                torch.device(value)
+            except RuntimeError as exc:
+                self.fail(
+                    f"{name}.current_device_name() returned {value!r}, which "
+                    f"torch rejects: {exc}"
+                )
+        self._for_each_platform(check)
+
+    def test_platform_name_matches_registry_key(self):
+        """platform_name() must return the identity the platform is keyed by."""
+        def check(name, p):
+            self.assertEqual(p.platform_name(), name)
         self._for_each_platform(check)
 
     def test_device_count_returns_int(self):
@@ -1078,7 +1393,7 @@ def _create_mock_platform(name):
         def create_graph(self):
             return None
 
-        def capture_to_graph(self, graph, pool=None, stream=None):
+        def capture_to_graph(self, graph, pool=None, stream=None, capture_error_mode=None):
             pass
 
         def replay_graph(self, graph):
@@ -1149,6 +1464,84 @@ def _create_mock_platform(name):
             return -1
 
     return MockPlatform()
+
+
+class TestKunLunXinDeviceContract(unittest.TestCase):
+    """Pin the kunlunxin identity/device-string split.
+
+    KunLunXin drives XPU through torch_xmlir, which exposes the hardware via the
+    torch CUDA API. Its torch device type is therefore 'cuda' while its vendor
+    identity is 'kunlunxin'. These assertions run on any host, unlike the
+    registry-driven tests above which skip kunlunxin on a CUDA box.
+    """
+
+    def setUp(self):
+        from megatron.plugin.platform.platform_kunlunxin import PlatformKunLunXin
+
+        self.platform = PlatformKunLunXin()
+
+    def test_platform_name_is_vendor_identity(self):
+        """platform_name() is the registry and override-registry key."""
+        self.assertEqual(self.platform.platform_name(), "kunlunxin")
+        self.assertEqual(self.platform._name, "kunlunxin")
+
+    def test_device_name_is_cuda(self):
+        """device_name() must be the torch device type, not the vendor name."""
+        self.assertEqual(self.platform.device_name(), "cuda")
+        self.assertEqual(self.platform.device_name(3), "cuda:3")
+
+    def test_device_name_is_parseable_by_torch(self):
+        """Regression: torch rejected 'kunlunxin' at every device= call site."""
+        import torch
+
+        self.assertEqual(
+            torch.device(self.platform.device_name()).type, torch.device("cuda").type
+        )
+        self.assertEqual(torch.device(self.platform.device_name(2)).index, 2)
+
+    def test_device_name_matches_inherited_device_namespace(self):
+        """device() must use the runtime's CUDA-compatible namespace."""
+        import torch
+
+        self.assertEqual(self.platform.device(1), torch.device("cuda", 1))
+
+    def test_override_vendor_resolves_to_kunlunxin(self):
+        """The override registry must still select kunlunxin implementations."""
+        from megatron.plugin import decorators
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("MG_FL_PREFER", None)
+            with patch.object(
+                platform_manager, "cur_platform", self.platform
+            ):
+                self.assertEqual(decorators._get_preferred_vendor(), "kunlunxin")
+
+
+class TestSupaDeviceContract(unittest.TestCase):
+    """Pin the supa platform device contract.
+
+    Biren SUPA is an independent torch device type: torch_supa renames
+    PrivateUse1 to 'supa', so tensors report .device.type == 'supa'.
+    transfer_to_supa patches torch.cuda so fl core's hardcoded torch.cuda.*
+    call sites resolve to the SUPA device. SUPA uses 'supa' for both:
+    platform_name() == 'supa' is the vendor identity / override key, and
+    device_name() == 'supa' is the torch device type.
+    """
+
+    def setUp(self):
+        from megatron.plugin.platform.platform_supa import PlatformSUPA
+
+        self.platform = PlatformSUPA()
+
+    def test_platform_name_is_vendor_identity(self):
+        """platform_name() is the registry and override-registry key."""
+        self.assertEqual(self.platform.platform_name(), "supa")
+        self.assertEqual(self.platform._name, "supa")
+
+    def test_device_name_is_supa(self):
+        """device_name() is the native torch device type 'supa' (not 'cuda')."""
+        self.assertEqual(self.platform.device_name(), "supa")
+        self.assertEqual(self.platform.device_name(0), "supa:0")
 
 
 if __name__ == "__main__":

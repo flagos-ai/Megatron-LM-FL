@@ -2,16 +2,22 @@
 
 """Fused kernels for mHC (Manifold-Constrained Hyper-Connections).
 
-Uses Triton and cuda.tile (cuTile) kernels when available, with PyTorch
-reference implementations as fallback.  Reference (non-fused) implementations
-live in ``megatron.core.transformer.hyper_connection`` and are used when fused
-kernels are unavailable or when the ``use_fused_mhc`` config flag is False.
+Uses Triton and cuda.tile (cuTile) kernels according to an explicit backend
+policy. With the default ``auto`` policy, unavailable accelerated operations
+fall back to PyTorch reference implementations. Reference implementations live
+in ``megatron.core.transformer.hyper_connection`` and are also used when the
+``use_fused_mhc`` config flag is False.
 
 Four fused operations:
-  - sinkhorn:     Sinkhorn-Knopp projection to doubly stochastic matrix
-  - h_aggregate:  weighted n-stream -> 1-stream aggregation
-  - h_post_bda:   fused H_res.T @ residual + H_post * (x + bias)
-  - proj_rms:     fused projection + RMS normalization
+  - sinkhorn:            Sinkhorn-Knopp projection to doubly stochastic matrix
+  - h_aggregate:         weighted n-stream -> 1-stream aggregation
+  - h_post_bda:          fused H_res.T @ residual + H_post * (x + bias)
+  - proj_rms_compute_h:  fused projection + RMS normalization + compute_h
+
+Determinism:
+  The native, Triton, and cuTile backends are currently tagged ``unknown``.
+  Numerical and gradient parity are covered, but bit-exact repeatability has
+  not been certified. The accelerated backends use timing-based autotuning.
 """
 
 import logging
@@ -20,7 +26,7 @@ import os
 import shutil
 import subprocess
 import warnings
-from typing import Optional, Tuple
+from typing import Literal, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -30,34 +36,18 @@ from megatron.core._rank_utils import log_single_rank, safe_get_rank
 logger = logging.getLogger(__name__)
 LOG2E = math.log2(math.e)
 
+#: Bit-exact determinism status for each concrete mHC backend. This uses the
+#: same three-value vocabulary proposed for operation-backend metadata while
+#: the ops registry is unavailable. ``auto`` is a
+#: per-operation selection policy, not a backend of its own.
+MHC_BACKEND_DETERMINISM: dict[str, str] = {
+    "native": "unknown",
+    "triton": "unknown",
+    "cutile": "unknown",
+}
 
-def _env_flag(name: str) -> bool:
-    return os.getenv(name, "0").lower() in ("1", "true", "yes", "on")
-
-
-def _forced_backend() -> Tuple[str, Optional[Exception]]:
-    value = os.getenv("MHC_FORCE_BACKEND", "auto").strip().lower()
-    value = value.replace("-", "_").replace("+", "_")
-    aliases = {
-        "auto": "auto",
-        "mixed": "auto",
-        "default": "auto",
-        "native": "native",
-        "torch": "native",
-        "pytorch": "native",
-        "none": "native",
-        "triton": "triton",
-        "triton_native": "triton",
-        "cutile": "cutile",
-        "cu_tile": "cutile",
-        "cuda_tile": "cutile",
-    }
-    if value not in aliases:
-        valid = ", ".join(sorted(aliases))
-        return "auto", ValueError(
-            f"Unsupported MHC_FORCE_BACKEND={value!r}; expected one of: {valid}"
-        )
-    return aliases[value], None
+MHCBackend = Literal["auto", "native", "triton", "cutile"]
+_VALID_MHC_BACKENDS = ("auto", "native", "triton", "cutile")
 
 
 # ---------------------------------------------------------------------------
@@ -92,59 +82,6 @@ try:
     _TRITON_AVAILABLE = True
 except ImportError:
     pass
-
-
-_MHC_FORCED_BACKEND, _MHC_BACKEND_VALIDATION_ERROR = _forced_backend()
-
-
-def _record_mhc_backend_validation_error(error: Exception) -> None:
-    global _MHC_BACKEND_VALIDATION_ERROR
-    if _MHC_BACKEND_VALIDATION_ERROR is None:
-        _MHC_BACKEND_VALIDATION_ERROR = error
-
-
-def _raise_mhc_backend_validation_error() -> None:
-    if _MHC_BACKEND_VALIDATION_ERROR is not None:
-        raise _MHC_BACKEND_VALIDATION_ERROR
-    if _MHC_FORCED_BACKEND == "cutile" and not is_cutile_available():
-        raise RuntimeError(
-            "MHC_FORCE_BACKEND=cutile was requested, but cuTile does not support "
-            f"the current device: {_CUTILE_DEVICE_SUPPORT_ERROR}"
-        )
-
-
-if _MHC_FORCED_BACKEND == "native":
-    _TRITON_AVAILABLE = False
-    _CUTILE_AVAILABLE = False
-    _CUTILE_EXPERIMENTAL_AVAILABLE = False
-elif _MHC_FORCED_BACKEND == "triton":
-    if not _TRITON_AVAILABLE:
-        _record_mhc_backend_validation_error(
-            RuntimeError("MHC_FORCE_BACKEND=triton was requested, but Triton is not available")
-        )
-    _CUTILE_AVAILABLE = False
-    _CUTILE_EXPERIMENTAL_AVAILABLE = False
-elif _MHC_FORCED_BACKEND == "cutile":
-    if not _CUTILE_AVAILABLE:
-        _record_mhc_backend_validation_error(
-            RuntimeError("MHC_FORCE_BACKEND=cutile was requested, but cuTile is not available")
-        )
-    _TRITON_AVAILABLE = False
-
-if _env_flag("MHC_DISABLE_TRITON"):
-    if _MHC_FORCED_BACKEND == "triton":
-        _record_mhc_backend_validation_error(
-            ValueError("MHC_FORCE_BACKEND=triton conflicts with MHC_DISABLE_TRITON=1")
-        )
-    _TRITON_AVAILABLE = False
-
-if _env_flag("MHC_DISABLE_CUTILE"):
-    if _MHC_FORCED_BACKEND == "cutile":
-        _record_mhc_backend_validation_error(
-            ValueError("MHC_FORCE_BACKEND=cutile conflicts with MHC_DISABLE_CUTILE=1")
-        )
-    _CUTILE_AVAILABLE = False
-    _CUTILE_EXPERIMENTAL_AVAILABLE = False
 
 
 def is_cutile_available() -> bool:
@@ -209,6 +146,30 @@ def _cutile_supports_current_device() -> bool:
 def is_triton_available() -> bool:
     """Return True if Triton is enabled for supported mHC kernels."""
     return _TRITON_AVAILABLE
+
+
+def _validate_mhc_backend(backend: MHCBackend) -> None:
+    """Validate an explicit mHC backend policy before dispatch."""
+    if backend not in _VALID_MHC_BACKENDS:
+        raise ValueError(
+            f"Unknown mHC fused backend {backend!r}; expected one of {_VALID_MHC_BACKENDS}."
+        )
+    if backend == "triton" and not is_triton_available():
+        raise RuntimeError("mHC fused backend 'triton' was requested, but Triton is unavailable.")
+    if backend == "cutile" and not is_cutile_available():
+        detail = _CUTILE_DEVICE_SUPPORT_ERROR or "cuTile is unavailable"
+        raise RuntimeError(
+            "mHC fused backend 'cutile' was requested, but cuTile does not support "
+            f"the current environment: {detail}."
+        )
+
+
+def _backend_uses_triton(backend: MHCBackend) -> bool:
+    return backend in ("auto", "triton") and is_triton_available()
+
+
+def _backend_uses_cutile(backend: MHCBackend) -> bool:
+    return backend in ("auto", "cutile") and is_cutile_available()
 
 
 # ============================================================================
@@ -1076,7 +1037,9 @@ if _CUTILE_AVAILABLE:
             )
             gx_tile = go_expanded * h_expanded
             ct.store(gx, index=(pid, 0, ct_idx), tile=gx_tile.astype(gx.dtype))
-            gh_acc += ct.sum(go_expanded * x_tile, axis=2)
+            # Reduce in fp32: the torch reference evaluates this product in fp32
+            # under torch.compile, and a bf16 product makes grad_h ~3x noisier.
+            gh_acc += ct.sum(go_expanded.astype(ct.float32) * x_tile.astype(ct.float32), axis=2)
         ct.store(gh, index=(pid, 0), tile=gh_acc.astype(gh.dtype))
 
     def _cutile_h_aggregate_fwd(x: Tensor, h_pre: Tensor) -> Tensor:
@@ -1425,14 +1388,6 @@ if _CUTILE_AVAILABLE:
 
     # -- Proj RMS kernels ----------------------------------------------------
 
-    @ct.function
-    def _ct_rms_dnorm(a_tile, norm_tile, dr_tile, K, eps=1e-6):
-        inv_norm = ct.where(norm_tile > 0, 1.0 / norm_tile, 0.0)
-        inv_sqrt_k = 1.0 / ct.sqrt(K)
-        u = norm_tile * inv_sqrt_k + eps
-        coeff = -(1.0 / (u * u)) * inv_sqrt_k
-        return dr_tile * coeff * a_tile * inv_norm
-
     @ct.kernel
     def _ct_proj_rms_fwd_kernel(
         A,
@@ -1472,7 +1427,10 @@ if _CUTILE_AVAILABLE:
             acc = ct.mma(
                 a_tile.astype(ct.tfloat32), b_tile.transpose().astype(ct.tfloat32), acc=acc
             )
-            sum_sq += ct.sum(a_tile * a_tile, axis=1, keepdims=True)
+            # Square in fp32: a bf16 square/reduction loses ~2e-3 relative on the
+            # RMS scale, which native (fp32) does not.
+            a_tile_f32 = a_tile.astype(ct.float32)
+            sum_sq += ct.sum(a_tile_f32 * a_tile_f32, axis=1, keepdims=True)
 
         bid_m_k = tile_m_id + split_k_id * num_m_tiles
         ct.store(PROJ, index=(bid_m_k, 0), tile=acc.astype(PROJ.dtype))
@@ -1587,133 +1545,6 @@ if _CUTILE_AVAILABLE:
             ct.store(PROJ_OUT, index=(bid_m, 2 + res_chunk), tile=res_accum.astype(PROJ_OUT.dtype))
             ct.store(H_RES, index=(bid_m, res_chunk), tile=h_res.astype(H_RES.dtype))
 
-    @ct.kernel
-    def _ct_proj_rms_bwd_kernel(
-        A,
-        B,
-        NORM,
-        DD,
-        DR,
-        DA,
-        DB,
-        M: int,
-        N: int,
-        K: int,
-        eps: float,
-        TILE_SIZE_M: ConstInt,
-        TILE_SIZE_N: ConstInt,
-        TILE_SIZE_K: ConstInt,
-    ):
-        zero_pad = ct.PaddingMode.ZERO
-        tile_k_id = ct.bid(0)
-        NUM_M_TILES = ct.cdiv(M, TILE_SIZE_M)
-        accumulator_db = ct.full((TILE_SIZE_K, TILE_SIZE_N), 0.0, dtype=ct.float32)
-        for tile_m_id in range(NUM_M_TILES):
-            accumulator_da = ct.full((TILE_SIZE_M, TILE_SIZE_K), 0.0, dtype=ct.float32)
-            a_tile = ct.load(
-                A,
-                index=(tile_m_id, tile_k_id),
-                shape=(TILE_SIZE_M, TILE_SIZE_K),
-                padding_mode=zero_pad,
-            )
-            norm_tile = ct.load(
-                NORM, index=(tile_m_id, 0), shape=(TILE_SIZE_M, 1), padding_mode=zero_pad
-            )
-            dr_tile = ct.load(
-                DR, index=(tile_m_id, 0), shape=(TILE_SIZE_M, 1), padding_mode=zero_pad
-            )
-            accumulator_da = accumulator_da + _ct_rms_dnorm(a_tile, norm_tile, dr_tile, K, eps)
-            b_tile = ct.load(
-                B, index=(0, tile_k_id), shape=(TILE_SIZE_N, TILE_SIZE_K), padding_mode=zero_pad
-            )
-            dd_tile = ct.load(
-                DD, index=(tile_m_id, 0), shape=(TILE_SIZE_M, TILE_SIZE_N), padding_mode=zero_pad
-            )
-            dd_tile = ct.astype(dd_tile, ct.tfloat32)
-            accumulator_da = ct.mma(dd_tile, b_tile.astype(ct.tfloat32), acc=accumulator_da)
-            ct.store(DA, index=(tile_m_id, tile_k_id), tile=accumulator_da.astype(DA.dtype))
-            accumulator_db = ct.mma(
-                a_tile.transpose().astype(ct.tfloat32), dd_tile, acc=accumulator_db
-            )
-        ct.store(DB, index=(0, tile_k_id), tile=accumulator_db.transpose().astype(DB.dtype))
-
-    @ct.kernel
-    def _ct_proj_rms_bwd_small_k_kernel(
-        A, B, NORM, DD, DR, DA, DB, M: int, N: int, K: int, eps: float, TILE_N_SIZE: ConstInt
-    ):
-        zero_pad = ct.PaddingMode.ZERO
-        TILE_DB_SIZE_M = 128
-        TILE_DB_SIZE_K = 64
-        NUM_M_TILES = ct.cdiv(M, TILE_DB_SIZE_M)
-        NUM_K_TILES = ct.cdiv(K, TILE_DB_SIZE_K)
-        if ct.bid(1) == 0:
-            for tile_id in range(ct.bid(0), NUM_K_TILES, ct.num_blocks(0)):
-                accumulator_db = ct.full((TILE_DB_SIZE_K, TILE_N_SIZE), 0.0, dtype=ct.float32)
-                for m_tile in range(NUM_M_TILES):
-                    a_tile = ct.load(
-                        A,
-                        index=(m_tile, tile_id),
-                        shape=(TILE_DB_SIZE_M, TILE_DB_SIZE_K),
-                        padding_mode=zero_pad,
-                    )
-                    dd_tile = ct.load(
-                        DD,
-                        index=(m_tile, 0),
-                        shape=(TILE_DB_SIZE_M, TILE_N_SIZE),
-                        padding_mode=zero_pad,
-                    )
-                    accumulator_db = ct.mma(
-                        a_tile.transpose().astype(ct.tfloat32),
-                        dd_tile.astype(ct.tfloat32),
-                        acc=accumulator_db,
-                    )
-                ct.store(
-                    DB,
-                    index=(0, tile_id),
-                    tile=accumulator_db.transpose().astype(DB.dtype),
-                    allow_tma=False,
-                )
-        TILE_DA_SIZE_M = 128
-        TILE_DA_SIZE_K = 256
-        NUM_DA_TILES = ct.cdiv(M, TILE_DA_SIZE_M) * ct.cdiv(K, TILE_DA_SIZE_K)
-        NUM_DA_K_TILES = ct.cdiv(K, TILE_DA_SIZE_K)
-        if ct.bid(1) == 1:
-            for tile_id in range(ct.bid(0), NUM_DA_TILES, ct.num_blocks(0)):
-                b_tile_idx = tile_id % NUM_DA_K_TILES
-                dd_tile_idx = tile_id // NUM_DA_K_TILES
-                accumulator_da = ct.full((TILE_DA_SIZE_M, TILE_DA_SIZE_K), 0.0, dtype=ct.float32)
-                a_tile = ct.load(
-                    A,
-                    index=(dd_tile_idx, b_tile_idx),
-                    shape=(TILE_DA_SIZE_M, TILE_DA_SIZE_K),
-                    padding_mode=zero_pad,
-                )
-                norm_tile = ct.load(
-                    NORM, index=(dd_tile_idx, 0), shape=(TILE_DA_SIZE_M, 1), padding_mode=zero_pad
-                )
-                dr_tile = ct.load(
-                    DR, index=(dd_tile_idx, 0), shape=(TILE_DA_SIZE_M, 1), padding_mode=zero_pad
-                )
-                accumulator_da = accumulator_da + _ct_rms_dnorm(
-                    a_tile.astype(ct.float32), norm_tile, dr_tile, K, eps
-                )
-                b_tile = ct.load(
-                    B,
-                    index=(0, b_tile_idx),
-                    shape=(TILE_N_SIZE, TILE_DA_SIZE_K),
-                    padding_mode=zero_pad,
-                )
-                dd_tile = ct.load(
-                    DD,
-                    index=(dd_tile_idx, 0),
-                    shape=(TILE_DA_SIZE_M, TILE_N_SIZE),
-                    padding_mode=zero_pad,
-                )
-                accumulator_da = ct.mma(
-                    dd_tile.astype(ct.tfloat32), b_tile.astype(ct.tfloat32), acc=accumulator_da
-                )
-                ct.store(DA, index=(dd_tile_idx, b_tile_idx), tile=accumulator_da.astype(DA.dtype))
-
     def _next_power_of_2(n: int) -> int:
         n -= 1
         n |= n >> 1
@@ -1750,126 +1581,6 @@ if _CUTILE_AVAILABLE:
 
     # Cache the best config across calls (keyed by M, N, K).
     _proj_rms_fwd_best_cfg: dict = {}
-
-    def _cutile_proj_rms_fwd(
-        x: Tensor, weight: Tensor, eps: float = 1e-6
-    ) -> Tuple[Tensor, Tensor, Tensor]:
-        M, K = x.shape
-        N = weight.shape[0]
-        TILE_N = _next_power_of_2(N)
-        dev = x.device
-        stream = torch.cuda.current_stream()
-
-        cache_key = (M, N, K)
-        cached = _proj_rms_fwd_best_cfg.get(cache_key)
-
-        if cached is not None or not _CUTILE_EXPERIMENTAL_AVAILABLE:
-            # Use cached best config, or fall back to default if no experimental.
-            if cached is not None:
-                tm, tn, tk, split_k = cached
-            else:
-                tm, tn, tk, split_k = _default_proj_rms_fwd_config(M, K, TILE_N)
-
-            proj = torch.empty(split_k * M, N, dtype=x.dtype, device=dev)
-            norm = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
-            # _ct_proj_rms_fwd_kernel keeps R in its signature; r is computed
-            # below from the reduced norm.
-            r = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
-
-            ct.launch(
-                stream,
-                (math.ceil(M / tm), split_k),
-                _ct_proj_rms_fwd_kernel,
-                (x, weight, proj, norm, r, M, N, K, eps, tm, tn, tk, split_k),
-            )
-            proj = proj.view(split_k, M, N).to(torch.float32).sum(dim=0).to(dtype=x.dtype)
-            norm = norm.view(split_k, M, 1).to(torch.float32).sum(dim=0).to(dtype=x.dtype)
-        else:
-            # Autotune on first call for this shape.
-            from types import SimpleNamespace
-
-            configs = [SimpleNamespace(**c) for c in _proj_rms_fwd_autotune_configs(N)]
-            # filter out configs with TILE_K > K or TILE_M > M
-            configs = [cfg for cfg in configs if cfg.TILE_K <= K and M % cfg.TILE_M == 0]
-            if len(configs) == 0:
-                tm, tn, tk, split_k = _default_proj_rms_fwd_config(M, K, TILE_N)
-                proj = torch.empty(split_k * M, N, dtype=x.dtype, device=dev)
-                norm = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
-                # Signature placeholder for the cuTile kernel; not read.
-                r = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
-                ct.launch(
-                    stream,
-                    (math.ceil(M / tm), split_k),
-                    _ct_proj_rms_fwd_kernel,
-                    (x, weight, proj, norm, r, M, N, K, eps, tm, tn, tk, split_k),
-                )
-                proj = proj.view(split_k, M, N).to(torch.float32).sum(dim=0).to(dtype=x.dtype)
-                norm = norm.view(split_k, M, 1).to(torch.float32).sum(dim=0).to(dtype=x.dtype)
-            else:
-                mx_split_k = max(cfg.SPLIT_K for cfg in configs)
-                proj = torch.empty(mx_split_k * M, N, dtype=x.dtype, device=dev)
-                norm = torch.empty(mx_split_k * M, 1, dtype=x.dtype, device=dev)
-                # Signature placeholder for autotune launches; not read.
-                r = torch.empty(mx_split_k * M, 1, dtype=x.dtype, device=dev)
-                tuned = ct_experimental.autotune_launch(
-                    stream,
-                    grid_fn=lambda cfg: (math.ceil(M / cfg.TILE_M), cfg.SPLIT_K),
-                    kernel=_ct_proj_rms_fwd_kernel,
-                    args_fn=lambda cfg: (
-                        x,
-                        weight,
-                        proj,
-                        norm,
-                        r,
-                        M,
-                        N,
-                        K,
-                        eps,
-                        cfg.TILE_M,
-                        cfg.TILE_N,
-                        cfg.TILE_K,
-                        cfg.SPLIT_K,
-                    ),
-                    search_space=configs,
-                )
-                best = tuned.tuned_config
-                _proj_rms_fwd_best_cfg[cache_key] = (
-                    best.TILE_M,
-                    best.TILE_N,
-                    best.TILE_K,
-                    best.SPLIT_K,
-                )
-                proj = torch.empty(best.SPLIT_K * M, N, dtype=x.dtype, device=dev)
-                norm = torch.empty(best.SPLIT_K * M, 1, dtype=x.dtype, device=dev)
-                # Signature placeholder for the cuTile kernel; not read.
-                r = torch.empty(best.SPLIT_K * M, 1, dtype=x.dtype, device=dev)
-                # Re-launch with best config for correct output.
-                ct.launch(
-                    stream,
-                    (math.ceil(M / best.TILE_M), best.SPLIT_K),
-                    _ct_proj_rms_fwd_kernel,
-                    (
-                        x,
-                        weight,
-                        proj,
-                        norm,
-                        r,
-                        M,
-                        N,
-                        K,
-                        eps,
-                        best.TILE_M,
-                        best.TILE_N,
-                        best.TILE_K,
-                        best.SPLIT_K,
-                    ),
-                )
-
-                proj = proj.view(best.SPLIT_K, M, N).to(torch.float32).sum(dim=0).to(dtype=x.dtype)
-                norm = norm.view(best.SPLIT_K, M, 1).to(torch.float32).sum(dim=0).to(dtype=x.dtype)
-        norm = torch.sqrt(norm)
-        r = 1.0 / (norm / math.sqrt(K) + eps)
-        return proj, norm, r
 
     # -- Reduce + compute_h launcher ------------------------------------------
 
@@ -1913,6 +1624,7 @@ if _CUTILE_AVAILABLE:
         _proj_tile_m: int,
         tile_n: int,
         split_k: int,
+        out_dtype: torch.dtype,
     ) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor]:
         """Launch reduce split-K + compute_h kernel.
 
@@ -1928,10 +1640,13 @@ if _CUTILE_AVAILABLE:
 
         bias_2d = bias.unsqueeze(0).contiguous()  # [1, N]
 
-        h_pre_out = torch.empty(M, n, dtype=proj_acc.dtype, device=dev)
-        h_post_out = torch.empty(M, n, dtype=proj_acc.dtype, device=dev)
-        h_res_out = torch.empty(M, N - 2 * n, dtype=proj_acc.dtype, device=dev)
-        r_out = torch.empty(M, 1, dtype=proj_acc.dtype, device=dev)
+        # Mapping outputs follow the promoted input/parameter dtype (fp32 for
+        # mHC's keep_in_fp32 parameters); the reduced projection is kept in the
+        # fp32 accumulator dtype because the backward consumes it.
+        h_pre_out = torch.empty(M, n, dtype=out_dtype, device=dev)
+        h_post_out = torch.empty(M, n, dtype=out_dtype, device=dev)
+        h_res_out = torch.empty(M, N - 2 * n, dtype=out_dtype, device=dev)
+        r_out = torch.empty(M, 1, dtype=out_dtype, device=dev)
         proj_out = torch.empty(M, N, dtype=proj_acc.dtype, device=dev)
 
         default_tm = _default_reduce_compute_h_tile_m(M)
@@ -2013,6 +1728,11 @@ if _CUTILE_AVAILABLE:
         N = weight.shape[0]
         TILE_N = _next_power_of_2(N)
         dev = x.device
+        # The mHC mapping is a keep_in_fp32 computation (see
+        # HyperConnectionModule._projection_and_get_norm): keep the split-K
+        # partials and the mapping outputs in fp32 even when the activations
+        # arrive in bf16, otherwise this path is ~170x less accurate than native.
+        acc_dtype = torch.float32
         stream = torch.cuda.current_stream()
 
         cache_key = (M, N, K)
@@ -2024,11 +1744,11 @@ if _CUTILE_AVAILABLE:
             else:
                 tm, tn, tk, split_k = _default_proj_rms_fwd_config(M, K, TILE_N)
 
-            proj_acc = torch.empty(split_k * M, N, dtype=x.dtype, device=dev)
-            norm_acc = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
+            proj_acc = torch.empty(split_k * M, N, dtype=acc_dtype, device=dev)
+            norm_acc = torch.empty(split_k * M, 1, dtype=acc_dtype, device=dev)
             # _ct_proj_rms_fwd_kernel keeps R in its signature; reduce_compute_h
             # computes r from norm_acc.
-            r_placeholder = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
+            r_placeholder = torch.empty(split_k * M, 1, dtype=acc_dtype, device=dev)
 
             ct.launch(
                 stream,
@@ -2043,10 +1763,10 @@ if _CUTILE_AVAILABLE:
             configs = [cfg for cfg in configs if cfg.TILE_K <= K and M % cfg.TILE_M == 0]
             if len(configs) == 0:
                 tm, tn, tk, split_k = _default_proj_rms_fwd_config(M, K, TILE_N)
-                proj_acc = torch.empty(split_k * M, N, dtype=x.dtype, device=dev)
-                norm_acc = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
+                proj_acc = torch.empty(split_k * M, N, dtype=acc_dtype, device=dev)
+                norm_acc = torch.empty(split_k * M, 1, dtype=acc_dtype, device=dev)
                 # Signature placeholder for the cuTile kernel; not read.
-                r_placeholder = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
+                r_placeholder = torch.empty(split_k * M, 1, dtype=acc_dtype, device=dev)
                 ct.launch(
                     stream,
                     (math.ceil(M / tm), split_k),
@@ -2069,10 +1789,10 @@ if _CUTILE_AVAILABLE:
                 )
             else:
                 mx_split_k = max(cfg.SPLIT_K for cfg in configs)
-                proj_acc = torch.empty(mx_split_k * M, N, dtype=x.dtype, device=dev)
-                norm_acc = torch.empty(mx_split_k * M, 1, dtype=x.dtype, device=dev)
+                proj_acc = torch.empty(mx_split_k * M, N, dtype=acc_dtype, device=dev)
+                norm_acc = torch.empty(mx_split_k * M, 1, dtype=acc_dtype, device=dev)
                 # Signature placeholder for autotune launches; not read.
-                r_placeholder = torch.empty(mx_split_k * M, 1, dtype=x.dtype, device=dev)
+                r_placeholder = torch.empty(mx_split_k * M, 1, dtype=acc_dtype, device=dev)
                 tuned = ct_experimental.autotune_launch(
                     stream,
                     grid_fn=lambda cfg: (math.ceil(M / cfg.TILE_M), cfg.SPLIT_K),
@@ -2103,10 +1823,10 @@ if _CUTILE_AVAILABLE:
                 )
                 tm, tn, tk, split_k = best.TILE_M, best.TILE_N, best.TILE_K, best.SPLIT_K
 
-                proj_acc = torch.empty(split_k * M, N, dtype=x.dtype, device=dev)
-                norm_acc = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
+                proj_acc = torch.empty(split_k * M, N, dtype=acc_dtype, device=dev)
+                norm_acc = torch.empty(split_k * M, 1, dtype=acc_dtype, device=dev)
                 # Signature placeholder for the cuTile kernel; not read.
-                r_placeholder = torch.empty(split_k * M, 1, dtype=x.dtype, device=dev)
+                r_placeholder = torch.empty(split_k * M, 1, dtype=acc_dtype, device=dev)
                 ct.launch(
                     stream,
                     (math.ceil(M / tm), split_k),
@@ -2145,114 +1865,9 @@ if _CUTILE_AVAILABLE:
             tm,
             TILE_N,
             split_k,
+            torch.promote_types(x.dtype, weight.dtype),
         )
         return h_pre, h_post, h_res, r, proj_reduced
-
-    def _proj_rms_bwd_autotune_configs(N):
-        """Generate autotune search space for proj_rms backward kernel (K >= 8192 path)."""
-        TILE_N = _next_power_of_2(N)
-        tile_ms = (32, 64, 128)
-        tile_ks = (32, 64, 128, 256)
-        for tile_m in tile_ms:
-            for tile_k in tile_ks:
-                yield {"TILE_SIZE_M": tile_m, "TILE_SIZE_N": TILE_N, "TILE_SIZE_K": tile_k}
-
-    _proj_rms_bwd_best_cfg: dict = {}
-
-    def _cutile_proj_rms_bwd(
-        grad_proj: Tensor,
-        grad_r: Tensor,
-        x: Tensor,
-        weight: Tensor,
-        norm: Tensor,
-        eps: float = 1e-6,
-    ) -> Tuple[Tensor, Tensor]:
-        M, K = x.shape
-        N = weight.shape[0]
-        da = torch.empty_like(x)
-        db = torch.empty_like(weight)
-        TILE_SIZE_N = _next_power_of_2(N)
-        assert TILE_SIZE_N <= 256, f"TILE_SIZE_N too large: {TILE_SIZE_N}"
-        stream = torch.cuda.current_stream()
-
-        if K >= 8192:
-            cache_key = (M, N, K)
-            cached = _proj_rms_bwd_best_cfg.get(cache_key)
-
-            if cached is not None or not _CUTILE_EXPERIMENTAL_AVAILABLE:
-                if cached is not None:
-                    tm, tn, tk = cached
-                else:
-                    tm, tn, tk = 128, TILE_SIZE_N, 128
-                ct.launch(
-                    stream,
-                    (math.ceil(K / tk), 1),
-                    _ct_proj_rms_bwd_kernel,
-                    (x, weight, norm, grad_proj, grad_r, da, db, M, N, K, eps, tm, tn, tk),
-                )
-            else:
-                from types import SimpleNamespace
-
-                configs = [SimpleNamespace(**c) for c in _proj_rms_bwd_autotune_configs(N)]
-                tuned = ct_experimental.autotune_launch(
-                    stream,
-                    grid_fn=lambda cfg: (math.ceil(K / cfg.TILE_SIZE_K), 1),
-                    kernel=_ct_proj_rms_bwd_kernel,
-                    args_fn=lambda cfg: (
-                        x,
-                        weight,
-                        norm,
-                        grad_proj,
-                        grad_r,
-                        da,
-                        db,
-                        M,
-                        N,
-                        K,
-                        eps,
-                        cfg.TILE_SIZE_M,
-                        cfg.TILE_SIZE_N,
-                        cfg.TILE_SIZE_K,
-                    ),
-                    search_space=configs,
-                )
-                best = tuned.tuned_config
-                _proj_rms_bwd_best_cfg[cache_key] = (
-                    best.TILE_SIZE_M,
-                    best.TILE_SIZE_N,
-                    best.TILE_SIZE_K,
-                )
-                ct.launch(
-                    stream,
-                    (math.ceil(K / best.TILE_SIZE_K), 1),
-                    _ct_proj_rms_bwd_kernel,
-                    (
-                        x,
-                        weight,
-                        norm,
-                        grad_proj,
-                        grad_r,
-                        da,
-                        db,
-                        M,
-                        N,
-                        K,
-                        eps,
-                        best.TILE_SIZE_M,
-                        best.TILE_SIZE_N,
-                        best.TILE_SIZE_K,
-                    ),
-                )
-        else:
-            num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count
-            grid = (num_sms, 2, 1)
-            ct.launch(
-                stream,
-                grid,
-                _ct_proj_rms_bwd_small_k_kernel,
-                (x, weight, norm, grad_proj, grad_r, da, db, M, N, K, eps, TILE_SIZE_N),
-            )
-        return da, db
 
     # -- Fused compute_h + proj_rms backward kernels ----------------------------
 
@@ -2968,68 +2583,65 @@ from megatron.core.transformer.hyper_connection import (
     native_fused_add_3,
     native_h_aggregate,
     native_h_post_bda,
-    native_proj_rms,
     native_sinkhorn,
 )
 
-_BACKEND_INFO_LOGGED = False
+_BACKEND_INFO_LOGGED: set[str] = set()
 
 
-def _select_triton_cutile_native(triton_impl) -> str:
+def _select_triton_cutile_native(triton_impl, backend: MHCBackend) -> str:
     if triton_impl is not None:
         return "triton"
-    if is_cutile_available():
+    if _backend_uses_cutile(backend):
         return "cutile"
     return "native"
 
 
-def _mhc_backend_status() -> Tuple[str, bool]:
+def _mhc_backend_status(backend: MHCBackend = "auto") -> Tuple[str, bool]:
     """Return backend description and whether every backend is native."""
-    sinkhorn = _select_triton_cutile_native(_get_triton_sinkhorn())
-    h_aggregate_fwd = _select_triton_cutile_native(_get_triton_h_aggregate_fwd())
-    h_aggregate_bwd = "cutile" if is_cutile_available() else "native"
-    h_post_bda_fwd = _select_triton_cutile_native(_get_triton_h_post_bda_fwd())
-    h_post_bda_bwd = _select_triton_cutile_native(_get_triton_h_post_bda_bwd())
-    proj_rms = "cutile" if is_cutile_available() else "native"
+    _validate_mhc_backend(backend)
+    sinkhorn = _select_triton_cutile_native(_get_triton_sinkhorn(backend), backend)
+    h_aggregate_fwd = _select_triton_cutile_native(_get_triton_h_aggregate_fwd(backend), backend)
+    h_aggregate_bwd = "cutile" if _backend_uses_cutile(backend) else "native"
+    h_post_bda_fwd = _select_triton_cutile_native(_get_triton_h_post_bda_fwd(backend), backend)
+    h_post_bda_bwd = _select_triton_cutile_native(_get_triton_h_post_bda_bwd(backend), backend)
+    proj_rms_compute_h = "cutile" if _backend_uses_cutile(backend) else "native"
     selected = (
         sinkhorn,
         h_aggregate_fwd,
         h_aggregate_bwd,
         h_post_bda_fwd,
         h_post_bda_bwd,
-        proj_rms,
+        proj_rms_compute_h,
     )
     message = (
-        f"MHC_FORCE_BACKEND={_MHC_FORCED_BACKEND}; "
+        f"policy={backend}; "
         f"sinkhorn={sinkhorn}; "
         f"h_aggregate=fwd:{h_aggregate_fwd},bwd:{h_aggregate_bwd}; "
         f"h_post_bda=fwd:{h_post_bda_fwd},bwd:{h_post_bda_bwd}; "
-        f"proj_rms={proj_rms}; "
-        f"proj_rms_compute_h={proj_rms}"
+        f"proj_rms_compute_h={proj_rms_compute_h}"
     )
     return message, all(backend == "native" for backend in selected)
 
 
-def _mhc_backend_selection() -> str:
+def _mhc_backend_selection(backend: MHCBackend = "auto") -> str:
     """Return a concise description of the selected mHC fused backends."""
-    message, _ = _mhc_backend_status()
+    message, _ = _mhc_backend_status(backend)
     return message
 
 
-def log_fused_mhc_backend_once() -> None:
-    """Log the fused mHC backend selection once per process."""
-    _raise_mhc_backend_validation_error()
-    global _BACKEND_INFO_LOGGED
-    if _BACKEND_INFO_LOGGED:
+def log_fused_mhc_backend_once(backend: MHCBackend = "auto") -> None:
+    """Log each configured fused mHC backend policy once per process."""
+    if backend in _BACKEND_INFO_LOGGED:
         return
-    _BACKEND_INFO_LOGGED = True
-    backend_selection, all_native = _mhc_backend_status()
+    backend_selection, all_native = _mhc_backend_status(backend)
+    _BACKEND_INFO_LOGGED.add(backend)
     log_single_rank(
         logger,
-        logging.WARNING if all_native else logging.INFO,
+        logging.WARNING if all_native and backend == "auto" else logging.INFO,
         f"[mHC] fused backend selection: {backend_selection}",
     )
-    if all_native and safe_get_rank() == 0:
+    if all_native and backend == "auto" and safe_get_rank() == 0:
         warnings.warn(
             "[mHC] No accelerated mHC backend is available; falling back to native torch "
             "implementations. The fallback is functionally equivalent, but may not provide "
@@ -3044,26 +2656,26 @@ def fused_add_3(a: Tensor, b: Tensor, c: Tensor) -> Tensor:
     return native_fused_add_3(a, b, c)
 
 
-def _get_triton_sinkhorn():
-    if not _TRITON_AVAILABLE:
+def _get_triton_sinkhorn(backend: MHCBackend = "auto"):
+    if not _backend_uses_triton(backend):
         return None
     return _TRITON_IMPLS["sinkhorn"]
 
 
-def _get_triton_h_aggregate_fwd():
-    if not _TRITON_AVAILABLE:
+def _get_triton_h_aggregate_fwd(backend: MHCBackend = "auto"):
+    if not _backend_uses_triton(backend):
         return None
     return _TRITON_IMPLS["h_aggregate_fwd"]
 
 
-def _get_triton_h_post_bda_fwd():
-    if not _TRITON_AVAILABLE:
+def _get_triton_h_post_bda_fwd(backend: MHCBackend = "auto"):
+    if not _backend_uses_triton(backend):
         return None
     return _TRITON_IMPLS["h_post_bda_fwd"]
 
 
-def _get_triton_h_post_bda_bwd():
-    if not _TRITON_AVAILABLE:
+def _get_triton_h_post_bda_bwd(backend: MHCBackend = "auto"):
+    if not _backend_uses_triton(backend):
         return None
     return _TRITON_IMPLS["h_post_bda_bwd"]
 
@@ -3071,7 +2683,8 @@ def _get_triton_h_post_bda_bwd():
 def _torch_h_aggregate_bwd(grad_output: Tensor, x: Tensor, h_pre: Tensor) -> Tuple[Tensor, Tensor]:
     grad_output_expanded = grad_output.unsqueeze(2)
     grad_x = grad_output_expanded * h_pre.unsqueeze(-1)
-    grad_h = torch.sum(grad_output_expanded * x, dim=-1)
+    # Multiply in FP32 before reducing; BF16 products lose precision before sum.
+    grad_h = torch.sum(grad_output_expanded.float() * x.float(), dim=-1)
     return grad_x.to(dtype=x.dtype), grad_h.to(dtype=h_pre.dtype)
 
 
@@ -3119,6 +2732,11 @@ def _torch_proj_rms_compute_h(
     eps: float,
     compute_h_eps: float = 1e-6,
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    # compute_mappings() hands us activations in the activation dtype while the
+    # mapping parameters are keep_in_fp32, so matmul would reject the pair.
+    # Compute in the wider of the two, matching the unfused path's fp32 upcast
+    # without letting a lower-precision parameter downcast the activations.
+    x = x.to(torch.promote_types(x.dtype, weight.dtype))
     proj = torch.matmul(x, weight.t())
     r = x.norm(dim=-1, keepdim=True) / math.sqrt(x.shape[-1])
     alpha = torch.cat(
@@ -3168,24 +2786,6 @@ if _CUTILE_AVAILABLE:
             """Run cuTile h_aggregate backward."""
             x, h_pre = ctx.saved_tensors
             return _cutile_h_aggregate_bwd(grad_output, x, h_pre)
-
-    class CutileProjRms(torch.autograd.Function):
-        """cuTile projection + RMS normalization."""
-
-        @staticmethod
-        def forward(ctx, x: Tensor, weight: Tensor, eps: float = 1e-6):
-            """Run cuTile projection plus RMS normalization forward."""
-            proj, norm, r = _cutile_proj_rms_fwd(x, weight, eps)
-            ctx.save_for_backward(x, weight, norm)
-            ctx.eps = eps
-            return proj, r
-
-        @staticmethod
-        def backward(ctx, grad_proj, grad_r):
-            """Run cuTile projection plus RMS normalization backward."""
-            x, weight, norm = ctx.saved_tensors
-            grad_x, grad_weight = _cutile_proj_rms_bwd(grad_proj, grad_r, x, weight, norm, ctx.eps)
-            return grad_x, grad_weight, None
 
     class CutileProjRmsComputeH(torch.autograd.Function):
         """cuTile projection + RMS norm + compute_h activations."""
@@ -3269,32 +2869,35 @@ if _CUTILE_AVAILABLE:
 
 
 class FusedHAggregate(torch.autograd.Function):
-    """H_aggregate with Triton/cuTile/torch forward and cuTile/torch backward."""
+    """H_aggregate dispatched according to the configured backend policy."""
 
     @staticmethod
-    def forward(ctx, x: Tensor, h_pre: Tensor):
+    def forward(ctx, x: Tensor, h_pre: Tensor, backend: MHCBackend):
         """Run h_aggregate forward using the best available backend."""
-        triton_fwd = _get_triton_h_aggregate_fwd()
+        triton_fwd = _get_triton_h_aggregate_fwd(backend)
         if triton_fwd is not None:
             output = triton_fwd(x, h_pre)
-        elif is_cutile_available():
+        elif _backend_uses_cutile(backend):
             output = _cutile_h_aggregate_fwd(x, h_pre)
         else:
             output = native_h_aggregate(x, h_pre)
         ctx.save_for_backward(x, h_pre)
+        ctx.backend = backend
         return output
 
     @staticmethod
     def backward(ctx, grad_output):
         """Run h_aggregate backward using the best available backend."""
         x, h_pre = ctx.saved_tensors
-        if is_cutile_available():
-            return _cutile_h_aggregate_bwd(grad_output, x, h_pre)
-        return _torch_h_aggregate_bwd(grad_output, x, h_pre)
+        if _backend_uses_cutile(ctx.backend):
+            grad_x, grad_h_pre = _cutile_h_aggregate_bwd(grad_output, x, h_pre)
+        else:
+            grad_x, grad_h_pre = _torch_h_aggregate_bwd(grad_output, x, h_pre)
+        return grad_x, grad_h_pre, None
 
 
 class FusedHPostBDA(torch.autograd.Function):
-    """H_post_bda with Triton/cuTile/torch forward and backward."""
+    """H_post_bda dispatched according to the configured backend policy."""
 
     @staticmethod
     def forward(
@@ -3304,12 +2907,13 @@ class FusedHPostBDA(torch.autograd.Function):
         h_post: Tensor,
         x: Tensor,
         bias: Optional[Tensor],
+        backend: MHCBackend,
     ):
         """Run h_post_bda forward using the best available backend."""
-        triton_fwd = _get_triton_h_post_bda_fwd()
+        triton_fwd = _get_triton_h_post_bda_fwd(backend)
         if triton_fwd is not None:
             output = triton_fwd(h_res, original_residual, h_post, x, bias)
-        elif is_cutile_available():
+        elif _backend_uses_cutile(backend):
             output = _cutile_h_post_bda_fwd(h_res, original_residual, h_post, x, bias)
         else:
             output = native_h_post_bda(h_res, original_residual, h_post, x, bias)
@@ -3319,6 +2923,7 @@ class FusedHPostBDA(torch.autograd.Function):
         else:
             ctx.save_for_backward(h_res, original_residual, h_post, x)
             ctx.has_bias = False
+        ctx.backend = backend
         return output
 
     @staticmethod
@@ -3330,49 +2935,51 @@ class FusedHPostBDA(torch.autograd.Function):
             h_res, orig_res, h_post, x = ctx.saved_tensors
             bias = None
 
-        triton_bwd = _get_triton_h_post_bda_bwd()
+        triton_bwd = _get_triton_h_post_bda_bwd(ctx.backend)
         if triton_bwd is not None:
-            return triton_bwd(grad_output, h_res, orig_res, h_post, x, bias)
-        if is_cutile_available():
-            return _cutile_h_post_bda_bwd(grad_output, h_res, orig_res, h_post, x, bias)
-        return _torch_h_post_bda_bwd(grad_output, h_res, orig_res, h_post, x, bias)
+            grads = triton_bwd(grad_output, h_res, orig_res, h_post, x, bias)
+        elif _backend_uses_cutile(ctx.backend):
+            grads = _cutile_h_post_bda_bwd(grad_output, h_res, orig_res, h_post, x, bias)
+        else:
+            grads = _torch_h_post_bda_bwd(grad_output, h_res, orig_res, h_post, x, bias)
+        return (*grads, None)
 
 
-def fused_sinkhorn(input_logits: Tensor, num_iterations: int, eps: float = 1e-6) -> Tensor:
-    """Project logits to a doubly stochastic matrix using Triton, cuTile, then torch."""
-    _raise_mhc_backend_validation_error()
-    triton_sinkhorn = _get_triton_sinkhorn()
+def fused_sinkhorn(
+    input_logits: Tensor, num_iterations: int, eps: float = 1e-6, *, backend: MHCBackend = "auto"
+) -> Tensor:
+    """Project logits according to the configured backend policy."""
+    _validate_mhc_backend(backend)
+    triton_sinkhorn = _get_triton_sinkhorn(backend)
     if triton_sinkhorn is not None:
         return triton_sinkhorn(input_logits, num_iterations, eps)
-    if is_cutile_available():
+    if _backend_uses_cutile(backend):
         return CutileSinkhornKnopp.apply(input_logits, num_iterations, eps)
     return native_sinkhorn(input_logits, num_iterations, eps)
 
 
-def fused_h_aggregate(x: Tensor, h_pre: Tensor) -> Tensor:
-    """Weighted n-stream to 1-stream aggregation using Triton/cuTile/torch."""
-    _raise_mhc_backend_validation_error()
-    if _TRITON_AVAILABLE or is_cutile_available():
-        return FusedHAggregate.apply(x, h_pre)
+def fused_h_aggregate(x: Tensor, h_pre: Tensor, *, backend: MHCBackend = "auto") -> Tensor:
+    """Aggregate n streams into one according to the configured backend policy."""
+    _validate_mhc_backend(backend)
+    if _backend_uses_triton(backend) or _backend_uses_cutile(backend):
+        return FusedHAggregate.apply(x, h_pre, backend)
     return native_h_aggregate(x, h_pre)
 
 
 def fused_h_post_bda(
-    h_res: Tensor, original_residual: Tensor, h_post: Tensor, x: Tensor, bias: Optional[Tensor]
+    h_res: Tensor,
+    original_residual: Tensor,
+    h_post: Tensor,
+    x: Tensor,
+    bias: Optional[Tensor],
+    *,
+    backend: MHCBackend = "auto",
 ) -> Tensor:
-    """Fused H_res.T @ residual + H_post * (x + bias)."""
-    _raise_mhc_backend_validation_error()
-    if _TRITON_AVAILABLE or is_cutile_available():
-        return FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias)
+    """Compute H_res.T @ residual + H_post * (x + bias) using the backend policy."""
+    _validate_mhc_backend(backend)
+    if _backend_uses_triton(backend) or _backend_uses_cutile(backend):
+        return FusedHPostBDA.apply(h_res, original_residual, h_post, x, bias, backend)
     return native_h_post_bda(h_res, original_residual, h_post, x, bias)
-
-
-def fused_proj_rms(x: Tensor, weight: Tensor, eps: float = 1e-6) -> Tuple[Tensor, Tensor]:
-    """Projection + RMS normalization using cuTile, then torch."""
-    _raise_mhc_backend_validation_error()
-    if is_cutile_available():
-        return CutileProjRms.apply(x, weight, eps)
-    return native_proj_rms(x, weight, eps)
 
 
 def fused_proj_rms_compute_h(
@@ -3385,10 +2992,12 @@ def fused_proj_rms_compute_h(
     n: int,
     eps: float = 1e-6,
     compute_h_eps: float = 1e-6,
+    *,
+    backend: MHCBackend = "auto",
 ) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
-    """Projection + RMS norm + compute_h split outputs using cuTile, then torch."""
-    _raise_mhc_backend_validation_error()
-    if is_cutile_available():
+    """Compute projection, RMS norm, and H outputs using the backend policy."""
+    _validate_mhc_backend(backend)
+    if _backend_uses_cutile(backend):
         return CutileProjRmsComputeH.apply(
             x, weight, alpha_pre, alpha_post, alpha_res, bias, n, eps, compute_h_eps
         )

@@ -2,6 +2,9 @@ import pytest
 
 from tests.functional_tests.python_test_utils import common
 
+# FlagScale: Functional-test CLI options are registered centrally in tests/conftest.py
+# so pytest discovers them during startup. Do not register them again here.
+
 
 @pytest.fixture
 def compare_approximate_results(request) -> bool:

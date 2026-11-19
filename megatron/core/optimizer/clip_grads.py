@@ -51,7 +51,7 @@ from ..tensor_parallel import param_is_not_tensor_parallel_duplicate
 from ..transformer.module import param_is_not_shared
 from ..utils import get_data_parallel_group_if_dtensor, to_local_if_dtensor
 
-########## FlagScale Begin ##########
+######## FlagScale Begin ########
 from megatron.plugin.decorators import overridable  # isort: skip
 from megatron.plugin.platform import get_platform  # isort: skip
 
@@ -67,10 +67,10 @@ except ImportError:
         return cur_platform.device_name()
 
 
-########## FlagScale End ##########
+######## FlagScale End ########
 
 
-@overridable  # FlagScale Add
+@overridable  # FlagScale Modify
 def get_grad_norm_fp32(
     grads_for_norm: Union[List[torch.Tensor], torch.Tensor],
     norm_type: Union[int, float] = 2,
@@ -78,18 +78,18 @@ def get_grad_norm_fp32(
 ) -> float:
     """Calculate the p-norm of gradients in FP32 precision.
 
-    This function is adapted from `torch.nn.utils.clip_grad.clip_grad_norm_` 
-    and extends it with functionality to handle model-parallel parameters. 
-    It ensures that the norm is correctly computed and reduced across 
-    the specified process group (typically the model-parallel group for 
+    This function is adapted from `torch.nn.utils.clip_grad.clip_grad_norm_`
+    and extends it with functionality to handle model-parallel parameters.
+    It ensures that the norm is correctly computed and reduced across
+    the specified process group (typically the model-parallel group for
     non-distributed optimizers or the entire world for distributed optimizers).
 
     Args:
-        grads_for_norm (Union[List[torch.Tensor], torch.Tensor]): An iterable 
+        grads_for_norm (Union[List[torch.Tensor], torch.Tensor]): An iterable
             of Tensors or a single Tensor used to calculate the gradient norm.
-        norm_type (Union[int, float]): The type of the p-norm to use. Can be 
+        norm_type (Union[int, float]): The type of the p-norm to use. Can be
             'inf' for infinity norm. Defaults to 2.
-        grad_stats_parallel_group (ProcessGroup, optional): The process group 
+        grad_stats_parallel_group (ProcessGroup, optional): The process group
             used for reducing gradient statistics (e.g., norms and zero counts).
 
     Returns:
@@ -112,7 +112,11 @@ def get_grad_norm_fp32(
     # Calculate norm.
     if norm_type == inf:
         total_norm = max(grad.abs().max() for grad in grads_for_norm)
-        total_norm_cuda = torch.tensor([float(total_norm)], dtype=torch.float, device='cuda')
+        total_norm_cuda = torch.tensor(
+            [float(total_norm)],
+            dtype=torch.float,
+            device=cur_platform.device(cur_platform.current_device()),  # FlagScale Modify
+        )
         # Take max across all data-parallel GPUs if using FSDP and then all model-parallel GPUs.
         if data_parallel_group:
             torch.distributed.all_reduce(
@@ -125,7 +129,11 @@ def get_grad_norm_fp32(
 
     else:
         if norm_type == 2.0:
-            dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
+            dummy_overflow_buf = torch.zeros(
+                1,
+                dtype=torch.int,
+                device=cur_platform.device(cur_platform.current_device()),  # FlagScale Modify
+            )
             # Use apex's multi-tensor applier for efficiency reasons.
             # Multi-tensor applier takes a function and a list of list
             # and performs the operation on that list all in one kernel.
@@ -137,7 +145,11 @@ def get_grad_norm_fp32(
                     False,  # no per-parameter norm
                 )
             else:
-                grad_norm = torch.zeros(1, dtype=torch.float, device='cuda')
+                grad_norm = torch.zeros(
+                    1,
+                    dtype=torch.float,
+                    device=cur_platform.device(cur_platform.current_device()),  # FlagScale Modify
+                )
             # Since we will be summing across data parallel groups,
             # we need the pow(norm-type).
             total_norm = grad_norm**norm_type
@@ -174,13 +186,13 @@ def clip_grad_by_total_norm_fp32(
     Note that the gradients are modified in-place.
 
     Args:
-        parameters (Union[List[torch.Tensor], torch.Tensor]): An iterable of 
+        parameters (Union[List[torch.Tensor], torch.Tensor]): An iterable of
             Tensors or a single Tensor that will have gradients normalized.
-        max_norm (Union[int, float]): The maximum permissible total norm 
+        max_norm (Union[int, float]): The maximum permissible total norm
             of the gradients.
         total_norm (float): The current total norm of the gradients.
-        use_decoupled_grad (bool, optional): Whether to read from the 
-            '.decoupled_grad' attribute instead of the standard '.grad'. 
+        use_decoupled_grad (bool, optional): Whether to read from the
+            '.decoupled_grad' attribute instead of the standard '.grad'.
             Defaults to False.
     """
     # Grads.
@@ -194,13 +206,23 @@ def clip_grad_by_total_norm_fp32(
                 grads.append(to_local_if_dtensor(param.decoupled_grad).detach())
         else:
             if param.grad is not None:
-                assert param.grad.type() == 'torch.cuda.FloatTensor'
+                try:
+                    assert param.grad.type() == 'torch.cuda.FloatTensor'
+                except AssertionError:
+                    assert (
+                        param.grad.device.type == cur_platform.device_name()
+                        and param.grad.dtype == torch.float32
+                    )
                 params.append(param)
                 grads.append(to_local_if_dtensor(param.grad).detach())
 
     # Scale.
     clip_coeff = max_norm / (total_norm + 1.0e-6)
-    dummy_overflow_buf = torch.zeros(1, dtype=torch.int, device='cuda')
+    dummy_overflow_buf = torch.zeros(
+        1,
+        dtype=torch.int,
+        device=cur_platform.device(cur_platform.current_device()),  # FlagScale Modify
+    )
     if isinstance(clip_coeff, torch.Tensor):
         clip_coeff.clamp_max_(1.0)
         assert (
@@ -223,19 +245,19 @@ def count_zeros_fp32(
 ) -> float:
     """Counts the number of zero values in the gradients of the given parameters.
 
-    The count is performed in FP32. This method filters parameters to ensure 
-    gradients are not double-counted by checking if the gradient is not None, 
-    the parameter is not shared, and the parameter is not a replica due 
-    to tensor model parallelism. It also handles parameters managed by 
+    The count is performed in FP32. This method filters parameters to ensure
+    gradients are not double-counted by checking if the gradient is not None,
+    the parameter is not shared, and the parameter is not a replica due
+    to tensor model parallelism. It also handles parameters managed by
     Megatron FSDP specifically.
 
     Args:
-        parameters (Union[List[torch.Tensor], torch.Tensor]): An iterable of 
+        parameters (Union[List[torch.Tensor], torch.Tensor]): An iterable of
             Tensors or a single Tensor whose gradients will be checked for zeros.
-        grad_stats_parallel_group (ProcessGroup): The process group used for 
+        grad_stats_parallel_group (ProcessGroup): The process group used for
             reducing the zero count across distributed ranks.
-        use_decoupled_grad (bool, optional): If True, reads from the 
-            '.decoupled_grad' attribute instead of the standard '.grad'. 
+        use_decoupled_grad (bool, optional): If True, reads from the
+            '.decoupled_grad' attribute instead of the standard '.grad'.
             Defaults to False.
 
     Returns:
@@ -251,7 +273,7 @@ def count_zeros_fp32(
     #   - should not be a replica due to tensor model parallelism
     total_num_zeros = torch.zeros(
         1, dtype=torch.int64, device=cur_platform.device_name()
-    )  # FlagScale Add
+    )  # FlagScale Modify
     data_parallel_group = None
     use_megatron_fsdp = False
     for param in parameters:
@@ -286,7 +308,7 @@ def count_zeros_fp32(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=data_parallel_group
         )
     # Sum across all model-parallel GPUs.
-    #### FlagScale Begin ####
+    ######## FlagScale Begin ########
     comm_device = get_device_type_for_comm(grad_stats_parallel_group)
     if comm_device == "cpu":
         total_num_zeros = total_num_zeros.cpu()
@@ -298,7 +320,7 @@ def count_zeros_fp32(
             torch.distributed.all_reduce(
                 total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=group
             )
-    #### FlagScale End ####
+    ######## FlagScale End ########
     else:
         torch.distributed.all_reduce(
             total_num_zeros, op=torch.distributed.ReduceOp.SUM, group=grad_stats_parallel_group

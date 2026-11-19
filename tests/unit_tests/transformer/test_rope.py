@@ -4,6 +4,10 @@ import pytest
 import torch
 
 from megatron.core.models.common.embeddings import apply_rotary_pos_emb
+from megatron.core.models.common.embeddings.rope_utils import (
+    _apply_rotary_pos_emb_bshd,
+    _apply_rotary_pos_emb_thd,
+)
 from megatron.core.models.common.embeddings.rotary_pos_embedding import (
     MultimodalRotaryEmbedding,
     RotaryEmbedding,
@@ -19,6 +23,41 @@ except ImportError:
     HAVE_FUSED_QKV_ROPE = False
 
 from tests.unit_tests.test_utilities import Utils
+
+
+@pytest.mark.parametrize('table_length', [8, 16])
+@pytest.mark.parametrize('max_seqlen', [None, 4])
+def test_thd_max_seqlen_preserves_frequency_layout(table_length, max_seqlen):
+    """A packed table and a longer ordinary cache retain their distinct layouts."""
+
+    class Group:
+        def size(self):
+            return 1
+
+        def rank(self):
+            return 0
+
+    cu_seqlens = torch.tensor([0, 4, 8], dtype=torch.int32, device='cuda')
+    freqs = torch.arange(table_length, device='cuda', dtype=torch.float32).view(-1, 1, 1, 1)
+    freqs = freqs.expand(-1, 1, 1, 4)
+    original = torch.randn(8, 1, 4, device='cuda', requires_grad=True)
+    actual_input = original.detach().clone().requires_grad_()
+    second_start = 4 if table_length == 8 else 0
+    expected = torch.cat(
+        [
+            _apply_rotary_pos_emb_bshd(original[:4].unsqueeze(1), freqs[:4]),
+            _apply_rotary_pos_emb_bshd(
+                original[4:].unsqueeze(1), freqs[second_start : second_start + 4]
+            ),
+        ]
+    ).squeeze(1)
+    actual = _apply_rotary_pos_emb_thd(
+        actual_input, cu_seqlens, freqs, cp_group=Group(), max_seqlen=max_seqlen
+    )
+    torch.testing.assert_close(actual, expected)
+    expected.sum().backward()
+    actual.sum().backward()
+    torch.testing.assert_close(actual_input.grad, original.grad)
 
 
 class TestMultimodalRotaryEmbedding:

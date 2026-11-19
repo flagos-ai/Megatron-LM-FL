@@ -7,11 +7,11 @@ from typing import Dict
 
 import torch
 
-# FlagScale Begin
+######## FlagScale Begin ########
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
-# FlagScale End
+######## FlagScale End ########
 
 
 class MegatronGradScaler(ABC):
@@ -20,33 +20,39 @@ class MegatronGradScaler(ABC):
     Args:
         initial_scale (float): The initial value for the loss scale.
     """
+
     def __init__(self, initial_scale: float):
         """Initialize scale value with the input initial scale."""
         assert initial_scale > 0.0
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self._scale = torch.tensor(
             [initial_scale], dtype=torch.float, device=cur_platform.device_name()
         )
-        # FlagScale End
+        ######## FlagScale End ########
 
     @property
     def scale(self):
+        """Return the current loss-scale tensor."""
         return self._scale
 
     @property
     def inv_scale(self):
+        """Return the reciprocal loss scale computed in double precision."""
         return self._scale.double().reciprocal().float()
 
     @abstractmethod
     def update(self, found_inf: bool):
+        """Update the loss scale after checking gradients for non-finite values."""
         pass
 
     @abstractmethod
     def state_dict(self):
+        """Return the gradient scaler state for checkpointing."""
         pass
 
     @abstractmethod
     def load_state_dict(self, state_dict: Dict):
+        """Restore the gradient scaler from a checkpoint state."""
         pass
 
 
@@ -71,23 +77,23 @@ class ConstantGradScaler(MegatronGradScaler):
 class DynamicGradScaler(MegatronGradScaler):
     """Gradient scaler with a dynamic scale factor adjusted during training.
 
-    This class implements a loss scaling strategy to prevent numerical underflow 
-    during mixed-precision training. It reduces the loss scale by a 
-    `backoff_factor` if a `hysteresis` number of NaNs/Infs are detected in 
-    consecutive iterations. Conversely, it increases the loss scale by a 
-    `growth_factor` if no non-finite gradients are seen for a specified 
+    This class implements a loss scaling strategy to prevent numerical underflow
+    during mixed-precision training. It reduces the loss scale by a
+    `backoff_factor` if a `hysteresis` number of NaNs/Infs are detected in
+    consecutive iterations. Conversely, it increases the loss scale by a
+    `growth_factor` if no non-finite gradients are seen for a specified
     `growth_interval` of iterations.
 
     Args:
         initial_scale (float): The starting value for the loss scale.
         min_scale (float): The lower bound for the loss scale.
-        growth_factor (float): The multiplier used to increase the scale when 
+        growth_factor (float): The multiplier used to increase the scale when
             gradients are stable. Must be greater than 1.0.
-        backoff_factor (float): The multiplier used to decrease the scale when 
+        backoff_factor (float): The multiplier used to decrease the scale when
             non-finite gradients are detected. Must be between 0.0 and 1.0.
-        growth_interval (int): The number of consecutive stable iterations 
+        growth_interval (int): The number of consecutive stable iterations
             required before increasing the scale.
-        hysteresis (int): The number of consecutive non-finite iterations 
+        hysteresis (int): The number of consecutive non-finite iterations
             required before decreasing the scale.
     """
 
@@ -106,37 +112,41 @@ class DynamicGradScaler(MegatronGradScaler):
         Args:
             initial_scale (float): Initial loss scale value.
             min_scale (float): Minimum loss scale value.
-            growth_factor (float): Factor to grow loss scale by if NaNs are not seen in `growth_interval`
+            growth_factor (float): Factor to grow loss scale by if NaNs are not seen in
+            `growth_interval`
                 training iterations. Must be greater than 1.
-            backoff_factor (float): Factor to decrease loss scale by if NaNs are seen in `hysteresis`
+            backoff_factor (float): Factor to decrease loss scale by if NaNs are seen in
+            `hysteresis`
                 consecutive training iterations. Must be between 0 and 1.
-            growth_interval (int): Number of training iterations of no NaNs before loss scale is increased.
-            hysteresis (int): Number of training iterations of consecutive NaNs before loss scale is decreased.
+            growth_interval (int): Number of training iterations of no NaNs before loss scale is
+            increased.
+            hysteresis (int): Number of training iterations of consecutive NaNs before loss scale is
+            decreased.
         """
         super(DynamicGradScaler, self).__init__(initial_scale)
 
         # Lower bound on the scale.
         assert min_scale > 0.0
         assert min_scale <= initial_scale
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self.min_scale = torch.tensor(
             [min_scale], dtype=torch.float, device=cur_platform.device_name()
         )
-        # FlagScale End
+        ######## FlagScale End ########
         # Growth and backoff factors for the scale.
         assert growth_factor > 1.0
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self.growth_factor = torch.tensor(
             [growth_factor], dtype=torch.float, device=cur_platform.device_name()
         )
-        # FlagScale End
+        ######## FlagScale End ########
         assert backoff_factor < 1.0
         assert backoff_factor > 0.0
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self.backoff_factor = torch.tensor(
             [backoff_factor], dtype=torch.float, device=cur_platform.device_name()
         )
-        # FlagScale End
+        ######## FlagScale End ########
         # Interval over which if we don't see any inf/nan,
         # we will scale the grad scale by the growth factor.
         assert growth_interval > 0
@@ -182,6 +192,8 @@ class DynamicGradScaler(MegatronGradScaler):
         return state_dict
 
     def load_state_dict(self, state_dict: Dict):
-        self._scale = state_dict['scale'].to(device=cur_platform.current_device())  # FlagScale Add
+        self._scale = state_dict['scale'].to(
+            device=cur_platform.current_device()
+        )  # FlagScale Modify
         self._growth_tracker = state_dict['growth_tracker']
         self._hysteresis_tracker = state_dict['hysteresis_tracker']

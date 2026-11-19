@@ -1,0 +1,103 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/set_env_common.sh"
+
+validate_metax_capacity() {
+  local device_count
+  device_count=$(python3 -c \
+    "import torch; print(torch.cuda.device_count() if torch.cuda.is_available() else 0)")
+  ci_validate_device_capacity "$device_count"
+}
+
+setup_metax_toolchain() {
+  local bridge_bin=/opt/maca/tools/cu-bridge/bin
+  local cucc_path="$bridge_bin/cucc"
+  local nvcc_path="$bridge_bin/nvcc"
+
+  if [ ! -x "$cucc_path" ]; then
+    echo "::error::MetaX compiler bridge not found at $cucc_path"
+    exit 1
+  fi
+
+  ln -sf "$cucc_path" "$nvcc_path"
+  ci_export_env PATH "$bridge_bin:$PATH"
+  ls -l "$cucc_path" "$nvcc_path"
+  "$nvcc_path" -V
+}
+
+configure_metax_unit_runtime() {
+  case "${CI_TEST_GROUP:-}" in
+    data|tensor_parallel|distributed)
+      # MACA 3.3 / MCCL can abort in mcIpcCloseMemHandle when these suites
+      # repeatedly destroy process groups. Keep normal group cleanup, but use
+      # non-P2P transports until the runtime's IPC teardown is fixed.
+      ci_export_env MCCL_P2P_DISABLE 1
+      echo "Disabling MCCL P2P for MetaX unit group: $CI_TEST_GROUP (IPC teardown workaround)."
+      ;;
+  esac
+}
+
+setup_unit_environment() {
+  configure_metax_unit_runtime
+  ci_activate_python_environment
+  ci_ensure_curl
+
+  local test_dependencies=(
+    mock
+    pytest-mock
+    coverage
+    pytest-asyncio
+    anyio
+    wandb
+    openai
+    httpx
+    nltk
+    msgpack
+  )
+  local pip_index_args=(
+    --index-url https://pypi.org/simple
+    --timeout 300
+    --retries 10
+    --no-cache-dir
+  )
+  python3 -m pip install torch boto3 "${test_dependencies[@]}" "${pip_index_args[@]}"
+  python3 -m pip install fastapi uvicorn "${pip_index_args[@]}"
+
+  echo "Skipping NVIDIA CUPTI dependencies on MetaX."
+  ci_install_project
+  validate_metax_capacity
+}
+
+setup_build_environment() {
+  ci_activate_python_environment
+  setup_metax_toolchain
+  ci_install_project
+  validate_metax_capacity
+}
+
+ci_require_env CI_TEST_SUITE
+case "$CI_TEST_SUITE" in
+  unit_group)
+    configure_metax_unit_runtime
+    ;;
+  unit)
+    setup_unit_environment
+    ;;
+  functional)
+    ci_setup_functional_environment
+    ci_install_local_tokenizer_dependencies
+    ci_validate_qwen_assets /home/gitlab-runner/data /home/gitlab-runner/tokenizers
+    setup_metax_toolchain
+    validate_metax_capacity
+    ;;
+  build)
+    setup_build_environment
+    ;;
+  *)
+    echo "::error::Unsupported CI_TEST_SUITE: $CI_TEST_SUITE"
+    exit 1
+    ;;
+esac

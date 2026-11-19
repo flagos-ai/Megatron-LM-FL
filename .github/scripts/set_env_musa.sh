@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/set_env_common.sh"
+
+configure_musa_runtime() {
+  ci_export_env DISTRIBUTED_BACKEND mccl
+  ci_export_env TORCHDYNAMO_DISABLE 1
+  ci_export_env TORCH_COMPILE_DISABLE 1
+  ci_export_env LD_LIBRARY_PATH "/usr/local/musa-4.3.4/lib:${LD_LIBRARY_PATH:-}"
+
+  # Derive a unique MASTER_PORT per test group to avoid TCP store collisions
+  # when multiple groups run in parallel on the same runner.
+  if [[ -n "${CI_TEST_GROUP:-}" ]]; then
+    local _port
+    case "$CI_TEST_GROUP" in
+      core)               _port=29600 ;;
+      models)             _port=29601 ;;
+      distributed)        _port=29602 ;;
+      dist_checkpointing) _port=29603 ;;
+      tensor_parallel)    _port=29604 ;;
+      pipeline_parallel)  _port=29605 ;;
+      data)               _port=29606 ;;
+      fusions)            _port=29607 ;;
+      others)             _port=29608 ;;
+      *)                  _port=29500 ;;
+    esac
+    ci_export_env MASTER_PORT "${_port}"
+  fi
+}
+
+validate_musa_capacity() {
+  local device_count
+  device_count=$(python3 -c "import torch; print(torch.musa.device_count())" |
+    awk '/^[0-9]+$/ { count = $0 } END { if (count == "") exit 1; print count }')
+  ci_validate_device_capacity "$device_count"
+}
+
+prepare_musa_te_runtime() {
+  # Some MUSA runtime images provide torch_musa but omit torchada.  The latter
+  # is the CUDA-to-MUSA adapter required by Megatron's CUDA-facing code paths.
+  # Install only the adapter package so the image-provided Torch/MUSA pair is
+  # not replaced by pip dependency resolution.
+  if ! python3 -c "import torchada" >/dev/null 2>&1; then
+    python3 -m pip install torchada \
+      --ignore-requires-python --no-deps --no-cache-dir
+  fi
+  python3 -c \
+    "import torchada; print(f'torchada import passed: {torchada.__file__}')"
+
+  # The MUSA image can carry NVIDIA FlashAttention package metadata without
+  # its CUDA extension. TE treats the metadata as availability and imports the
+  # missing flash_attn_*_cuda module before backend selection.
+  python3 -m pip uninstall -y flash-attn flash-attn-3 flash-attn-4 \
+    >/dev/null 2>&1 || true
+
+  # Megatron and TE-FL are installed with --no-deps to preserve the
+  # image-provided Torch/MUSA pair. Let onnxscript resolve its own ONNX-only
+  # dependencies, including onnx_ir, before TE imports its ONNX extensions.
+  if ! python3 -c "import onnxscript" >/dev/null 2>&1; then
+    python3 -m pip install onnxscript --no-cache-dir
+  fi
+  python3 -c \
+    "import onnxscript; print(f'onnxscript import passed: {onnxscript.__file__}')"
+}
+
+install_musa_tensorboard() {
+  # Preserve the image-provided Torch/MUSA, NumPy, and protobuf versions.
+  # tensorboard is installed --no-deps below, but absl-py is a hard runtime
+  # dependency (tensorboard.compat.tensorflow_stub.flags does `from absl.flags
+  # import *`) and is not preinstalled in the MUSA image. Install it explicitly
+  # so the SummaryWriter/event_accumulator validation below does not fail.
+  python3 -m pip install absl-py --no-cache-dir
+  python3 -m pip install "tensorboard==2.17.1" --no-deps --no-cache-dir
+  python3 -c \
+    "from torch.utils.tensorboard import SummaryWriter; from tensorboard.backend.event_processing import event_accumulator; print('MUSA TensorBoard writer and reader validated')"
+}
+
+install_flash_attn_collection_stub() {
+  if [ "${CI_TEST_GROUP:-}" != "models" ]; then
+    return
+  fi
+
+  # MUSA cannot use the NVIDIA FlashAttention package.  Keep a collection-only
+  # version marker so Megatron's version-gated tests are skipped cleanly.
+  local stub_dir=/tmp/megatron-ci-stubs
+  mkdir -p "$stub_dir/flash_attn"
+  printf '__version__ = "0.0.0"\n' > "$stub_dir/flash_attn/__init__.py"
+  ci_export_env PYTHONPATH "$stub_dir:${PYTHONPATH:-}"
+  python3 -c "import flash_attn; assert flash_attn.__version__ == '0.0.0'"
+}
+
+install_musa_compatibility_layer() {
+  # Keep the image-provided torch/torch_musa pair intact while redirecting
+  # legacy CUDA APIs and device strings used by Megatron tests to MUSA.
+  python3 -c "import torchada; print(f'image-provided torchada import passed: {torchada.__file__}')"
+
+  # Create this only after installing the project so pip cannot import Megatron
+  # through the compatibility layer while it is still building editable metadata.
+  local site_dir=/tmp/musa-ci-site
+  mkdir -p "$site_dir"
+
+  if [ "${CI_TEST_SUITE:-}" = "unit" ]; then
+    # coverage must start before torch is imported. Loading the compatibility
+    # layer from sitecustomize imports torch too early and breaks coverage's
+    # module scan on the MUSA torch build.
+    rm -f "$site_dir/sitecustomize.py"
+    cat > "$site_dir/musa_ci_pytest.py" <<'PYTESTEOF'
+import contextlib
+import io
+
+
+def pytest_configure(config):
+    with contextlib.redirect_stdout(io.StringIO()):
+        import torchada  # noqa: F401
+        import torch
+        from megatron.plugin.platform import get_platform
+
+        is_musa = get_platform().device_name() == "musa"
+
+    if is_musa:
+        torch.cuda.is_available = torch.musa.is_available
+PYTESTEOF
+    ci_export_env PYTEST_ADDOPTS "${PYTEST_ADDOPTS:-} -p musa_ci_pytest"
+  else
+    cat > "$site_dir/sitecustomize.py" <<'SITEEOF'
+import torchada  # noqa: F401
+import torch
+
+from megatron.plugin.platform import get_platform
+
+if get_platform().device_name() == "musa":
+    torch.cuda.is_available = torch.musa.is_available
+SITEEOF
+  fi
+
+  ci_export_env PYTHONPATH "$site_dir:${PYTHONPATH:-}"
+}
+
+setup_unit_environment() {
+  ci_activate_python_environment
+  configure_musa_runtime
+  ci_ensure_curl
+
+  local test_dependencies=(
+    boto3
+    mock
+    pytest-mock
+    coverage
+    pytest-asyncio
+    anyio
+    wandb
+    openai
+    httpx
+    nltk
+    absl-py
+  )
+  python3 -m pip install "${test_dependencies[@]}" --no-cache-dir
+  python3 -m pip install fastapi uvicorn --no-cache-dir
+  if [[ "${CI_TEST_GROUP:-}" = models || "${CI_TEST_GROUP:-}" = __all__ ]]; then
+    # rl_utils imports SummaryWriter while model tests are being collected.
+    install_musa_tensorboard
+  fi
+  prepare_musa_te_runtime
+
+  echo "Skipping NVIDIA CUPTI and Emerging-Optimizers dependencies on MUSA."
+  ci_install_project --ignore-requires-python
+  install_flash_attn_collection_stub
+  install_musa_compatibility_layer
+  validate_musa_capacity
+}
+
+setup_build_environment() {
+  ci_activate_python_environment
+  configure_musa_runtime
+  prepare_musa_te_runtime
+  ci_install_project --ignore-requires-python
+  install_musa_compatibility_layer
+  validate_musa_capacity
+}
+
+ci_require_env CI_TEST_SUITE
+case "$CI_TEST_SUITE" in
+  unit_group)
+    configure_musa_runtime
+    install_flash_attn_collection_stub
+    ;;
+  unit)
+    setup_unit_environment
+    ;;
+  functional)
+    configure_musa_runtime
+
+    # Functional test toolchain and Python 3.10-compatible project install.
+    ci_setup_functional_environment --ignore-requires-python
+    prepare_musa_te_runtime
+    ci_install_local_tokenizer_dependencies
+    install_musa_tensorboard
+    ci_validate_qwen_assets /home/gitlab-runner/data /home/gitlab-runner/tokenizers
+    install_musa_compatibility_layer
+    validate_musa_capacity
+    ;;
+  build)
+    setup_build_environment
+    ;;
+  *)
+    echo "::error::Unsupported CI_TEST_SUITE: $CI_TEST_SUITE"
+    exit 1
+    ;;
+esac

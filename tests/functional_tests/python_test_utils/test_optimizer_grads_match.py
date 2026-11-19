@@ -283,7 +283,6 @@ def load_dist_checkpoint_pt(
     load(
         state_dict=placeholders,
         storage_reader=data_reader,
-        no_dist=True,  # switches off all collectives
     )
     return placeholders  # dict[str, Tensor]
 

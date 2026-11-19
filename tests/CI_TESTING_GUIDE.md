@@ -1,0 +1,733 @@
+# CI Testing Guide
+
+This guide describes the configuration-driven GitHub Actions test system, how
+to add tests, and how to reproduce CI on a development machine. The commands
+below are intended to exercise the same setup and runner scripts as CI.
+
+## CI architecture
+
+Each hardware platform has three entry points:
+
+| Component | Location | Responsibility |
+| --- | --- | --- |
+| Platform workflow | `.github/workflows/all_tests_<platform>.yml` | Triggers, concurrency, and suite enablement |
+| Platform config | `.github/configs/<platform>.yml` | Image, runner labels, container settings, process count, and test matrix |
+| Platform setup | `.github/scripts/set_env_<platform>.sh` | Runtime variables, dependencies, device validation, and project installation |
+
+The automatic and requested entrypoints generate a plan and call
+`_platform_pipeline.yml`. Manual platform wrappers also reuse that pipeline.
+It prepares TE-FL and calls `all_tests_common.yml`, which loads the platform
+config and dispatches the reusable unit and functional
+workflows. Platform-specific behavior belongs in the config or setup script;
+the common workflows should not need a new hardware conditional.
+
+The project-facing contract is `.flagcicd/project.yaml`. It owns stage, level,
+logical-group and gate-policy semantics. The planner and validators read this
+file directly; there is no generated catalog to maintain. After editing it, run
+`python .github/scripts/ci/validate_flagcicd_contract.py` and
+`python .github/scripts/ci/validate_unit_group_catalog.py`.
+
+The execution path is:
+
+```text
+ci.yml / ci-requested.yml
+  -> lint_common.yml
+  -> generate_test_plan.py
+  -> _platform_pipeline.yml (also used by manual platform wrappers)
+     -> prepare TE-FL wheel artifact
+     -> all_tests_common.yml: verify configuration identity and load config
+        -> unit_tests_common.yml
+           -> checkout + set_env_<platform>.sh once per device
+           -> install runtime packages + restore/install TE-FL once
+           -> run_unit_groups.py, in configured group order
+              -> set_env_<platform>.sh (unit_group, no installation)
+              -> tests/test_utils/runners/run_ci_unit_tests.sh
+        -> functional_tests_common.yml
+           -> set_env_<platform>.sh
+           -> tests/functional_tests/shell_test_utils/run_ci_test.sh
+  -> flagcicd_gate.py: verify plan, matrix and platform/device evidence
+```
+
+Unit tests run before functional tests when both suites are enabled. A failed
+unit job prevents the functional matrix from starting.
+
+### Single-runner unit execution
+
+Each platform/device uses one container and one unit job. Checkout, platform
+setup, dynamic dependency installation and TE-FL restoration/installation happen
+once, without dependency wheel snapshots or artifact transfers between test jobs.
+The existing dependency resolution policy and TE-FL build/cache workflow are
+unchanged. There is no new cross-run environment cache or image freshness policy.
+
+Initial setup receives `CI_TEST_SUITE=unit` and `CI_TEST_GROUP=__all__` and installs
+the union of unit-group dependencies. Each group then gets a fresh shell and
+distributed test process, invoking the setup script with `CI_TEST_SUITE=unit_group`
+for lightweight group-specific runtime settings only. Those hooks must not install
+packages. Their environment exports do not propagate to other groups or later
+Actions steps. The container filesystem is shared; tests must still clean up their
+own files and external resources. Processes remaining in the group's process group
+are killed before starting the next group.
+
+Each group retains a 60-minute timeout. Failed or timed-out groups do not prevent
+later groups from running, but any nonzero group result fails the unit job. The job
+has a 12-hour total limit to accommodate sequential groups and setup. There is no
+new retry of tests and no change to assertions, ignore lists, distributed process
+counts or experimental passes.
+
+On GitHub's **Re-run failed jobs**, unit jobs restore a small checkpoint containing
+group results and coverage data. Groups that already passed in the same workflow
+run are skipped; failed, timed-out and unfinished groups run again. Each completed
+group updates the checkpoint, and the workflow attempts to cache it even after a
+failure or cancellation. Missing, evicted or invalid checkpoints fall back to
+running all groups. A hard runner shutdown may prevent saving the checkpoint.
+Only successes with valid per-rank JUnit evidence can be reused; older checkpoints
+without it rerun those groups. Checkpoints are scoped to the run, commit, platform/device and test configuration;
+they are never reused by a new workflow run. Multiple reruns retain prior successes.
+**Re-run all jobs** also reuses successful unit groups; start a new workflow run to
+force all groups to execute again.
+
+Environment setup still runs normally on every attempt. Dependencies may change
+between attempts: this is result reuse, not a frozen environment or container
+snapshot. No automatic test retries are added.
+
+Coverage data is isolated per group. Coverage measures `megatron/plugin/*` and
+`megatron/core/*`; it is core/plugin coverage, not full unit-group coverage.
+The reported denominator leaves out `coverage.omit` in `.flagcicd/project.yaml`
+(plugin test code and sources owned by planned groups that no platform runs)
+plus the platform's `test_matrix.unit.coverage_omit` (other vendors' plugin
+directories). Triton kernel functions (`@triton.jit`, `@triton.autotune`,
+`@triton.heuristics`) are excluded from the report as well: their bodies are
+compiled and executed on the device, so coverage.py cannot trace them on any
+platform; the Python launchers that call them remain measured. Omission applies only to reports: collection still measures every
+source file, and an omitted directory returns to the denominator once its entry
+is removed. Percentages are therefore comparable only between runs with the
+same omit lists. The
+coverage artifact retains each completed group's JSON and `unit-results.json`.
+That attestation records `plan_hash`, `expected_groups`, `executed_groups`,
+`missing_groups`, `unexpected_groups`, `status`, and per-group results; the
+platform workflow and final CI gate verify it. Each selected group must provide
+JUnit reports for all configured ranks and phases, consistent testcase counts,
+no failures/errors, and at least one passing test across the group. A normal or
+experimental phase may be empty, but a wholly empty or skipped group cannot pass,
+even when pytest exits zero. A combined
+`coverage-<platform>-<device>-all.json` is sent to FlagCICD. Available reports
+are uploaded even after test failures.
+Each completed group prints `PASS`, `FAIL` or `TIMEOUT` outside its collapsible log
+section, so its result remains visible without expanding test output. The Actions
+summary lists the same status and exit code. Interrupted groups are marked
+`INCOMPLETE`, not passed, and remain eligible for rerun. Reused successes show
+`PASS` with `Previously passed`; their JSON results have `reused: true`. Reused groups retain
+their coverage, while retries replace the failed attempt's coverage. Hardware timing
+and residual cross-group filesystem effects still need validation in the platform
+container.
+
+The unit check is now `unit-<device>` instead of separate `unit-<device>-<group>`
+checks. Before merging, update any branch protection rules that require individual
+group checks; the existing `all_tests_complete` aggregate gate remains unchanged.
+
+## Platform configuration contract
+
+Start from `.github/configs/template.yml`. The fields used by the common
+workflow are:
+
+| Field | Meaning |
+| --- | --- |
+| `setup_script` | Repository-relative platform setup script |
+| `test_matrix.unit.nproc_per_node` | Number of distributed processes used by each unit-test group |
+| `ci_image` | Container image used by test jobs |
+| `runner_labels` | Labels that select the self-hosted runner |
+| `container_volumes` | Host-to-container mounts |
+| `container_options` | Runtime, device, shared-memory, and security options |
+| `device_types` | Device values used to expand the test matrix |
+| `test_matrix.unit.groups` | Named unit-test paths |
+| `test_matrix.unit.pytest_extra_args` | Additional pytest arguments |
+| `test_matrix.unit.ignored_tests` | Platform-specific file or node exclusions |
+| `test_matrix.functional.train` | Functional and benchmark cases |
+
+`device_types` drives both reusable workflow matrices. Some existing platform
+configs still carry a legacy `test_matrix.unit.devices` value, but the common
+workflow does not read it. Do not add that field to new configs.
+
+The setup script receives the suite and distributed process count:
+
+```text
+CI_TEST_SUITE=unit|unit_group|functional|build
+CI_NPROC_PER_NODE=<positive integer>
+```
+
+The unit-test runner additionally receives the platform, device, and group
+variables used for test selection and coverage naming:
+
+```text
+CI_PLATFORM=<platform>
+CI_DEVICE=<device type>
+CI_TEST_GROUP=<unit-test group>
+```
+
+It must preserve the vendor-provided accelerator runtime and PyTorch stack,
+prepare only the selected suite, install this project, and fail early when the
+configured devices are unavailable. Use helpers from
+`.github/scripts/set_env_common.sh`. `ci_export_env` exports values in the
+current process and writes them to `GITHUB_ENV` when running in Actions.
+
+Use an immutable, validated image tag. The image should already contain the
+vendor PyTorch build, communication library, TransformerEngine implementation,
+fused operators, and expensive build dependencies. Setup scripts should not
+silently replace that stack with packages from public PyPI.
+
+## Adding a unit test
+
+There is no separate unit-test registry. A test enters CI when pytest discovers
+its name and a unit group in the target platform config selects its path.
+
+Put the test under `tests/unit_tests/` in the directory that owns the behavior.
+Name files `test_*.py`, functions and methods `test_*`, and classes `Test*`.
+Prefer extending the nearest existing test module instead of adding an
+unrelated root-level file.
+
+### How CI discovers and starts the test
+
+The complete unit-test selection path is:
+
+```text
+.github/configs/<platform>.yml
+  test_matrix.unit.groups[].path
+    -> all_tests_common.yml reads the groups
+    -> unit_tests_common.yml creates one job per device
+    -> run_unit_groups.py iterates the configured groups in that job
+    -> CI_TEST_PATH=<group path>
+    -> run_ci_unit_tests.sh expands paths and platform exclusions
+    -> torch.distributed.run starts CI_NPROC_PER_NODE processes
+    -> every rank runs the same pytest selection
+```
+
+For example, a new file at
+`tests/unit_tests/models/test_my_model.py` is automatically selected when the
+platform contains:
+
+```yaml
+- name: models
+  path: tests/unit_tests/models/
+```
+
+No workflow edit is needed in that case. The common directory mapping is:
+
+| Test location | Group |
+| --- | --- |
+| `tests/unit_tests/test_*.py` | `core` |
+| `tests/unit_tests/models/` | `models` |
+| `tests/unit_tests/distributed/` | `distributed` |
+| `tests/unit_tests/dist_checkpointing/` | `dist_checkpointing` |
+| `tests/unit_tests/tensor_parallel/` | `tensor_parallel` |
+| `tests/unit_tests/pipeline_parallel/` | `pipeline_parallel` |
+| `tests/unit_tests/data/` | `data` |
+| `tests/unit_tests/fusions/` | `fusions` |
+| `tests/unit_tests/transformer/` | `transformer` (CUDA only today) |
+| `post_training/`, `tokenizers/`, `utils/` | `others` |
+
+Other directories under `tests/unit_tests/` have logical groups in the routing
+catalog but are not executed by any platform yet. They are marked
+`status: planned`; a change that directly matches one of them blocks the plan
+until a platform config adds the execution group. When a planned group is
+reached only through a shared-path fallback, the platform expands to every
+active group it can execute and records the rest under `fallback_excluded`.
+
+The platform config remains authoritative. A platform may omit a complete
+group when its runtime cannot execute that boundary. A root glob such as
+`tests/unit_tests/test_*.py` also does not include tests in subdirectories.
+
+If a new top-level directory is not covered, add it to
+`.flagcicd/project.yaml` and register an execution group in every platform
+config that should run it. Then run both validators listed above:
+
+```yaml
+test_matrix:
+  unit:
+    groups:
+      - name: optimizer
+        path: tests/unit_tests/optimizer/
+        description: Optimizer tests
+```
+
+A group `path` may contain multiple repository-relative paths separated by
+spaces. Directory paths are collected recursively.
+
+Before submitting a new test:
+
+1. Check the group paths in every applicable `.github/configs/<platform>.yml`.
+2. Run `python3 -m pytest --collect-only <path>` in the platform container.
+3. Check that `test_matrix.unit.ignored_tests` does not exclude the file or
+   node ID.
+4. Run the complete affected group through `run_ci_unit_tests.sh` using the
+   CI-parity command below.
+
+Running only `pytest <node>` proves the test can execute, but does not prove CI
+selects it. The group run is the final collection check.
+
+### Logical groups and diff routing
+
+`.flagcicd/project.yaml` owns logical routing and is read directly. Each
+group declares `status: active|planned|unsupported`, and may declare an
+`execution_group` alias (for example, `plugin` executes as `core`). An alias
+must target an existing active group, and required levels are checked through
+that effective execution group. Platform
+configs remain authoritative for execution: a platform runs a group only when
+it declares a matching unit group. For every other active group it must declare
+`unsupported_groups` with a reason; the validator rejects an active group that
+has no platform owner. A platform may also declare a group unsupported when the
+execution group exists but does not collect every test path of that group; the
+declaration is rejected only when all test paths are already covered.
+
+`.github/scripts/ci/generate_test_plan.py` runs in the `generate-matrix` job. It
+combines the catalog, the platform router, and the selected platform configs,
+then publishes `unit-test-plan.json` and an Actions summary. Its execution
+matrix is passed to `ci.yml`, so only the selected execution groups run.
+
+Routing rules:
+
+- Unknown and shared paths expand to every logical group. Shared inputs include
+  `.github/`, `docker/`, `uv.lock`, `pyproject.toml`, `setup.py`, and test
+  infrastructure such as `tests/unit_tests/conftest.py`.
+- Unknown paths produce a diagnostic full fallback plan, but the plan is
+  `blocked` and the fallback is not executed until catalog onboarding is
+  completed. A changed path that matches more than one logical group is a route
+  conflict and also blocks the plan. Catalog paths must be disjoint; the
+  validator rejects any tracked path owned by multiple logical groups.
+- A blocked plan's platform table is labeled diagnostic only. Its rows describe
+  how the fallback would materialize and are not executed.
+- Required groups are resolved through `execution_group` aliases. For example, a
+  level requiring `plugin` is satisfied when the platform provides `core`, and
+  fails when the alias target is missing or the group is declared unsupported.
+- The plan records `plan_status=ready|partial|blocked`. `ready` means every
+  selected platform executes every configured execution group with no required
+  group missing. `partial` means the run relied on a shared/fallback selection,
+  a selected planned group, a non-required unresolved group, or a
+  fallback-excluded group. `selection=all` is a diagnostic full-catalog scope;
+  scheduled nightly runs use `selection=configured` and ignore the diff.
+  `blocked` emits no unit matrix and fails `generate-matrix`.
+- `catalog_completeness` is separate from `plan_status`. Planned catalog groups
+  are reported in `unwired_planned_groups` and do not enter the configured
+  matrix, so they do not block nightly. The Summary distinguishes
+  `Configured matrix: complete|incomplete` from
+  `Logical catalog completeness: full|partial`.
+- The repository contract enables PR `L1`, branch/nightly `L2`, and manual `L2`
+  planning. These levels select required groups, not separate acceptance
+  pipelines or device counts. L0/L3/L4 and release acceptance remain future
+  design work outside runtime configuration until execution and gates exist.
+- Documentation-only changes produce no platform jobs, even when a
+  `platform:<name>` label is present. Labels override routing only for PRs that
+  contain at least one code change; a mixed documentation and code change is
+  routed by its code paths.
+- Renames include both the old and new paths.
+- An active group selected on a platform executes, is explicitly declared
+  unsupported there, or is reported as unresolved. An unresolved required group
+  blocks the plan; any other unresolved group makes it `partial`. A selected
+  group is never silently skipped.
+- A directly affected group that is `planned` or declared unsupported on every
+  selected platform blocks the plan. Planned fallback is allowed only when the
+  planned group is not a direct match.
+- A selected planned group does not execute when it is reached through `all` or
+  an affected fallback. The platform runs every active group it can execute, so
+  a known gap cannot narrow coverage; excluded groups are reported in
+  `fallback_excluded`.
+- A missing required group, or a required group that is planned/unsupported,
+  blocks the plan. A non-required unresolved group makes the plan `partial`. A
+  platform with no executable groups blocks the plan.
+- `plan_hash` and `expected_unit_groups` are propagated through the platform
+  workflows. The runner attests them in `coverage-report/unit-results.json`, and
+  the final CI gate verifies one hash across all platforms plus exact
+  expected/executed group equality. The `plan_hash` is stable for identical
+  source/base SHAs, configs, and changed files.
+- Managed DooD runners guarantee one job per physical machine. Different
+  machines may run platform/device jobs concurrently. Within a unit job, groups
+  execute sequentially with a runner-enforced 3600-second timeout per attempt.
+  Platform setup verifies available device capacity against `nproc_per_node`.
+  The catalog does not expose resource locks, group parallelism, or inert timeout
+  overrides. Runner deployment must preserve physical-machine exclusivity.
+
+Unit coverage is scoped to `megatron/plugin/` and `megatron/core/` in the
+catalog and the runner. It is core/plugin-line coverage, not full unit-group
+coverage.
+
+Validate the catalog after changing a test directory or a platform unit group:
+
+```bash
+python .github/scripts/ci/validate_unit_group_catalog.py
+```
+
+The validator checks path existence against the git index, dependency
+acyclicity, platform group names, owner and unsupported declarations,
+required-group execution through aliases, tracked-path overlaps between logical
+groups, and that every `tests/unit_tests/` directory has a logical group.
+
+### Distributed test requirements
+
+CI launches every unit group through `torch.distributed.run`, including tests
+that do not explicitly use collectives. Every rank collects and executes the
+same pytest selection. Distributed tests must:
+
+- enter collectives and process-group creation in the same order on all ranks;
+- destroy process groups in fixture teardown, including exception paths;
+- avoid rank-local skips after another rank has entered a collective;
+- use bounded timeouts for network, subprocess, and rendezvous operations;
+- avoid multiplying large worker pools by the number of torchrun ranks; and
+- use temporary paths whose ownership and synchronization are explicit.
+
+A failure on one rank often appears on other ranks as a later rendezvous or
+collective timeout. Diagnose the first rank-specific exception instead of the
+final `ChildFailedError` or SIGTERM cascade.
+
+### Platform exclusions
+
+The CI runner accepts ignored entries as either a complete file or a pytest
+node ID:
+
+```yaml
+ignored_tests:
+  - tests/unit_tests/vendor_only/test_kernel.py
+  - tests/unit_tests/test_optimizer.py::test_vendor_specific_path
+```
+
+Complete files become `--ignore`; node IDs become `--deselect`. Add a
+platform-specific exclusion only when the platform cannot support the behavior
+or a tracked infrastructure limitation makes the test unsafe. Include a short
+reason next to the entry. Do not add platform conditionals to Megatron source
+code to make a CI test disappear.
+
+## Adding a functional test
+
+A functional or benchmark case lives at:
+
+```text
+tests/functional_tests/test_cases/<model>/<test_case>/
+  model_config.yaml
+  golden_values_<environment>_<platform>.json
+```
+
+Use a nearby case with the same model and test type as the starting point.
+`model_config.yaml` contains:
+
+- `ENV_VARS`: variables required by the training and validation scripts.
+- `MODEL_ARGS`: arguments passed to the training entry point.
+- `TEST_TYPE`: usually `regular`; resume and release modes are also supported.
+- `METRICS`: TensorBoard metrics validated by a regular test.
+
+Paths embedded in `MODEL_ARGS`, such as `--data-path` and
+`--tokenizer-model`, must match `container_volumes` in the platform config.
+Validate both the host source and the in-container destination before running
+the workflow.
+
+Register the case in each applicable platform config:
+
+```yaml
+test_matrix:
+  functional:
+    train:
+      - model: gpt
+        test_case: my_gpt_case
+        training_script: pretrain_gpt.py
+        n_repeat: 1
+        golden_environment: dev
+        golden_platform: my_platform
+        enable_lightweight_mode: false
+        gpus_per_node: 8
+```
+
+Optional matrix values and their defaults are:
+
+| Field | Default |
+| --- | --- |
+| `n_repeat` | `1` |
+| `golden_environment` | `dev` |
+| `golden_platform` | `dgx_a100` |
+| `enable_lightweight_mode` | `false` |
+| `data_path` | `/opt/data/datasets` |
+| `data_cache_path` | `/tmp/data_cache` |
+| `checkpoint_load_path` | `/tmp/checkpoints` |
+| `tensorboard_subpath` | `tensorboard` |
+
+`gpus_per_node` is required for every functional matrix entry and must be a
+positive integer. Set it from the topology used by that case, not from the
+unit-test process count. For example, TP1/PP1 uses one device and TP2/PP2 uses
+four devices.
+
+### Regular functional cases
+
+A regular case extracts the configured TensorBoard metrics and compares them
+with `golden_values_<environment>_<platform>.json`. Generate a baseline from a
+complete, reviewed run on the target software and hardware stack. Do not update
+golden values merely to hide an unexplained regression.
+
+The exact check and the approximate check are separate. If a backend is known
+to have nondeterministic reduction ordering, record that explicitly in the case
+configuration and retain the approximate comparison rather than weakening the
+shared checker.
+
+### Benchmark cases
+
+Set `ENV_VARS.BENCHMARK_TEST: 1`. A benchmark golden file is platform-specific:
+
+```json
+{
+  "my_platform": {
+    "my_device": {
+      "elapsed time per iteration (ms):": {
+        "values": [100.0, 98.0, 97.0],
+        "threshold": {"type": "upper_bound", "tolerance": 0.1}
+      },
+      "throughput per GPU (TFLOP/s/GPU):": {
+        "values": [10.0, 10.2, 10.3],
+        "threshold": {"type": "lower_bound", "tolerance": 0.1}
+      }
+    }
+  }
+}
+```
+
+The benchmark checker discards the first five warmup observations before
+comparing the averages. Record enough iterations to leave a representative
+steady-state sample. Never reuse a performance baseline from a different
+accelerator model.
+
+## Running tests on a development machine
+
+### Recommended: reproduce the CI container
+
+Use the image, options, and mounts from `.github/configs/<platform>.yml`. This
+is the supported way to reproduce CI because a host Python environment usually
+does not contain the same vendor runtime or operator implementations.
+
+Before starting the container:
+
+1. Verify all host paths in `container_volumes` exist and contain the expected
+   datasets, tokenizers, libraries, or checkpoints.
+2. Verify the required device nodes exist and are idle.
+3. Pull the configured image without changing its tag.
+4. Mount the repository into the container and set it as the working directory.
+
+For the current Hygon BW1000 config, run this at the repository root:
+
+```bash
+docker run --rm -it \
+  --ipc=host \
+  --shm-size=500g \
+  --hostname megatron_cicd \
+  --user root \
+  --ulimit nofile=65535:65535 \
+  --env DTK_HOME=/opt/dtk \
+  --env GEMS_VENDOR=amd \
+  --env ROCM_PATH=/opt/dtk \
+  --env HIP_PATH=/opt/dtk/hip \
+  --env HSA_PATH=/opt/dtk/hsa \
+  --env HIP_CLANG_PATH=/opt/dtk/llvm/bin \
+  --env DEVICE_LIB_PATH=/opt/dtk/amdgcn/bitcode \
+  --device=/dev/kfd \
+  --device=/dev/mkfd \
+  --device=/dev/dri \
+  --group-add video \
+  --cap-add=SYS_PTRACE \
+  --security-opt seccomp=unconfined \
+  -v /opt/hyhal:/opt/hyhal \
+  -v /data/megatron-ci-assets-20260726/baai_datasets:/home/gitlab-runner/data \
+  -v /data/megatron-ci-assets-20260726/baai_tokenizers:/home/gitlab-runner/tokenizers \
+  -v /data/megatron-ci-assets-20260726/baai_datasets:/opt/data/datasets \
+  -v /data/megatron-ci-assets-20260726/baai_tokenizers:/opt/data/tokenizers \
+  -v "$PWD:/workspace/Megatron-LM-FL" \
+  -w /workspace/Megatron-LM-FL \
+  harbor.baai.ac.cn/flagos-dev/megatron-lm-fl:manual-20260728-hygon-dev \
+  bash
+```
+
+The setup script prepends the DTK executable and library directories to
+`PATH` and `LD_LIBRARY_PATH`. The corresponding full values are also declared
+in `.github/configs/hygon.yml`; that config remains authoritative if the DTK
+layout changes.
+
+Do not replace the Hygon device options with `--gpus all`; BW1000 is exposed by
+the DTK runtime through `/dev/kfd`, `/dev/mkfd`, `/dev/dri`, and `/opt/hyhal`.
+For another platform, copy the exact values from that platform config instead
+of adapting this example by guesswork.
+
+### Run a unit-test group with CI parity
+
+Inside the container, at the repository root:
+
+```bash
+export GITHUB_WORKSPACE="$PWD"
+export CI_TEST_SUITE=unit
+export CI_PLATFORM=hygon
+export CI_DEVICE=bw1000
+export CI_NPROC_PER_NODE=8
+export CI_TEST_GROUP=models
+export CI_TEST_PATH='tests/unit_tests/models/'
+
+source .github/scripts/set_env_hygon.sh
+
+export CI_IGNORED_TESTS="$(yq -o=json -I=0 \
+  '.test_matrix.unit.ignored_tests // []' .github/configs/hygon.yml)"
+export CI_PYTEST_EXTRA_ARGS="$(yq -o=json -I=0 \
+  '.test_matrix.unit.pytest_extra_args // []' .github/configs/hygon.yml)"
+
+tests/test_utils/runners/run_ci_unit_tests.sh
+```
+
+Use `source`, not `bash`, for local setup so exported runtime variables remain
+in the current shell. GitHub Actions invokes the script with `bash` because
+`ci_export_env` writes the variables to `GITHUB_ENV` for the next step.
+
+Change `CI_TEST_GROUP` and `CI_TEST_PATH` together to select another group. A
+single test can be selected without changing the script:
+
+```bash
+export CI_TEST_GROUP=debug_one_test
+export CI_TEST_PATH='tests/unit_tests/models/test_gpt_model.py'
+tests/test_utils/runners/run_ci_unit_tests.sh
+```
+
+The runner still applies the platform ignore list, pytest arguments, distributed
+process count, hard-timeout wrapper, and coverage settings.
+
+### Run a functional or benchmark case with CI parity
+
+Start a fresh container when switching from unit setup to functional setup.
+Then run:
+
+```bash
+export GITHUB_WORKSPACE="$PWD"
+export CI_TEST_SUITE=functional
+export CI_PLATFORM=hygon
+export CI_DEVICE=bw1000
+export CI_NPROC_PER_NODE=1
+
+source .github/scripts/set_env_hygon.sh
+
+MODEL=gpt
+TEST_CASE=qwen3_0p6b_mcore_te_tp1_pp1_no_mmap_bin_files_hygon
+GOLDEN_VALUES_PATH=./tests/functional_tests/test_cases/gpt/$TEST_CASE/golden_values_dev_bw1000.json
+GPUS_PER_NODE=1
+OUTPUT_DIR="./test_output/$TEST_CASE"
+mkdir -p "$OUTPUT_DIR"
+
+bash tests/functional_tests/shell_test_utils/run_ci_test.sh \
+  "DATA_PATH=/opt/data/datasets" \
+  "DATA_CACHE_PATH=/tmp/data_cache" \
+  "OUTPUT_PATH=$OUTPUT_DIR" \
+  "TENSORBOARD_PATH=$OUTPUT_DIR/tensorboard" \
+  "CHECKPOINT_SAVE_PATH=$OUTPUT_DIR/checkpoints" \
+  "CHECKPOINT_LOAD_PATH=/tmp/checkpoints" \
+  "TRAINING_SCRIPT_PATH=pretrain_gpt.py" \
+  "TRAINING_PARAMS_PATH=./tests/functional_tests/test_cases/$MODEL/$TEST_CASE/model_config.yaml" \
+  "GOLDEN_VALUES_PATH=$GOLDEN_VALUES_PATH" \
+  "N_REPEAT=1" \
+  "ENABLE_LIGHTWEIGHT_MODE=false" \
+  "GPUS_PER_NODE=$GPUS_PER_NODE"
+```
+
+For the Hygon benchmark, start a fresh container and replace the case-specific
+values above before sourcing the setup script:
+
+```bash
+TEST_CASE=qwen3_0p6b_mcore_te_tp2_pp2_benchmark_hygon
+GOLDEN_VALUES_PATH=./tests/functional_tests/test_cases/gpt/$TEST_CASE/golden_values_dev_bw1000.json
+export CI_NPROC_PER_NODE=4
+GPUS_PER_NODE=4
+```
+
+and pass those values to the same runner command. The matrix entry in
+`.github/configs/hygon.yml` is the source of truth for the case name, golden
+target, repeat count, and distributed process count.
+
+The functional runner may normalize values in `model_config.yaml` with
+in-place `yq` edits. Run it from a disposable worktree or inspect `git diff`
+afterward and keep only intentional test-case changes.
+
+### Faster direct debugging
+
+After the platform setup has succeeded, a direct pytest command can shorten the
+edit/debug loop:
+
+```bash
+python3 -m torch.distributed.run --nproc_per_node=8 \
+  -m pytest -v \
+  tests/unit_tests/models/test_gpt_model.py::TestGPTModel::test_constructor \
+  -p no:randomly
+```
+
+This is not a CI-equivalent result: it does not automatically apply the full
+group ignore list, extra pytest arguments, coverage configuration, or platform
+hard timeout. Run the CI runner script before submitting the change.
+
+### Native host setup
+
+Running outside the configured container is supported only when the host
+already matches the platform image: vendor driver/runtime, vendor PyTorch,
+collective library, TransformerEngine implementation, fused operators, Python,
+and test tools must all be compatible. Set the same `CI_*` variables and
+`source` the platform setup script. Some setup scripts install system tools or
+write under `/usr/local`, so an isolated container is normally safer.
+
+Do not use `tests/test_utils/runners/run_tests.sh` as proof of compatibility
+with this workflow. It is a legacy convenience runner with a separate platform
+configuration and does not reproduce every platform supported by the new
+GitHub Actions path.
+
+## Adding a new platform
+
+1. Copy `.github/configs/template.yml` to
+   `.github/configs/<platform>.yml` and fill every required field.
+2. Add `.github/scripts/set_env_<platform>.sh`. Reuse
+   `set_env_common.sh`, preserve the image's vendor packages, and implement the
+   `unit`, `functional`, and `build` suite branches that the platform supports.
+   Add an install-free `unit_group` branch (a no-op if no group settings are needed).
+3. Add `.github/workflows/all_tests_<platform>.yml` that calls
+   `all_tests_common.yml` with `platform: <platform>`.
+4. Register an online self-hosted runner with every label in `runner_labels`.
+5. Validate the container options, mounts, device count, one collective, one
+   unit group, one regular functional case, and one benchmark independently.
+6. Enable the full matrices only after those smoke tests pass.
+
+No change to `all_tests_common.yml`, `unit_tests_common.yml`, or
+`functional_tests_common.yml` should be required for a normal platform
+addition.
+
+## Failure diagnosis
+
+Use the stage that failed to classify the problem:
+
+| Symptom | First place to investigate |
+| --- | --- |
+| Job remains queued | Runner online state and exact `runner_labels` match |
+| Setup import failure | Image contents and platform setup script |
+| Device or collective preflight timeout | Host driver, device nodes, stale processes, and communication runtime |
+| Test exits with `124` or `137` | Platform timeout, rank failure, or host/runtime recovery issue |
+| Dataset/tokenizer not found | Host asset path and `container_volumes` destination |
+| `yq` expression behaves unexpectedly | Confirm mikefarah `yq` v4, not the Python package |
+| `uv` downloads another Python | Use the platform setup; Hygon intentionally installs a compatibility shim |
+| Functional comparison fails | Training log, TensorBoard extraction, and the selected golden file |
+| Benchmark comparison fails | Warmup count, complete iteration list, target hardware, and threshold direction |
+
+Functional Actions artifacts contain the case log directory for seven days.
+The rank-zero live log is not always sufficient: inspect all rank logs under:
+
+```text
+test_output/<test_case>/logs/<repeat>/<run-id>/attempt_0/<rank>/stderr.log
+```
+
+When one rank crashes, the other ranks may report only a rendezvous or
+collective timeout. The first rank-specific exception is the useful failure.
+If the platform preflight itself fails before pytest or training starts, treat
+that as an environment/runtime failure rather than changing test expectations.
+
+## Submission checklist
+
+- The new test is discovered by the intended group or functional matrix.
+- The platform config uses the correct image, labels, options, and mounts.
+- The setup script succeeds and validates the configured device count.
+- Unit tests were run through `run_ci_unit_tests.sh`.
+- Functional tests were run through `run_ci_test.sh`.
+- Golden values came from a reviewed run on the declared environment/platform.
+- Benchmark values contain steady-state samples after warmup.
+- Platform exclusions are narrow and documented.
+- No vendor package was silently replaced during setup.
+- The full platform workflow was run with both unit and functional suites
+  enabled before merge.

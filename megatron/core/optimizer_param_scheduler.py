@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-class ParamGroupOverride(TypedDict):
+class ParamGroupOverride(TypedDict, total=False):
     """Override values for a parameter group. These values may be optimizer-state/scheduler related.
 
     These are the values you see later in param_group.get(...) calls in the
@@ -25,7 +25,7 @@ class ParamGroupOverride(TypedDict):
 
     Example:
         >>> param_group_override = ParamGroupOverride(min_lr=1e-4, wd_mult=0.1)
-        >>> param_group_override == ParamGroupOverride(newvar=3) # this is ok too
+        >>> param_group_override == ParamGroupOverride(optimizer='muon')  # per-param optimizer
 
     """
 
@@ -34,6 +34,7 @@ class ParamGroupOverride(TypedDict):
     start_wd: float
     end_wd: float
     wd_mult: float
+    optimizer: str
 
 
 def get_canonical_lr_for_logging(param_groups: list[dict]) -> float | None:
@@ -138,7 +139,7 @@ class OptimizerParamScheduler:
         override_opt_param_scheduler: Optional[bool] = False,
         wsd_decay_steps: Optional[int] = None,
         lr_wsd_decay_style: Optional[str] = None,
-        stablelm2_scheduler_config=None,  # FlagScale Add
+        stablelm2_scheduler_config=None,  # FlagScale Modify
     ) -> None:
 
         # Class values.
@@ -177,7 +178,7 @@ class OptimizerParamScheduler:
                 'both override and ' 'use-checkpoint are set.'
             )
 
-        # FlagScale Begin
+        ######## FlagScale Begin ########
         self.stablelm2_scheduler_config = stablelm2_scheduler_config
         if self.stablelm2_scheduler_config is not None:
             ## absolute samples
@@ -187,7 +188,7 @@ class OptimizerParamScheduler:
             ## N of consine
             if self.stablelm2_scheduler_config.cosine_period_samples == 0:
                 self.stablelm2_scheduler_config.cosine_period_samples = self.lr_decay_steps
-        # FlagScale End
+        ######## FlagScale End ########
 
         # Set the learning rate
         self.step(0)
@@ -259,7 +260,7 @@ class OptimizerParamScheduler:
             lr = max_lr * warmup_steps**0.5 / (num_steps**0.5)
             return max(min_lr, lr)
 
-        #### FlagScale Begin ####
+        ######## FlagScale Begin ########
         # stablelm2 scheduler of multiple stages
         if self.stablelm2_scheduler_config is not None:
             log_single_rank(
@@ -327,7 +328,7 @@ class OptimizerParamScheduler:
                 return self.max_lr
             else:  # Decay Phase
                 return self.max_lr * 0.5 ** ((self.num_steps - S) / T)
-        #### FlagScale End ####
+        ######## FlagScale End ########
 
         num_steps_ = self.num_steps - self.lr_warmup_steps
         decay_steps_ = self.lr_decay_steps - self.lr_warmup_steps

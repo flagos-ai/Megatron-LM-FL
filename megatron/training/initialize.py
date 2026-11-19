@@ -22,30 +22,27 @@ from megatron.core.rerun_state_machine import (
     RerunMode,
     initialize_rerun_state_machine,
 )
-from megatron.core.transformer.custom_layers.batch_invariant_kernels import enable_batch_invariant_mode
+from megatron.core.transformer.custom_layers.batch_invariant_kernels import (
+    enable_batch_invariant_mode,
+)
 from megatron.core.utils import get_te_version, is_te_min_version, is_torch_min_version
-from megatron.training import get_adlr_autoresume, get_args, get_tensorboard_writer
-from megatron.training.utils import print_rank_0, warn_rank_0
-from megatron.training import inprocess_restart
-from megatron.training.arguments import parse_args, validate_args
+from megatron.training import (
+    get_adlr_autoresume,
+    get_args,
+    get_tensorboard_writer,
+    inprocess_restart,
+)
 from megatron.training.async_utils import init_persistent_async_worker
-from megatron.training.checkpointing import load_args_from_checkpoint
-from megatron.training.global_vars import set_global_variables
-from megatron.training.utils import is_rank0
-from megatron.training.yaml_arguments import validate_yaml
+from megatron.training.utils import is_rank0, print_rank_0, warn_rank_0
 
 logger = logging.getLogger(__name__)
 
 
 def initialize_megatron(
-    extra_args_provider=None,
-    args_defaults={},
-    ignore_unknown_args=False,
     allow_no_cuda=False,
     skip_mpu_initialization=False,
     get_embedding_ranks=None,
     get_position_embedding_ranks=None,
-    parsed_args=None,
     store=None,
 ):
     """Set global variables, initialize distributed, and
@@ -57,39 +54,13 @@ def initialize_megatron(
     (optionally, only when args.lazy_mpu_init == True)
     """
     if not allow_no_cuda:
-        # Make sure cuda is available.
-        assert torch.cuda.is_available(), "Megatron requires CUDA."
+        # Make sure a supported accelerator platform is available.
+        # (fork: CUDA assert generalized to registered FlagOS platforms -- musa/npu/etc.)
+        from megatron.plugin.platform.platform_manager import is_current_platform_supported
 
-    # Parse arguments
-    if parsed_args is None:
-        args = parse_args(extra_args_provider, ignore_unknown_args)
-    else:
-        args = parsed_args
+        assert is_current_platform_supported(), "Megatron requires CUDA or a supported FlagOS platform."
 
-    # Prep for checkpoint conversion.
-    if args.ckpt_convert_format is not None:
-        assert args.ckpt_convert_save is not None
-        assert args.load is not None
-        args.exit_on_missing_checkpoint = True
-
-    if args.use_checkpoint_args or args_defaults.get("use_checkpoint_args", False):
-        assert args.load is not None or args.pretrained_checkpoint is not None, "--use-checkpoint-args requires --load or --pretrained-checkpoint argument"
-        assert args.non_persistent_ckpt_type != "local", (
-            "--use-checkpoint-args is not supported with --non_persistent_ckpt_type=local. "
-            "Two-stage checkpoint loading is not implemented, and all arguments must be defined "
-            "before initializing LocalCheckpointManager."
-        )
-        load_args_from_checkpoint(args, load_arg='pretrained_checkpoint')
-        load_args_from_checkpoint(args)
-
-    if args.yaml_cfg is not None:
-        args = validate_yaml(args, args_defaults)
-    else:
-        validate_args(args, args_defaults)
-
-    # set global args, build tokenizer, and set adlr-autoresume,
-    # tensorboard-writer, and timers.
-    set_global_variables(args)
+    args = get_args()
 
     # set logging level
     setup_logging()
@@ -116,7 +87,7 @@ def initialize_megatron(
         ),
         result_rejected_tracker_filename=args.result_rejected_tracker_filename,
     )
-    
+
     if args.batch_invariant_mode:
         print_rank_0("Enabling batch invariant mode globally")
         enable_batch_invariant_mode()
@@ -231,11 +202,16 @@ def _initialize_tp_communicators():
             args.hidden_size,
         ]
 
-
     if is_te_min_version("2.7.0"):
         UserBufferQuantizationMode = te_module.base.UserBufferQuantizationMode
-        quantization_modes = [UserBufferQuantizationMode.FP8 if args.fp8 else UserBufferQuantizationMode.NONE]
-        if args.fp8 is not None and args.first_last_layers_bf16 and (args.num_layers_at_start_in_bf16 > 0 or args.num_layers_at_end_in_bf16 > 0):
+        quantization_modes = [
+            UserBufferQuantizationMode.FP8 if args.fp8 else UserBufferQuantizationMode.NONE
+        ]
+        if (
+            args.fp8 is not None
+            and args.first_last_layers_bf16
+            and (args.num_layers_at_start_in_bf16 > 0 or args.num_layers_at_end_in_bf16 > 0)
+        ):
             quantization_modes.append(UserBufferQuantizationMode.NONE)
         # The process group with the target bootstrap backend is created in Transformer Engine.
         te_module.base.initialize_ub(
@@ -274,7 +250,10 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
     """Initialize torch.distributed and core model parallel."""
     args = get_args()
 
-    device_count = torch.cuda.device_count()
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    platform = get_platform()
+    device_count = platform.device_count()
     if torch.distributed.is_initialized():
 
         print_rank_0("torch distributed is already initialized, skipping initialization ...")
@@ -286,14 +265,14 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
         print_rank_0("> initializing torch distributed ...")
         # Manually set the device ids.
         if device_count > 0:
-            torch.cuda.set_device(args.local_rank)
-            device_id = torch.device(f'cuda:{args.local_rank}')
+            platform.set_device(args.local_rank)
+            device_id = platform.device(args.local_rank)
         else:
             device_id = None
 
         # Set to non-default stream for cudagraph capturing.
         if args.cuda_graph_impl == "transformer_engine":
-            torch.cuda.set_stream(torch.cuda.Stream())
+            platform.set_stream(platform.Stream())
 
         # Set flight recorder env vars if specified.
         # Priority: pre-existing environment variable > MLM argument.
@@ -347,8 +326,11 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
             'timeout': timedelta(minutes=args.distributed_timeout_minutes),
         }
         if args.fake_process_group:
-            assert is_torch_min_version("2.3.0"), "Fake process group is only supported with PyTorch 2.3.0 and above."
+            assert is_torch_min_version(
+                "2.3.0"
+            ), "Fake process group is only supported with PyTorch 2.3.0 and above."
             from torch.testing._internal.distributed.fake_pg import FakeStore
+
             store = FakeStore()
             init_process_group_kwargs['backend'] = 'fake'
             init_process_group_kwargs['store'] = store
@@ -382,7 +364,6 @@ def _initialize_distributed(get_embedding_ranks, get_position_embedding_ranks, s
                 create_gloo_process_groups=args.use_gloo_process_groups,
                 high_priority_stream_groups=args.high_priority_stream_groups,
                 sharp_enabled_group=args.sharp_enabled_group,
-                create_all_gather_group=args.create_all_gather_group,
             )
             print_rank_0(
                 f"> initialized tensor model parallel with size "
@@ -420,7 +401,9 @@ def _set_random_seed(
         random.seed(seed)
         np.random.seed(seed)
         torch.manual_seed(seed)
-        if torch.cuda.device_count() > 0:
+        from megatron.plugin.platform.platform_manager import get_platform
+
+        if get_platform().device_count() > 0:
             tensor_parallel.model_parallel_cuda_manual_seed(
                 seed, te_rng_tracker, inference_rng_tracker, use_cudagraphable_rng
             )
@@ -463,6 +446,14 @@ def set_jit_fusion_options():
 
 def _warmup_jit_function():
     """Compilie JIT functions before the main training steps"""
+    from megatron.plugin.platform.platform_manager import get_platform
+
+    # JIT fusion warmup is CUDA-only (nvfuser / legacy JIT fuser). On other
+    # platforms the fused ops don't exist and torch.rand(..., device="cuda")
+    # can't even allocate — --disable-jit-fuser doesn't help because
+    # set_jit_fusion_options() calls this unconditionally.
+    if get_platform().device_name() != "cuda":
+        return
     args = get_args()
     if args.bf16:
         dtype = torch.bfloat16

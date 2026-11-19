@@ -67,6 +67,8 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "cpu_offloading_retain_pinned_cpu_buffers": False,
     "cpu_offloading_num_layers": 0,
     "cpu_offloading_weights": False,
+    "chunked_cross_entropy": False,
+    "cross_entropy_chunk_size": 4096,
     "cross_entropy_fusion_impl": "native",
     "cross_entropy_loss_fusion": True,
     "csa_compress_ratios": None,
@@ -81,7 +83,6 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "deallocate_pipeline_outputs": True,
     "defer_embedding_wgrad_compute": False,
     "delay_wgrad_compute": False,
-    "dense_grouped_gemm": False,    ##### FlagScale add #####
     "deterministic_mode": False,
     "disable_bf16_reduced_precision_matmul": False,
     "disable_parameter_transpose_cache": False,
@@ -91,13 +92,17 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "dsa_indexer_n_heads": None,
     "dsa_indexer_topk": None,
     "dsa_indexer_use_sparse_loss": False,
+    ######## FlagScale Begin ########
+    "indexer_type_rule": None,
+    "indexer_types": None,
+    ######## FlagScale End ########
     "dualpipev_pipeline_model_parallel_size": None,
     "embedding_init_method": {},
     "embedding_init_method_std": 0.014,
     "enable_autocast": False,
     "enable_hetero": None,
     "enable_cuda_graph": False,
-    ##### FlagScale Begin #####
+    ######## FlagScale Begin ########
     "enable_hyper_connections": False,
     "engram_embedding_parallel_method": "alltoall",
     "engram_embedding_parallel_size": None,
@@ -109,7 +114,7 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "engram_tokenizer_name_or_path": None,
     "engram_vocab_size": None,
     "log_moe_overload_factor": False,
-    ##### FlagScale End #####
+    ######## FlagScale End ########
     "ep_overlap_early_attn_memory_release": False,
     "experimental_attention_variant": None,
     "hetero_pipeline_layer_split": None,
@@ -237,13 +242,14 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "mtp_standalone": False,
     "mtp_use_repeated_layer": False,
     "multi_latent_attention": False,
-    ##### FlagScale Begin #####
+    ######## FlagScale Begin ########
     "max_ngram_size": 1,
+    "mhc_fused_backend": "auto",
     "mhc_init_gating_factor": 0.01,
     "mhc_recompute_layer_num": None,
-    "mhc_sinkhorn_iterations": 10,
+    "mhc_sinkhorn_iterations": 20,
     "moe_mlp_glu_interleave_size": None,
-    ##### FlagScale End #####
+    ######## FlagScale End ########
     "nccl_all_reduce_for_prefill": False,
     "no_rope_freq": None,
     "no_sync_func": None,
@@ -257,11 +263,11 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "num_microbatches_with_partial_activation_checkpoints": None,
     "num_moe_experts": 128,
     "num_query_groups": 2,
-    ##### FlagScale Begin #####
+    ######## FlagScale Begin ########
     "n_embed_per_ngram": None,
     "n_head_per_ngram": 1,
     "num_residual_streams": 4,
-    ##### FlagScale End #####
+    ######## FlagScale End ########
     "output_layer_init_method": {},
     "overlap_moe_expert_parallel_comm": False,
     "overlap_p2p_comm": False,
@@ -315,10 +321,10 @@ GOLDEN_CONFIG: Dict[str, Any] = {
     "transformer_impl": "transformer_engine",
     "use_cpu_initialization": None,
     "use_dualpipev": False,
-    ##### FlagScale Begin #####
+    ######## FlagScale Begin ########
     "use_engram": False,
     "use_fused_mhc": False,
-    ##### FlagScale End #####
+    ######## FlagScale End ########
     "use_fused_weighted_squared_relu": False,
     "use_inference_optimized_layers": False,
     "use_kitchen": False,
@@ -537,7 +543,7 @@ class TestMambaMoEModel:
 
     def setup_method(self, method):
         if torch.cuda.is_available():
-            free_mem = torch.cuda.mem_get_info()[0] / (1024 ** 3)
+            free_mem = torch.cuda.mem_get_info()[0] / (1024**3)
             if free_mem < 20:
                 pytest.skip(f"Not enough GPU memory ({free_mem:.1f} GiB free, need >= 20 GiB)")
 

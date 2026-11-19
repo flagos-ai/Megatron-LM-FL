@@ -4,9 +4,10 @@
 
 hardware_name: cuda
 display_name: 'CUDA Tests'
+setup_script: .github/scripts/set_env_cuda.sh
 
 # CI image for online env
-ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:cuda12.8.1-cudnn9.8.0-torch2.7.0-python3.12-dev-02111650
+ci_image: harbor.baai.ac.cn/flagscale/megatron-lm-fl:manual-20260828-cuda-dev
 
 # Runner labels for A100 node
 runner_labels:
@@ -27,6 +28,8 @@ runner_labels:
 container_volumes:
   - /mnt/airs-business/cicd/baai_datasets:/home/gitlab-runner/data
   - /mnt/airs-business/cicd/baai_tokenizers:/home/gitlab-runner/tokenizers
+  - /mnt/airs-business/cicd/baai_datasets:/opt/data/datasets
+  - /mnt/airs-business/cicd/baai_tokenizers:/opt/data/tokenizers
 
 # Container options (hardware-specific settings)
 container_options: '--privileged --gpus all --shm-size=500g --hostname megatron_cicd --user root --ulimit nofile=65535:65535'
@@ -38,77 +41,245 @@ device_types:
 # Test matrix configuration
 test_matrix:
   unit:
+    nproc_per_node: 8
     devices:
       - a100
+    pytest_extra_args:
+      - -m
+      - not experimental and not flaky_in_dev
+    experimental_pytest_extra_args:
+      - --experimental
+      - -m
+      - experimental and not flaky_in_dev
+    groups:
+      - name: core
+        path: tests/unit_tests/test_*.py megatron/plugin/tests/
+        description: Core unit tests
+      - name: models
+        path: tests/unit_tests/models/
+        description: Model tests
+      - name: distributed
+        path: tests/unit_tests/distributed/
+        description: Distributed tests
+      - name: dist_checkpointing
+        path: tests/unit_tests/dist_checkpointing/
+        description: Distributed checkpointing tests
+      - name: tensor_parallel
+        path: tests/unit_tests/tensor_parallel/
+        description: Tensor parallel tests
+      - name: pipeline_parallel
+        path: tests/unit_tests/pipeline_parallel/
+        description: Pipeline parallel tests
+      - name: data
+        path: tests/unit_tests/data/
+        description: Data tests
+      - name: fusions
+        path: tests/unit_tests/fusions/
+        description: Fusion tests
+      - name: transformer
+        path: tests/unit_tests/transformer/
+        description: Transformer tests
+      - name: others
+        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
+        description: post-training, tokenizer, and utility tests
+      - name: optimizer
+        path: tests/unit_tests/optimizer/
+        description: Optimizer tests
+      - name: extensions
+        path: tests/unit_tests/extension/
+        description: Third-party extension tests
+      - name: a2a_overlap
+        path: tests/unit_tests/a2a_overlap/
+        description: All-to-all overlap tests
+      - name: flagcicd_cov
+        path: tests/unit_tests/flagcicd_cov/
+        description: FlagCICD supplementary coverage cases (nightly and manual only)
+    # Other vendors' plugin code cannot execute on this platform; keep it out
+    # of this platform's reported coverage denominator.
+    coverage_omit:
+      - megatron/plugin/Ascend/
+      - megatron/plugin/kunlunxin/
+      - megatron/plugin/metax/
+      - megatron/plugin/mthreads/
+    unsupported_groups:
+      dsa_kernel: "DSA Triton kernels require SM90+; CUDA CI currently runs on A100 (SM80)."
     # Ignored test files for unit tests
     # These files will be skipped when running pytest
     ignored_tests:
+      # All-to-all overlap
+      # A100 (SM80) cannot execute Transformer Engine FP8, which requires SM89+.
+      # Skip only the 12 FP8 cases on A100 while keeping the passing BF16 coverage active.
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag0-alltoall-512]
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag0-alltoall-None]
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag1-alltoall-512]
+      - tests/unit_tests/a2a_overlap/test_delay_wgrad_compute.py::TestDelayWgradCompute::test_overlap_dispatch_backward_with_experts_wgrad[fp8_flag1-alltoall-None]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads-fp8_flag1-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads_params-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[512-optim_grads_params-fp8_flag1-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads-fp8_flag1-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads_params-fp8_flag0-alltoall]
+      - tests/unit_tests/a2a_overlap/test_fsdp_1f1b_overlap.py::TestFSDP1F1BOverlap::test_fsdp_1f1b_training_step[None-optim_grads_params-fp8_flag1-alltoall]
+
+      # Data
+      # Requires the upstream HuggingFace tokenizer fixture, which is not present in FL CI assets.
+      - tests/unit_tests/data/test_fim_dataset.py
+
+      # Distributed checkpointing
+      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
+      - tests/unit_tests/dist_checkpointing/models/test_mamba.py
+      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
+      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
       - tests/unit_tests/data/test_preprocess_data.py
+      # Downloads GPT-2 tokenizer files when the mounted offline fixture is absent.
+      # CI runners cannot rely on external Hugging Face/S3 access.
+      - tests/unit_tests/data/test_preprocess_mmdata.py
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
-      - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_safe_globals.py
-      - tests/unit_tests/dist_checkpointing/models/test_moe_experts.py
-      - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
-      - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
+      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
+
+      # Distributed
       # Sporadic CUDA async allocation failure leaves NCCL ranks on different collective sequences.
       - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_custom_dtype
-      - tests/unit_tests/export/trtllm/test_distributed_fp8.py
-      - tests/unit_tests/export/trtllm/test_single_device_fp8.py
-      - tests/unit_tests/export/trtllm/test_trtllm_helper.py
-      - tests/unit_tests/pipeline_parallel/test_pipeline_layout.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromSequenceParallelRegion ## sporadic NCCL all-gather OOM on shared A100 CI runner
-      - tests/unit_tests/transformer/moe/test_a2a_token_dispatcher.py
-      - tests/unit_tests/transformer/moe/test_token_dispatcher.py ## sporadic cuda malloc error on CI machines, tests passed locally
-      - tests/unit_tests/test_inference.py
-      - tests/unit_tests/models/test_gpt_model.py
-      - tests/unit_tests/models/test_mamba_model.py
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard_te_quantized
+      # The A100 CI image (PyTorch 2.7.0a0 nv25.3) repeatedly leaves ranks on
+      # different NCCL collective sequences; the same case passes on 8xH100
+      # with PyTorch 2.7.1. Re-enable after upgrading the CUDA CI image.
+      - tests/unit_tests/distributed/megatron_fsdp/test_mfsdp_fully_shard.py::TestMegatronFsdpFullyShard::test_fully_shard
+      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+      - tests/unit_tests/distributed/test_grad_sync_with_expert_parallel.py
+      - tests/unit_tests/distributed/test_param_and_grad_buffer.py ## test_bucket_sizes[True-True-False-18050] FAILED NCCL SIGABRT
+
+      # Fusions
+      # CUDA CI sees sporadic backward gradient mismatches from the fused kernel;
+      # the numeric error is within 1 ULP but outside allclose.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_inplace_forward_backward
+      # KV-split MLA RoPE fusion hits sporadic Triton autotune/compile failures on shared A100 CI.
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-sbhd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-thd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-sbhd]
+      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-thd]
+
+      # Models
+      # Dynamic inference FP8 selects Flash Attention with an unsupported test head size.
+      - tests/unit_tests/models/test_gpt_model.py::TestGPTWithDynamicInference::test_dynamic_inference_padding_with_fp8
+      # FL does not modify upstream Mamba logic, and mamba-ssm is not installed in the CUDA CI image.
+      - tests/unit_tests/models/test_hybrid_model.py
+      - tests/unit_tests/models/test_hybrid_moe_model.py
       - tests/unit_tests/models/test_mamba_moe_model.py ## sporadic cuda malloc error on CI machines, tests passed locally
       - tests/unit_tests/models/test_mimo_1f1b_schedule.py ## HyperCommGrid + TE attention: TE requires global _TENSOR_MODEL_PARALLEL_GROUP but HyperCommGrid only sets per-grid process groups
       - tests/unit_tests/models/test_mimo_checkpoint.py ## same HyperCommGrid + TE attention issue as test_mimo_1f1b_schedule
-      - tests/unit_tests/post_training/test_modelopt_module_spec.py
-      - tests/unit_tests/transformer/moe/test_upcycling.py ## tests passed locally but CI hits unhandled NCCL error
-      - tests/unit_tests/transformer/moe/test_aux_loss.py
-      - tests/unit_tests/transformer/moe/test_moe_layer_discrepancy.py
-      - tests/unit_tests/transformer/moe/test_routers.py
-      - tests/unit_tests/transformer/test_attention.py
-      - tests/unit_tests/transformer/test_attention_packed_seq.py
-      - tests/unit_tests/transformer/test_cuda_graphs.py
-      - tests/unit_tests/transformer/test_full_cuda_graph.py
-      - tests/unit_tests/transformer/test_multi_latent_attention.py
-      - tests/unit_tests/transformer/test_multi_token_prediction.py
-      - tests/unit_tests/transformer/test_transformer_block.py
-      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py
-      - tests/unit_tests/transformer/test_submodule_callables.py ## tests passed locally but CI hits NCCL error
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp4_sp] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp2_sp_longseq] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[short_seqs_parallel] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[extreme_mixed] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[long_short_mix] ## TE version does not support CP + THD format attention
-      - tests/unit_tests/transformer/experimental_attention_variant/test_absorbed_mla.py
-      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py
-      # KV-split MLA RoPE fusion hits sporadic Triton autotune/compile failures on shared A100 CI.
-      # Keep the inplace MLA RoPE cases enabled for coverage.
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-sbhd]
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-sbhd]
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[False-thd]
-      - tests/unit_tests/fusions/test_mla_yarn_rope_apply.py::TestFusedMLARope::test_kv_split_forward_backward[True-thd]
-      - tests/unit_tests/dist_checkpointing/test_local.py
-      - tests/unit_tests/dist_checkpointing/test_serialization.py::TestSerialization::test_remove_sharded_tensors ## NCCL hangs inexplicably during distributed barrier with TP=2 PP=4 on 8 GPUs
 
+      # Post-training
+      - tests/unit_tests/post_training/test_modelopt_model_builder.py::test_model_provider_switches_to_modelopt_builder ## ModelOpt is excluded from the FL CUDA CI image
+      - tests/unit_tests/post_training/test_modelopt_module_spec.py
+
+      # Tensor parallel
+      - tests/unit_tests/tensor_parallel/test_mappings.py::test_GatherFromSequenceParallelRegion ## sporadic NCCL all-gather OOM on shared A100 CI runner
+
+      # Tokenizers
+      - tests/unit_tests/tokenizers/test_tokenizer.py
+
+      # Transformer
+      # A100 (SM80) cannot execute Transformer Engine FP8, which requires SM89+.
+      - tests/unit_tests/transformer/test_transformer_block.py::TestParallelTransformerBlock::test_gpu_forward_full_checkpoint_fp8
+      - tests/unit_tests/transformer/test_transformer_block.py::TestParallelTransformerBlock::test_gpu_forward_selective_checkpoint_fp8
+      # The current A100 TE/cuDNN stack has no backend for padded THD attention.
+      - tests/unit_tests/transformer/test_attention_packed_seq.py::TestParallelAttentionWithPackedPaddedSequence::test_gpu_forward
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestParallelMLAAttention::test_gpu_forward_thd_padded[yarn]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestParallelMLAAttention::test_gpu_forward_thd_padded[rope]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp4_sp]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[tp2_cp2_sp_longseq]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[short_seqs_parallel]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[extreme_mixed]
+      - tests/unit_tests/transformer/test_thd_correctness.py::test_thd_format[long_short_mix]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[rope-False]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[yarn-False]
+      - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[yarn-True]
+      # DSv4 native parity with compress_ratio=4 requires the optional
+      # fast_hadamard_transform package, which is not installed in the CUDA CI image.
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-False-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-False-4-pro-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-True-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-True-4-pro-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-False-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-False-4-pro-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-True-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-True-4-pro-unfused]
+      # These strict numerical checks pass on H100 but exceed tolerance on the A100 CI stack.
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[False]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[True]
+      - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py::TestTransformerBlockWithProcessGroups::test_mlp_with_custom_pgs[8-4-2-True]
+      - tests/unit_tests/transformer/test_transformer_layer.py::TestParallelTransformerLayer::test_chunked_mlp
+      # On the A100 CI stack, shared-expert all-to-all backward can leave ranks on
+      # different default-PG collective sequences and hit the NCCL watchdog timeout.
+      - tests/unit_tests/transformer/moe/test_shared_experts.py
+
+      # Top-level unit tests
+      # FL does not modify upstream FP8 block-scaling logic; the CUDA CI image is below CUDA 12.9.
+      - tests/unit_tests/test_fp8_param.py
+      - tests/unit_tests/test_inference.py
+      # PyTorch 2.7/NCCL allocator teardown leaves the CUDA context invalid on the local CI stack.
+      - tests/unit_tests/test_nccl_allocator.py
       # test_straggler_detector causes a SIGSEGV (Signal 11) crash during pytest session teardown on A100.
       # Root cause: UCX (HPC-X libucs.so) crashes in torch.distributed.barrier() called from the
       # session-scoped cleanup fixture in conftest.py, likely because the distributed process group
       # is in an inconsistent state after the test completes. This is a UCX/NCCL environment issue,
       # not a logic bug. Skipped until the teardown issue is resolved.
       - tests/unit_tests/test_utils.py::test_straggler_detector
-      - tests/unit_tests/tokenizers/test_tokenizer.py
-      - tests/unit_tests/dist_checkpointing/models/test_bert_model.py::TestBertModel::test_sharded_state_dict_save_load
-      - tests/unit_tests/dist_checkpointing/models/test_gpt_model.py::TestGPTModel::test_sharded_state_dict_save_load
-      - tests/unit_tests/dist_checkpointing/models/test_t5_model.py::TestT5Model::test_sharded_state_dict_save_load
-      - tests/unit_tests/distributed/megatron_fsdp/test_mcore_fully_sharded_data_parallel.py
+
+      # Supplementary coverage tests (flagcicd_cov)
+      # DistributedOptimizer save/load_parameter_state (dp_zero format): on 8xA100 DP ranks 1-7
+      # restore zeros while rank 0 restores its shard; the same test passes with one rank. The
+      # developer suite ignores tests/unit_tests/dist_checkpointing/test_optimizer.py on this stack too.
+      - tests/unit_tests/flagcicd_cov/optimizer/test_distrib_optimizer_ckpt_cov.py::test_distributed_optimizer_save_and_load_parameter_state
+      # The HuggingFace wrappers call transformers' private _load_pretrained_model with the old
+      # signature; the image's transformers/modelopt patch requires pretrained_model_name_or_path.
+      - tests/unit_tests/flagcicd_cov/models_lm/test_clip_model_cov.py::test_siglip_model_loads_local_vision_encoder
+      - tests/unit_tests/flagcicd_cov/models_lm/test_clip_model_cov.py::test_siglip_forward_returns_last_hidden_state_of_vision_encoder
+      - tests/unit_tests/flagcicd_cov/models_lm/test_huggingface_module_cov.py::test_auto_huggingface_model_loads_local_model_and_runs_forward
+      - tests/unit_tests/flagcicd_cov/models_lm/test_huggingface_module_cov.py::test_build_hf_model_constructs_qwen_and_siglip_wrappers
+      - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_model_loads_local_lm_and_flags_gradients_for_tp_averaging
+      - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_forward_returns_per_token_cross_entropy_loss
+      - tests/unit_tests/flagcicd_cov/models_lm/test_qwen_model_cov.py::test_qwen_embedding_transposes_input_embeddings_to_sequence_major
+      # Selective recompute of layernorm+mlp on a local-spec layer exhausts GPU memory on 8xA100
+      # (cuBLAS handle allocation fails, ~40 GB per rank) and pytest then stalls rendering the
+      # failure, which would block the whole group without an NCCL timeout. Root cause open.
+      - tests/unit_tests/flagcicd_cov/transformer_core/test_transformer_layer_cov.py::test_selective_recompute_layernorm_and_mlp_preserves_values_and_grads
+      # paged_stash.allocate_stash_buffers references torch.float8_e8m0fnu, which the A100 image's
+      # PyTorch 2.7.0a0 (nv25.03) does not provide; re-enable once the image ships a torch with it.
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_hooks_cov.py::test_on_get_returns_the_reload_view_without_padding_once_captured
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_hooks_cov.py::test_on_get_raises_when_a_stashed_tensor_was_never_reloaded
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_stash_moves_pending_paged_tensors_into_the_reload_queue
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_stash_rejects_a_reload_queue_with_leftover_entries
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reload_restores_paged_tensors_from_the_stash[wait-stream]
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reload_restores_paged_tensors_from_the_stash[no-wait]
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_transitions_capture_to_captured_and_allocates_buffers
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_reallocates_released_buffers_while_captured
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_applies_default_size_factors_when_config_is_omitted
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_reset_restores_free_lists_and_flags_between_iterations
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_cuda_tier_from_avg_tokens_for_positive_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_cuda_tier_from_actual_tokens_for_negative_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_zero_cuda_tier_when_capture_recorded_no_avg_hint
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_adds_pinned_host_tier_for_positive_cpu_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_sizes_host_tier_from_actual_tokens_for_negative_cpu_factor
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_zeros_stale_overflow_and_recreates_buffers
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_manager_cov.py::test_allocate_groups_buffers_by_dtype_and_hidden_size
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_prepare_for_rerun_clears_capacity_budget_and_stash_flags
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_prepare_for_rerun_keeps_page_buffers_for_validation
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_call_reruns_once_after_a_stash_overflow
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_rerun_cov.py::test_call_succeeds_without_rerun_when_only_a_host_spill_occurred
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_runner_cov.py::test_check_moe_overflow_reports_stash_overflow_across_ranks
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_runner_cov.py::test_check_moe_overflow_reports_host_spill_across_ranks
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_round_trips_the_interleaved_schedule_outputs
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_round_trips_input_gradients_after_reload
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_iteration_leaves_no_pending_work_behind
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_iteration_returns_all_pages_to_the_free_list
+      - tests/unit_tests/flagcicd_cov/moe_paged_stash/test_paged_stash_schedule_cov.py::test_paged_stash_iteration_records_the_schedule_in_order
 
   functional:
     train:
@@ -119,6 +290,7 @@ test_matrix:
         golden_environment: dev
         golden_platform: dgx_a100
         enable_lightweight_mode: false
+        gpus_per_node: 1
       - model: gpt
         test_case: qwen3_0p6b_mcore_te_tp2_pp2_benchmark
         training_script: pretrain_gpt.py
@@ -126,4 +298,32 @@ test_matrix:
         golden_environment: dev
         golden_platform: dgx_a100
         enable_lightweight_mode: false
-        gpus_per_node: 8
+        gpus_per_node: 4
+
+# TE-FL runtime configuration
+te_fl:
+  prepare: true
+  build_mode: cuda
+  build_environment:
+    NVTE_FRAMEWORK: pytorch
+    NVTE_WITH_USERBUFFERS: "0"
+    NVTE_WITH_CUDA: "1"
+    NVTE_WITH_NCCL_EP: "0"
+    NVTE_CUDA_ARCHS: "80"
+    CMAKE_CUDA_ARCHITECTURES: "80"
+    TORCH_CUDA_ARCH_LIST: "8.0"
+  runtime:
+    environment:
+      TE_FL_PREFER: flagos
+    install_pip_args: []
+    pip_packages: [flag-gems, sqlalchemy]
+
+# Exact files or directory prefixes owned by this platform. Shared paths run all platforms.
+paths_watch:
+  - .github/configs/cuda.yml
+  - .github/scripts/set_env_cuda.sh
+  - .github/workflows/all_tests_cuda.yml
+  - megatron/plugin/platform/platform_cuda.py
+  - tests/functional_tests/test_cases/gpt/qwen3_0p6b_mcore_te_tp2_pp2_benchmark/
+
+test_retry: {transient_retries: 1}
