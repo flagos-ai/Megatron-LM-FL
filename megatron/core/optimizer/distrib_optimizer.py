@@ -13,7 +13,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import torch
 import torch.nn.functional
 
-from megatron.core.utils import log_single_rank, nvtx_range_pop, nvtx_range_push
+from megatron.core.utils import log_single_rank
 
 from ..dist_checkpointing.optimizer import KEEP_VARS_HINT
 
@@ -3054,7 +3054,6 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
             self, '_defer_param_sync', False
         )
         timers = self.config.timers
-        nvtx_range_push(msg="optimizer.params_all_gather")
         if timers is not None and (self.ddp_config.use_megatron_fsdp or should_sync_params):
             timers('params-all-gather', log_level=1).start(barrier=self.config.barrier_with_L1_time)
         if self.ddp_config.use_megatron_fsdp:
@@ -3074,6 +3073,5 @@ class DistributedOptimizer(MixedPrecisionOptimizer):
                 self.start_param_sync_for_bucket_group_subset()
         if timers is not None and (self.ddp_config.use_megatron_fsdp or should_sync_params):
             timers('params-all-gather').stop()
-        nvtx_range_pop(msg="optimizer.params_all_gather")
 
         return update_successful
