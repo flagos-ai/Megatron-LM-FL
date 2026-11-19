@@ -17,6 +17,10 @@ configure_hygon_runtime() {
   local device_index
   local cuda_visible_devices
 
+  # The Hygon image exports a Tsinghua mirror that returns HTTP 403 for
+  # transformers. Keep all subsequent CI pip installs on the public index.
+  ci_export_env PIP_INDEX_URL https://pypi.org/simple
+
   ci_export_env GEMS_VENDOR amd
   ci_require_env CI_NPROC_PER_NODE
   if ! [[ "$CI_NPROC_PER_NODE" =~ ^[1-9][0-9]*$ ]]; then

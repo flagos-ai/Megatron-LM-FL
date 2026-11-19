@@ -73,6 +73,11 @@ on:
         type: string
         default: '[]'
         description: JSON array of test files or node IDs to ignore
+      coverage_omit:
+        required: false
+        type: string
+        default: '[]'
+        description: JSON array of source directories excluded from reported coverage
       te_fl_runtime_environment:
         required: true
         type: string
@@ -206,6 +211,7 @@ jobs:
           CI_SETUP_SCRIPT: ${{ inputs.setup_script }}
           CI_NPROC_PER_NODE: ${{ inputs.nproc_per_node }}
           CI_IGNORED_TESTS: ${{ inputs.ignored_tests }}
+          CI_COVERAGE_OMIT: ${{ inputs.coverage_omit }}
           CI_PYTEST_EXTRA_ARGS: ${{ inputs.pytest_extra_args }}
           CI_EXPERIMENTAL_PYTEST_EXTRA_ARGS: ${{ inputs.experimental_pytest_extra_args }}
         run: python3 .github/scripts/run_unit_groups.py
