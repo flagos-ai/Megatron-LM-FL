@@ -753,14 +753,12 @@ class GatedDeltaNet(MegatronModule):
         # TODO: Move CP layout ownership to a model/region-level scheduler so hybrid models can
         # enter contiguous layout before GDN regions instead of paying module-local conversions.
         if cp_size_chunkwise > 1:
-            nvtx_range_push(suffix="zigzag_to_contiguous")
             if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
                 qkvzba = zigzag_to_contiguous_chunks(
                     qkvzba, cp_group_chunkwise, seq_dim=0, cu_seqlens=cu_seqlens_q
                 )
             else:
                 qkvzba = zigzag_to_contiguous_chunks(qkvzba, cp_group_chunkwise, seq_dim=0)
-            nvtx_range_pop(suffix="zigzag_to_contiguous")
 
         qkvzba, thd_cp_a2a_inv = self._a2a_cp_to_hp(
             qkvzba,
@@ -771,7 +769,6 @@ class GatedDeltaNet(MegatronModule):
             packed_seq_params,
         )
 
-        nvtx_range_push(suffix="pre_gated_delta_rule")
         if cp_size_chunkwise > 1 and packed_seq_params is None and batch > 1:
             raise ValueError(
                 "GDN chunkwise CP with SBHD inputs currently requires micro_batch_size == 1 "
@@ -809,7 +806,6 @@ class GatedDeltaNet(MegatronModule):
                 packed_seq_params=packed_seq_params,
                 loop_iter=loop_iter,
             )
-        nvtx_range_pop(suffix="pre_gated_delta_rule")
 
         # --- Spike diagnostics: stash lightweight g reference ---
         # Only store the tensor reference; no .item() or device sync here.
@@ -849,7 +845,6 @@ class GatedDeltaNet(MegatronModule):
         # TODO: The planned CP layout refactor should keep consecutive GDN layers contiguous and
         # restore zigzag only at SDPA/canonical-layout boundaries.
         if cp_size_chunkwise > 1:
-            nvtx_range_push(suffix="contiguous_to_zigzag")
             if packed_seq_params is not None and packed_seq_params.qkv_format == 'thd':
                 norm_out = contiguous_to_zigzag_chunks(
                     norm_out, cp_group=cp_group_chunkwise, seq_dim=0, cu_seqlens=cu_seqlens_q
@@ -858,7 +853,6 @@ class GatedDeltaNet(MegatronModule):
                 norm_out = contiguous_to_zigzag_chunks(
                     norm_out, cp_group=cp_group_chunkwise, seq_dim=0
                 )
-            nvtx_range_pop(suffix="contiguous_to_zigzag")
 
         norm_out = self._a2a_hp_to_cp(
             norm_out, cp_size_headwise, cp_group_headwise, packed_seq_params, thd_cp_a2a_inv

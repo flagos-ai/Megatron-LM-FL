@@ -14,7 +14,6 @@ from megatron.core.ssm.mamba_context_parallel import (
     _redo_attention_load_balancing,
 )
 from megatron.core.tensor_parallel.mappings import gather_from_sequence_parallel_region
-from megatron.core.utils import nvtx_range_pop, nvtx_range_push
 
 # Check CUDA backend availability
 try:
@@ -100,15 +99,12 @@ def _fsa_headwise_cp_forward(
             f"Q heads per TP ({num_q_heads_per_tp}) must be divisible by "
             f"CP size ({cp_size})"
         )
-    nvtx_range_push(msg="fsa_cp.q_all_to_all")
     q_3d = query.reshape(sq_local, b, np_local * hn)
     q_full_seq_3d = _all_to_all_cp2hp(q_3d, cp_group)
     # [sq_global, b, np_local * hn / cp_size] = [sq_global, b, (np_local/cp_size) * hn]
     sq_global = sq_local * cp_size
-    nvtx_range_pop(msg="fsa_cp.q_all_to_all")
 
     # Undo zigzag load-balancing + reshape to 4-d + transpose SBHD->BSHD
-    nvtx_range_push(msg="fsa_cp.q_transform")
     num_q_heads_per_rank = np_local // cp_size
     q_full_seq = q_full_seq_3d.reshape(sq_global, b, num_q_heads_per_rank, hn)
     if use_fused_kernel:
@@ -117,14 +113,12 @@ def _fsa_headwise_cp_forward(
     else:
         q_full_seq = _undo_attention_load_balancing(q_full_seq, cp_size)
         q_bshd = q_full_seq.transpose(0, 1).contiguous()
-    nvtx_range_pop(msg="fsa_cp.q_transform")
 
     # Global Q head index for this rank's first Q head
     first_q_head_global_idx = cp_rank * num_q_heads_per_rank
 
     # Step 2: K/V heads - choose communication mode based on head count
     nkv_local = key.shape[2]
-    nvtx_range_push(msg="fsa_cp.kv_comm")
     if num_kv_heads_per_tp >= cp_size and num_kv_heads_per_tp % cp_size == 0:
         # Scenario 1: Sufficient KV heads, use all-to-all
         # After all-to-all, Q and KV heads are naturally aligned:
@@ -184,12 +178,10 @@ def _fsa_headwise_cp_forward(
         # [b, sq_global, 1, hn]
 
         window_sizes_local = window_sizes[kv_head_idx:kv_head_idx+1, :]
-    nvtx_range_pop(msg="fsa_cp.kv_comm")
 
     # Step 3: FSA kernel (Q, K, V are all in BSHD layout now)
     # Both Triton and CUDA backends share the same call signature for this path,
     # but CUDA returns (out, lse) while Triton returns out only.
-    nvtx_range_push(msg="fsa_cp.fsa_kernel")
     result = flash_attn_kernel(
         q_bshd, k_bshd, v_bshd,
         window_sizes=window_sizes_local,
@@ -198,10 +190,8 @@ def _fsa_headwise_cp_forward(
     )
     # CUDA backend returns (out, lse), Triton returns out only
     output_bshd = result[0] if isinstance(result, tuple) else result
-    nvtx_range_pop(msg="fsa_cp.fsa_kernel")
 
     # Step 4: Transpose BSHD->SBHD + redo zigzag + all-to-all backward
-    nvtx_range_push(msg="fsa_cp.output_all_to_all")
     if use_fused_kernel:
         # Fused: single kernel does BSHD->SBHD + redo-zigzag
         output_sbhd_zigzag = fused_bshd_to_sbhd_zigzag_redo(output_bshd, cp_size)
@@ -216,5 +206,4 @@ def _fsa_headwise_cp_forward(
     output_sp_3d = _all_to_all_hp2cp(output_3d, cp_group)
     # [sq_local, b, np_local * hn]
     output_sp = output_sp_3d.reshape(sq_local, b, np_local, hn)
-    nvtx_range_pop(msg="fsa_cp.output_all_to_all")
     return output_sp

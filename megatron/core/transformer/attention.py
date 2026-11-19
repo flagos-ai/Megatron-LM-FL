@@ -1204,7 +1204,6 @@ class Attention(MegatronModule, ABC):
             else:
                 # No CP or CP disabled, use standard FSA
                 # Transpose to BSHD for flash_sparse_attn_func / flash_attn_func_cuda
-                nvtx_range_push(suffix="fsa_kernel")
                 query = query.transpose(0, 1).contiguous()
                 key = key.transpose(0, 1).contiguous()
                 value = value.transpose(0, 1).contiguous()
@@ -1248,7 +1247,6 @@ class Attention(MegatronModule, ABC):
                     )
                 # Convert output back from BSHD [b, sq, np, hn] to SBHD [sq, b, np, hn]
                 output = output.transpose(0, 1).contiguous()
-                nvtx_range_pop(suffix="fsa_kernel")
 
         output = output.reshape(output.size(0), output.size(1), -1)
 
