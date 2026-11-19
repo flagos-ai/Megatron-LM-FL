@@ -2263,6 +2263,18 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             if not defer_init:
                 self._set_parallel_attributes()
 
+        @overridable  # FlagScale Modify
+        def make_grouped_weights(self, defer_init=False):
+            return super().make_grouped_weights(defer_init=defer_init)
+
+        @overridable  # FlagScale Modify
+        def _get_weight_tensors(self):
+            return super()._get_weight_tensors()
+
+        @overridable  # FlagScale Modify
+        def _forward_grouped_linear(self, x, m_splits, is_first_microbatch=None):
+            return super().forward(x, m_splits, is_first_microbatch=is_first_microbatch)
+
         def forward(self, x, m_splits):
             """Forward."""
             _is_first_microbatch = (
@@ -2271,7 +2283,8 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
             with quant_context:
-                out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+                # FlagScale Modify
+                out = self._forward_grouped_linear(x, m_splits, _is_first_microbatch)
             self.is_first_microbatch = False
 
             # TE only returns a tuple when return_bias is True, otherwise
