@@ -24,8 +24,6 @@ from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
 ######## FlagScale End ########
 
-logger = logging.getLogger(__name__)
-
 if TYPE_CHECKING:
     from megatron.core.transformer import TransformerConfig
 
