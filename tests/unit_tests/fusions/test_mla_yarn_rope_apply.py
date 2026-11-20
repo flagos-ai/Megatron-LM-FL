@@ -34,6 +34,7 @@ def dtype_tols(dtype):
         raise ValueError(f"Unsuppored dtype ({dtype})")
 
 
+##### FlagScale Begin #####
 def _assert_close_with_sparse_bf16_outliers(
     actual, expected, *, msg, tols, allow_sparse_outliers=False
 ):
@@ -52,6 +53,9 @@ def _assert_close_with_sparse_bf16_outliers(
         if bad.sum().item() <= max_sparse_bad and diff.max().item() <= 5.0:
             return
         raise
+
+
+##### FlagScale End #####
 
 
 class FakeCPGroup:

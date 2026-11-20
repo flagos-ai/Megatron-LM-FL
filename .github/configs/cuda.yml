@@ -202,17 +202,14 @@ test_matrix:
       - tests/unit_tests/transformer/test_multi_latent_attention.py::TestContextParallelMLAAttentionPrecision::test_gpu_forward_thd_precision[yarn-True]
       # DSv4 native parity with compress_ratio=4 requires the optional
       # fast_hadamard_transform package, which is not installed in the CUDA CI image.
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[512-True-True-4-flash-unfused]
+      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[512-True-True-4-pro-unfused]
       - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-False-4-flash-unfused]
       - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-False-4-pro-unfused]
       - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-True-4-flash-unfused]
       - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-False-True-4-pro-unfused]
       - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-False-4-flash-unfused]
       - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-False-4-pro-unfused]
-      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-True-4-flash-unfused]
-      - tests/unit_tests/transformer/experimental_attention_variant/test_dsv4_hybrid_native_parity.py::TestDSv4HybridNativeParity::test_attention_matches_native_reference[4096-True-True-4-pro-unfused]
-      # These strict numerical checks pass on H100 but exceed tolerance on the A100 CI stack.
-      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[False]
-      - tests/unit_tests/transformer/experimental_attention_variant/test_attention_variant_dsa.py::TestFusedDSAIndexerLossGradient::test_fused_indexer_loss_gradient_matches_autograd[True]
       - tests/unit_tests/transformer/test_transformer_block_custom_pgs.py::TestTransformerBlockWithProcessGroups::test_mlp_with_custom_pgs[8-4-2-True]
       - tests/unit_tests/transformer/test_transformer_layer.py::TestParallelTransformerLayer::test_chunked_mlp
       # On the A100 CI stack, shared-expert all-to-all backward can leave ranks on
