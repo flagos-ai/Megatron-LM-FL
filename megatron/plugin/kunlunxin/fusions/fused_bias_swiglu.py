@@ -102,6 +102,11 @@ class WeightedSwiGLUFunction(torch.autograd.Function):
 @debug_patch("fusions.fused_bias_swiglu.weighted_bias_swiglu_impl")
 def weighted_bias_swiglu_impl(input, bias, weights, fp8_input_store=False, clamp_value=None):
     """Run XPU token-wise weighted SwiGLU."""
+    if clamp_value is not None and clamp_value > 0:
+        from megatron.core.fusions.fused_bias_swiglu import weighted_bias_swiglu_impl as core_impl
+
+        return core_impl.__wrapped__(input, bias, weights, fp8_input_store, clamp_value)
+
     ori_shape = input.shape
     assert len(ori_shape) in [2, 3]
     assert not fp8_input_store, "Not support fp8 now!"
