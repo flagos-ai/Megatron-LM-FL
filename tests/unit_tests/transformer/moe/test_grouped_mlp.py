@@ -1101,3 +1101,87 @@ class TestTEGroupedMLP:
             f"Fused-path training did not reduce loss enough: "
             f"initial={losses[0]:.6f}, final={losses[-1]:.6f}, full={losses}"
         )
+
+    @pytest.mark.parametrize("parallel_mode", ["column", "row"])
+    def test_expert_parallel_attributes_survive_reset(self, parallel_mode):
+        """Megatron's parallel attributes must outlive TE's parameter rebuilds."""
+        from megatron.core.extensions.transformer_engine import TEGroupedLinear
+
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(1, 1, expert_model_parallel_size=1)
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=self.hidden_size,
+            num_attention_heads=4,
+            num_moe_experts=self.num_experts,
+            expert_model_parallel_size=1,
+            add_bias_linear=False,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+        )
+        # explicit_expert_comm, which clears TE's parallel_mode, needs EP or expert TP.
+        config.expert_model_parallel_size = 2
+        linear = TEGroupedLinear(
+            self.num_experts,
+            self.hidden_size,
+            self.hidden_size,
+            parallel_mode=parallel_mode,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=True,
+            is_expert=True,
+        )
+        assert linear.explicit_expert_comm
+
+        expected_dim = 0 if parallel_mode == "column" else 1
+        # Once after construction and once more after a reset: TE rebuilds its
+        # parameters on reset, so attributes set only in __init__ are lost.
+        for _ in range(2):
+            for i in range(linear.num_gemms):
+                weight = getattr(linear, f"weight{i}")
+                assert weight.partition_dim == expected_dim
+                assert weight.partition_stride == 1
+                assert weight.allreduce is False
+            linear.reset_parameters()
+
+    @pytest.mark.skipif(
+        not (hasattr(torch, "npu") and torch.npu.is_available()), reason="NPU required"
+    )
+    def test_npu_indexed_expert_weights_count_in_grad_norm(self):
+        """Indexed experts must not be dropped from gradient statistics as TP duplicates."""
+        from megatron.core.extensions.transformer_engine import TEGroupedLinear
+        from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
+
+        if Utils.world_size % 2:
+            pytest.skip("This parallel layout requires an even number of ranks")
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(2, 1, expert_model_parallel_size=1)
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=self.hidden_size,
+            num_attention_heads=4,
+            num_moe_experts=self.num_experts,
+            tensor_model_parallel_size=2,
+            add_bias_linear=False,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+        )
+        linear = TEGroupedLinear(
+            self.num_experts,
+            self.hidden_size,
+            self.hidden_size,
+            parallel_mode="column",
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=True,
+            is_expert=True,
+        )
+        assert linear.explicit_expert_comm
+
+        # Expert TP is 2 here, so each rank holds its own half of every expert weight
+        # and must contribute it to the gradient norm, clipping and the zero count.
+        for i in range(linear.num_gemms):
+            weight = getattr(linear, f"weight{i}")
+            assert param_is_not_tensor_parallel_duplicate(weight)

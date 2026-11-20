@@ -215,3 +215,10 @@ register(
     impl="megatron.plugin.metax.distributed.fsdp.param_and_grad_buffer._get_communication_stream",
     vendor="metax",
 )
+
+# Count indexed expert weights as tensor-parallel shards in gradient statistics.
+register(
+    target="megatron.core.extensions.transformer_engine.TEGroupedLinear._set_parallel_attributes",
+    impl="megatron.plugin.Ascend.grouped_linear.set_parallel_attributes",
+    vendor="npu",
+)
