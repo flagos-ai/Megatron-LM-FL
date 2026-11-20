@@ -746,6 +746,15 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
+        # Pass loop_iter to self_attention module (used by GDN's per-iteration
+        # dt_bias offset).  Set as attribute rather than function argument to
+        # avoid changing the Attention.forward() / SelfAttention.forward()
+        # signature — GDN reads it from kwargs via **kwargs, but SDPA modules
+        # would reject an unknown keyword.  The attribute is cleared immediately
+        # after the call.
+        _loop_iter = getattr(self, '_loop_iter', None)
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = _loop_iter
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
@@ -758,6 +767,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = None
         nvtx_range_pop(suffix="self_attention")
 
         if self.recompute_input_layernorm:
@@ -776,6 +787,23 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             # self attention module.
             hidden_states = attention_output_with_bias[0]
         else:
+            # Apply loop residual scale to attention output before residual add
+            if getattr(self, '_loop_residual_scale', None) is not None:
+                attn_scale = (
+                    self._loop_residual_scale["attn"]
+                    if isinstance(self._loop_residual_scale, dict)
+                    else self._loop_residual_scale
+                )
+                if attention_output_with_bias[1] is not None:
+                    warnings.warn(
+                        "loop_residual_scale only scales the attention output, not the bias. "
+                        "This may cause incorrect scaling when bias is present.",
+                        stacklevel=2,
+                    )
+                attention_output_with_bias = (
+                    attention_output_with_bias[0] * attn_scale,
+                    attention_output_with_bias[1],
+                )
             with self.bias_dropout_add_exec_handler():
                 hidden_states = self.self_attn_bda(self.training, self.config.bias_dropout_fusion)(
                     attention_output_with_bias, residual, self.hidden_dropout
@@ -834,6 +862,14 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
         This method calls the core computation of a transformer layer, including
         self-attention, cross-attention (if applicable), and feed-forward operations.
         """
+        # Extract loop_residual_scale before passing to sub-methods.
+        # Store on self temporarily so _forward_attention and _forward_mlp can read it.
+        loop_residual_scale = kwargs.pop("loop_residual_scale", None)
+        self._loop_residual_scale = loop_residual_scale
+        # Extract loop_iter and store on self so _forward_attention can pass it
+        # to self_attention (used by GDN's per-iteration dt_bias offset).
+        loop_iter = kwargs.pop("loop_iter", None)
+        self._loop_iter = loop_iter
         hidden_states, context = self._forward_attention(*args, **kwargs)
         output = self._forward_mlp(
             hidden_states,
@@ -841,6 +877,8 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             padding_mask=kwargs.get("padding_mask", None),
             input_ids=kwargs.get("input_ids", None),
         )
+        self._loop_residual_scale = None
+        self._loop_iter = None
         return output, context
 
     def _forward_pre_mlp_layernorm(self, hidden_states: Tensor):
@@ -1036,6 +1074,23 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             # MLP module.
             hidden_states = mlp_output_with_bias[0]
         else:
+            # Apply loop residual scale to MLP output before residual add
+            if getattr(self, '_loop_residual_scale', None) is not None:
+                mlp_scale = (
+                    self._loop_residual_scale["mlp"]
+                    if isinstance(self._loop_residual_scale, dict)
+                    else self._loop_residual_scale
+                )
+                if mlp_output_with_bias[1] is not None:
+                    warnings.warn(
+                        "loop_residual_scale only scales the MLP output, not the bias. "
+                        "This may cause incorrect scaling when bias is present.",
+                        stacklevel=2,
+                    )
+                mlp_output_with_bias = (
+                    mlp_output_with_bias[0] * mlp_scale,
+                    mlp_output_with_bias[1],
+                )
             with self.bias_dropout_add_exec_handler():
                 hidden_states = self.mlp_bda(self.training, self.config.bias_dropout_fusion)(
                     mlp_output_with_bias, residual, self.hidden_dropout
@@ -1609,10 +1664,17 @@ class HyperConnectionTransformerLayer(TransformerLayer):
         """Forward pass with MHC recompute manager support."""
         kwargs.pop("dynamic_inference_decode_only", None)
         mhc_recompute_manager = kwargs.pop("mhc_recompute_manager", None)
+        # Pop loop_residual_scale to prevent it leaking into _forward_attention kwargs.
+        # HyperConnectionTransformerLayer does not use loop residual scaling.
+        kwargs.pop("loop_residual_scale", None)
+        # Pop and store loop_iter so self_attention can receive it via getattr.
+        self._loop_iter = kwargs.pop("loop_iter", None)
 
         hidden_states, context = self._forward_attention(
             *args, mhc_recompute_manager=mhc_recompute_manager, **kwargs
         )
+
+        self._loop_iter = None
 
         output = self._forward_mlp(
             hidden_states,
@@ -1673,6 +1735,15 @@ class HyperConnectionTransformerLayer(TransformerLayer):
 
         # Self attention.
         nvtx_range_push(suffix="self_attention")
+        # Pass loop_iter to self_attention module (used by GDN's per-iteration
+        # dt_bias offset).  Set as attribute rather than function argument to
+        # avoid changing the Attention.forward() / SelfAttention.forward()
+        # signature — GDN reads it from kwargs via **kwargs, but SDPA modules
+        # would reject an unknown keyword.  The attribute is cleared immediately
+        # after the call.
+        _loop_iter = getattr(self, '_loop_iter', None)
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = _loop_iter
         attention_output_with_bias = self.self_attention(
             input_layernorm_output,
             attention_mask=attention_mask,
@@ -1685,6 +1756,8 @@ class HyperConnectionTransformerLayer(TransformerLayer):
             packed_seq_params=packed_seq_params,
             sequence_len_offset=sequence_len_offset,
         )
+        if _loop_iter is not None:
+            self.self_attention._loop_iter = None
         nvtx_range_pop(suffix="self_attention")
 
         if checkpoint_input_layernorm:

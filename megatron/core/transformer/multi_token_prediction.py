@@ -1379,12 +1379,10 @@ class MultiTokenPredictionLayer(MegatronModule):
                 )
 
         if self.config.recompute_method == 'uniform':
-            # Uniformly divide the total number of Transformer layers and checkpoint
-            # the input activation of each divided chunk.
-            # A method to further reduce memory usage reducing checkpoints.
+            # Each MTP depth has only 1 transformer layer, always checkpoint as one unit.
             assert (
-                self.config.recompute_num_layers == 1
-            ), "recompute_num_layers must be 1 for MTP recompute"
+                self.config.mtp_recompute_num_layers == 1
+            ), "mtp_recompute_num_layers must be 1 for MTP recompute"
             with outer_quantization_context:
                 outputs = checkpoint_handler()
         elif self.config.recompute_method == 'block':

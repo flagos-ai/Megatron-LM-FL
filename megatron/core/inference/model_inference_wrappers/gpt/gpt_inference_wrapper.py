@@ -74,6 +74,7 @@ class GPTInferenceWrapper(AbstractModelInferenceWrapper):
             or attention_backend == AttnBackend.fused
             or attention_backend == AttnBackend.unfused
             or attention_backend == AttnBackend.auto
+            or attention_backend == AttnBackend.fsa
         ):
             # TE creates the attention mask internally
             attention_mask = None

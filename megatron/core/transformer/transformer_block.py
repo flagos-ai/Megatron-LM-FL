@@ -66,6 +66,9 @@ get_cpu_offload_context = None
 te_checkpoint = None
 
 if HAVE_TE:
+    from megatron.core.extensions.transformer_engine import (
+        te_checkpoint,  # FlagScale Modify: used by the loop-aware _checkpointed_forward
+    )
     from megatron.core.extensions.transformer_engine import TENorm, get_cpu_offload_context
 
     LayerNormImpl = TENorm
@@ -80,6 +83,25 @@ else:
 
 
 logger = logging.getLogger(__name__)
+
+
+class _GradScale(torch.autograd.Function):
+    """Identity in forward, scales gradient in backward.
+
+    Used at the loop→prelude boundary to attenuate gradients flowing from
+    the loop region back into the prelude layers.
+    """
+
+    @staticmethod
+    def forward(ctx, x, scale):
+        """Return x unchanged and remember the gradient scale."""
+        ctx.scale = scale
+        return x
+
+    @staticmethod
+    def backward(ctx, grad_output):
+        """Scale the incoming gradient."""
+        return grad_output * ctx.scale, None
 
 
 def get_num_layers_to_build(
@@ -372,6 +394,9 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         self._build_layers()
         self.num_layers_per_pipeline_rank = len(self.layers)
 
+        # Build loop execution plan
+        self._build_loop_execution_plan()
+
     def _build_layers(self):
         # Transformer layers.
         # @jcasper can we improve how we deal with layer_number?
@@ -459,6 +484,231 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         if self.config.inference_fuse_tp_communication:
             self._setup_fused_tp_communication()
 
+    def _build_loop_execution_plan(self):
+        """Build the execution plan for Loop Transformer.
+
+        Precomputes:
+          - self._execution_plan: list of (local_layer_idx, loop_iteration) tuples.
+            loop_iteration=0 for all layers on their first visit, >=1 for repeated visits.
+          - self._loop_enabled: whether any looping happens on this PP rank.
+          - self._loop_residual_scales: list[dict] with per-iteration attn/mlp
+            scale factors, or None.
+        """
+        self._loop_residual_scales = self.config._loop_residual_scales
+        self._loop_enabled = False
+        self._loop_entry_exec_idx = None
+        self._loop_local_range = (0, 0)
+
+        if self.config.loop_start_layer is None:
+            # No looping: standard sequential execution
+            self._execution_plan = [(i, -1) for i in range(len(self.layers))]
+            return
+
+        # Compute the global layer range owned by this PP rank.
+        # layer.layer_number is 1-based global index.
+        local_layer_count = len(self.layers)
+        if local_layer_count == 0:
+            self._execution_plan = []
+            return
+
+        # Global 0-based range of layers on this rank: [global_start, global_end)
+        global_start = self.layers[0].layer_number - 1  # convert 1-based to 0-based
+        global_end = global_start + local_layer_count
+
+        loop_start = self.config.loop_start_layer
+        loop_end = self.config.loop_end_layer
+        num_iters = self.config.num_loop_iterations
+
+        # Compute intersection of loop range with this rank's layer range
+        overlap_start = max(loop_start, global_start)
+        overlap_end = min(loop_end, global_end)
+
+        if overlap_start >= overlap_end:
+            # No loop layers on this rank
+            self._execution_plan = [(i, -1) for i in range(local_layer_count)]
+            return
+
+        # Validate: loop range must be fully contained within this rank's range,
+        # or this rank's range must be fully contained within the loop range.
+        # Partial overlap at boundaries is allowed (the loop range can span multiple PP stages).
+        rank_in_loop_start = overlap_start - global_start  # local index where loop begins
+        rank_in_loop_end = overlap_end - global_start  # local index where loop ends (exclusive)
+
+        self._loop_enabled = True
+
+        # Build execution plan:
+        # 1. Prelude: layers before the loop on this rank (iteration 0)
+        # 2. Loop: layers in the loop range, repeated according to loop_type
+        # 3. Coda: layers after the loop on this rank (iteration 0)
+        plan = []
+
+        # Prelude. loop_iteration=-1 marks "not part of the loop": the scale
+        # lookup below is guarded by `loop_iter >= 0`, so these layers keep a
+        # full-strength residual (h + f(h)) instead of a scaled one.
+        for i in range(rank_in_loop_start):
+            plan.append((i, -1))
+
+        # Loop iterations
+        loop_type = self.config.loop_type
+        if loop_type == "module-wise":
+            # ABCD → ABCDABCD
+            for iteration in range(num_iters):
+                for i in range(rank_in_loop_start, rank_in_loop_end):
+                    plan.append((i, iteration))
+        elif loop_type == "block-wise":
+            # ABCD with block_size=2 → ABABCDCD
+            block_size = self.config.loop_block_size
+            # Use global indices to determine block boundaries so that
+            # blocks align correctly across PP ranks.
+            for block_global_start in range(loop_start, loop_end, block_size):
+                block_global_end = min(block_global_start + block_size, loop_end)
+                # Intersect this block with this rank's layer range
+                local_start = max(block_global_start, overlap_start) - global_start
+                local_end = min(block_global_end, overlap_end) - global_start
+                if local_start >= local_end:
+                    continue
+                for iteration in range(num_iters):
+                    for i in range(local_start, local_end):
+                        plan.append((i, iteration))
+        elif loop_type == "sdpa-wise":
+            # Only SDPA layers inside the loop range are repeated, each one in place:
+            # with A=GDN, B=SDPA, ABC → ABBC. Layer order is never changed and GDN
+            # layers always execute exactly once, so the sequential state each GDN
+            # layer carries is never recomputed on an already-transformed input.
+            sdpa_locals = self._get_sdpa_local_indices(global_start, overlap_start, overlap_end)
+            for i in range(rank_in_loop_start, rank_in_loop_end):
+                if i in sdpa_locals:
+                    for iteration in range(num_iters):
+                        plan.append((i, iteration))
+                else:
+                    # A GDN layer inside the loop range: executes once and is not
+                    # part of the loop, so -1 keeps its residual at full strength.
+                    plan.append((i, -1))
+        else:
+            raise ValueError(f"Unsupported loop_type='{loop_type}'.")
+
+        # Coda (see prelude above for why -1)
+        for i in range(rank_in_loop_end, local_layer_count):
+            plan.append((i, -1))
+
+        self._execution_plan = plan
+        # Local [start, end) of the loop range on this rank, for region reporting.
+        self._loop_local_range = (rank_in_loop_start, rank_in_loop_end)
+
+        # Identify the exec-step index where the loop region begins.
+        # This is where _GradScale is inserted to attenuate backward flow
+        # from the loop into the prelude.
+        self._loop_entry_exec_idx = None
+        if rank_in_loop_start > 0:
+            # This rank has prelude layers; find the first loop exec step.
+            for idx, (local_idx, loop_iter) in enumerate(plan):
+                if local_idx >= rank_in_loop_start:
+                    self._loop_entry_exec_idx = idx
+                    break
+
+        # Log execution plan summary
+        loop_span = rank_in_loop_end - rank_in_loop_start
+        block_info = ""
+        if loop_type == "block-wise":
+            block_info = f"block_size={self.config.loop_block_size}, "
+        if loop_type == "sdpa-wise":
+            # Only the SDPA layers repeat, so report how many did.
+            from collections import Counter as _Counter
+
+            _repeated = sum(1 for _, c in _Counter(i for i, _ in plan).items() if c > 1)
+            loop_info = f"loop={_repeated}of{loop_span}x{num_iters}, "
+        else:
+            loop_info = f"loop={loop_span}x{num_iters}, "
+        logger.info(
+            f"Loop Transformer execution plan: "
+            f"loop_type='{loop_type}', "
+            f"{block_info}"
+            f"global_layers=[{global_start}, {global_end}), "
+            f"loop_range=[{loop_start}, {loop_end}), "
+            f"local_loop=[{rank_in_loop_start}, {rank_in_loop_end}), "
+            f"num_iters={num_iters}, "
+            f"residual_scales={self._loop_residual_scales}, "
+            f"total_exec_steps={len(plan)} "
+            f"(prelude={rank_in_loop_start}, "
+            f"{loop_info}"
+            f"coda={local_layer_count - rank_in_loop_end})"
+        )
+
+        # Print expanded model structure with attention type per execution step
+        self._log_execution_plan(plan, global_start)
+
+    def _get_sdpa_local_indices(self, global_start, overlap_start, overlap_end):
+        """Local indices of SDPA (non-linear-attention) layers in [overlap_start, overlap_end).
+
+        Used by loop_type='sdpa-wise'. The attention pattern comes from
+        ``get_linear_attention_pattern`` (1=linear attention/GDN, 0=SDPA), the same
+        source the layer specs are built from, so this cannot drift from the layers
+        actually instantiated.
+        """
+        from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+            get_linear_attention_pattern,
+        )
+
+        pattern = get_linear_attention_pattern(self.config)
+        sdpa_locals = {
+            g - global_start for g in range(overlap_start, overlap_end) if pattern[g] == 0
+        }
+        if not sdpa_locals:
+            # A rank whose share of the loop range holds no SDPA layer is legitimate
+            # under PP, but if the whole loop range has none the config is a no-op.
+            logger.warning(
+                f"loop_type='sdpa-wise' found no SDPA layers in loop range "
+                f"[{overlap_start}, {overlap_end}) on this rank; no looping will "
+                f"happen here. Check loop_start_layer/loop_end_layer against the "
+                f"attention pattern (linear_attention_freq="
+                f"{self.config.linear_attention_freq})."
+            )
+        return sdpa_locals
+
+    def _log_execution_plan(self, plan, global_start):
+        """Print the expanded model structure showing attn type and loop iteration."""
+        # Loop layers are the ones carrying loop_iter >= 0, which is also what
+        # drives the residual-scale lookup. Counting repeats would mislabel a
+        # 'sdpa-wise' GDN layer, which sits inside the loop range but runs once.
+        loop_local_indices = {local_idx for local_idx, it in plan if it >= 0}
+        # Range boundaries come from the config rather than from the plan: under
+        # 'sdpa-wise' the looped layers are scattered, so the first/last looped
+        # index does not delimit the prelude and coda.
+        range_start, range_end = self._loop_local_range
+
+        lines = []
+        for step, (local_idx, loop_iter) in enumerate(plan):
+            layer = self._get_layer(local_idx)
+            global_idx = local_idx + global_start
+
+            # Determine attention type
+            attn_module = getattr(layer, 'self_attention', None)
+            attn_type = type(attn_module).__name__ if attn_module is not None else "Unknown"
+
+            # Determine MLP type
+            mlp_module = getattr(layer, 'mlp', None)
+            mlp_type = type(mlp_module).__name__ if mlp_module is not None else "Unknown"
+
+            # Determine region
+            if loop_iter >= 0:
+                region = f"loop iter={loop_iter}"
+            elif local_idx < range_start:
+                region = "prelude (no scale)"
+            elif local_idx >= range_end:
+                region = "coda (no scale)"
+            else:
+                # Inside the loop range but run once and unscaled: a GDN layer
+                # under 'sdpa-wise'.
+                region = "in range, not looped (no scale)"
+
+            lines.append(
+                f"  step {step:>3d}: global_layer={global_idx:>3d} "
+                f"(physical={local_idx:>3d}) | "
+                f"attn={attn_type:<30s} | mlp={mlp_type:<15s} | {region}"
+            )
+
+        logger.info(f"Expanded model structure ({len(plan)} steps):\n" + "\n".join(lines))
+
     def has_final_layernorm_in_this_stage(self):
         """
         Check if this vpp stage contains the final layernorm.
@@ -514,6 +764,191 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
 
     def _get_layer(self, layer_number: int):
         return self.layers[layer_number]
+
+    def _checkpointed_forward(
+        self,
+        hidden_states: Tensor,
+        attention_mask: Tensor,
+        context: Tensor,
+        context_mask: Tensor,
+        rotary_pos_emb: Tensor,
+        attention_bias: Tensor,
+        packed_seq_params: PackedSeqParams,
+        use_inner_quantization_context: bool,
+        padding_mask: Optional[Tensor] = None,
+        extract_layer_indices: Optional[Set[int]] = None,
+        layer_offset: int = 0,
+        input_ids: Optional[Tensor] = None,
+    ):
+        """Forward method with activation checkpointing.
+
+        Args:
+            extract_layer_indices (Set[int], optional): Global layer
+                indices (across all pipeline stages) from which to
+                extract features.
+            layer_offset (int): The global layer offset for the current
+                pipeline stage. Used to convert local layer indices to
+                global indices when checking extract_layer_indices.
+
+        Returns:
+            If extract_layer_indices is empty: hidden_states tensor
+            If extract_layer_indices is non-empty: (hidden_states, intermediate_hidden_states) tuple
+        """
+        if extract_layer_indices is None:
+            extract_layer_indices = set()
+        intermediate_hidden_states: List[Tensor] = []
+
+        def custom(start: int, end: int):
+            """Create a custom forward function for execution plan steps [start, end).
+
+            When loop is enabled, start/end refer to indices in self._execution_plan.
+            Each step maps to (local_layer_idx, loop_iteration).
+            """
+
+            def custom_forward(
+                hidden_states,
+                attention_mask,
+                context,
+                context_mask,
+                rotary_pos_emb,
+                padding_mask=None,
+            ):
+                for exec_idx in range(start, end):
+                    # Scale gradients at the prelude→loop boundary
+                    if (
+                        exec_idx == self._loop_entry_exec_idx
+                        and self.config.loop_prelude_grad_scale is not None
+                    ):
+                        hidden_states = _GradScale.apply(
+                            hidden_states, self.config.loop_prelude_grad_scale
+                        )
+
+                    local_idx, loop_iter = self._execution_plan[exec_idx]
+                    layer = self._get_layer(local_idx)
+
+                    loop_residual_scale = (
+                        self._loop_residual_scales[loop_iter]
+                        if self._loop_enabled
+                        and loop_iter >= 0
+                        and self._loop_residual_scales is not None
+                        else None
+                    )
+
+                    # Get appropriate inner quantization context
+                    if use_inner_quantization_context:
+                        if self.config.fp8:
+                            inner_quantization_context = get_fp8_context(
+                                self.config, layer.layer_number - 1
+                            )
+                        # TODO: check if fp4 is supported in this case
+                        elif self.config.fp4:
+                            inner_quantization_context = get_fp4_context(
+                                self.config, layer.layer_number - 1
+                            )
+                        else:
+                            inner_quantization_context = nullcontext()
+                    else:
+                        inner_quantization_context = nullcontext()
+
+                    with inner_quantization_context:
+                        hidden_states, context = layer(
+                            hidden_states=hidden_states,
+                            attention_mask=attention_mask,
+                            context=context,
+                            context_mask=context_mask,
+                            rotary_pos_emb=rotary_pos_emb,
+                            attention_bias=attention_bias,
+                            inference_context=None,
+                            packed_seq_params=packed_seq_params,
+                            padding_mask=padding_mask,
+                            input_ids=input_ids,
+                            loop_residual_scale=loop_residual_scale,
+                            loop_iter=loop_iter if self._loop_enabled else None,
+                        )
+
+                return hidden_states, context
+
+            return custom_forward
+
+        def checkpoint_handler(forward_func):
+            """Determines whether to use the `te_checkpoint` or `tensor_parallel.checkpoint`"""
+            # TODO: check if fp4 is supported in this case
+            if self.config.fp8 or self.config.fp4:
+                return te_checkpoint(
+                    forward_func,
+                    self.config.distribute_saved_activations,
+                    tensor_parallel.random.get_cuda_rng_tracker,
+                    self.pg_collection.tp,
+                    hidden_states,
+                    attention_mask,
+                    context,
+                    context_mask,
+                    rotary_pos_emb,
+                    padding_mask,
+                )
+            else:
+                return tensor_parallel.checkpoint(
+                    forward_func,
+                    self.config.distribute_saved_activations,
+                    hidden_states,
+                    attention_mask,
+                    context,
+                    context_mask,
+                    rotary_pos_emb,
+                    padding_mask,
+                )
+
+        num_exec_steps = len(self._execution_plan)
+
+        if self.config.recompute_method == 'uniform':
+            # Uniformly divide the total number of execution steps and checkpoint
+            # the input activation of each divided chunk.
+            # A method to further reduce memory usage reducing checkpoints.
+            exec_idx = 0
+            while exec_idx < num_exec_steps:
+                chunk_end = min(exec_idx + self.config.recompute_num_layers, num_exec_steps)
+                hidden_states, context = checkpoint_handler(custom(exec_idx, chunk_end))
+
+                # Feature extraction for uniform recompute: collect at end of each chunk
+                for idx in range(exec_idx, chunk_end):
+                    local_idx, loop_iter = self._execution_plan[idx]
+                    if loop_iter == 0 and (local_idx + layer_offset) in extract_layer_indices:
+                        if idx == chunk_end - 1:
+                            intermediate_hidden_states.append(hidden_states)
+
+                exec_idx += self.config.recompute_num_layers
+
+        elif self.config.recompute_method == 'block':
+            # Checkpoint the input activation of only a set number of individual
+            # execution steps and skip the rest.
+            recompute_skip_num_layers = 0
+            for exec_idx in range(num_exec_steps):
+                # Skip recomputation when input grad computation is not needed.
+                # TODO: check if fp4 is supported in this case
+                if (self.config.fp8 or self.config.fp4) and not hidden_states.requires_grad:
+                    recompute_skip_num_layers += 1
+                if (
+                    exec_idx >= recompute_skip_num_layers
+                    and exec_idx < self.config.recompute_num_layers + recompute_skip_num_layers
+                ):
+                    hidden_states, context = checkpoint_handler(custom(exec_idx, exec_idx + 1))
+                else:
+                    hidden_states, context = custom(exec_idx, exec_idx + 1)(
+                        hidden_states, attention_mask, context, context_mask, rotary_pos_emb
+                    )
+
+                # Feature extraction: collect hidden states at specified global layer indices
+                local_idx, loop_iter = self._execution_plan[exec_idx]
+                if loop_iter == 0 and (local_idx + layer_offset) in extract_layer_indices:
+                    intermediate_hidden_states.append(hidden_states)
+        else:
+            raise ValueError("Invalid activation recompute method.")
+
+        # Return intermediate hidden states if feature extraction was requested
+        if len(extract_layer_indices) > 0:
+            return hidden_states, intermediate_hidden_states
+
+        return hidden_states
 
     def set_input_tensor(self, input_tensor: Tensor):
         """Set input tensor to be used instead of forward()'s input.
@@ -822,21 +1257,38 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             # Forward pass.
             if self.config.recompute_granularity == 'full' and self.training:
                 assert engram_hash_input_ids is None  # FlagScale Modify
-                checkpointed_result = checkpointed_forward(
-                    self,
-                    hidden_states=hidden_states,
-                    attention_mask=attention_mask,
-                    context=context,
-                    context_mask=context_mask,
-                    rotary_pos_emb=rotary_pos_emb,
-                    attention_bias=attention_bias,
-                    packed_seq_params=packed_seq_params,
-                    use_inner_quantization_context=use_inner_quantization_context,
-                    padding_mask=padding_mask,
-                    extract_layer_indices=extract_layer_indices,
-                    layer_offset=layer_offset,
-                    input_ids=input_ids,
-                )
+                if self._loop_enabled:
+                    # checkpointed_forward does not know the loop execution plan.
+                    checkpointed_result = self._checkpointed_forward(
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        use_inner_quantization_context=use_inner_quantization_context,
+                        padding_mask=padding_mask,
+                        extract_layer_indices=extract_layer_indices,
+                        layer_offset=layer_offset,
+                        input_ids=input_ids,
+                    )
+                else:
+                    checkpointed_result = checkpointed_forward(
+                        self,
+                        hidden_states=hidden_states,
+                        attention_mask=attention_mask,
+                        context=context,
+                        context_mask=context_mask,
+                        rotary_pos_emb=rotary_pos_emb,
+                        attention_bias=attention_bias,
+                        packed_seq_params=packed_seq_params,
+                        use_inner_quantization_context=use_inner_quantization_context,
+                        padding_mask=padding_mask,
+                        extract_layer_indices=extract_layer_indices,
+                        layer_offset=layer_offset,
+                        input_ids=input_ids,
+                    )
                 # Handle return value from _checkpointed_forward
                 if len(extract_layer_indices) > 0:
                     # (hidden_states, intermediate_hidden_states) tuple
@@ -857,7 +1309,27 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     self.layers[0].pre_compute_embedding(engram_hash_input_ids)
                 ######## FlagScale End ########
 
-                for l_no, layer in enumerate(self.layers):
+                for exec_step, (local_idx, loop_iter) in enumerate(self._execution_plan):
+                    # Scale gradients at the prelude→loop boundary
+                    if (
+                        exec_step == self._loop_entry_exec_idx
+                        and self.config.loop_prelude_grad_scale is not None
+                    ):
+                        hidden_states = _GradScale.apply(
+                            hidden_states, self.config.loop_prelude_grad_scale
+                        )
+
+                    layer = self.layers[local_idx]
+
+                    # Determine loop residual scale for this execution step
+                    loop_residual_scale = (
+                        self._loop_residual_scales[loop_iter]
+                        if self._loop_enabled
+                        and loop_iter >= 0
+                        and self._loop_residual_scales is not None
+                        else None
+                    )
+
                     # Get appropriate inner quantization context
                     if use_inner_quantization_context:
                         if self.config.fp8:
@@ -873,18 +1345,22 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     else:
                         inner_quantization_context = nullcontext()
 
-                    mhc_manager = mhc_layer_managers[l_no]
+                    mhc_manager = mhc_layer_managers[local_idx]
                     if mhc_manager is not None:
                         mhc_manager.is_last_layer_in_recompute_block = (
-                            mhc_is_last_in_recompute_block[l_no]
+                            mhc_is_last_in_recompute_block[local_idx]
                         )
 
                     with self.offload_context, inner_quantization_context:
                         ######## FlagScale Begin ########
                         # Pre-compute embeddings for the next DeepSeekTransformerLayer
                         # if engram exists, to overlap with current layer's computation
-                        if engram_hash_input_ids is not None and l_no < len(self.layers) - 1:
-                            next_layer = self.layers[l_no + 1]
+                        if (
+                            engram_hash_input_ids is not None
+                            and exec_step < len(self._execution_plan) - 1
+                        ):
+                            next_local_idx = self._execution_plan[exec_step + 1][0]
+                            next_layer = self.layers[next_local_idx]
                             if getattr(next_layer, "is_engram_layer", False):
                                 next_layer.pre_compute_embedding(engram_hash_input_ids)
                         ######## FlagScale End ########
@@ -919,6 +1395,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                             padding_mask=padding_mask,
                             mhc_recompute_manager=mhc_manager,
                             input_ids=input_ids,
+                            loop_residual_scale=loop_residual_scale,
+                            loop_iter=loop_iter if self._loop_enabled else None,
                         )
 
                         ######## FlagScale Begin ########
@@ -933,7 +1411,7 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                     self._finalize_mhc_recompute_layer(
                         mhc_manager=mhc_manager,
                         hidden_states=hidden_states,
-                        is_last_in_recompute_block=mhc_is_last_in_recompute_block[l_no],
+                        is_last_in_recompute_block=mhc_is_last_in_recompute_block[local_idx],
                     )
 
                     if (
@@ -944,7 +1422,8 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
                         hidden_states = self.group_prefetch_offload_commit_async(hidden_states)
 
                     # Extract intermediate embeddings using global layer index
-                    if (l_no + layer_offset) in extract_layer_indices:
+                    # Only extract on the first visit (loop_iter == 0) to avoid duplicates.
+                    if loop_iter == 0 and (local_idx + layer_offset) in extract_layer_indices:
                         intermediate_hidden_states.append(hidden_states)
 
         # Only contract if the final layer norm is in this stage
@@ -982,6 +1461,21 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
         if not self.pre_process and len(self.layers) == 0 and not self.final_layernorm:
             hidden_states = hidden_states.clone()
         self.config.recompute_granularity = saved_recompute_granularity  # FlagScale Modify
+
+        # --- Collect GDN decay diagnostic references (lazy, no device sync) ---
+        if getattr(self.config, 'gdn_spike_diag_threshold', None) is not None:
+            self._gdn_decay_diag = {}
+            for local_idx, layer in enumerate(self.layers):
+                attn = getattr(layer, 'self_attention', None)
+                if attn is None:
+                    attn = getattr(layer, 'inner', None)
+                    if attn is not None:
+                        attn = getattr(attn, 'self_attention', None)
+                g_ref = getattr(attn, '_g_diag_ref', None) if attn is not None else None
+                if g_ref is not None:
+                    global_layer = layer.layer_number - 1  # 0-based, align with param names
+                    self._gdn_decay_diag[global_layer] = g_ref
+                    attn._g_diag_ref = None  # clear for next step
 
         if len(extract_layer_indices) > 0:
             return hidden_states, intermediate_hidden_states

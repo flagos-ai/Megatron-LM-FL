@@ -26,6 +26,14 @@ def enable_jit_fuser():
             # triton backend (triton.backends.mtgpu for MUSA) that isn't
             # guaranteed importable — keep the plain eager functions.
             if get_platform().device_name() == "cuda" and not _is_metax_torch():
+                # Verify that the inductor backend can resolve triton's cache key.
+                # Triton 3.7+ removed `triton_key` which torch._inductor expects,
+                # causing torch.compile to fail at graph-cache time.
+                try:
+                    from triton.compiler.compiler import triton_key  # noqa: F401
+                except (ImportError, ModuleNotFoundError):
+                    jit_fuser = noop_decorator
+                    return
                 jit_fuser = torch.compile
             else:
                 jit_fuser = noop_decorator

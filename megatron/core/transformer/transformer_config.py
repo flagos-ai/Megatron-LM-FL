@@ -99,6 +99,11 @@ class TransformerConfig(ModelParallelConfig):
     mtp_use_repeated_layer: bool = False
     """Use a single MTP layer repeatedly instead of multiple separate layers."""
 
+    mtp_recompute_num_layers: Optional[int] = None
+    """Number of layers per recompute unit for MTP modules.
+    Each MTP depth has only 1 transformer layer, so only recompute_num_layers=1 is supported.
+    If None, defaults to 1 when full recompute is enabled."""
+
     mtp_hybrid_override_pattern: Optional[str] = None
     """DEPRECATED: Use unified hybrid_layer_pattern instead.
     Legacy argument for loading old checkpoints.
@@ -112,6 +117,97 @@ class TransformerConfig(ModelParallelConfig):
     num_layers_in_last_pipeline_stage: Optional[int] = None
     """Number of transformer layers on last pipeline stage.
     None implies equal layer division across PP ranks."""
+
+    # Loop Transformer (SMELT-style) configuration
+    loop_start_layer: Optional[int] = None
+    """Global layer index (0-based) where the loop span begins (inclusive).
+    None means looping is disabled. When set, loop_end_layer must also be set.
+    The looped span [loop_start_layer, loop_end_layer) will be executed
+    num_loop_iterations times during forward, while only storing one copy of weights."""
+
+    loop_end_layer: Optional[int] = None
+    """Global layer index (0-based) where the loop span ends (exclusive).
+    The number of physical layers in the loop = loop_end_layer - loop_start_layer."""
+
+    num_loop_iterations: int = 2
+    """Number of times the looped layers are executed per forward pass.
+    Effective depth = prelude + loop_span * num_loop_iterations + coda.
+    Only used when loop_start_layer is not None."""
+
+    loop_residual_scale: Optional[float] = field(
+        default=None, metadata={"argparse_meta": {"type": float, "nargs": "+"}}
+    )
+    """Scale factor applied to sublayer outputs (attention & MLP) within the looped span.
+
+    Accepted formats (via YAML config):
+      - float: uniform scale for all iterations and both sublayers.
+            e.g. 0.5
+      - list[float]: per-iteration scale (length must equal num_loop_iterations),
+            shared by attention and MLP.
+            e.g. [0.6, 0.4]
+      - list[dict]: per-iteration + per-sublayer scale.  Each dict must contain
+            'attn' and 'mlp' keys.
+            e.g. [{"attn": 0.7, "mlp": 0.5}, {"attn": 0.3, "mlp": 0.5}]
+
+    None means no scaling.  Normalised to ``_loop_residual_scales`` in __post_init__."""
+
+    loop_type: str = "module-wise"
+    """Controls the granularity of the loop.
+    - 'module-wise': loop the entire transformer layer sequence. ABCD → ABCDABCD.
+    - 'block-wise': split the loop span into blocks of loop_block_size and repeat
+      each block. E.g. ABCD with block_size=2 → ABABCDCD.
+    - 'layer-wise': repeat each layer in place. ABCD → AABBCCDD. Alias for
+      'block-wise' with loop_block_size=1, normalised to that in __post_init__.
+    - 'sdpa-wise': repeat only the SDPA layers in the span, in place; GDN layers
+      run once. Requires linear_attention_freq.
+    Only used when loop_start_layer is not None."""
+
+    loop_block_size: Optional[int] = None
+    """Block size for block-wise loop. The loop span is split into consecutive blocks
+    of this size, and each block is repeated num_loop_iterations times.
+    Must evenly divide (loop_end_layer - loop_start_layer).
+    Only used when loop_type='block-wise'."""
+
+    enable_loop_dt_offset: bool = False
+    """When True, GDN layers gain a per-loop-iteration learnable offset to dt_bias,
+    allowing different decay rates at each loop iteration.  The parameter shape is
+    [num_loop_iterations, num_value_heads_per_tp], initialized to zeros so it is
+    backward-compatible with existing checkpoints.  Ignored when looping is disabled
+    (loop_start_layer is None)."""
+
+    loop_gdn_key_lora_rank: Optional[int] = None
+    """When set, each looped GDN layer gains a per-loop-iteration low-rank delta on
+    the key part of its input projection, so k^(1) and k^(2) differ structurally
+    rather than only because the input differs.
+
+    Motivation: under weight tying a looped DPLR layer contributes the factor
+    (I - beta*k*k^T) at every iteration. If the keys are identical, every iteration
+    erases the same direction of recurrent memory and the loop adds no expressivity;
+    distinct keys grow the erasure subspace from rank-1 towards rank-T.
+
+    Enabling this splits the fused in_proj (TELayerNormColumnParallelLinear) into a
+    separate norm + linear so the post-norm activation is exposed, which is what the
+    delta must consume to stay mergeable into a weight copy. Checkpoint keys are
+    unchanged: state-dict hooks rename them back to the fused layout, so checkpoint
+    conversion tooling sees exactly the same tensors as before.
+
+    Parameters are [num_loop_iterations, hidden, rank] and [num_loop_iterations,
+    rank, qk_dim_local_tp], with the up-projection initialized to zero so the model
+    starts bit-identical to one without the delta."""
+
+    gdn_spike_diag_threshold: Optional[float] = None
+    """When set, enables GDN spike diagnostics.  Each step whose total grad norm
+    exceeds this threshold triggers per-layer grad norm + GDN decay stats output.
+    During forward, each GDN layer records lightweight references to its decay
+    tensor g; the expensive host sync (.item()) only happens when a spike is
+    detected after backward.  Set to None to disable (default)."""
+
+    loop_prelude_grad_scale: Optional[float] = None
+    """When set, scales gradients flowing backward from the loop region into the
+    prelude layers by this factor.  For example, 0.5 halves the gradient magnitude
+    reaching prelude layers.  This counteracts the gradient amplification caused by
+    loop backpropagation through repeated layers.
+    Only effective when loop_start_layer is not None.  None means no scaling (default)."""
 
     pipeline_model_parallel_layout: Optional[Union[str, list, PipelineParallelLayerLayout]] = None
     """Custom definition of the pipeline parallel partitioning.
@@ -168,6 +264,25 @@ class TransformerConfig(ModelParallelConfig):
     decide the best backend to run (except in the case of local).
     If attention backend is local we use the local pytorch implementation in mcore.
     Users can specify exact backend by changing this config. """
+
+    ## dma related configuration
+    softmax_threshold: float = 0.0
+    """Softmax threshold for flash-sparse-attention backend. Attention tiles whose
+    max score falls below this threshold are skipped. Only used when
+    attention_backend is flash_sparse. Typical values: 0.0 ~ 0.1."""
+
+    is_quant: bool = False
+    """Whether to quantize QKV to FP8 in flash-sparse-attention. Enables FP8 compute
+    for improved throughput. Only used when attention_backend is flash_sparse."""
+
+    is_local: bool = True
+    """Whether to enable local window attention in flash-sparse-attention.
+    Only used when attention_backend is flash_sparse."""
+
+    is_autotune: bool = False
+    """Whether to enable kernel autotuning in flash-sparse-attention.
+    Only used when attention_backend is flash_sparse."""
+    ## dma related configuration
 
     softmax_scale: Optional[float] = None
     """Softmax scale for attention scaling."""
@@ -490,6 +605,37 @@ class TransformerConfig(ModelParallelConfig):
 
     linear_num_value_heads: Optional[int] = 32
     """Number of value and gate heads for the gated delta net."""
+
+    linear_cp_mode: Optional[str] = "chunkwise"
+    """Context parallel mode for gated delta net. Options: 'headwise' (Ulysses-style all-to-all)
+    or 'chunkwise' (FLA ring CP). Headwise is bitwise-exact with CP-off; chunkwise is
+    approximate at bf16 floor but has better memory efficiency."""
+
+    fsa_cp_mode: Optional[str] = "headwise"
+    """Context parallel mode for Flash Sparse Attention (FSA). Options: 'headwise'
+    (Ulysses-style all-to-all on Q heads, AllGather on KV when heads insufficient).
+    Currently only 'headwise' is supported."""
+
+    fsa_use_fused_kernels: bool = False
+    """Use fused Triton kernels for FSA operations.
+    Currently fuses zigzag reorder + SBHD/BSHD transpose into single kernels,
+    eliminating redundant intermediate tensors."""
+
+    fsa_use_cuda: bool = False
+    """Use CUDA (cute) backend for Flash Sparse Attention instead of Triton.
+    Requires flash-sparse-attention installed with [cute] extras:
+    pip install flash-sparse-attention[cute]
+    When True, uses CUTLASS/CUTE kernels which may have different performance
+    characteristics than Triton kernels. Falls back to Triton if CUDA backend
+    is unavailable."""
+
+    gdn_conv_pad_alignment: Optional[int] = None
+    """Alignment for causal conv1d input padding in GDN packed sequence mode.
+    When set, pads the conv input to a multiple of this value. Incompatible with chunkwise CP."""
+
+    gdn_pre_gated_delta_rule_fusion: bool = False
+    """Whether to use fused pre_gated_delta_rule kernel for GDN. Requires custom CUDA extension.
+    When False, falls back to non-fused implementation."""
 
     ####################
     # initialization
@@ -1395,6 +1541,186 @@ class TransformerConfig(ModelParallelConfig):
         """
         super().__post_init__()
 
+        # Validate Loop Transformer configuration
+        if (self.loop_start_layer is None) != (self.loop_end_layer is None):
+            raise ValueError(
+                "loop_start_layer and loop_end_layer must both be None or both be set. "
+                f"Got loop_start_layer={self.loop_start_layer}, "
+                f"loop_end_layer={self.loop_end_layer}."
+            )
+        if self.loop_start_layer is not None:
+            if not (0 <= self.loop_start_layer < self.loop_end_layer <= self.num_layers):
+                raise ValueError(
+                    f"Loop range must satisfy "
+                    f"0 <= loop_start_layer < loop_end_layer <= num_layers. "
+                    f"Got loop_start_layer={self.loop_start_layer}, "
+                    f"loop_end_layer={self.loop_end_layer}, num_layers={self.num_layers}."
+                )
+            if self.num_loop_iterations < 2:
+                raise ValueError(
+                    f"num_loop_iterations must be >= 2, got {self.num_loop_iterations}."
+                )
+            # --- Normalise loop_residual_scale → _loop_residual_scales ---
+            # Internal format: list[dict] with keys "attn" and "mlp",
+            # length == num_loop_iterations.  None if no scaling.
+            raw = self.loop_residual_scale
+            R = self.num_loop_iterations
+            # nargs="+" makes argparse wrap a single value into [val];
+            # unwrap single-element lists so the scalar path handles them.
+            if isinstance(raw, list) and len(raw) == 1 and isinstance(raw[0], (int, float)):
+                raw = raw[0]
+            if raw is None:
+                self._loop_residual_scales = None
+            elif isinstance(raw, (int, float)):
+                if raw <= 0:
+                    raise ValueError(f"loop_residual_scale must be positive, got {raw}.")
+                self._loop_residual_scales = [
+                    {"attn": float(raw), "mlp": float(raw)} for _ in range(R)
+                ]
+            elif isinstance(raw, list):
+                if len(raw) != R:
+                    raise ValueError(
+                        f"loop_residual_scale list length ({len(raw)}) must equal "
+                        f"num_loop_iterations ({R})."
+                    )
+                scales = []
+                for i, entry in enumerate(raw):
+                    if isinstance(entry, (int, float)):
+                        if entry <= 0:
+                            raise ValueError(
+                                f"loop_residual_scale[{i}] must be positive, got {entry}."
+                            )
+                        scales.append({"attn": float(entry), "mlp": float(entry)})
+                    elif isinstance(entry, dict):
+                        for key in ("attn", "mlp"):
+                            if key not in entry:
+                                raise ValueError(
+                                    f"loop_residual_scale[{i}] dict must contain "
+                                    f"'{key}' key, got {entry}."
+                                )
+                            if entry[key] <= 0:
+                                raise ValueError(
+                                    f"loop_residual_scale[{i}]['{key}'] must be "
+                                    f"positive, got {entry[key]}."
+                                )
+                        scales.append({"attn": float(entry["attn"]), "mlp": float(entry["mlp"])})
+                    else:
+                        raise ValueError(
+                            f"loop_residual_scale[{i}] must be a number or a dict "
+                            f"with 'attn'/'mlp' keys, got {type(entry).__name__}."
+                        )
+                self._loop_residual_scales = scales
+            else:
+                raise ValueError(
+                    f"loop_residual_scale must be None, a number, or a list, "
+                    f"got {type(raw).__name__}."
+                )
+            _VALID_LOOP_TYPES = {"module-wise", "block-wise", "sdpa-wise", "layer-wise"}
+            if self.loop_type not in _VALID_LOOP_TYPES:
+                raise ValueError(
+                    f"loop_type must be one of {_VALID_LOOP_TYPES}, got '{self.loop_type}'."
+                )
+            if self.loop_type == "layer-wise":
+                # Alias for block-wise with block_size=1: ABC -> AABBCC, each layer
+                # repeated in place. Normalised here so nothing downstream has to
+                # know about the alias.
+                if self.loop_block_size not in (None, 1):
+                    raise ValueError(
+                        f"loop_type='layer-wise' implies loop_block_size=1, but "
+                        f"loop_block_size={self.loop_block_size} was given. Either drop "
+                        f"loop_block_size or use loop_type='block-wise'."
+                    )
+                self.loop_type = "block-wise"
+                self.loop_block_size = 1
+            if self.loop_type == "block-wise":
+                if self.loop_block_size is None:
+                    raise ValueError("loop_block_size must be set when loop_type='block-wise'.")
+                loop_span = self.loop_end_layer - self.loop_start_layer
+                if self.loop_block_size <= 0 or self.loop_block_size > loop_span:
+                    raise ValueError(
+                        f"loop_block_size must be in [1, {loop_span}], "
+                        f"got {self.loop_block_size}."
+                    )
+                if loop_span % self.loop_block_size != 0:
+                    raise ValueError(
+                        f"loop_block_size ({self.loop_block_size}) must evenly divide "
+                        f"loop span ({loop_span} = loop_end_layer - loop_start_layer)."
+                    )
+            if self.loop_type == "sdpa-wise":
+                # Repeats only the SDPA layers in the loop range, in place
+                # (ABC -> ABBC for B=SDPA), so the loop span needs no block
+                # alignment. It does need an attention pattern to read.
+                if self.linear_attention_freq is None:
+                    raise ValueError(
+                        "loop_type='sdpa-wise' requires linear_attention_freq to be set "
+                        "so SDPA layers can be identified."
+                    )
+                from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+                    get_linear_attention_pattern,
+                )
+
+                _pattern = get_linear_attention_pattern(self)
+                _n_sdpa = sum(
+                    1 for g in range(self.loop_start_layer, self.loop_end_layer) if _pattern[g] == 0
+                )
+                if _n_sdpa == 0:
+                    raise ValueError(
+                        f"loop_type='sdpa-wise' found no SDPA layers in loop range "
+                        f"[{self.loop_start_layer}, {self.loop_end_layer}); the loop "
+                        f"would be a no-op. Attention pattern (1=linear/GDN, 0=SDPA) "
+                        f"over that range: "
+                        f"{_pattern[self.loop_start_layer:self.loop_end_layer]}."
+                    )
+            # Validate loop_prelude_grad_scale
+            if self.loop_prelude_grad_scale is not None:
+                if self.loop_prelude_grad_scale <= 0:
+                    raise ValueError(
+                        f"loop_prelude_grad_scale must be positive, "
+                        f"got {self.loop_prelude_grad_scale}."
+                    )
+            # Validate loop_gdn_key_lora_rank
+            if self.loop_gdn_key_lora_rank is not None:
+                if self.loop_gdn_key_lora_rank <= 0:
+                    raise ValueError(
+                        f"loop_gdn_key_lora_rank must be positive, "
+                        f"got {self.loop_gdn_key_lora_rank}."
+                    )
+                if self.loop_type == "sdpa-wise":
+                    # GDN layers never receive a loop_iter under sdpa-wise, so every
+                    # delta would be an unused parameter: DDP's grad-buffer assertion
+                    # fires when a backward hook never runs.
+                    raise ValueError(
+                        "loop_gdn_key_lora_rank requires a loop_type that actually "
+                        "loops GDN layers ('module-wise', 'block-wise' or "
+                        "'layer-wise'); under 'sdpa-wise' the GDN layers run once and "
+                        "the per-iteration deltas would be unused parameters."
+                    )
+                if self.fp8 is not None:
+                    # Splitting the fused in_proj turns TE's single _extra_state into
+                    # two, and the quantiser state cannot be renamed one-to-one.
+                    raise ValueError(
+                        "loop_gdn_key_lora_rank is not supported together with fp8: "
+                        "splitting the fused in_proj changes TE's _extra_state layout, "
+                        "so checkpoint keys would no longer round-trip."
+                    )
+        else:
+            self._loop_residual_scales = None
+            # Looping is disabled; these flags have no effect.
+            if self.enable_loop_dt_offset:
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "enable_loop_dt_offset is set but looping is disabled "
+                    "(loop_start_layer is None). The flag will be ignored.",
+                )
+            if self.loop_gdn_key_lora_rank is not None:
+                log_single_rank(
+                    logger,
+                    logging.WARNING,
+                    "loop_gdn_key_lora_rank is set but looping is disabled "
+                    "(loop_start_layer is None). The flag will be ignored.",
+                )
+                self.loop_gdn_key_lora_rank = None
         if self.dsa_kernel_backend is None:
             self.dsa_kernel_backend = (
                 "cudnn" if self.experimental_attention_variant == "dsv4_hybrid" else "none"
@@ -1498,10 +1824,48 @@ class TransformerConfig(ModelParallelConfig):
 
             # Check tensor parallelism compatibility
             tp_cp_size = self.tensor_model_parallel_size * self.context_parallel_size
-            assert self.linear_num_key_heads % tp_cp_size == 0, (
-                f"{self.linear_num_key_heads=} must be a multiple of "
-                f"({self.tensor_model_parallel_size=} * {self.context_parallel_size=})."
-            )
+            assert (
+                self.linear_num_key_heads % self.tensor_model_parallel_size == 0
+            ), "linear_num_key_heads must be a multiple of tensor_model_parallel_size."
+            assert (
+                self.linear_num_value_heads % self.tensor_model_parallel_size == 0
+            ), "linear_num_value_heads must be a multiple of tensor_model_parallel_size."
+
+            # Context parallel validation
+            if self.context_parallel_size > 1:
+                assert self.linear_cp_mode in ("headwise", "chunkwise"), (
+                    f"linear_cp_mode must be one of 'headwise' or 'chunkwise', "
+                    f"got {self.linear_cp_mode!r}."
+                )
+                if self.linear_cp_mode == "headwise":
+                    linear_head_parallel_size = (
+                        self.linear_num_key_heads // self.tensor_model_parallel_size
+                    )
+                    assert linear_head_parallel_size % self.context_parallel_size == 0, (
+                        f"GDN headwise CP requires num_key_heads_per_tp "
+                        f"({linear_head_parallel_size}) to be divisible by "
+                        f"context_parallel_size ({self.context_parallel_size})."
+                    )
+                    linear_head_parallel_size_v = (
+                        self.linear_num_value_heads // self.tensor_model_parallel_size
+                    )
+                    assert linear_head_parallel_size_v % self.context_parallel_size == 0, (
+                        f"GDN headwise CP requires num_value_heads_per_tp "
+                        f"({linear_head_parallel_size_v}) to be divisible by "
+                        f"context_parallel_size ({self.context_parallel_size})."
+                    )
+                if self.gdn_conv_pad_alignment is not None:
+                    assert self.linear_cp_mode != "chunkwise", (
+                        "gdn_conv_pad_alignment is incompatible with "
+                        "linear_cp_mode='chunkwise' when context_parallel_size > 1."
+                    )
+            if self.gdn_conv_pad_alignment is not None:
+                assert self.gdn_conv_pad_alignment > 0, (
+                    f"gdn_conv_pad_alignment must be positive when set, "
+                    f"got {self.gdn_conv_pad_alignment}."
+                )
+
+            tp_cp_size = self.tensor_model_parallel_size * self.context_parallel_size
             assert self.linear_num_value_heads % tp_cp_size == 0, (
                 f"{self.linear_num_value_heads=} must be a multiple of "
                 f"({self.tensor_model_parallel_size=} * {self.context_parallel_size=})."
@@ -1562,6 +1926,44 @@ class TransformerConfig(ModelParallelConfig):
                         "this path. Use sparse indexer loss or set dsa_kernel_backend='none'."
                     )
             self.hetereogenous_dist_checkpoint = True
+
+        # FSA (Flash Sparse Attention) CP validation
+        if self.attention_backend == AttnBackend.fsa and self.context_parallel_size > 1:
+            assert self.fsa_cp_mode in ("headwise",), (
+                f"fsa_cp_mode must be 'headwise', "
+                f"got {self.fsa_cp_mode!r}. "
+                f"Currently only 'headwise' (Ulysses-style) is supported for FSA."
+            )
+
+            if self.fsa_cp_mode == "headwise":
+                # Q heads validation: must be divisible by CP size after TP
+                num_q_heads_per_tp = self.num_attention_heads // self.tensor_model_parallel_size
+                assert num_q_heads_per_tp % self.context_parallel_size == 0, (
+                    f"FSA headwise CP requires num_attention_heads per TP rank "
+                    f"({num_q_heads_per_tp}) to be divisible by "
+                    f"context_parallel_size ({self.context_parallel_size}). "
+                    f"Got num_attention_heads={self.num_attention_heads}, "
+                    f"tensor_model_parallel_size={self.tensor_model_parallel_size}, "
+                    f"context_parallel_size={self.context_parallel_size}."
+                )
+
+                # KV heads warning: if not enough, will use AllGather sequence dimension
+                if self.tensor_model_parallel_size > self.num_query_groups:
+                    # Each TP rank holds 1 KV head (via AllGather + indexing)
+                    num_kv_heads_per_tp = 1
+                else:
+                    num_kv_heads_per_tp = self.num_query_groups // self.tensor_model_parallel_size
+
+                if num_kv_heads_per_tp < self.context_parallel_size:
+                    log_single_rank(
+                        logger,
+                        logging.WARNING,
+                        f"FSA headwise CP: num_query_groups per TP rank ({num_kv_heads_per_tp}) "
+                        f"< context_parallel_size ({self.context_parallel_size}). "
+                        f"K/V will use AllGather for sequence dimension "
+                        f"(higher communication cost). "
+                        f"This is expected when cp_size > num_kv_heads_per_tp.",
+                    )
 
         if self.fp8:
             # cannot support first last layer bf16 with delayed scaling
@@ -1890,6 +2292,19 @@ class TransformerConfig(ModelParallelConfig):
 
         if self.recompute_modules is None:
             self.recompute_modules = ["core_attn"]
+
+        # MTP recompute_num_layers validation and defaulting
+        if self.mtp_recompute_num_layers is not None:
+            assert self.mtp_recompute_num_layers == 1, (
+                "mtp_recompute_num_layers must be 1 "
+                "(each MTP depth has only 1 transformer layer)."
+            )
+        if (
+            self.mtp_num_layers
+            and self.recompute_granularity == "full"
+            and self.mtp_recompute_num_layers is None
+        ):
+            self.mtp_recompute_num_layers = 1
 
         if self.recompute_granularity == "selective":
             if len(self.recompute_modules) > 0:

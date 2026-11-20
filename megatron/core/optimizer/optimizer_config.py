@@ -380,6 +380,14 @@ class OptimizerConfig:
     log_num_zeros_in_grad: bool = False
     """If true, calculate and log the number of zeros in gradient."""
 
+    log_per_module_grad_norm: bool = False
+    """If true, compute and log per-module (attn/mlp/other) grad norm breakdown at each step."""
+
+    log_per_module_grad_norm_detailed: bool = False
+    """If true (requires log_per_module_grad_norm), additionally log fine-grained sub-category
+    grad norms: attn/gdn, attn/sdpa, mlp/experts, mlp/shared_experts, mlp/router,
+    other/layernorm, other/embed, other/lm_head."""
+
     barrier_with_L1_time: bool = False
     """If true, use barrier with level 1 time measurements."""
 
