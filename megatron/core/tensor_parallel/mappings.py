@@ -4,6 +4,7 @@ import torch
 
 from megatron.core.parallel_state import get_global_memory_buffer
 from megatron.core.utils import get_tensor_model_parallel_group_if_none, is_torch_min_version
+from megatron.plugin.decorators import overridable
 
 from .utils import split_tensor_along_last_dim
 
@@ -553,10 +554,17 @@ def reduce_scatter_to_sequence_parallel_region(
     )
 
 
-def all_gather_last_dim_from_tensor_parallel_region(input_, group=None):
-    """Wrapper for autograd function: forward: AG, backward RS <last dim>"""
+@overridable
+def all_gather_last_dim_from_tensor_parallel_region(input_, group=None, *, output_split_count=1):
+    """AG/RS on the last dimension, optionally keeping one partition per rank subset."""
     group = get_tensor_model_parallel_group_if_none(group)
-    return _AllGatherFromTensorParallelRegion.apply(input_, group)
+    world_size = group.size()
+    assert 0 < output_split_count <= world_size and world_size % output_split_count == 0
+    output = _AllGatherFromTensorParallelRegion.apply(input_, group)
+    if output_split_count == 1:
+        return output
+    partition = group.rank() // (world_size // output_split_count)
+    return output.chunk(output_split_count, dim=-1)[partition]
 
 
 def reduce_scatter_last_dim_to_tensor_parallel_region(input_, group=None):

@@ -137,6 +137,12 @@ register(
 )
 
 register(
+    target="megatron.core.tensor_parallel.mappings.all_gather_last_dim_from_tensor_parallel_region",
+    impl="megatron.plugin.Ascend.tensor_parallel.mappings.all_gather_last_dim_from_tensor_parallel_region",
+    vendor="npu",
+)
+
+register(
     target="megatron.core.tensor_parallel.random._set_cuda_rng_state",
     impl="megatron.plugin.Ascend.tensor_parallel.random._set_cuda_rng_state",
     vendor="npu",

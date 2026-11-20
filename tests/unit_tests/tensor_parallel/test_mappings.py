@@ -197,3 +197,96 @@ def test_ReduceScatterToSequenceParallelRegion():
         expected_output = expected_output + 4
     assert torch.equal(output_data[0], expected_output)
     Utils.destroy_model_parallel()
+
+
+@pytest.mark.internal
+@pytest.mark.parametrize("tp,partitions", [(2, 1), (4, 1), (4, 2), (8, 2), (8, 4)])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("strided,recompute", [(False, False), (True, False), (False, True)])
+def test_all_gather_last_dim_partition_gradients(tp, partitions, dtype, strided, recompute):
+    """Compare output and linear input/weight gradients with gather-then-slice."""
+    Utils.initialize_model_parallel(tp, 1)
+    group = get_tensor_model_parallel_group_if_none(tp_group=None)
+    device = mappings.cur_platform.current_device()
+    torch.manual_seed(123 + Utils.rank)
+    data = torch.randn(16, 2, 12, device=device, dtype=dtype)
+    if strided:
+        data = data.transpose(0, 1)
+    x = data.detach().requires_grad_()
+    weight = torch.randn(12, 8, device=device, dtype=dtype, requires_grad=True)
+    expected = mappings.all_gather_last_dim_from_tensor_parallel_region.__wrapped__(
+        x @ weight, group=group, output_split_count=partitions
+    )
+
+    def gather(inputs, weights):
+        return mappings.all_gather_last_dim_from_tensor_parallel_region(
+            inputs @ weights, group=group, output_split_count=partitions
+        )
+
+    if recompute:
+        from torch.utils.checkpoint import checkpoint, set_checkpoint_early_stop
+
+        with set_checkpoint_early_stop(False):
+            actual = checkpoint(gather, x, weight, use_reentrant=False)
+    else:
+        actual = gather(x, weight)
+    comparisons = [(actual, expected, 0)]
+    grad = torch.randn_like(actual)
+    tol = 1e-5 if dtype == torch.float32 else 3e-2
+    for _ in range(2):
+        expected_grads = torch.autograd.grad(expected, (x, weight), grad, retain_graph=True)
+        actual_grads = torch.autograd.grad(actual, (x, weight), grad, retain_graph=True)
+        for result, reference in zip(actual_grads, expected_grads):
+            comparisons.append((result, reference, tol))
+    # Rank-local gradient flags must not select different forward collectives.
+    mixed = x.detach().requires_grad_(group.rank() % 2 == 0)
+    comparisons.append(
+        (
+            mappings.all_gather_last_dim_from_tensor_parallel_region(
+                mixed, group=group, output_split_count=partitions
+            ),
+            mappings.all_gather_last_dim_from_tensor_parallel_region.__wrapped__(
+                mixed, group=group, output_split_count=partitions
+            ),
+            0,
+        )
+    )
+    Utils.destroy_model_parallel()
+    for result, reference, tolerance in comparisons:
+        torch.testing.assert_close(result, reference, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.internal
+@pytest.mark.parametrize("partitions", [1, 2])
+def test_all_gather_last_dim_cpu_fallback(monkeypatch, partitions):
+    """The Ascend override preserves native full and partitioned CPU AG/RS gradients."""
+    import torch.distributed as dist
+
+    from megatron.plugin.Ascend.tensor_parallel.mappings import (
+        all_gather_last_dim_from_tensor_parallel_region,
+    )
+
+    if Utils.world_size % partitions:
+        pytest.skip("Output partitions must divide the distributed world size")
+    Utils.initialize_distributed()
+    group = dist.new_group(backend="gloo")
+    try:
+        # Native mappings allocate on the active platform; exercise the CPU path with Gloo.
+        monkeypatch.setattr(mappings.cur_platform, "current_device", lambda: "cpu")
+        x = torch.full((4, 2, 3), float(Utils.rank), requires_grad=True)
+        expected = mappings.all_gather_last_dim_from_tensor_parallel_region.__wrapped__(
+            x, group=group, output_split_count=partitions
+        )
+        actual = all_gather_last_dim_from_tensor_parallel_region(
+            x, group=group, output_split_count=partitions
+        )
+        grad = torch.full_like(actual, float(Utils.rank + 1))
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            torch.autograd.grad(actual, x, grad)[0],
+            torch.autograd.grad(expected, x, grad)[0],
+            rtol=0,
+            atol=0,
+        )
+    finally:
+        dist.destroy_process_group(group)
