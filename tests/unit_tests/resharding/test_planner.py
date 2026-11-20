@@ -90,6 +90,42 @@ def _verify_full_coverage(ops, dim, expected_full_len):
 class TestPlanMultiDimLcm:
     """Tests for the LCM-based TP planner."""
 
+    @pytest.mark.parametrize("dim", [1, 2], ids=["column", "row"])
+    @pytest.mark.parametrize("src_tp,dst_tp", [(1, 1), (1, 2), (2, 1)])
+    def test_dense_expert_tp_transitions(self, dim, src_tp, dst_tp):
+        """Copy distinct 3-D expert weights using plans with TP-marked singleton groups."""
+        import torch
+
+        full = torch.arange(3 * 8 * 12, dtype=torch.float32).reshape(3, 8, 12)
+        sources = full.chunk(src_tp, dim=dim)
+        src = _meta(
+            name="linear_fc1.weight" if dim == 1 else "linear_fc2.weight",
+            shape=tuple(sources[0].shape),
+            is_tp=True,
+            partition_dim=dim,
+            tp_ranks=list(range(src_tp)),
+            ep_ranks=[0, src_tp],
+        )
+        src.is_ep = True
+        for rank, expected in enumerate(full.chunk(dst_tp, dim=dim)):
+            dst = _meta(
+                name=src.name,
+                shape=tuple(expected.shape),
+                is_tp=True,
+                partition_dim=dim,
+                owner_rank=rank,
+                tp_ranks=list(range(dst_tp)),
+                ep_ranks=[rank, rank + dst_tp],
+            )
+            dst.is_ep = True
+            descriptors = _build_descriptors_for_param(src, dst)
+            ops = _plan_tp(src.name, src, dst, descriptors, my_global_rank=rank)
+            actual = torch.full_like(expected, float("nan"))
+            for source_rank, source_slice, target_slice in ops:
+                actual[target_slice].copy_(sources[source_rank][source_slice])
+            _verify_full_coverage(ops, dim, expected.shape[dim])
+            torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
     def test_tp2_to_tp1(self):
         """TP2 → TP1: destination rank 0 should receive from both source ranks."""
         # Source: TP2, each rank has shape (64, 64) on dim 1

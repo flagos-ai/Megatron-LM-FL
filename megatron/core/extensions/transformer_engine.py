@@ -2001,6 +2001,10 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             # all weights (its default for non-parallel mode). We need to fix this after init
             # so that refit/resharding can correctly identify which dimension is TP-partitioned.
             original_parallel_mode = parallel_mode
+            # TE's constructor resets the parameters, which calls back into
+            # reset_parameters() below, so record these before delegating to it.
+            self._original_parallel_mode = original_parallel_mode
+            self._is_expert = is_expert
 
             if self.explicit_expert_comm:
                 if parallel_mode == "column":
@@ -2045,23 +2049,7 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                     **extra_kwargs,
                 )
 
-            for param in self.parameters():
-                setattr(param, "allreduce", not (is_expert and self.expert_parallel))
-
-            # Explicitly stamp partition_dim and partition_stride on expert weight
-            # tensors when explicit_expert_comm cleared parallel_mode.  TE ≤2.12
-            # set these internally; TE ≥2.13 no longer does (parallel_mode=None
-            # is passed due to explicit_expert_comm).  The resharding/refit planner
-            # relies on partition_dim to correctly plan TP gather/scatter operations.
-            # NOTE: we intentionally do NOT stamp tensor_model_parallel here —
-            # doing so would change num-zeros gradient counting.
-            if self.explicit_expert_comm and original_parallel_mode in ("column", "row"):
-                part_dim = 0 if original_parallel_mode == "column" else 1
-                for i in range(num_gemms):
-                    weight = getattr(self, f"weight{i}", None)
-                    if weight is not None:
-                        setattr(weight, "partition_dim", part_dim)
-                        setattr(weight, "partition_stride", 1)
+            self._set_parallel_attributes()
 
             self._register_load_state_dict_pre_hook(
                 type(self)._normalize_grouped_parameter_keys, with_module=True
@@ -2240,6 +2228,53 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
                 self.te_quant_params, self.training, is_context_quantized
             )
 
+        @overridable  # FlagScale Modify
+        def _set_parallel_attributes(self):
+            """Stamp Megatron's parallel attributes on the parameters.
+
+            TE rebuilds its parameters whenever they are reset or materialized from the
+            meta device, which drops every attribute Megatron has set, so this runs both
+            after construction and after each reset.
+
+            Explicitly stamp partition_dim and partition_stride on expert weight
+            tensors when explicit_expert_comm cleared parallel_mode.  TE <= 2.12
+            set these internally; TE >= 2.13 no longer does (parallel_mode=None
+            is passed due to explicit_expert_comm).  The resharding/refit planner
+            relies on partition_dim to correctly plan TP gather/scatter operations.
+            NOTE: we intentionally do NOT stamp tensor_model_parallel here, so that
+            this default keeps the existing num-zeros gradient counting unchanged.
+            Platforms that need the indexed expert weights counted as tensor-parallel
+            shards override this method instead of changing the default.
+            """
+            for param in self.parameters():
+                setattr(param, "allreduce", not (self._is_expert and self.expert_parallel))
+
+            if self.explicit_expert_comm and self._original_parallel_mode in ("column", "row"):
+                part_dim = 0 if self._original_parallel_mode == "column" else 1
+                for i in range(self.num_gemms):
+                    weight = getattr(self, f"weight{i}", None)
+                    if weight is not None:
+                        setattr(weight, "partition_dim", part_dim)
+                        setattr(weight, "partition_stride", 1)
+
+        def reset_parameters(self, defer_init=False):
+            """Re-apply Megatron's parallel attributes to TE's rebuilt parameters."""
+            super().reset_parameters(defer_init=defer_init)
+            if not defer_init:
+                self._set_parallel_attributes()
+
+        @overridable  # FlagScale Modify
+        def make_grouped_weights(self, defer_init=False):
+            return super().make_grouped_weights(defer_init=defer_init)
+
+        @overridable  # FlagScale Modify
+        def _get_weight_tensors(self):
+            return super()._get_weight_tensors()
+
+        @overridable  # FlagScale Modify
+        def _forward_grouped_linear(self, x, m_splits, is_first_microbatch=None):
+            return super().forward(x, m_splits, is_first_microbatch=is_first_microbatch)
+
         def forward(self, x, m_splits):
             """Forward."""
             _is_first_microbatch = (
@@ -2248,7 +2283,8 @@ if HAVE_TE and is_te_min_version("1.9.0.dev0"):
             quant_context = _get_fp8_autocast_for_quant_params(self.te_quant_params, self.training)
 
             with quant_context:
-                out = super().forward(x, m_splits, is_first_microbatch=_is_first_microbatch)
+                # FlagScale Modify
+                out = self._forward_grouped_linear(x, m_splits, _is_first_microbatch)
             self.is_first_microbatch = False
 
             # TE only returns a tuple when return_bias is True, otherwise
