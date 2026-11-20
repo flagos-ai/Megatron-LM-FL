@@ -48,6 +48,7 @@ from megatron.core.utils import (
     nvtx_range_pop,
     nvtx_range_push,
 )
+from megatron.plugin.decorators import overridable
 
 from ..models.common.embeddings.yarn_rotary_pos_embedding import (
     _yarn_get_concentration_factor_from_config,
@@ -1356,6 +1357,7 @@ class Attention(MegatronModule, ABC):
 
         return output, bias
 
+    @overridable
     @jit_fuser
     def _apply_output_gate(self, x, gate):
         x_dtype = x.dtype
