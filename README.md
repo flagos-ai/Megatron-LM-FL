@@ -13,6 +13,22 @@ Megatron-LM and Megatron Core
 
 <div align="left">
 
+## Layer-sliding fine-tuning for Megatron-LM-FL
+
+SlideFormer adds an opt-in engine for full-parameter fine-tuning on one GPU or
+multiple GPUs on one host. It keeps FP32 training state in host memory, streams
+layers through a bounded GPU window and pipelines transfer, computation and
+CPU Adam updates. Its Dense DP transport follows the layer streaming and
+communication design of SlideDP.
+
+See the [user guide](docs/user-guide/slideformer_megatron_fl.md) for single-
+and multi-GPU launch, checkpoint recovery and reference measurements.
+The [package guide](docs/slideformer_package.md) describes the optional wheel
+and the MCore session API.
+
+- SlideFormer (DAC 2026). [Paper](https://arxiv.org/abs/2603.16428) · [Reference repository](https://github.com/RegiaYoung/SlideFormer)
+- SlideDP (2026). [Paper](https://arxiv.org/abs/2609.34162) · [Project repository](https://github.com/RegiaYoung/SlideDP)
+
 ## About
 
 This repository contains two components: **Megatron-LM** and **Megatron Core**.

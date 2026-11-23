@@ -1,0 +1,296 @@
+{
+  "date": "2026-10-15",
+  "implementation_commit": "5c2a1c772183f22c4b00962ce69f64f1aaddcf92",
+  "previous_implementation_commit": "4f6c79afab0a182d78f7a288983682d3b5d55be3",
+  "measured_source_file_count": 1194,
+  "source_files_match_commit": true,
+  "environment": {
+    "host": "gpu2-9",
+    "packages": {
+      "torch": "2.11.0+cu130",
+      "transformer-engine": "2.12.0",
+      "transformers": "5.9.0",
+      "mbridge": "0.15.1",
+      "flash-attn": "2.8.3.post1",
+      "liger-kernel": "0.8.2"
+    },
+    "torch_cuda": "13.0",
+    "nccl": [
+      2,
+      28,
+      9
+    ],
+    "gpu": "NVIDIA A800-SXM4-80GB",
+    "threads": 8
+  },
+  "performance_dp4": {
+    "protocol": {
+      "gpus": "4,5,6,7",
+      "model": "/data/Qwen2.5-7B-Instruct",
+      "ssdp_repo": "/path/to/SSDP",
+      "ssdp_revision": "44c362f556aab35632d34c20f847d33c0f253722",
+      "cpu_affinity": "32-39;40-47;48-55;56-63",
+      "profile_dir": null,
+      "source_manifest_sha256": "49a0de8049e0e5edeae15bd003711cd039316110ce9dfef52589fdc4cd45a011",
+      "steps": 23,
+      "tensor_parallel_size": 1,
+      "data_parallel_size": 4,
+      "sequence_parallel": false,
+      "global_batch_size": 32,
+      "microbatch_size": 8,
+      "microbatches_per_step": 1,
+      "warmup_steps": 3,
+      "order": [
+        "ssdp_a",
+        "megatron_a",
+        "megatron_b",
+        "ssdp_b"
+      ],
+      "slide_environment": {
+        "MEGATRON_SLIDEFORMER_ENABLE": "1",
+        "MEGATRON_SLIDEFORMER_ACTIVATION_OFFLOAD": "1",
+        "MEGATRON_SLIDEFORMER_KERNEL_POLICY": "auto",
+        "MEGATRON_SLIDEFORMER_STRICT_KERNELS": "1",
+        "MEGATRON_SLIDEFORMER_GPU_GRADIENT_PIPELINE": "0",
+        "MEGATRON_SLIDEFORMER_SHARDED_CPU_OPT": "1",
+        "MEGATRON_SLIDEFORMER_EAGER_SHARDED_UPDATE": "1",
+        "MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB": "0",
+        "MEGATRON_SLIDEFORMER_GPU_REDUCE": "1",
+        "MEGATRON_SLIDEFORMER_SHARD_H2D": "1",
+        "MEGATRON_SLIDEFORMER_SHARDED_EXEC_CACHE": "0",
+        "MEGATRON_SLIDEFORMER_ASYNC_GRAD_ACCUMULATE": "1",
+        "MEGATRON_SLIDEFORMER_CPU_GRAD_BUFFER_COUNT": "1",
+        "MEGATRON_SLIDEFORMER_GPU_GRAD_BUFFER_COUNT": "1"
+      }
+    },
+    "runs": {
+      "ssdp_a": {
+        "measured_steps": 20,
+        "mean_s": 3.449641883210279,
+        "median_s": 3.45021282043308,
+        "min_s": 3.427188073983416,
+        "max_s": 3.4645061169285327,
+        "input_tokens_per_s": 9498.957024926221,
+        "end_sum_pss_gib": 107.68704032897949,
+        "peak_allocated_gpu_gib": 4.817756175994873,
+        "first_loss": 12.48535442352295,
+        "last_loss": 10.734953165054321
+      },
+      "megatron_a": {
+        "measured_steps": 20,
+        "mean_s": 3.59723215556005,
+        "median_s": 3.592913157539442,
+        "min_s": 3.565072010969743,
+        "max_s": 3.6479374279733747,
+        "input_tokens_per_s": 9109.225811114873,
+        "end_sum_pss_gib": 111.80043888092041,
+        "peak_allocated_gpu_gib": 5.172512531280518,
+        "first_loss": 12.48499,
+        "last_loss": 10.73433
+      },
+      "megatron_b": {
+        "measured_steps": 20,
+        "mean_s": 3.6028473642538303,
+        "median_s": 3.591250429977663,
+        "min_s": 3.5591337389778346,
+        "max_s": 3.88325715996325,
+        "input_tokens_per_s": 9095.028650148335,
+        "end_sum_pss_gib": 111.79783058166504,
+        "peak_allocated_gpu_gib": 5.172512531280518,
+        "first_loss": 12.48499,
+        "last_loss": 10.73402
+      },
+      "ssdp_b": {
+        "measured_steps": 20,
+        "mean_s": 3.457311134261545,
+        "median_s": 3.458684799494222,
+        "min_s": 3.434471881017089,
+        "max_s": 3.4856602700892836,
+        "input_tokens_per_s": 9477.885769456208,
+        "end_sum_pss_gib": 107.67304134368896,
+        "peak_allocated_gpu_gib": 4.817756175994873,
+        "first_loss": 12.48535442352295,
+        "last_loss": 10.735044002532959
+      }
+    },
+    "aggregate": {
+      "ssdp": {
+        "mean_s": 3.453476508735912,
+        "median_s": 3.4562493505654857,
+        "input_tokens_per_s": 9488.409698780371,
+        "measured_steps": 40
+      },
+      "megatron": {
+        "mean_s": 3.6000397599069403,
+        "median_s": 3.592913157539442,
+        "input_tokens_per_s": 9102.12169458013,
+        "measured_steps": 40
+      }
+    },
+    "megatron_to_ssdp_time_ratio": 1.0424393363615714,
+    "input_sha256_by_rank": {
+      "3": "fc3f2eee12a5de9567cda34af325080a9f2315ef20655882b8cf6970363313cf",
+      "2": "94e02552c99192353f2c88e2de1c7e9c66a4a3d3e42b56b2d72f607d87ff2d81",
+      "1": "04fdf049ba7582fef3e562a95461fea4547867b6e7379231b6ccce3e1ad1aff3",
+      "0": "ab592d4ed17116a3417f3e8ac10088bceac92819bcf808c499cdd4bd0b6b864d"
+    }
+  },
+  "integration_tp2dp2": {
+    "protocol": {
+      "gpus": "4,5,6,7",
+      "model": "/data/Qwen2.5-7B-Instruct",
+      "ssdp_repo": "/path/to/SSDP",
+      "ssdp_revision": null,
+      "cpu_affinity": "32-39;40-47;48-55;56-63",
+      "profile_dir": null,
+      "source_manifest_sha256": "49a0de8049e0e5edeae15bd003711cd039316110ce9dfef52589fdc4cd45a011",
+      "steps": 13,
+      "tensor_parallel_size": 2,
+      "data_parallel_size": 2,
+      "sequence_parallel": true,
+      "global_batch_size": 32,
+      "microbatch_size": 8,
+      "microbatches_per_step": 2,
+      "warmup_steps": 3,
+      "order": [
+        "megatron_tp2dp2"
+      ],
+      "slide_environment": {
+        "MEGATRON_SLIDEFORMER_ENABLE": "1",
+        "MEGATRON_SLIDEFORMER_ACTIVATION_OFFLOAD": "1",
+        "MEGATRON_SLIDEFORMER_KERNEL_POLICY": "auto",
+        "MEGATRON_SLIDEFORMER_STRICT_KERNELS": "1",
+        "MEGATRON_SLIDEFORMER_GPU_GRADIENT_PIPELINE": "0",
+        "MEGATRON_SLIDEFORMER_SHARDED_CPU_OPT": "1",
+        "MEGATRON_SLIDEFORMER_EAGER_SHARDED_UPDATE": "1",
+        "MEGATRON_SLIDEFORMER_SPLIT_SWIGLU_THRESHOLD_GIB": "0",
+        "MEGATRON_SLIDEFORMER_GPU_REDUCE": "1",
+        "MEGATRON_SLIDEFORMER_SHARD_H2D": "1",
+        "MEGATRON_SLIDEFORMER_SHARDED_EXEC_CACHE": "0",
+        "MEGATRON_SLIDEFORMER_ASYNC_GRAD_ACCUMULATE": "1",
+        "MEGATRON_SLIDEFORMER_CPU_GRAD_BUFFER_COUNT": "1",
+        "MEGATRON_SLIDEFORMER_GPU_GRAD_BUFFER_COUNT": "1"
+      }
+    },
+    "runs": {
+      "megatron_tp2dp2": {
+        "measured_steps": 10,
+        "mean_s": 8.508213871275075,
+        "median_s": 8.45472469041124,
+        "min_s": 8.448032018030062,
+        "max_s": 8.995986663969234,
+        "input_tokens_per_s": 3851.337130890582,
+        "end_sum_pss_gib": 169.3965253829956,
+        "peak_allocated_gpu_gib": 5.3384928703308105,
+        "first_loss": 12.48494,
+        "last_loss": 10.99196
+      }
+    },
+    "aggregate": {
+      "megatron": {
+        "mean_s": 8.508213871275075,
+        "median_s": 8.45472469041124,
+        "input_tokens_per_s": 3851.337130890582,
+        "measured_steps": 10
+      }
+    },
+    "input_sha256_by_rank": {
+      "1": "ab592d4ed17116a3417f3e8ac10088bceac92819bcf808c499cdd4bd0b6b864d",
+      "2": "04fdf049ba7582fef3e562a95461fea4547867b6e7379231b6ccce3e1ad1aff3",
+      "3": "04fdf049ba7582fef3e562a95461fea4547867b6e7379231b6ccce3e1ad1aff3",
+      "0": "ab592d4ed17116a3417f3e8ac10088bceac92819bcf808c499cdd4bd0b6b864d"
+    }
+  },
+  "correctness": {
+    "slide_unit_tests": 40,
+    "native_reduce_unit_cases_per_rank": 8,
+    "gpu_reduce_oracle_comparisons_per_rank": 144,
+    "eager_token_iterator_layouts_per_rank": 3,
+    "full_matrix": {
+      "pp_cpu": {
+        "tied_embedding_max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      "pp_gpu": {
+        "tied_embedding_max_abs": [
+          0.0,
+          0.0
+        ]
+      },
+      "resume": "weights, moments and optimizer steps bitwise identical on all four ranks",
+      "gpu_reduce_vs_cpu": {
+        "max_abs": 0.0
+      },
+      "pooled_gpu_reduce_vs_cpu": {
+        "max_abs": 0.0
+      },
+      "tp2_gpu_reduce_vs_cpu": {
+        "max_abs": 0.0
+      }
+    },
+    "full_matrix_completed_jobs": 11,
+    "final_helper_gpu_vs_cpu": {
+      "fast": {
+        "max_abs_vs_cpu": {
+          "parameters": 0.0,
+          "exp_avg_flat": 1.1641532182693481e-10,
+          "exp_avg_sq_flat": 1.4210854715202004e-14
+        },
+        "old_gpu_max_abs_vs_cpu": {
+          "exp_avg_flat": 1.1641532182693481e-10,
+          "exp_avg_sq_flat": 1.4210854715202004e-14
+        },
+        "max_abs_vs_old_gpu": {
+          "exp_avg_flat": 0.0,
+          "exp_avg_sq_flat": 0.0
+        },
+        "optimizer_steps_identical": true,
+        "ranks": 4
+      },
+      "fast_single": {
+        "max_abs_vs_cpu": {
+          "parameters": 0.0,
+          "exp_avg_flat": 0.0,
+          "exp_avg_sq_flat": 0.0
+        },
+        "old_gpu_max_abs_vs_cpu": {
+          "exp_avg_flat": 0.0,
+          "exp_avg_sq_flat": 0.0
+        },
+        "max_abs_vs_old_gpu": {
+          "exp_avg_flat": 0.0,
+          "exp_avg_sq_flat": 0.0
+        },
+        "optimizer_steps_identical": true,
+        "ranks": 4
+      }
+    },
+    "native_te_fused_tp2dp2_outstanding": {
+      "steps": 3,
+      "microbatches": 2,
+      "max_gradient_abs_error": 0,
+      "max_parameter_abs_error": 0,
+      "log": "checks/native_te_slots.log"
+    }
+  },
+  "diagnostics_excluded_from_performance": [
+    "followup-profile: profiler runs are diagnostic only.",
+    "followup-one-slot: one screening run, not an SSDP parity comparison.",
+    "followup-tp2dp2: failed eager scale check, 1/65472 vs 1/32736.",
+    "followup-tp2dp2-fixed: 13 training steps completed but benchmark source-change guard rejected timings after a test-file formatting edit; replaced by frozen-source followup-tp2-release.",
+    "Initial native unit invocation stopped because an unrelated data fixture waited for /opt/data; final invocation used --confcutdir=tests/unit_tests/distributed."
+  ],
+  "limits": [
+    "Performance workload: synthetic tokens, Qwen2.5-7B-Instruct. DP4: 23 steps/job, 3 warmup, 40 measured steps/backend; TP2DP2: 13 steps, 3 warmup. No long-run convergence claim.",
+    "End-of-run host PSS is not startup or peak host memory. GPU metric is PyTorch allocation, excluding external CUDA/NCCL allocations.",
+    "Single-host CPU sharded optimizer; PP uses the unsharded fallback. Expert and TP-special gradients retain fallback paths.",
+    "Interleaved VPP and nonzero global gradient clipping are rejected. NVMe plus sharded optimizer is unsupported.",
+    "Checkpoint restore requires the same topology; native distributed checkpoint resharding is not implemented.",
+    "PP checks establish tied-weight consistency and first-stage outstanding-microbatch gradient parity, not exhaustive end-to-end PP/CP/EP numerical equivalence.",
+    "TP2 real-model timings are separate integration evidence; TP-special gradients still retain CPU fallback. No TP speedup claim.",
+    "No end-to-end DP4 speedup established; approximately 0.4341 GiB/rank of training peak allocated memory was saved.",
+    "Final-helper multiple-microbatch Adam moments differ from CPU by existing FP32 rounding; they match the preceding GPU implementation bitwise."
+  ]
+}
