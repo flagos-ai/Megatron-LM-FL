@@ -439,10 +439,10 @@ def test_npu_mc2_layer_matches_unfused(
         pytest.skip(f"MC2 layer comparison requires at least {ep_size * etp_size} Ascend ranks")
     import flagcx  # noqa: F401; register the optional test backend before group initialization
     import torch_npu
-    from transformer_engine.plugin.core.backends.vendor.npu import mc2
+    from transformer_engine.plugin.core.backends.vendor.npu import npu
     from transformer_engine.plugin.core.policy import policy_context, policy_from_env
 
-    if not mc2.is_moe_fusion_available():
+    if not npu.is_moe_fusion_available():
         pytest.skip("Native MC2 interfaces are unavailable under the current policy")
     monkeypatch.setenv("NPU_MOE_MC2", "1")
     Utils.initialize_model_parallel(
@@ -569,7 +569,7 @@ def test_npu_mc2_layer_matches_unfused(
         if permutation_case == "missing_symbol":
             monkeypatch.delattr(torch_npu, "npu_moe_token_unpermute_with_routing_map")
         with policy_context(policy):
-            assert mc2.is_moe_fusion_available() == (
+            assert npu.is_moe_fusion_available() == (
                 not deny_fusion or candidate.token_dispatcher.ep_rank != 0
             )
         if routing_case == "local_disabled" and candidate.token_dispatcher.ep_rank == 0:
@@ -638,7 +638,7 @@ def test_npu_mc2_layer_matches_unfused(
         if expect_native:
             native_calls.clear()
             with monkeypatch.context() as dense_pair:
-                dense_pair.setattr(mc2, "get_moe_permutation_pair", lambda *args: None)
+                dense_pair.setattr(npu, "get_moe_permutation_pair", lambda *args: None)
                 dense_mc2 = run(candidate)
             assert native_calls == []
             assert candidate.token_dispatcher._npu_moe_permutation_pair is None
@@ -654,8 +654,8 @@ def test_npu_mc2_layer_matches_unfused(
         with monkeypatch.context() as denied_env:
             denied_env.setenv("TE_FL_DENY_VENDORS", "NPU")
             with policy_context(policy_from_env()):
-                assert not mc2.is_moe_fusion_available()
-                assert not mc2.is_moe_fusion_available(candidate.token_dispatcher.ep_group, device)
+                assert not npu.is_moe_fusion_available()
+                assert not npu.is_moe_fusion_available(candidate.token_dispatcher.ep_group, device)
     finally:
         Utils.destroy_model_parallel()
 
@@ -664,7 +664,7 @@ def test_npu_mc2_pair_state_and_shared_output_cpu(monkeypatch):
     """Keep a selected inverse for combine, then reset it before a dense fallback dispatch."""
     from types import SimpleNamespace
 
-    from transformer_engine.plugin.core.backends.vendor.npu import mc2
+    from transformer_engine.plugin.core.backends.vendor.npu import npu
 
     from megatron.plugin.Ascend.transformer.moe import fused_experts
 
@@ -685,7 +685,7 @@ def test_npu_mc2_pair_state_and_shared_output_cpu(monkeypatch):
     def unexpected_resolve(*args):
         raise AssertionError("combine must retain the pair selected during dispatch")
 
-    monkeypatch.setattr(mc2, "get_moe_permutation_pair", unexpected_resolve)
+    monkeypatch.setattr(npu, "get_moe_permutation_pair", unexpected_resolve)
     dispatcher = SimpleNamespace(
         _npu_moe_schedule=False,
         _npu_moe_permutation_pair=(None, fixed_inverse),
@@ -740,7 +740,7 @@ def test_npu_mc2_pair_state_and_shared_output_cpu(monkeypatch):
      ("empty_rank", False), ("empty_expert", True), ("count_limit", True), ("overflow", False)],
 )
 def test_npu_mc2_global_count_limit(case, supported):
-    from transformer_engine.plugin.core.backends.vendor.npu.mc2 import supports_moe_counts
+    from transformer_engine.plugin.core.backends.vendor.npu.npu import supports_moe_counts
 
     # 512 BF16 rows of width 2048 are exactly 2 MiB per source/destination.
     counts = torch.full((8, 16), 32, dtype=torch.int64)

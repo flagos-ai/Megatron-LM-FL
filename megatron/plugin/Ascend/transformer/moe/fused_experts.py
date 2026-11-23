@@ -100,9 +100,9 @@ def dispatch_preprocess(self, hidden_states, routing_map, probs):
     ordered_probs = probs
     self.routing_map = routing_map
     self.tokens_per_expert = tokens_per_expert
-    from transformer_engine.plugin.core.backends.vendor.npu import mc2
+    from transformer_engine.plugin.core.backends.vendor.npu import npu
 
-    counts_supported = mc2.supports_moe_counts(
+    counts_supported = npu.supports_moe_counts(
         counts, hidden_states.size(-1), hidden_states.element_size()
     )
     if counts_supported:
@@ -127,7 +127,7 @@ def dispatch_preprocess(self, hidden_states, routing_map, probs):
     if self.shared_experts is not None:
         self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
     if counts_supported and self.config.moe_permute_fusion:
-        self._npu_moe_permutation_pair = mc2.get_moe_permutation_pair(
+        self._npu_moe_permutation_pair = npu.get_moe_permutation_pair(
             hidden_states, self.routing_map, ordered_probs, self.num_out_tokens,
             self.config.moe_router_topk,
         )
@@ -191,16 +191,16 @@ def _supports_group(layer, x):
     if cached is None or cached[0] != key:
         supported = _supported(layer, x)
         if supported:
-            from transformer_engine.plugin.core.backends.vendor import npu
+            from transformer_engine.plugin.core.backends.vendor.npu import npu
 
-            mc2 = getattr(npu, "mc2", None)
+            probe = getattr(npu, "is_moe_fusion_available", None)
             # This local probe must not initialize a communicator.
-            supported = mc2 is not None and mc2.is_moe_fusion_available()
+            supported = probe is not None and probe()
         flag = torch.tensor(int(supported), dtype=torch.int64, device=device)
         dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=dispatcher.ep_group)
         if flag.item():
             # Communicator lookup may be collective: enter only after all ranks agree.
-            flag.fill_(int(mc2.is_moe_fusion_available(dispatcher.ep_group, device)))
+            flag.fill_(int(probe(dispatcher.ep_group, device)))
             dist.all_reduce(flag, op=dist.ReduceOp.MIN, group=dispatcher.ep_group)
         cached = (key, bool(flag.item()))
         dispatcher._npu_moe_group_support = cached
