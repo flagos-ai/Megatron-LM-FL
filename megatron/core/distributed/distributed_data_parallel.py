@@ -7,6 +7,8 @@ from typing import Optional
 
 import torch
 
+from megatron.plugin.decorators import overridable
+
 from ..config_logger import has_config_logger_enabled, log_config_to_disk
 from ..optimizer.param_layout import FullParamLayout
 from ..process_groups_config import ProcessGroupCollection
@@ -514,6 +516,7 @@ class DistributedDataParallel(_BaseDataParallel):
             self.enable_forward_pre_hook()
         self.overlap_param_gather_with_optimizer_step = False
 
+    @overridable
     def enable_forward_pre_hook(self):
         """
         Enable forward pre-hooks needed for param all-gather overlap with forward compute.
