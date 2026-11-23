@@ -1,4 +1,4 @@
-# Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
 from collections import OrderedDict
 from typing import Any, Callable, Dict, Literal, Optional
@@ -716,6 +716,16 @@ class GPTModel(LanguageModule):
                 )
         sequence_parallel_override = False
 
+        slideformer_processor = getattr(self, "_slideformer_output_processor", None)
+        if output_processor is None and slideformer_processor is not None and labels is not None:
+            return slideformer_processor(
+                hidden_states=hidden_states,
+                output_layer=self.output_layer,
+                output_weight=output_weight,
+                labels=labels,
+                loss_mask=loss_mask,
+                runtime_gather_output=runtime_gather_output,
+            )
         if output_processor is not None:
             return output_processor(
                 hidden_states=hidden_states,
@@ -790,6 +800,10 @@ class GPTModel(LanguageModule):
         if labels is None:
             # [s b h] => [b s h]
             return logits.transpose(0, 1).contiguous()
+
+        # Native vocab CE mutates FP32 logits; full backward hooks return views.
+        if logits.dtype == torch.float32 and hasattr(self, "_megatron_slideformer_engine"):
+            logits = logits.clone()
 
         loss = self.compute_language_model_loss(labels, logits)
 
