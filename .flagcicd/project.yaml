@@ -34,6 +34,7 @@ global:
   - .rst
   shared_paths:
   - tests/unit_tests/conftest.py
+  - .gitignore
   - .flagcicd/
   - .github/
   - .pre-commit-config.yaml
@@ -194,6 +195,7 @@ test_groups:
   status: planned
   reason: No platform declares an inference execution group yet.
   paths:
+  - examples/inference/
   - megatron/core/inference/
   - megatron/inference/
   - tests/unit_tests/inference/
@@ -204,6 +206,8 @@ test_groups:
   status: planned
   reason: No platform declares an RL execution group yet.
   paths:
+  - train_rl.py
+  - examples/rl/
   - megatron/rl/
   - tests/unit_tests/rl/
   depends_on:
@@ -213,6 +217,19 @@ test_groups:
   status: planned
   reason: No platform declares a training-loop execution group yet.
   paths:
+  - pretrain_gpt.py
+  - pretrain_hybrid.py
+  - pretrain_mamba.py
+  - pretrain_vlm.py
+  - examples/academic_paper_scripts/
+  - examples/bert/
+  - examples/gptoss/
+  - examples/mamba/
+  - examples/megatron_fsdp/
+  - examples/mixtral/
+  - examples/multimodal/
+  - examples/post_training/
+  - examples/t5/
   - megatron/training/*.py
   - megatron/training/config/
   - megatron/training/models/
@@ -245,6 +262,7 @@ test_groups:
   status: planned
   reason: No platform declares a model-export execution group yet.
   paths:
+  - examples/export/
   - megatron/core/export/
   - tests/unit_tests/export/
   depends_on:

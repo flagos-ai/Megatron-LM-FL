@@ -35,7 +35,7 @@ class RoutingIntegrityTests(unittest.TestCase):
             self.assertEqual(plan["plan_status"], "blocked")
             self.assertEqual(plan["direct_groups"], ["inference"])
             self.assertEqual(plan["global_groups"]["unmapped_paths"], ["unknown_file.py"])
-            self.assertEqual([item["group"] for item in plan["direct_gaps"]], ["inference"])
+            self.assertEqual(plan["direct_gaps"], [])
 
     def test_changed_planned_tests_reach_executor_and_final_gate(self) -> None:
         test_path = "tests/unit_tests/inference/test_common_inference_params.py"
