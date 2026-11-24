@@ -9,6 +9,7 @@ from megatron.core.transformer.moe.experts import TEGroupedMLP
 from megatron.core.transformer.moe.moe_layer import MoELayer
 from megatron.core.transformer.moe.moe_utils import permute, sort_chunks_by_idxs
 from megatron.core.transformer.moe.token_dispatcher import MoEAlltoAllTokenDispatcher
+from megatron.core.utils import ensure_params_ready
 
 
 def _supported_dispatcher(dispatcher):
@@ -36,8 +37,9 @@ def _supported(layer, x):
         return False
     if not isinstance(layer.experts, TEGroupedMLP) or layer.experts._with_fused_impl:
         return False
-    if layer.experts.linear_fc1.single_grouped_weight or layer.experts.linear_fc2.single_grouped_weight:
-        return False
+    for linear in (layer.experts.linear_fc1, layer.experts.linear_fc2):
+        if linear.single_grouped_weight and not getattr(linear, "_mg_dense_grouped_weight", False):
+            return False
     if dispatcher.ep_group._get_backend(x.device).name() not in ("hccl", "flagcx"):
         return False
     return not any(
@@ -79,7 +81,6 @@ def preprocess(self, hidden_states, probs, routing_map):
 
 def dispatch_preprocess(self, hidden_states, routing_map, probs):
     """Write the first token permutation directly in native MC2 round order."""
-    self._npu_moe_permutation_pair = None
     self._npu_moe_expert_order = None
     if not getattr(self, "_npu_moe_schedule", False):
         return MoEAlltoAllTokenDispatcher.dispatch_preprocess.__wrapped__(
@@ -114,7 +115,7 @@ def dispatch_preprocess(self, hidden_states, routing_map, probs):
         columns = (orders + torch.arange(self.ep_size)[:, None] * self.num_local_experts).flatten()
         local_order = orders[self.ep_rank]
         self._npu_moe_counts = counts.index_select(1, columns)
-        self._npu_moe_expert_order = local_order.tolist()
+        self._npu_moe_expert_order = (local_order.tolist(), local_order.to(hidden_states.device))
         inverse = columns.argsort().to(hidden_states.device)
         columns = columns.to(hidden_states.device)
         self.routing_map = routing_map.index_select(1, columns)
@@ -126,44 +127,15 @@ def dispatch_preprocess(self, hidden_states, routing_map, probs):
     self.probs = probs
     if self.shared_experts is not None:
         self.shared_experts.pre_forward_comm(hidden_states.view(self.hidden_shape))
-    if counts_supported and self.config.moe_permute_fusion:
-        self._npu_moe_permutation_pair = npu.get_moe_permutation_pair(
-            hidden_states, self.routing_map, ordered_probs, self.num_out_tokens,
-            self.config.moe_router_topk,
-        )
-    if self._npu_moe_permutation_pair is None:
-        output, permuted_probs, mapping, _, _ = permute(
-            hidden_states,
-            self.routing_map,
-            probs=ordered_probs,
-            num_out_tokens=self.num_out_tokens,
-            fused=self.config.moe_permute_fusion,
-        )
-    else:
-        self.routing_map = self.routing_map.contiguous()
-        output, permuted_probs, mapping = self._npu_moe_permutation_pair[0](
-            hidden_states, self.routing_map, ordered_probs, self.num_out_tokens
-        )
+    output, permuted_probs, mapping, _, _ = permute(
+        hidden_states,
+        self.routing_map,
+        probs=ordered_probs,
+        num_out_tokens=self.num_out_tokens,
+        fused=self.config.moe_permute_fusion,
+    )
     self.reversed_local_input_permutation_mapping = mapping
     return output, permuted_probs
-
-
-def combine_postprocess(self, permutated_local_input_tokens: torch.Tensor) -> torch.Tensor:
-    """Consume the permutation pair selected by this dispatch, then restore the layer shape."""
-    pair = getattr(self, "_npu_moe_permutation_pair", None)
-    if pair is None:
-        return MoEAlltoAllTokenDispatcher.combine_postprocess.__wrapped__(
-            self, permutated_local_input_tokens
-        )
-    output = pair[1](
-        permutated_local_input_tokens,
-        self.reversed_local_input_permutation_mapping,
-        self.hidden_shape_before_permute,
-        self.routing_map,
-    ).view(self.hidden_shape)
-    if self.shared_experts is not None:
-        output += self.shared_experts.get_output()
-    return output
 
 
 def gather_tokens_per_expert(self, counts):
@@ -208,17 +180,11 @@ def _supports_group(layer, x):
 
 
 def _weights(linear, order=None):
-    # DDP removes these handles when overlap is disabled and replaces them on enable.
-    owner = getattr(linear, "_npu_mc2_ddp", None)
-    ddp = owner() if owner is not None else None
-    if ddp is not None and ddp.remove_forward_pre_hook_handles:
-        handle = ddp.remove_forward_pre_hook_handles.get(linear)
-        hook = linear._forward_pre_hooks.get(handle.id) if handle is not None else None
-        if hook is None:
-            raise RuntimeError("MC2 cannot read expert weights: active DDP parameter sync hook is missing")
-        hook(linear)
+    ensure_params_ready(linear.parameters(recurse=False))
+    if getattr(linear, "_mg_dense_grouped_weight", False):
+        return linear.weight if order is None else linear.weight.index_select(0, order[1])
     weights = tuple(linear._get_weight_tensors())
-    return weights if order is None else tuple(weights[i] for i in order)
+    return weights if order is None else tuple(weights[i] for i in order[0])
 
 
 def compute_experts(self, hidden_states, probs):

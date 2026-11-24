@@ -404,26 +404,24 @@ class TestMoELayerRecompute:
 
 
 @pytest.mark.parametrize(
-    "tp_size, etp_size, ep_size, deny_fusion, routing_case, permutation_case",
+    "tp_size, etp_size, ep_size, deny_fusion, routing_case, permute_fusion",
     [
-        (1, 1, 8, False, "random", "native"),
-        (4, 1, 8, False, "random", "native"),
-        (4, 2, 8, False, "random", "native"),
-        (4, 1, 8, True, "random", "native"),
-        (4, 1, 8, False, "local_disabled", "native"),
-        (1, 1, 2, False, "random", "native"),
-        (4, 1, 8, False, "skewed", "native"),
-        (1, 1, 8, False, "small_payload", "native"),
-        (1, 1, 8, False, "empty_destination", "native"),
-        (1, 1, 8, False, "overflow", "native"),
-        (4, 1, 8, False, "random", "policy_denied"),
-        (4, 1, 8, False, "random", "missing_symbol"),
-        (4, 1, 8, False, "random", "unfused_permutation"),
+        (1, 1, 8, False, "random", True),
+        (4, 1, 8, False, "random", True),
+        (4, 2, 8, False, "random", True),
+        (4, 1, 8, True, "random", True),
+        (4, 1, 8, False, "local_disabled", True),
+        (1, 1, 2, False, "random", True),
+        (4, 1, 8, False, "skewed", True),
+        (1, 1, 8, False, "small_payload", True),
+        (1, 1, 8, False, "empty_destination", True),
+        (1, 1, 8, False, "overflow", True),
+        (4, 1, 8, False, "random", False),
     ],
 )
 @pytest.mark.parametrize("recompute", [False, True])
 def test_npu_mc2_layer_matches_unfused(
-    monkeypatch, tp_size, etp_size, ep_size, deny_fusion, routing_case, recompute, permutation_case
+    monkeypatch, tp_size, etp_size, ep_size, deny_fusion, routing_case, recompute, permute_fusion
 ):
     """Compare complete expert/input/router gradients and the disabled path on NPU."""
     import copy
@@ -438,7 +436,6 @@ def test_npu_mc2_layer_matches_unfused(
     if get_platform().device_name() != "npu" or Utils.world_size < ep_size * etp_size:
         pytest.skip(f"MC2 layer comparison requires at least {ep_size * etp_size} Ascend ranks")
     import flagcx  # noqa: F401; register the optional test backend before group initialization
-    import torch_npu
     from transformer_engine.plugin.core.backends.vendor.npu import npu
     from transformer_engine.plugin.core.policy import policy_context, policy_from_env
 
@@ -464,7 +461,7 @@ def test_npu_mc2_layer_matches_unfused(
             moe_ffn_hidden_size=64 if overflow else 512,
             moe_router_topk=2 if overflow else 8,
             moe_grouped_gemm=True,
-            moe_permute_fusion=permutation_case != "unfused_permutation",
+            moe_permute_fusion=permute_fusion,
             moe_token_dispatcher_type="alltoall",
             moe_router_dtype="fp32",
             moe_router_load_balancing_type="aux_loss",
@@ -544,30 +541,6 @@ def test_npu_mc2_layer_matches_unfused(
                     ("moe_grouped_matmul_alltoallv", ("reference",)),
                 ),
             )
-        if permutation_case == "policy_denied":
-            policy = replace(
-                policy,
-                per_op_order=policy.per_op_order
-                + (
-                    ("moe_permute_with_routing_map", ("reference",)),
-                    ("moe_unpermute_with_routing_map", ("reference",)),
-                ),
-            )
-        native_calls = []
-        for name in (
-            "npu_moe_token_permute_with_routing_map",
-            "npu_moe_token_unpermute_with_routing_map",
-        ):
-            native_op = getattr(torch_npu, name)
-
-            def trace_native(*args, _op=native_op, _name=name, **kwargs):
-                result = _op(*args, **kwargs)
-                native_calls.append(_name)
-                return result
-
-            monkeypatch.setattr(torch_npu, name, trace_native)
-        if permutation_case == "missing_symbol":
-            monkeypatch.delattr(torch_npu, "npu_moe_token_unpermute_with_routing_map")
         with policy_context(policy):
             assert npu.is_moe_fusion_available() == (
                 not deny_fusion or candidate.token_dispatcher.ep_rank != 0
@@ -604,19 +577,12 @@ def test_npu_mc2_layer_matches_unfused(
         actual, expected = run(candidate), run(reference)
         forwards = 4 if recompute else 2
         assert len(metadata_calls) == forwards
-        expect_native = expect_fused and permutation_case == "native"
-        assert bool(candidate.token_dispatcher._npu_moe_permutation_pair) == expect_native
-        mapping = candidate.token_dispatcher.reversed_local_input_permutation_mapping
-        if expect_native:
-            assert mapping.ndim == 1 and mapping.dtype == torch.int32
-            assert mapping.numel() == tokens * config.moe_router_topk
-            assert mapping.untyped_storage().nbytes() == mapping.numel() * mapping.element_size()
-            assert native_calls.count("npu_moe_token_permute_with_routing_map") == forwards
-            assert native_calls.count("npu_moe_token_unpermute_with_routing_map") == forwards
-            order = candidate.token_dispatcher._npu_moe_expert_order
+        if expect_fused and permute_fusion:
+            mapping = candidate.token_dispatcher.reversed_local_input_permutation_mapping
+            assert mapping.shape == (tokens, 2 * config.num_moe_experts + 1)
+            assert mapping.dtype == torch.int32
+            order = candidate.token_dispatcher._npu_moe_expert_order[0]
             assert order != list(range(len(order)))
-        else:
-            assert native_calls == []
         if overflow:
             assert candidate.token_dispatcher._npu_moe_expert_order is None
         if routing_case in ("skewed", "overflow", "empty_destination"):
@@ -635,22 +601,10 @@ def test_npu_mc2_layer_matches_unfused(
                     torch.testing.assert_close(value, ref, rtol=0, atol=0)
 
         compare(actual, expected, expect_fused)
-        if expect_native:
-            native_calls.clear()
-            with monkeypatch.context() as dense_pair:
-                dense_pair.setattr(npu, "get_moe_permutation_pair", lambda *args: None)
-                dense_mc2 = run(candidate)
-            assert native_calls == []
-            assert candidate.token_dispatcher._npu_moe_permutation_pair is None
-            assert candidate._npu_moe_mc2_logged
-            compare(actual, dense_mc2, True)
-        native_calls.clear()
         with monkeypatch.context() as disabled_env:
             disabled_env.setenv("NPU_MOE_MC2", "0")
             disabled, plain = run(candidate), run(reference)
         compare(disabled, plain, False)
-        assert candidate.token_dispatcher._npu_moe_permutation_pair is None
-        assert native_calls == []
         with monkeypatch.context() as denied_env:
             denied_env.setenv("TE_FL_DENY_VENDORS", "NPU")
             with policy_context(policy_from_env()):
@@ -658,80 +612,6 @@ def test_npu_mc2_layer_matches_unfused(
                 assert not npu.is_moe_fusion_available(candidate.token_dispatcher.ep_group, device)
     finally:
         Utils.destroy_model_parallel()
-
-
-def test_npu_mc2_pair_state_and_shared_output_cpu(monkeypatch):
-    """Keep a selected inverse for combine, then reset it before a dense fallback dispatch."""
-    from types import SimpleNamespace
-
-    from transformer_engine.plugin.core.backends.vendor.npu import npu
-
-    from megatron.plugin.Ascend.transformer.moe import fused_experts
-
-    torch.manual_seed(19)
-    shape = (3, 2, 4)
-    routing_map = torch.tensor([[1, 0, 1, 0], [0, 1, 1, 0], [1, 0, 0, 1]] * 2, dtype=torch.bool)
-    token_rows = routing_map.T.nonzero()[:, 1]
-    native_mapping = token_rows.argsort(stable=True).to(torch.int32)
-    shared = torch.randn(shape, dtype=torch.float64, requires_grad=True)
-    pre_forward_shapes = []
-    inverses = []
-
-    def fixed_inverse(tokens, mapping, restore_shape, route):
-        assert mapping is native_mapping and route is routing_map
-        inverses.append(1)
-        return tokens.index_select(0, mapping.long()).reshape(*restore_shape[:1], 2, -1).sum(1)
-
-    def unexpected_resolve(*args):
-        raise AssertionError("combine must retain the pair selected during dispatch")
-
-    monkeypatch.setattr(npu, "get_moe_permutation_pair", unexpected_resolve)
-    dispatcher = SimpleNamespace(
-        _npu_moe_schedule=False,
-        _npu_moe_permutation_pair=(None, fixed_inverse),
-        hidden_shape=shape,
-        hidden_shape_before_permute=(6, 4),
-        reversed_local_input_permutation_mapping=native_mapping,
-        routing_map=routing_map,
-        config=SimpleNamespace(moe_permute_fusion=False, moe_router_padding_for_quantization=False),
-        drop_and_pad=False,
-        num_out_tokens=12,
-        preprocess=lambda route: route.sum(0),
-        _maybe_dtoh_and_synchronize=lambda point, counts: counts,
-        shared_experts=SimpleNamespace(
-            pre_forward_comm=lambda x: pre_forward_shapes.append(x.shape), get_output=lambda: shared
-        ),
-    )
-    inputs = [torch.randn(shape, dtype=torch.float64, requires_grad=True) for _ in range(2)]
-    probs = [torch.randn(6, 4, dtype=torch.float64, requires_grad=True) for _ in range(2)]
-    weighted = inputs[0].view(6, 4).index_select(0, token_rows) * probs[0].T[routing_map.T][:, None]
-    native_output = fused_experts.combine_postprocess(dispatcher, weighted)
-    assert inverses == [1]
-
-    dense_tokens, dense_probs = fused_experts.dispatch_preprocess(
-        dispatcher, inputs[1], routing_map, probs[1]
-    )
-    assert dispatcher._npu_moe_permutation_pair is None
-    assert dispatcher._npu_moe_expert_order is None
-    dense_output = fused_experts.combine_postprocess(
-        dispatcher, dense_tokens * dense_probs[:, None]
-    )
-    assert inverses == [1]
-    assert pre_forward_shapes == [shape]
-    expected = [
-        (x.view(6, 4) * (p * routing_map).sum(1, keepdim=True)).view(shape) + shared
-        for x, p in zip(inputs, probs)
-    ]
-    upstream = [torch.randn_like(value) for value in expected]
-    variables = (*inputs, *probs, shared)
-    actual_grads = torch.autograd.grad(
-        (native_output, dense_output), variables, upstream, retain_graph=True
-    )
-    expected_grads = torch.autograd.grad(expected, variables, upstream)
-    for actual, reference in zip((native_output, dense_output), expected):
-        torch.testing.assert_close(actual, reference, rtol=1e-12, atol=1e-12)
-    for actual, reference in zip(actual_grads, expected_grads):
-        torch.testing.assert_close(actual, reference, rtol=1e-12, atol=1e-12)
 
 
 @pytest.mark.parametrize(
@@ -806,40 +686,35 @@ def test_npu_mc2_ddp_weight_readiness(monkeypatch):
             layer,
         )
         linears = (layer.experts.linear_fc1, layer.experts.linear_fc2)
-        expected = [tuple(p.detach().clone() for p in linear.parameters()) for linear in linears]
-        waits = []
-        for bucket in ddp.expert_parallel_bucket_groups:
-            finish = bucket.finish_param_sync
-
-            def traced_finish(*args, _finish=finish, **kwargs):
-                waits.append(1)
-                return _finish(*args, **kwargs)
-
-            monkeypatch.setattr(bucket, "finish_param_sync", traced_finish)
-        for enabled in (True, False, True, False, True):
-            if enabled:
-                ddp.zero_grad_buffer()
-                for bucket in ddp.expert_parallel_bucket_groups:
-                    bucket.start_param_sync()
+        with torch.no_grad():
+            params = (p for linear in linears for p in linear.parameters(recurse=False))
+            for i, param in enumerate(params):
+                param.fill_(i + 1)
+        expected = [
+            tuple(p.detach().clone() for p in linear.parameters(recurse=False)) for linear in linears
+        ]
+        # Exercise normal DDP scheduling, an external gather with hooks removed, and re-enable.
+        for enabled in (True, False, True):
+            if not enabled:
+                ddp.disable_forward_pre_hook(param_sync=False)
+            for group in ddp.expert_parallel_bucket_groups:
+                for bucket in group.buckets:
+                    shards = bucket.param_data.chunk(group.intra_distributed_optimizer_instance_size)
+                    for rank, shard in enumerate(shards):
+                        if rank != group.intra_distributed_optimizer_instance_rank:
+                            shard.zero_()
+                group.start_param_sync()
+                assert group.param_gather_handle is not None
             for linear, baseline in zip(linears, expected):
-                before = len(waits)
                 weights = _weights(linear)
-                assert len(waits) - before == (len(tuple(linear.parameters())) if enabled else 0)
+                if isinstance(weights, torch.Tensor):
+                    weights = (weights,)
+                assert len(weights) == len(baseline)
                 for actual, original in zip(weights, baseline):
                     torch.testing.assert_close(actual, original, rtol=0, atol=0)
-                if enabled:
-                    for param in linear.parameters():
-                        assert ddp.param_to_bucket_group[param].param_gather_handle is None
-            if enabled:
-                linear = linears[0]
-                handle = ddp.remove_forward_pre_hook_handles[linear]
-                with monkeypatch.context() as broken:
-                    broken.delitem(linear._forward_pre_hooks, handle.id)
-                    with pytest.raises(RuntimeError, match="active DDP parameter sync hook is missing"):
-                        _weights(linear)
-            if enabled:
-                ddp.disable_forward_pre_hook(param_sync=False)
-            else:
+                for param in linear.parameters(recurse=False):
+                    assert ddp.param_to_bucket_group[param].param_gather_handle is None
+            if not enabled:
                 ddp.enable_forward_pre_hook()
     finally:
         Utils.destroy_model_parallel()
