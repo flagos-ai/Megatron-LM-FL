@@ -2,6 +2,7 @@
 
 import argparse
 import sys
+from dataclasses import replace
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -857,27 +858,50 @@ class TestTEGroupedMLP:
                 self.fc2_ffn_hidden_size,
             )
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.internal
-    def test_gpu_forward_backward(self):
-        self.sequential_mlp.cuda()
-        self.grouped_mlp.cuda()
+    @pytest.mark.parametrize(
+        "dense_dtype",
+        [None, torch.bfloat16, torch.float16],
+        ids=["indexed", "dense_bf16", "dense_fp16"],
+    )
+    def test_gpu_forward_backward(self, monkeypatch, dense_dtype):
+        device = "cuda" if dense_dtype is None else "npu"
+        if dense_dtype is None and not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+        if dense_dtype is not None:
+            if not hasattr(torch, "npu") or not torch.npu.is_available():
+                pytest.skip("Dense grouped weights require NPU")
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+            monkeypatch.setenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "1")
+            config = replace(
+                self.grouped_mlp.config,
+                moe_single_grouped_weight=True,
+                params_dtype=dense_dtype,
+                bf16=dense_dtype == torch.bfloat16,
+                fp16=dense_dtype == torch.float16,
+                gradient_accumulation_fusion=False,
+            )
+            self.grouped_mlp = MoELayer(config, self.grouped_mlp.submodules)
+            self.sequential_mlp.to(dtype=dense_dtype)
+            self.grouped_mlp.router.load_state_dict(self.sequential_mlp.router.state_dict())
+        self.sequential_mlp.to(device)
+        self.grouped_mlp.to(device)
         # Copy the weights to ensure the same init value
         with torch.no_grad():
             for i in range(self.num_experts):
                 self.sequential_mlp.experts.local_experts[i].linear_fc1.weight.copy_(
-                    getattr(self.grouped_mlp.experts.linear_fc1, f"weight{i}")
+                    self.grouped_mlp.experts.linear_fc1._get_weight_tensors()[i]
                 )
                 self.sequential_mlp.experts.local_experts[i].linear_fc2.weight.copy_(
-                    getattr(self.grouped_mlp.experts.linear_fc2, f"weight{i}")
+                    self.grouped_mlp.experts.linear_fc2._get_weight_tensors()[i]
                 )
         # [sequence length, batch size, hidden size]
         seq_len = 32
         batch_size = 2
         hidden_states = torch.rand(
             (seq_len, batch_size, self.hidden_size),
-            dtype=torch.bfloat16,
-            device="cuda",
+            dtype=dense_dtype or torch.bfloat16,
+            device=device,
             requires_grad=True,
         )
         hidden_states.retain_grad()
@@ -890,15 +914,50 @@ class TestTEGroupedMLP:
             smm_results.append(self.sequential_mlp.experts.local_experts[i].linear_fc2.weight.grad)
 
         hidden_states.grad = None
+        if dense_dtype is not None:
+            from transformer_engine.plugin.core.manager import OpManager, get_default_manager
+
+            op = "te_general_grouped_gemm_for_grouped_tensor"
+            manager, dispatch = get_default_manager(), OpManager.call
+            assert manager.get_selected_impl_id(op) == "vendor.npu"
+            routed = set()
+
+            def record_dispatch(self, op_name, *args, **kwargs):
+                result = dispatch(self, op_name, *args, **kwargs)
+                if op_name == op:
+                    routed.add((args[1], args[3], self._get_last_impl_id(op)))
+                return result
+
+            monkeypatch.setattr(OpManager, "call", record_dispatch)
         output_gmm, _ = self.grouped_mlp(hidden_states)
         output_gmm.mean().backward()
+        if dense_dtype is not None:
+            assert hidden_states.device.type == output_gmm.device.type == "npu"
+            assert routed == {
+                (True, False, "vendor.npu"),
+                (False, False, "vendor.npu"),
+                (False, True, "vendor.npu"),
+            }
         gmm_results = [output_gmm, hidden_states.grad]
+        fc1, fc2 = self.grouped_mlp.experts.linear_fc1, self.grouped_mlp.experts.linear_fc2
         for i in range(self.num_experts):
-            gmm_results.append(getattr(self.grouped_mlp.experts.linear_fc1, f"weight{i}").grad)
-            gmm_results.append(getattr(self.grouped_mlp.experts.linear_fc2, f"weight{i}").grad)
+            gmm_results.append(
+                fc1.weight.grad[i] if dense_dtype else fc1._get_weight_tensors()[i].grad
+            )
+            gmm_results.append(
+                fc2.weight.grad[i] if dense_dtype else fc2._get_weight_tensors()[i].grad
+            )
 
         for smm_result, gmm_result in zip(smm_results, gmm_results):
-            torch.testing.assert_close(smm_result, gmm_result)
+            if dense_dtype is None:
+                torch.testing.assert_close(smm_result, gmm_result)
+            else:
+                tolerance = (
+                    dict(atol=2e-3, rtol=2e-2)
+                    if dense_dtype == torch.bfloat16
+                    else dict(atol=2e-4, rtol=2e-3)
+                )
+                torch.testing.assert_close(smm_result, gmm_result, **tolerance)
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.internal
@@ -1101,3 +1160,616 @@ class TestTEGroupedMLP:
             f"Fused-path training did not reduce loss enough: "
             f"initial={losses[0]:.6f}, final={losses[-1]:.6f}, full={losses}"
         )
+
+    @pytest.mark.parametrize("parallel_mode", ["column", "row"])
+    def test_expert_parallel_attributes_survive_reset(self, parallel_mode):
+        """Megatron's parallel attributes must outlive TE's parameter rebuilds."""
+        from megatron.core.extensions.transformer_engine import TEGroupedLinear
+
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(1, 1, expert_model_parallel_size=1)
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=self.hidden_size,
+            num_attention_heads=4,
+            num_moe_experts=self.num_experts,
+            expert_model_parallel_size=1,
+            add_bias_linear=False,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+        )
+        # explicit_expert_comm, which clears TE's parallel_mode, needs EP or expert TP.
+        config.expert_model_parallel_size = 2
+        linear = TEGroupedLinear(
+            self.num_experts,
+            self.hidden_size,
+            self.hidden_size,
+            parallel_mode=parallel_mode,
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=True,
+            is_expert=True,
+        )
+        assert linear.explicit_expert_comm
+
+        expected_dim = 0 if parallel_mode == "column" else 1
+        # Once after construction and once more after a reset: TE rebuilds its
+        # parameters on reset, so attributes set only in __init__ are lost.
+        for _ in range(2):
+            for i in range(linear.num_gemms):
+                weight = getattr(linear, f"weight{i}")
+                assert weight.partition_dim == expected_dim
+                assert weight.partition_stride == 1
+                assert weight.allreduce is False
+            linear.reset_parameters()
+
+    @pytest.mark.skipif(
+        not (hasattr(torch, "npu") and torch.npu.is_available()), reason="NPU required"
+    )
+    def test_npu_indexed_expert_weights_count_in_grad_norm(self):
+        """Indexed experts must not be dropped from gradient statistics as TP duplicates."""
+        from megatron.core.extensions.transformer_engine import TEGroupedLinear
+        from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
+
+        if Utils.world_size % 2:
+            pytest.skip("This parallel layout requires an even number of ranks")
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(2, 1, expert_model_parallel_size=1)
+        config = TransformerConfig(
+            num_layers=1,
+            hidden_size=self.hidden_size,
+            num_attention_heads=4,
+            num_moe_experts=self.num_experts,
+            tensor_model_parallel_size=2,
+            add_bias_linear=False,
+            bf16=True,
+            params_dtype=torch.bfloat16,
+        )
+        linear = TEGroupedLinear(
+            self.num_experts,
+            self.hidden_size,
+            self.hidden_size,
+            parallel_mode="column",
+            config=config,
+            init_method=config.init_method,
+            bias=False,
+            skip_bias_add=True,
+            is_expert=True,
+        )
+        assert linear.explicit_expert_comm
+
+        # Expert TP is 2 here, so each rank holds its own half of every expert weight
+        # and must contribute it to the gradient norm, clipping and the zero count.
+        for i in range(linear.num_gemms):
+            weight = getattr(linear, f"weight{i}")
+            assert param_is_not_tensor_parallel_duplicate(weight)
+
+    @pytest.fixture
+    def npu_dense_config(self, monkeypatch):
+        if not hasattr(torch, "npu") or not torch.npu.is_available():
+            pytest.skip("NPU required")
+        from transformer_engine.plugin.core.backends.vendor.npu.patches import apply_patch
+
+        # Megatron's transfer_to_npu import can replace TE's compatibility hooks.
+        apply_patch()
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
+        monkeypatch.setenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "1")
+        return replace(
+            self.grouped_mlp.config,
+            moe_single_grouped_weight=True,
+            gradient_accumulation_fusion=False,
+            use_cpu_initialization=False,
+        )
+
+    def test_npu_dense_replicated_weights_use_tp_deduplication(self, npu_dense_config):
+        """Replicated experts must contribute to gradient statistics only once per TP group."""
+        from megatron.core import parallel_state
+        from megatron.core.tensor_parallel import param_is_not_tensor_parallel_duplicate
+
+        if Utils.world_size % 4:
+            pytest.skip("This parallel layout requires a multiple of four ranks")
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(
+            4, 1, expert_model_parallel_size=1, expert_tensor_parallel_size=1
+        )
+        config = replace(
+            npu_dense_config,
+            tensor_model_parallel_size=4,
+            expert_model_parallel_size=1,
+            expert_tensor_parallel_size=1,
+            sequence_parallel=True,
+        )
+        experts = MoELayer(config, self.grouped_mlp.submodules).experts
+        for linear in (experts.linear_fc1, experts.linear_fc2):
+            assert not linear.explicit_expert_comm
+            assert not linear.weight.tensor_model_parallel
+            assert param_is_not_tensor_parallel_duplicate(linear.weight) == (
+                parallel_state.get_tensor_model_parallel_rank() == 0
+            )
+
+    @pytest.mark.parametrize(
+        "unsupported",
+        [
+            "single_param_off",
+            "fused_gemm_off",
+            "fp32",
+            "offload",
+            "input_fp32",
+            "backend_denied",
+            "backend_denied_at_runtime",
+            "backend_error",
+        ],
+    )
+    def test_npu_dense_grouped_unsupported(self, npu_dense_config, monkeypatch, unsupported):
+        from transformer_engine.plugin.core.policy import with_denied_vendors
+
+        rejected = pytest.raises(
+            ValueError, match="moe_single_grouped_weight is currently supported only"
+        )
+        if unsupported.endswith("off"):
+            flag = (
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM"
+                if unsupported == "single_param_off"
+                else "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
+            )
+            monkeypatch.setenv(flag, "0")
+        if unsupported == "input_fp32":
+            layer = MoELayer(npu_dense_config, self.grouped_mlp.submodules).experts
+            with pytest.raises(TypeError, match="requires BF16 or FP16 input"):
+                layer.linear_fc1(torch.randn(8, 16, device="npu"), [2] * 4)
+        elif unsupported in ("backend_denied_at_runtime", "backend_error"):
+            import torch_npu
+
+            linear = MoELayer(npu_dense_config, self.grouped_mlp.submodules).experts.linear_fc1
+            tokens = torch.randn(2 * linear.num_gemms, 16, device="npu", dtype=torch.bfloat16)
+            if unsupported == "backend_denied_at_runtime":
+                with (
+                    with_denied_vendors("NPU"),
+                    pytest.raises(RuntimeError, match="No available implementation"),
+                ):
+                    linear(tokens, [2] * linear.num_gemms)
+            else:
+
+                def fail_grouped_matmul(*args, **kwargs):
+                    raise RuntimeError("injected grouped GEMM failure")
+
+                monkeypatch.setattr(torch_npu, "npu_grouped_matmul", fail_grouped_matmul)
+                with pytest.raises(RuntimeError, match="injected grouped GEMM failure"):
+                    linear(tokens, [2] * linear.num_gemms)
+        elif unsupported == "backend_denied":
+            # With the NPU vendor denied, TE-FL selects another implementation of the
+            # grouped GEMM, so the dense layout must not be offered at all.
+            with with_denied_vendors("NPU"), rejected:
+                replace(npu_dense_config)
+        else:
+            with rejected:
+                replace(
+                    npu_dense_config,
+                    params_dtype=torch.float32 if unsupported == "fp32" else torch.bfloat16,
+                    bf16=unsupported != "fp32",
+                    cpu_offloading=unsupported == "offload",
+                )
+
+    @pytest.mark.parametrize("change", ["single_param", "fused_gemm", "backend"])
+    @pytest.mark.parametrize("meta_init", [False, True])
+    def test_npu_dense_grouped_initialization_changes(
+        self, npu_dense_config, monkeypatch, change, meta_init
+    ):
+        """Reject changes after config validation or before meta materialization."""
+        from contextlib import nullcontext
+
+        from transformer_engine.plugin.core.policy import with_denied_vendors
+
+        config = replace(npu_dense_config, init_model_with_meta_device=meta_init)
+        if meta_init:
+            experts = MoELayer(config, self.grouped_mlp.submodules).experts
+        if change != "backend":
+            flag = (
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM"
+                if change == "single_param"
+                else "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM"
+            )
+            monkeypatch.setenv(flag, "0")
+        policy = with_denied_vendors("NPU") if change == "backend" else nullcontext()
+        with policy, pytest.raises(RuntimeError, match="NPU dense grouped weights require"):
+            if meta_init:
+                experts.linear_fc1.reset_parameters()
+            else:
+                MoELayer(config, self.grouped_mlp.submodules)
+
+    @staticmethod
+    def _npu_expert_tensors(layer, optimizer, state=None):
+        """Read per-expert weights or gathered optimizer shards in either parameter layout."""
+        from megatron.core import parallel_state
+
+        values = []
+        for linear in (layer.linear_fc1, layer.linear_fc2):
+            for parameter in linear.parameters():
+                value = parameter.detach()
+                if state is not None:
+                    value = torch.zeros_like(parameter, dtype=torch.float32).view(-1)
+                    if parameter in optimizer.model_param_gbuf_map:
+                        bound = optimizer._get_model_param_range_map(parameter)["param"]
+                        master = parameter.main_param
+                        shard = (
+                            master
+                            if state == "param"
+                            else (
+                                master.grad
+                                if state == "grad"
+                                else optimizer.optimizer.state[master][state]
+                            )
+                        )
+                        value[bound.start : bound.end].copy_(shard)
+                    torch.distributed.all_reduce(
+                        value, group=parallel_state.get_expert_data_parallel_group()
+                    )
+                    value = value.view(parameter.shape)
+                values.extend(value.unbind(0) if value.ndim == 3 else [value])
+        return [value.detach().cpu().double() for value in values]
+
+    @pytest.mark.parametrize(
+        "save_dense,load_dense,sharding",
+        [
+            (True, True, "fully_sharded_model_space"),
+            (True, True, "fully_reshardable"),
+            (False, True, "fully_reshardable"),
+            (True, False, "fully_reshardable"),
+        ],
+        ids=["dense_sharded", "dense_reshardable", "indexed_to_dense", "dense_to_indexed"],
+    )
+    def test_npu_dense_grouped_checkpoint(
+        self, npu_dense_config, tmp_path_dist_ckpt, monkeypatch, sharding, save_dense, load_dense
+    ):
+        """Recover weights and Adam state, then continue training across parameter layouts."""
+        from copy import deepcopy
+
+        from megatron.core import parallel_state
+        from megatron.core.dist_checkpointing import load, save
+        from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
+        from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+        from megatron.core.transformer.moe.moe_utils import get_default_pg_collection
+        from tests.unit_tests.dist_checkpointing import TempNamedDir
+
+        if Utils.world_size != 8:
+            pytest.skip("This parallel layout requires eight ranks")
+        Utils.destroy_model_parallel()
+        Utils.initialize_model_parallel(
+            2, 1, expert_model_parallel_size=2, expert_tensor_parallel_size=2
+        )
+        # Native indexed FC2 metadata rejects flattened_range in model-space format.
+        # Cross-layout recovery therefore uses its supported fully_reshardable format.
+        metadata = {
+            "dp_cp_group": parallel_state.get_data_parallel_group(with_context_parallel=True),
+            "distrib_optim_sharding_type": sharding,
+        }
+
+        def create(dense):
+            for flag in (
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM",
+                "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM",
+            ):
+                monkeypatch.setenv(flag, str(int(dense)))
+            config = replace(
+                npu_dense_config,
+                moe_single_grouped_weight=dense,
+                init_model_with_meta_device=True,
+                num_moe_experts=8,
+                tensor_model_parallel_size=2,
+                expert_model_parallel_size=2,
+                expert_tensor_parallel_size=2,
+            )
+            layer = TEGroupedMLP(
+                4,
+                config,
+                get_submodules(self.grouped_mlp.submodules.experts),
+                get_default_pg_collection(),
+            )
+            for linear, axis in ((layer.linear_fc1, 0), (layer.linear_fc2, 1)):
+                assert all(p.is_meta for p in linear.parameters())
+                for _ in range(2):
+                    linear.reset_parameters()
+                    for parameter in linear.parameters():
+                        assert parameter.device.type == "npu"
+                        assert (parameter.partition_dim, parameter.partition_stride) == (
+                            axis + int(dense),
+                            1,
+                        )
+                        assert parameter.tensor_model_parallel and not parameter.allreduce
+            ddp = DistributedDataParallel(
+                layer.config, DistributedDataParallelConfig(use_distributed_optimizer=True), layer
+            )
+            optimizer = get_megatron_optimizer(
+                OptimizerConfig(
+                    bf16=True,
+                    params_dtype=torch.bfloat16,
+                    use_distributed_optimizer=True,
+                    lr=0.001,
+                    clip_grad=0.0,
+                ),
+                [ddp],
+            )
+            return layer, ddp, optimizer.chained_optimizers[-1]
+
+        layer, ddp, optimizer = create(save_dense)
+        x = torch.randn(8, 16, device="npu", dtype=torch.bfloat16) * 0.1
+
+        def step(module, model_optimizer):
+            module.zero_grad_buffer()
+            model_optimizer.zero_grad()
+            output, _ = module(x, torch.tensor([3, 0, 2, 3]), torch.ones(8, device="npu"))
+            output.float().square().sum().backward()
+            module.finish_grad_sync()
+            assert model_optimizer.step()[0]
+
+        size = sum(p.numel() for p in layer.linear_fc1.parameters())
+        cut = size // 2 + 1
+        begin, end = (
+            (0, cut) if parallel_state.get_expert_data_parallel_rank() == 0 else (cut, size)
+        )
+        # Flat ranges of the parent weight owned by this rank: one that crosses expert
+        # rows, and empty ones at the start, the middle and the end.
+        probe_ranges = {
+            "cross_row": (begin, end),
+            **{
+                f"empty_{index}": (0, size) if begin == 0 else (index, index)
+                for index in (0, cut, size)
+            },
+        }
+        if not (save_dense and load_dense):
+            probe_ranges = {}
+
+        def probe_values(first, last, is_loading=False):
+            # A checkpoint probe stores its own flat index. The load target starts as
+            # NaN, so only values read back from the checkpoint can match.
+            values = torch.arange(first, last, dtype=torch.float32, device="npu")
+            return values.fill_(float("nan")) if is_loading else values
+
+        def state(module, model_optimizer, is_loading=False):
+            model = module.sharded_state_dict(metadata=metadata)
+            parent = model.get("linear_fc1.weight")
+            return {
+                "model": model,
+                "optimizer": model_optimizer.sharded_state_dict(
+                    model, metadata=metadata, is_loading=is_loading
+                ),
+                "probes": {
+                    name: replace(
+                        parent,
+                        key=name + "." + parent.key,
+                        data=probe_values(first, last, is_loading),
+                        flattened_range=slice(first, last),
+                        replica_id=(*parent.replica_id[:2], 0),
+                    )
+                    for name, (first, last) in probe_ranges.items()
+                },
+            }
+
+        def values(module, model_optimizer):
+            return {
+                "tensors": {
+                    name: self._npu_expert_tensors(module, model_optimizer, name)
+                    for name in (None, "param", "exp_avg", "exp_avg_sq")
+                },
+                "param_groups": deepcopy(
+                    [
+                        {key: value for key, value in group.items() if key != "params"}
+                        for group in model_optimizer.optimizer.param_groups
+                    ]
+                ),
+            }
+
+        step(ddp, optimizer)
+        saved = values(layer, optimizer)
+        with TempNamedDir(tmp_path_dist_ckpt / "grouped_checkpoint") as path:
+            save(state(layer, optimizer), path)
+            step(ddp, optimizer)
+            restored_layer, restored_ddp, restored_optimizer = create(load_dense)
+            target = state(restored_layer, restored_optimizer, is_loading=True)
+            expected_probes = {name: probe_values(*span) for name, span in probe_ranges.items()}
+            restored = load(target, path)
+            torch.testing.assert_close(restored["probes"], expected_probes, rtol=0, atol=0)
+            restored_layer.load_state_dict(restored["model"])
+            torch.testing.assert_close(
+                self._npu_expert_tensors(restored_layer, restored_optimizer),
+                saved["tensors"][None],
+                rtol=0,
+                atol=0,
+            )
+            restored_optimizer.load_state_dict(restored["optimizer"])
+            torch.testing.assert_close(
+                values(restored_layer, restored_optimizer), saved, rtol=0, atol=0
+            )
+            step(restored_ddp, restored_optimizer)
+            tolerance = (
+                dict(rtol=0, atol=0) if save_dense == load_dense else dict(rtol=2e-2, atol=2e-3)
+            )
+            torch.testing.assert_close(
+                values(restored_layer, restored_optimizer), values(layer, optimizer), **tolerance
+            )
+
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+    @pytest.mark.parametrize("expert_tp", [1, 2])
+    def test_npu_grouped_optimizer_alignment(self, npu_dense_config, monkeypatch, dtype, expert_tp):
+        """Compare indexed/dense expert gradients, clipping and distributed Adam updates."""
+        from megatron.core import parallel_state
+        from megatron.core.distributed import DistributedDataParallel, DistributedDataParallelConfig
+        from megatron.core.optimizer import OptimizerConfig, get_megatron_optimizer
+        from megatron.core.process_groups_config import ProcessGroupCollection
+        from megatron.core.resharding.utils import extract_param_metadata
+        from megatron.core.transformer.moe.moe_utils import get_default_pg_collection
+
+        if Utils.world_size % 8:
+            pytest.skip("This comparison requires a multiple of eight ranks")
+        Utils.destroy_model_parallel()
+        tp, ep = (4, 8) if expert_tp == 1 else (2, 2)
+        Utils.initialize_model_parallel(
+            tp, 1, expert_model_parallel_size=ep, expert_tensor_parallel_size=expert_tp
+        )
+        config = replace(
+            npu_dense_config,
+            hidden_size=64,
+            ffn_hidden_size=128,
+            moe_ffn_hidden_size=128,
+            num_moe_experts=ep * 2,
+            tensor_model_parallel_size=tp,
+            expert_model_parallel_size=ep,
+            expert_tensor_parallel_size=expert_tp,
+            sequence_parallel=True,
+            init_model_with_meta_device=True,
+            params_dtype=dtype,
+            bf16=dtype == torch.bfloat16,
+            fp16=dtype == torch.float16,
+        )
+
+        def set_mode(enabled):
+            for name in (
+                "NVTE_GROUPED_LINEAR_SINGLE_PARAM",
+                "NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM",
+            ):
+                monkeypatch.setenv(name, str(int(enabled)))
+
+        models, optimizers = [], []
+        for enabled in (False, True):
+            set_mode(enabled)
+            _set_random_seed(seed_=233, data_parallel_random_init=False)
+            layer = TEGroupedMLP(
+                2,
+                replace(config, moe_single_grouped_weight=enabled),
+                get_submodules(self.grouped_mlp.submodules.experts),
+                get_default_pg_collection(),
+            )
+            for name, axis in (("linear_fc1", 0), ("linear_fc2", 1)):
+                linear = getattr(layer, name)
+                assert all(p.is_meta for p in linear.parameters())
+                for _ in range(2):
+                    linear.reset_parameters()
+                    for parameter in linear.parameters():
+                        assert parameter.device.type == "npu"
+                        assert parameter.tensor_model_parallel and not parameter.allreduce
+                        assert parameter.partition_dim == axis + int(enabled)
+                        assert parameter.partition_stride == 1
+                if enabled:
+                    groups = ProcessGroupCollection.use_mpu_process_groups(
+                        ["tp", "pp", "dp", "ep", "expt_tp"]
+                    )
+                    meta = extract_param_metadata(
+                        linear.weight,
+                        name + ".weight",
+                        torch.distributed.get_rank(),
+                        groups,
+                        num_experts=config.num_moe_experts,
+                    )
+                    assert meta.is_tp and meta.is_ep and meta.partition_dim == axis + 1
+                    assert (
+                        meta.tensor_parallel_group_ranks
+                        == torch.distributed.get_process_group_ranks(groups.expt_tp)
+                    )
+            if enabled:
+                # Repeated reset can consume RNG differently for stacked/indexed storage.
+                with torch.no_grad():
+                    for name in ("linear_fc1", "linear_fc2"):
+                        reference = getattr(models[0].module, name)
+                        getattr(layer, name).weight.copy_(
+                            torch.stack([getattr(reference, f"weight{i}") for i in range(2)])
+                        )
+            ddp = DistributedDataParallel(
+                layer.config, DistributedDataParallelConfig(use_distributed_optimizer=True), layer
+            )
+            optimizer = get_megatron_optimizer(
+                OptimizerConfig(
+                    bf16=config.bf16,
+                    fp16=config.fp16,
+                    params_dtype=dtype,
+                    use_distributed_optimizer=True,
+                    loss_scale=1.0,
+                    lr=1e-4,
+                    adam_beta1=0.9,
+                    adam_beta2=0.95,
+                    clip_grad=0.1,
+                ),
+                [ddp],
+            )
+            models.append(ddp)
+            optimizers.append(optimizer)
+
+        def tensors(index, state=None):
+            return self._npu_expert_tensors(
+                models[index].module, optimizers[index].chained_optimizers[-1], state
+            )
+
+        tolerance = dict(atol=2e-3, rtol=2e-2) if config.bf16 else dict(atol=2e-4, rtol=2e-3)
+
+        def assert_aligned(left, right):
+            torch.testing.assert_close(left, right, **tolerance)
+            left = torch.cat([value.reshape(-1) for value in left])
+            right = torch.cat([value.reshape(-1) for value in right])
+            assert (left - right).norm() <= (1e-2 if config.bf16 else 2e-3) * left.norm()
+
+        torch.testing.assert_close(tensors(0), tensors(1), rtol=0, atol=0)
+        # The layout is committed when the parameters are built, so the switches
+        # must not change how an existing layer executes.
+        set_mode(False)
+        for iteration in range(3):
+            before = [tensors(i, "param") for i in range(2)]
+            results = []
+            for index, (ddp, optimizer) in enumerate(zip(models, optimizers)):
+                ddp.zero_grad_buffer()
+                optimizer.zero_grad()
+                values = []
+                for microbatch, counts in enumerate(([3, 5], [8, 0])):
+                    torch.manual_seed(
+                        71
+                        + 2 * iteration
+                        + microbatch
+                        + parallel_state.get_expert_model_parallel_rank()
+                    )
+                    x = torch.randn(8, 64, device="npu", dtype=dtype, requires_grad=True)
+                    probabilities = torch.rand(8, device="npu", requires_grad=True)
+                    output, _ = ddp(x, torch.tensor(counts), probabilities)
+                    (output.float() * (torch.randn_like(output) * 32).float()).sum().backward()
+                    values.extend(
+                        v.detach().cpu().double() for v in (output, x.grad, probabilities.grad)
+                    )
+                ddp.finish_grad_sync()
+                assert not optimizer.prepare_grads()
+                gradient = tensors(index, "grad")
+                norm = torch.tensor(
+                    sum(value.square().sum().item() for value in gradient), device="npu"
+                )
+                torch.distributed.all_reduce(
+                    norm, group=parallel_state.get_expert_tensor_model_pipeline_parallel_group()
+                )
+                reported = float(optimizer.get_grad_norm())
+                assert reported == pytest.approx(norm.sqrt().item(), rel=2e-6, abs=1e-7)
+                assert reported > optimizer.config.clip_grad
+                old_moments = (
+                    [[torch.zeros_like(v) for v in gradient]] * 2
+                    if iteration == 0
+                    else [tensors(index, s) for s in ("exp_avg", "exp_avg_sq")]
+                )
+                success, step_norm, _ = optimizer.step()
+                assert success and float(step_norm) == pytest.approx(reported, rel=1e-7)
+                clipped = [v * min(1.0, 0.1 / (reported + 1e-6)) for v in gradient]
+                # Adam may reuse its gradient buffer; validate clipping through both moments.
+                for state, previous, beta, power in zip(
+                    ("exp_avg", "exp_avg_sq"), old_moments, (0.9, 0.95), (1, 2)
+                ):
+                    torch.testing.assert_close(
+                        tensors(index, state),
+                        [
+                            beta * old + (1 - beta) * g.pow(power)
+                            for old, g in zip(previous, clipped)
+                        ],
+                        rtol=2e-6,
+                        atol=1e-8,
+                    )
+                results.append(values + gradient)
+            assert_aligned(*results)
+            for state in (None, "param", "exp_avg", "exp_avg_sq"):
+                assert_aligned(tensors(0, state), tensors(1, state))
+            updates = [
+                [old - new for old, new in zip(before[i], tensors(i, "param"))] for i in range(2)
+            ]
+            assert_aligned(*updates)
