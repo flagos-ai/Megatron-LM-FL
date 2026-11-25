@@ -35,6 +35,7 @@ from megatron.core.transformer.module import MegatronModule
 from megatron.core.transformer.spec_utils import ModuleSpec, build_module
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import ensure_params_ready, get_pg_size
+from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform  # FlagScale Modify
 
 cur_platform = get_platform()  # FlagScale Modify
@@ -268,6 +269,7 @@ def _validate_nonpacked_cp_uniform_length(
         )
 
 
+@overridable
 def rotate_activation(x: torch.Tensor) -> torch.Tensor:
     """Apply Hadamard rotation activation.
     Reference:
