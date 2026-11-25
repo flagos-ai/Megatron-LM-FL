@@ -143,6 +143,12 @@ register(
 )
 
 register(
+    target="megatron.core.distributed.param_and_grad_buffer._ParamAndGradBucketGroup._gather_param_buckets",
+    impl="megatron.plugin.Ascend.distributed.param_and_grad_buffer._gather_param_buckets",
+    vendor="npu",
+)
+
+register(
     target="megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer.gradient_reduce_preprocessing",
     impl="megatron.plugin.Ascend.distributed.fsdp.param_and_grad_buffer.gradient_reduce_preprocessing",
     vendor="npu",
