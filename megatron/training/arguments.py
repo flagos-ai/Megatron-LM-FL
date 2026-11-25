@@ -1678,6 +1678,52 @@ def validate_args(args, defaults={}):
             "must be used in conjunction with `--fp8-recipe delayed`."
         )
 
+    fractions = args.optimizer_state_offload_fraction_per_pipeline_stage
+    if fractions is not None:
+        if len(fractions) != args.pipeline_model_parallel_size or any(
+            not 0.0 <= value <= 1.0 for value in fractions
+        ):
+            raise ValueError(
+                "State offload fractions require one finite value in [0, 1] per physical PP stage"
+            )
+        if not (args.chunked_optimizer_state_offload or args.offload_optimizer_states):
+            raise ValueError("Per-stage fractions require chunked optimizer state offload")
+    offload_fraction = (
+        max(fractions) if fractions is not None else args.optimizer_state_offload_fraction
+    )
+
+    # Optimizer configuration normalizes the deprecated spelling. Include it here so
+    # cross-config validation still runs before that configuration is constructed.
+    if (
+        args.chunked_optimizer_state_offload or args.offload_optimizer_states
+    ) and offload_fraction > 0.0:
+        if args.optimizer_state_offload_chunk_size_mb == 0:
+            warn_rank_0(
+                "optimizer state offload is enabled with chunk size 0, so all "
+                "selected optimizer tensor state is temporarily restored together. Set "
+                "--optimizer-state-offload-chunk-size-mb to a positive value to bound the "
+                "tensor-state GPU window. Selected master weights always use one full "
+                "restore window regardless of chunk size."
+            )
+        assert (
+            not args.use_megatron_fsdp
+        ), "chunked optimizer state offload does not support Megatron-FSDP"
+        if not args.no_save_optim or not args.no_load_optim:
+            assert args.ckpt_format == 'torch_dist', (
+                "chunked optimizer state offload requires --ckpt-format torch_dist when "
+                "optimizer state is saved or loaded because its sharded load hooks preserve "
+                "CPU canonical storage"
+            )
+        if not args.no_save_optim:
+            assert not args.async_save, (
+                "chunked optimizer state offload does not support --async-save when optimizer "
+                "state is saved because the background writer can retain tensors backed by "
+                "reusable pinned CPU buffers"
+            )
+        assert (
+            args.cuda_graph_impl != 'full_iteration'
+        ), "chunked optimizer state offload does not support full-iteration CUDA graphs"
+
     if args.non_persistent_ckpt_type == "local":
         assert args.non_persistent_local_ckpt_dir is not None, "Tried to use local checkpointing without specifying --local-ckpt-dir!"
     if args.replication:
@@ -2587,6 +2633,52 @@ def _add_training_args(parser):
                        help='Disable pinning of CPU memory for gradients.')
     group.add_argument('--no-pin-cpu-params', action='store_false', dest='pin_cpu_params',
                        help='Disable pinning of CPU memory for parameters.')
+    group.add_argument(
+        '--chunked-optimizer-state-offload',
+        action='store_true',
+        help='Keep selected optimizer tensor states and master weights in CPU memory between '
+        'updates. GPU tensor-state updates run in bounded chunks, while selected master '
+        'weights use one full restore window.',
+    )
+    group.add_argument(
+        '--optimizer-state-offload-chunk-size-mb',
+        type=int,
+        default=0,
+        help='Target size of each optimizer tensor-state staging buffer in MiB. Two buffers '
+        'can be live for overlap (roughly 2x this value per active offload manager). Zero '
+        'temporarily restores all selected tensor state for one full GPU update. A single '
+        'atomic parameter state may exceed this soft target and is reported at runtime. This '
+        'value does not bound the selected master-weight window, which is always restored in '
+        'full.',
+    )
+    group.add_argument(
+        '--optimizer-state-offload-fraction',
+        type=float,
+        default=1.0,
+        help='Fraction of optimizer parameter bundles to offload. Selected bundles always '
+        'include both tensor state and any separate master weight. This is distinct from '
+        '--optimizer-offload-fraction, which belongs to --optimizer-cpu-offload; the modes are '
+        'mutually exclusive. Zero disables optimizer state offload even when its flag is set.',
+    )
+    group.add_argument(
+        '--offload-optimizer-states',
+        action='store_true',
+        dest='offload_optimizer_states',
+        help='Deprecated spelling for --chunked-optimizer-state-offload. It automatically '
+        'enables the replacement; the legacy-equivalent settings are chunk size 0 and offload '
+        'fraction 1.0 unless new tuning arguments are supplied. '
+        'With a nonzero fraction, optimizer-state checkpoint I/O requires --ckpt-format '
+        'torch_dist, optimizer-state saves must be synchronous, and optimizer or full-iteration '
+        'CUDA graphs are unsupported.',
+    )
+    group.add_argument(
+        '--optimizer-state-offload-fraction-per-pipeline-stage',
+        type=float,
+        nargs='+',
+        default=None,
+        help='One optimizer state offload fraction per physical pipeline stage. Overrides '
+        '--optimizer-state-offload-fraction; all virtual chunks share the physical stage value.',
+    )
     group.add_argument('--dataloader-type', type=str, default=None,
                        choices=['single', 'cyclic', 'external'],
                        help='Single pass vs multiple pass data loader')
