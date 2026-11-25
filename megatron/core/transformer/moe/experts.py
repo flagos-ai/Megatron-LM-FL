@@ -632,6 +632,8 @@ class TEGroupedMLP(MegatronModule):
         permuted_local_hidden_states: torch.Tensor,
         tokens_per_expert: torch.Tensor,
         permuted_probs: torch.Tensor,
+        linear_fc1: Optional[Callable] = None,
+        linear_fc2: Optional[Callable] = None,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Forward of TEGroupedMLP
 
@@ -681,7 +683,7 @@ class TEGroupedMLP(MegatronModule):
         with off_interface(
             self.offload_expert_fc1, permuted_local_hidden_states, "expert_fc1"
         ) as permuted_local_hidden_states:
-            fc1_output, bias_parallel = apply_module(self.linear_fc1)(
+            fc1_output, bias_parallel = (linear_fc1 or apply_module(self.linear_fc1))(
                 permuted_local_hidden_states, tokens_per_expert
             )
         if self.offload_expert_fc1:
@@ -775,7 +777,9 @@ class TEGroupedMLP(MegatronModule):
         else:
             with off_interface(self.offload_moe_act, fc1_output, "moe_act") as fc1_output:
                 bias_act_output = bias_act_func(fc1_output, bias_parallel, permuted_probs)
-        output, output_bias = apply_module(self.linear_fc2)(bias_act_output, tokens_per_expert)
+        output, output_bias = (linear_fc2 or apply_module(self.linear_fc2))(
+            bias_act_output, tokens_per_expert
+        )
         if self.activation_recompute:
             self.activation_checkpoint.discard_output_and_register_recompute(output)
 

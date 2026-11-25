@@ -34,6 +34,7 @@ from megatron.core.transformer.moe.token_dispatcher_inference import (
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.typed_torch import apply_module, not_none
 from megatron.core.utils import internal_api, nvtx_range_pop, nvtx_range_push
+from megatron.plugin.decorators import overridable
 
 try:
     import flashinfer  # pylint: disable=unused-import
@@ -457,6 +458,7 @@ class MoELayer(BaseMoELayer):
 
     ######## FlagScale End ########
 
+    @overridable
     @maybe_skip_or_early_return_by_cudagraph("preprocess")
     def preprocess(
         self, hidden_states: torch.Tensor, probs: torch.Tensor, routing_map: torch.Tensor
@@ -566,6 +568,14 @@ class MoELayer(BaseMoELayer):
         output = self.token_dispatcher.combine_preprocess(expert_output)
 
         return output, mlp_bias
+
+    @overridable
+    def compute_experts(self, hidden_states: torch.Tensor, probs: torch.Tensor):
+        """Dispatch, compute routed experts and combine their outputs."""
+        dispatched_input, probs = self.dispatch(hidden_states, probs)
+        output, mlp_bias = self.routed_experts_compute(dispatched_input, probs)
+        assert mlp_bias is None, f"mlp_bias is not supported for {type(self.token_dispatcher)}"
+        return self.combine(output), mlp_bias
 
     def combine(self, output: torch.Tensor):
         """Combines expert outputs via communication and adds shared expert output.
@@ -685,12 +695,7 @@ class MoELayer(BaseMoELayer):
                 if intermediate_tensors is not None:
                     hidden_states, probs = intermediate_tensors
 
-                dispatched_input, probs = self.dispatch(hidden_states, probs)
-                output, mlp_bias = self.routed_experts_compute(dispatched_input, probs)
-                assert (
-                    mlp_bias is None
-                ), f"mlp_bias is not supported for {type(self.token_dispatcher)}"
-                output = self.combine(output)
+                output, mlp_bias = self.compute_experts(hidden_states, probs)
 
                 if intermediate_tensors is not None:
                     return output, mlp_bias

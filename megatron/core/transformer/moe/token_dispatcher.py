@@ -36,6 +36,7 @@ from megatron.core.transformer.moe.moe_utils import (
 )
 from megatron.core.transformer.moe.shared_experts import SharedExpertMLP
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.plugin.decorators import overridable
 
 """ We use the following notation throughout this file:
      H: hidden size
@@ -500,6 +501,11 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             self.cudagraph_attrs.append('shared_experts.gate_score')
         self.cudagraph_attrs.append('shared_experts.cached_fc1_input')
 
+    @overridable
+    def _gather_tokens_per_expert(self, counts: torch.Tensor) -> torch.Tensor:
+        """Gather token-count metadata across the expert tensor/parallel group."""
+        return gather_from_sequence_parallel_region(counts, group=self.tp_ep_group)
+
     def preprocess(self, routing_map: torch.Tensor) -> torch.Tensor:
         """
         Preprocesses the token routing map for All-to-All communication and token permutation.
@@ -570,9 +576,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
             # expert by all ranks.
             # [tp_size, ep_size, num_experts]
             num_global_tokens_per_expert = (
-                gather_from_sequence_parallel_region(
-                    num_local_tokens_per_expert, group=self.tp_ep_group
-                )
+                self._gather_tokens_per_expert(num_local_tokens_per_expert)
                 .reshape(self.ep_size, self.tp_size, self.num_experts)
                 .transpose(0, 1)
             )
@@ -623,6 +627,7 @@ class MoEAlltoAllTokenDispatcher(MoETokenDispatcher):
         ), "cuda_sync_point must be after cuda_dtoh_point."
         return num_tokens_per_local_expert
 
+    @overridable
     def dispatch_preprocess(
         self, hidden_states: torch.Tensor, routing_map: torch.Tensor, probs: torch.Tensor
     ):
