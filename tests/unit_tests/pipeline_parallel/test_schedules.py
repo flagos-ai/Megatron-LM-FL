@@ -768,3 +768,46 @@ def test_forward_backward_no_pipelining_with_custom_pgs(mocker):
         assert l['loss_reduced'] == expected['loss_reduced']
 
     Utils.destroy_model_parallel()
+
+
+@pytest.mark.parametrize("per_token", [False, True])
+@pytest.mark.parametrize("cp_size", [1, 2])
+def test_dsa_aux_gradient_scaling_with_context_parallel(per_token, cp_size):
+    from types import SimpleNamespace
+
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
+        DSAIndexerLossAutoScaler,
+    )
+
+    config = SimpleNamespace(
+        timers=None,
+        calculate_per_token_loss=per_token,
+        dsa_indexer_loss_coeff=1.0,
+        grad_scale_func=None,
+    )
+    activation = torch.ones(1, device="cuda", requires_grad=True)
+    aux_loss = torch.ones((), device="cuda", requires_grad=True)
+    output = DSAIndexerLossAutoScaler.apply(activation, aux_loss)
+    old_scale = DSAIndexerLossAutoScaler.main_loss_backward_scale
+    DSAIndexerLossAutoScaler.main_loss_backward_scale = None
+    try:
+        output, _ = schedule.forward_step_calc_loss(
+            model=SimpleNamespace(),
+            output_tensor=output,
+            loss_func=None,
+            config=config,
+            vp_stage=None,
+            collect_non_loss_data=False,
+            num_microbatches=4,
+            forward_data_store=[],
+            cp_group_size=cp_size,
+            is_last_stage=True,
+        )
+        output.sum().backward()
+        # A local mean is averaged across CP shards by DDP. Per-token loss
+        # receives its normalization from final model-grad handling.
+        torch.testing.assert_close(
+            aux_loss.grad, torch.tensor(1.0 if per_token else 1.0 / 4, device="cuda")
+        )
+    finally:
+        DSAIndexerLossAutoScaler.main_loss_backward_scale = old_scale

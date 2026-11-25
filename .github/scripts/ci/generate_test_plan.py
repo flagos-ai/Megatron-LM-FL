@@ -179,7 +179,7 @@ def build_plan(
 ) -> dict[str, Any]:
     """Build the complete plan document, including its stable hash."""
     group_selection = unit_group_routing.select_groups(
-        catalog, changed, selection=selection, level=level, unknown_diff=unknown_diff
+        catalog, changed, selection=selection, level=level, unknown_diff=unknown_diff, stage=stage
     )
     required = group_selection["required"]
 
@@ -188,30 +188,49 @@ def build_plan(
         for name in platforms:
             platform = platform_units[name]
             materialized = unit_group_routing.materialize_groups(
-                catalog, platform, group_selection["selected"], group_selection["reasons"], required
+                catalog,
+                platform,
+                group_selection["selected"],
+                group_selection["reasons"],
+                required,
+                group_selection["stage_excluded"],
             )
-            # Changed planned test files get an ephemeral execution group. Their
-            # catalog status remains planned; ordinary configured/nightly runs
-            # do not acquire these groups.
+            # Changes to planned tests or their source files get an ephemeral
+            # execution group. Their catalog status remains planned; ordinary
+            # configured/nightly runs do not acquire these groups.
             planned_execution = []
             planned_skipped = []
             if selection == "affected":
                 source_root = catalog.path.parent.parent
+                tracked_paths = unit_group_routing.tracked_paths(source_root) or ()
                 for group in materialized["planned"] + materialized["unsupported"]:
                     group_name = group["name"]
                     if catalog.groups[group_name].status != "planned":
                         continue
                     if group_name in required:
                         continue
+                    changed_test_paths = {
+                        path
+                        for path in changed
+                        if path.startswith("tests/unit_tests/")
+                        and pathlib.PurePosixPath(path).match("test_*.py")
+                        and catalog.matches_all(path) == [group_name]
+                        and (source_root / path).is_file()
+                    }
+                    changed_source = any(
+                        not path.startswith("tests/unit_tests/")
+                        and group_name in catalog.matches_all(path)
+                        for path in changed
+                    )
+                    related_test_paths = {
+                        path
+                        for path in tracked_paths
+                        if path.startswith("tests/unit_tests/")
+                        and pathlib.PurePosixPath(path).match("test_*.py")
+                        and catalog.matches_all(path) == [group_name]
+                    }
                     paths = sorted(
-                        {
-                            path
-                            for path in changed
-                            if path.startswith("tests/unit_tests/")
-                            and pathlib.PurePosixPath(path).match("test_*.py")
-                            and catalog.matches_all(path) == [group_name]
-                            and (source_root / path).is_file()
-                        }
+                        changed_test_paths | (related_test_paths if changed_source else set())
                     )
                     if not paths:
                         continue
@@ -297,6 +316,7 @@ def build_plan(
         "plan_status": plan_status,
         "catalog_completeness": catalog_completeness,
         "unwired_planned_groups": unwired_planned_groups,
+        "stage_excluded_groups": group_selection["stage_excluded"],
         "source_sha": source_sha,
         "control_sha": control_sha,
         "base_sha": base_sha,
@@ -306,6 +326,7 @@ def build_plan(
         "catalog_hash": f"sha256:{catalog.digest}",
         "config_hash": config_hash,
         "coverage_sources": list(catalog.coverage_sources),
+        "coverage_omit": list(catalog.coverage_omit),
         "direct_groups": direct_groups,
         "direct_gaps": direct_gaps,
         "expected_unit_groups": expected_unit_groups,
@@ -382,6 +403,8 @@ def write_summary(path: pathlib.Path, plan: dict[str, Any]) -> None:
         ),
         f"- Logical catalog completeness: {plan['catalog_completeness']}",
         "- Unwired planned groups: " + (", ".join(plan["unwired_planned_groups"]) or "none"),
+        "- Groups excluded from this stage: "
+        + (", ".join(plan["stage_excluded_groups"]) or "none"),
         f"- Selected logical groups: {len(plan['selected_logical_groups'])}",
         "- Selected execution groups: "
         + (
@@ -395,6 +418,9 @@ def write_summary(path: pathlib.Path, plan: dict[str, Any]) -> None:
         f"- Coverage scope: core/plugin coverage only "
         f"(`{', '.join(plan['coverage_sources'])}`); "
         "not full Megatron unit-group coverage",
+        "- Coverage omitted from the reported denominator: "
+        + (", ".join(f"`{path}`" for path in plan["coverage_omit"]) or "none")
+        + "; platform configs may omit more",
         f"- Fallback: {'yes' if global_groups['fallback'] else 'no'}"
         + (
             f" ({_escape(global_groups['fallback_reason'])})"

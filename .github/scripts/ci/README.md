@@ -101,9 +101,12 @@ single-device/distributed acceptance pipelines. Both use the platform's actual
 `nproc_per_node`. L0/L3/L4 and release acceptance are future design work, not
 runtime configuration. Add them only with executable adapters and gate evidence.
 
-Changed planned tests execute automatically for affected PR runs. The planner
-creates `planned-<group>` temporary execution groups containing only changed,
-existing `tests/unit_tests/**/test_*.py` files. The catalog remains `planned`.
+Changes to a planned group's tests or source files execute automatically for
+affected PR runs. Test-only changes create a `planned-<group>` temporary
+execution group containing the changed, existing
+`tests/unit_tests/**/test_*.py` files. Source-only changes create the same
+temporary group with the existing test files owned by that planned group. The
+catalog remains `planned`.
 The final CI Summary includes a **Pending permanent onboarding** table listing
 each temporary group, changed files, platform/device, and execution result.
 Missing or invalid evidence is reported explicitly, including when platform
@@ -123,10 +126,10 @@ If every selected platform excludes the group, configured tests continue and
 the missing planned coverage remains advisory. Exclusions for regular active
 groups remain unchanged. No special hardware is provisioned.
 
-Source-only changes, deleted test files, and helper/conftest-only changes do not
-create temporary tests. Configured tests continue and the unexecuted planned
-groups are reported as advisory coverage gaps. Nightly/configured selection
-remains unchanged; activating a group is still required for permanent coverage.
+Deleted test files and helper/conftest-only changes do not create temporary
+planned groups. Configured tests continue and any unexecuted planned groups are
+reported as advisory coverage gaps. Nightly/configured selection remains
+unchanged; activating a group is still required for permanent coverage.
 
 Blocking conditions:
 

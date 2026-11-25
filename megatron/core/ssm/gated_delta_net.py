@@ -6,6 +6,7 @@
 # LICENSE file in the root directory of this source tree.
 
 import logging
+import os
 from dataclasses import dataclass, replace
 from typing import List, Optional, Tuple, Union
 
@@ -208,7 +209,11 @@ class GatedDeltaNet(MegatronModule):
         setattr(self.A_log, "tensor_model_parallel", True)
         setattr(self.A_log, "partition_dim", 0)
 
-        if self.config.deterministic_mode:
+        # Opt in only after validating FLA reproducibility for the target workload.
+        if (
+            self.config.deterministic_mode
+            and os.environ.get("MEGATRON_DETERMINISTIC_USE_FLA", "0") != "1"
+        ):
             self.gated_delta_rule = torch_chunk_gated_delta_rule
         else:
             self.gated_delta_rule = chunk_gated_delta_rule
@@ -421,7 +426,10 @@ class GatedDeltaNet(MegatronModule):
             if self.conv_bias
             else None
         )
-        if self.config.deterministic_mode:
+        if (
+            self.config.deterministic_mode
+            and os.environ.get("MEGATRON_DETERMINISTIC_USE_FLA", "0") != "1"
+        ):
             qkv = qkv.transpose(1, 2).contiguous()  # b, s, d -> b, d, s
             conv_out = F.conv1d(
                 input=qkv,  # Torch-native only accept [b, d, s] format input

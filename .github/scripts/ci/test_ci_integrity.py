@@ -35,7 +35,7 @@ class RoutingIntegrityTests(unittest.TestCase):
             self.assertEqual(plan["plan_status"], "blocked")
             self.assertEqual(plan["direct_groups"], ["inference"])
             self.assertEqual(plan["global_groups"]["unmapped_paths"], ["unknown_file.py"])
-            self.assertEqual([item["group"] for item in plan["direct_gaps"]], ["inference"])
+            self.assertEqual(plan["direct_gaps"], [])
 
     def test_changed_planned_tests_reach_executor_and_final_gate(self) -> None:
         test_path = "tests/unit_tests/inference/test_common_inference_params.py"
@@ -116,9 +116,11 @@ class RoutingIntegrityTests(unittest.TestCase):
         plan = build_plan([".pre-commit-config.yaml"])
         self.assertEqual(plan["plan_status"], "partial")
         self.assertFalse(plan["global_groups"]["unmapped_paths"])
+        excluded = set(plan["stage_excluded_groups"])
         for platform in plan["platforms"]:
             self.assertEqual(
-                plan["expected_unit_groups"][platform["name"]], platform["configured_groups"]
+                plan["expected_unit_groups"][platform["name"]],
+                [name for name in platform["configured_groups"] if name not in excluded],
             )
         mixed = build_plan([".pre-commit-config.yaml", "unmapped_config.yaml"])
         self.assertEqual(mixed["plan_status"], "blocked")
@@ -137,8 +139,8 @@ class RoutingIntegrityTests(unittest.TestCase):
     def test_configured_nightly_still_selects_every_configured_group(self) -> None:
         plan = build_plan([], selection="configured", level="L2", event="schedule")
         self.assertEqual(plan["plan_status"], "ready")
-        self.assertEqual(len(plan["platforms"]), 8)
-        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 75)
+        self.assertEqual(len(plan["platforms"]), 9)
+        self.assertEqual(sum(map(len, plan["expected_unit_groups"].values())), 84)
         for platform in plan["platforms"]:
             self.assertEqual(
                 plan["expected_unit_groups"][platform["name"]], platform["configured_groups"]

@@ -145,6 +145,43 @@ class GateTests(unittest.TestCase):
         self.assertIn("tests/unit_tests/inference/test_new.py", summary)
         self.assertNotIn("Missing result", summary)
 
+    def test_stage_excluded_group_cannot_be_selected(self) -> None:
+        plan = copy.deepcopy(self.plan)
+        self.assertIn("flagcicd_cov", plan["expected_unit_groups"]["cuda"])
+        plan["stage"] = "pr"
+        plan["stage_excluded_groups"] = ["flagcicd_cov"]
+        plan["plan_hash"] = flagcicd_gate.flagcicd_contract.plan_hash(plan)
+        errors = flagcicd_gate.verify_plan(
+            plan,
+            expected_hash=plan["plan_hash"],
+            expected_groups=plan["expected_unit_groups"],
+            required_statuses=["ready"],
+            allow_catalog_partial=True,
+        )
+        self.assertEqual(
+            errors, ["cuda selected_groups contains groups excluded from stage 'pr': flagcicd_cov"]
+        )
+
+    def test_stage_excluded_group_cannot_hide_in_another_bucket(self) -> None:
+        plan = copy.deepcopy(self.plan)
+        plan["stage"] = "pr"
+        plan["stage_excluded_groups"] = ["flagcicd_cov"]
+        cuda = next(item for item in plan["platforms"] if item["name"] == "cuda")
+        cuda["planned"] = [
+            group for group in cuda["selected_groups"] if group["name"] == "flagcicd_cov"
+        ]
+        cuda["selected_groups"] = [
+            group for group in cuda["selected_groups"] if group["name"] != "flagcicd_cov"
+        ]
+        errors = flagcicd_gate.verify_plan(
+            plan,
+            expected_hash=plan["plan_hash"],
+            expected_groups=plan["expected_unit_groups"],
+            required_statuses=["ready"],
+            allow_catalog_partial=True,
+        )
+        self.assertIn("cuda planned contains groups excluded from stage 'pr': flagcicd_cov", errors)
+
     def test_plan_policy_and_hash_are_checked(self) -> None:
         plan = copy.deepcopy(self.plan)
         errors = flagcicd_gate.verify_plan(

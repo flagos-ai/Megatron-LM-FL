@@ -141,7 +141,7 @@ PYCFGEOF
 
 install_kunlunxin_functional_dependencies() {
   local pip_index_args=(
-    --index-url https://pypi.tuna.tsinghua.edu.cn/simple
+    --index-url https://pypi.org/simple
     --timeout 300
     --retries 10
     --no-cache-dir
