@@ -9,6 +9,7 @@ import torch
 
 import megatron.core.parallel_state as parallel_state
 from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+    _validate_dsa_index_share_pipeline_split,
     get_dsa_module_spec_for_backend,
     get_experimental_attention_variant_module_spec,
 )
@@ -186,6 +187,29 @@ class TestDSAIndexShareHelpers:
         assert length_holder is getattr(packed_seq_params, DSAttention._LENGTH_HOLDER_ATTR)
         assert not hasattr(attention_mask, DSAttention._HOLDER_ATTR)
         assert not hasattr(attention_mask, DSAttention._LENGTH_HOLDER_ATTR)
+
+    def test_index_share_pipeline_split_rejects_cross_stage_source(self):
+        config = SimpleNamespace(
+            indexer_types=None,
+            experimental_attention_variant="dsa",
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=1,
+        )
+
+        _validate_dsa_index_share_pipeline_split(config, [0, 1, 2, 3])
+        with pytest.raises(RuntimeError, match="pipeline split is invalid"):
+            _validate_dsa_index_share_pipeline_split(config, [1, 2, 3, 4])
+
+    def test_index_share_pipeline_split_uses_configured_layer_types(self):
+        config = SimpleNamespace(
+            experimental_attention_variant="dsa",
+            indexer_types=["full", "full", "shared", "shared"],
+            dsa_indexer_topk_freq=4,
+            dsa_indexer_skip_topk_offset=0,
+        )
+        _validate_dsa_index_share_pipeline_split(config, [1, 2, 3])
+        with pytest.raises(RuntimeError, match="pipeline split is invalid"):
+            _validate_dsa_index_share_pipeline_split(config, [2, 3])
 
 
 def _build_packed_causal_mask_for_test(
@@ -2035,9 +2059,11 @@ class TestFusedDSAIndexerLossGradient:
         index_head_dim = 64
         softmax_scale = head_dim**-0.5
         loss_coeff = 1.0
+        ##### FlagScale Begin #####
         # Allow the ~1.15e-4 FP32 gradient discrepancy observed in A100 (SM80)
         # CI from einsum reduction rounding; other architectures keep 1e-5.
         grad_atol = 2e-4 if torch.cuda.get_device_capability() == (8, 0) else 1e-5
+        ##### FlagScale End #####
 
         for seqlen, index_topk in [[16, 8], [32, 16], [64, 32]]:
             for sparse_loss in [False, True]:
@@ -2110,9 +2136,11 @@ class TestFusedDSAIndexerLossGradient:
                     mask,
                     sparse_loss,
                     self.pg_collection,
-                    None,
-                    None,
-                    None,
+                    None,  # varlen_starts
+                    None,  # varlen_ends
+                    None,  # key_positions
+                    None,  # query_valid_rows
+                    False,  # calculate_per_token_loss
                 )
                 loss_fused.backward()
 
@@ -2129,6 +2157,7 @@ class TestFusedDSAIndexerLossGradient:
                     topk_indices_fused, topk_indices
                 ), f"{tag} Top-k indices mismatch between fused and reference"
 
+                ##### FlagScale Begin #####
                 assert torch.allclose(
                     grad_q_fused, grad_q_ref, rtol=1e-5, atol=grad_atol
                 ), f"{tag} grad_q mismatch: max diff = {(grad_q_fused - grad_q_ref).abs().max().item()}"
@@ -2140,6 +2169,7 @@ class TestFusedDSAIndexerLossGradient:
                 assert torch.allclose(
                     grad_k_fused, grad_k_ref, rtol=1e-5, atol=grad_atol
                 ), f"{tag} grad_k mismatch: max diff = {(grad_k_fused - grad_k_ref).abs().max().item()}"
+                ##### FlagScale End #####
 
 
 class TestFusedDSAIndexerLossGradientTP:
@@ -2210,9 +2240,11 @@ class TestFusedDSAIndexerLossGradientTP:
                 mask,
                 sparse_loss,
                 pg_collection_tp1,
-                None,
-                None,
-                None,
+                None,  # varlen_starts
+                None,  # varlen_ends
+                None,  # key_positions
+                None,  # query_valid_rows
+                False,
             )
             loss_tp1.backward()
 
@@ -2269,9 +2301,11 @@ class TestFusedDSAIndexerLossGradientTP:
                     mask,
                     sparse_loss,
                     pg_collection_tpn,
-                    None,
-                    None,
-                    None,
+                    None,  # varlen_starts
+                    None,  # varlen_ends
+                    None,  # key_positions
+                    None,  # query_valid_rows
+                    False,
                 )
                 loss_tpn.backward()
 
@@ -3984,3 +4018,80 @@ class TestDSAModuleSpecDispatch:
         config = self._make_dsa_config(qk_l2_norm=True)
         with pytest.raises(AssertionError, match="qk_l2_norm is not supported"):
             get_dsa_module_spec_for_backend(config, backend=None)
+
+    @pytest.mark.parametrize(
+        "kwargs, message",
+        [
+            ({"dsa_indexer_topk_freq": 0}, "dsa_indexer_topk_freq must be positive"),
+            (
+                {"dsa_indexer_skip_topk_offset": -1},
+                "dsa_indexer_skip_topk_offset must be non-negative",
+            ),
+        ],
+    )
+    def test_dsa_rejects_invalid_sharing_schedule(self, kwargs, message):
+        with pytest.raises(ValueError, match=message):
+            self._make_dsa_config(experimental_attention_variant="dsa", **kwargs)
+
+    @pytest.mark.parametrize("topk_freq", [1, 2])
+    def test_gpt_uses_mla_dsa_forward_backward(self, monkeypatch, topk_freq):
+        from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
+            get_transformer_block_with_experimental_attention_variant_spec,
+        )
+        from megatron.core.models.gpt.gpt_model import GPTModel
+
+        for variable in ("NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN"):
+            monkeypatch.delenv(variable, raising=False)
+        model_parallel_cuda_manual_seed(123)
+        config = self._make_dsa_config(
+            experimental_attention_variant="dsa",
+            dsa_indexer_loss_coeff=0.1,
+            qk_layernorm=True,
+            dsa_indexer_topk_freq=topk_freq,
+        )
+        model = GPTModel(
+            config=config,
+            transformer_layer_spec=get_transformer_block_with_experimental_attention_variant_spec(
+                config
+            ),
+            vocab_size=128,
+            max_sequence_length=8,
+            parallel_output=False,
+            position_embedding_type="rope",
+        ).cuda()
+        normalized_queries, indexer_queries = [], []
+        hooks = []
+        for layer in model.decoder.layers:
+            if layer.self_attention.core_attention.indexer is None:
+                continue
+            hooks.append(
+                layer.self_attention.q_layernorm.register_forward_hook(
+                    lambda module, inputs, output: normalized_queries.append(
+                        output.detach().clone()
+                    )
+                )
+            )
+            hooks.append(
+                layer.self_attention.core_attention.indexer.linear_wq_b.register_forward_pre_hook(
+                    lambda module, inputs: indexer_queries.append(inputs[0].detach().clone())
+                )
+            )
+        tokens = torch.randint(0, 128, (1, 8), device="cuda")
+        positions = torch.arange(8, device="cuda").unsqueeze(0)
+        DSAIndexerLossAutoScaler.set_loss_scale(torch.tensor(1.0, device="cuda"))
+        output = model(tokens, positions, attention_mask=None)
+        for hook in hooks:
+            hook.remove()
+        assert normalized_queries and len(normalized_queries) == len(indexer_queries)
+        for normalized, indexed in zip(normalized_queries, indexer_queries):
+            torch.testing.assert_close(indexed, normalized, rtol=0, atol=0)
+        assert output.shape == (1, 8, 128)
+        output.float().square().mean().backward()
+        for layer in model.decoder.layers:
+            assert isinstance(layer.self_attention, MLASelfAttention)
+            assert layer.self_attention.linear_kv_up_proj.weight.grad is not None
+            indexer = layer.self_attention.core_attention.indexer
+            if indexer is not None:
+                assert indexer.linear_wq_b.weight.grad is not None
+            else:
+                assert layer.self_attention.core_attention.skip_topk

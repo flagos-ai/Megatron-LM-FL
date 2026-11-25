@@ -60,20 +60,6 @@ def _get_thd_token_idx(cu_seqlens, pid_m, seq_num, cp_rank, cp_size):
 
 
 ######## FlagScale Begin ########
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "head_num"],
-    restore_value=["Q"],
-)
 @triton.jit
 def _mla_rope_fwd_inplace_kernel(
     Q,
@@ -85,6 +71,7 @@ def _mla_rope_fwd_inplace_kernel(
     batch_size,
     seq_num,
     cu_seqlens_q,
+    position_ids,
     stride_x_seq,
     stride_x_nheads,
     stride_cos_seq,
@@ -111,7 +98,9 @@ def _mla_rope_fwd_inplace_kernel(
     pid_m = tl.program_id(axis=0)
     pid_head = tl.program_id(axis=1)
 
-    if cu_seqlens_q is None:
+    if position_ids is not None:
+        token_idx = tl.load(position_ids + pid_m)
+    elif cu_seqlens_q is None:
         token_idx = pid_m // batch_size
     else:
         token_idx = _get_thd_token_idx(cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size)
@@ -135,7 +124,7 @@ def _mla_rope_fwd_inplace_kernel(
     Q = Q + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
 
     x_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads + nope_dim
-    mask = x_off < head_num * stride_x_nheads
+    mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
     # x1 = t[..., 0::2], x2 = t[..., 1::2]
     x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
     x_2_off = x_1_off + 1
@@ -149,26 +138,15 @@ def _mla_rope_fwd_inplace_kernel(
         tl.store(Q + x_1_off, x_left, mask=mask)
         tl.store(Q + x_2_off, x_right, mask=mask)
     else:
+        # The interleaved input and split output layouts alias. Finish all loads
+        # before any warp stores to the overlapping destination addresses.
+        tl.debug_barrier()
         x_left_off = x_off + tl.arange(0, emb_dim // 2)[None, :]
         x_right_off = x_left_off + emb_dim // 2
         tl.store(Q + x_left_off, x_left, mask=mask)
         tl.store(Q + x_right_off, x_right, mask=mask)
 
 
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_H": 1}),
-        triton.Config({"BLOCK_H": 2}),
-        triton.Config({"BLOCK_H": 4}),
-        triton.Config({"BLOCK_H": 8}),
-        triton.Config({"BLOCK_H": 16}),
-        triton.Config({"BLOCK_H": 32}),
-        triton.Config({"BLOCK_H": 64}),
-        triton.Config({"BLOCK_H": 128}),
-    ],
-    key=["emb_dim", "head_num"],
-    restore_value=["DO"],
-)
 @triton.jit
 def _mla_rope_bwd_inplace_kernel(
     DO,
@@ -180,6 +158,7 @@ def _mla_rope_bwd_inplace_kernel(
     batch_size,
     seq_num,
     cu_seqlens_q,
+    position_ids,
     stride_x_seq,
     stride_x_nheads,
     stride_cos_seq,
@@ -204,7 +183,9 @@ def _mla_rope_bwd_inplace_kernel(
     pid_m = tl.program_id(axis=0)
     pid_head = tl.program_id(axis=1)
 
-    if cu_seqlens_q is None:
+    if position_ids is not None:
+        token_idx = tl.load(position_ids + pid_m)
+    elif cu_seqlens_q is None:
         token_idx = pid_m // batch_size
     else:
         token_idx = _get_thd_token_idx(cu_seqlens_q, pid_m, seq_num, cp_rank, cp_size)
@@ -228,7 +209,7 @@ def _mla_rope_bwd_inplace_kernel(
     DO = DO + pid_m * stride_x_seq + pid_head * BLOCK_H * stride_x_nheads
 
     x_off = tl.arange(0, BLOCK_H)[:, None] * stride_x_nheads + nope_dim
-    mask = x_off < head_num * stride_x_nheads
+    mask = (pid_head * BLOCK_H + tl.arange(0, BLOCK_H))[:, None] < head_num
     if REMOVE_INTERLEAVING:
         x_1_off = x_off + tl.arange(0, emb_dim // 2)[None, :] * 2
         x_2_off = x_1_off + 1
@@ -245,8 +226,44 @@ def _mla_rope_bwd_inplace_kernel(
     x_1 = x_left * cos_left + x_right * sin_right
     x_2 = -x_left * sin_left + x_right * cos_right
 
+    if not REMOVE_INTERLEAVING:
+        # The split input and interleaved output layouts alias. Finish all loads
+        # before any warp stores to the overlapping destination addresses.
+        tl.debug_barrier()
     tl.store(DO + x_1_off, x_1, mask=mask)
     tl.store(DO + x_2_off, x_2, mask=mask)
+
+
+_autotuned_mla_rope_fwd_inplace_kernel = triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_H": 1}),
+        triton.Config({"BLOCK_H": 2}),
+        triton.Config({"BLOCK_H": 4}),
+        triton.Config({"BLOCK_H": 8}),
+        triton.Config({"BLOCK_H": 16}),
+        triton.Config({"BLOCK_H": 32}),
+        triton.Config({"BLOCK_H": 64}),
+        triton.Config({"BLOCK_H": 128}),
+    ],
+    key=["emb_dim", "head_num"],
+    restore_value=["Q"],
+)(_mla_rope_fwd_inplace_kernel)
+
+
+_autotuned_mla_rope_bwd_inplace_kernel = triton.autotune(
+    configs=[
+        triton.Config({"BLOCK_H": 1}),
+        triton.Config({"BLOCK_H": 2}),
+        triton.Config({"BLOCK_H": 4}),
+        triton.Config({"BLOCK_H": 8}),
+        triton.Config({"BLOCK_H": 16}),
+        triton.Config({"BLOCK_H": 32}),
+        triton.Config({"BLOCK_H": 64}),
+        triton.Config({"BLOCK_H": 128}),
+    ],
+    key=["emb_dim", "head_num"],
+    restore_value=["DO"],
+)(_mla_rope_bwd_inplace_kernel)
 
 
 class _FusedMLARoPEInplace(torch.autograd.Function):
@@ -269,6 +286,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
         rotary_interleaved=False,
         inverse=False,
         remove_interleaving=False,
+        position_ids=None,
     ):
         """
         Forward function for _FusedMLARoPEInplace.
@@ -287,6 +305,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
         seq_num = None
         if cu_seqlens_q is None:
             # sbhd
+            assert position_ids is None
             max_seqlen, batch_size, nheads, headdim = q.shape
             q = q.view(-1, nheads, headdim)
             total_seqlen = q.shape[0]
@@ -294,6 +313,8 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             # thd
             total_seqlen, nheads, headdim = q.shape
             seq_num = len(cu_seqlens_q) - 1
+            if position_ids is not None:
+                assert position_ids.shape == (total_seqlen,)
         assert q.stride(-1) == 1
         assert cos.stride(-1) == 1
         assert sin.stride(-1) == 1
@@ -301,7 +322,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
         assert emb_dim % 4 == 0
 
         grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
-        _mla_rope_fwd_inplace_kernel[grid](
+        _autotuned_mla_rope_fwd_inplace_kernel[grid](
             q,
             cos,
             sin,
@@ -311,6 +332,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             batch_size,
             seq_num,
             cu_seqlens_q,
+            position_ids,
             q.stride(0),
             q.stride(1),
             cos.stride(0),
@@ -320,7 +342,8 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             INVERSE=inverse,
             REMOVE_INTERLEAVING=remove_interleaving,
         )
-        ctx.save_for_backward(cos, sin)
+        ctx.save_for_backward(cos, sin, *(() if position_ids is None else (position_ids,)))
+        ctx.has_position_ids = position_ids is not None
         ctx.nope_dim = nope_dim
         ctx.emb_dim = emb_dim
         ctx.cu_seqlens_q = cu_seqlens_q
@@ -342,7 +365,11 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             grad: [seq_len, batch_size, head_num, nope_dim + emb_dim]
                 or [total_seq_len, head_num, nope_dim + emb_dim]
         """
-        cos, sin = ctx.saved_tensors
+        if ctx.has_position_ids:
+            cos, sin, position_ids = ctx.saved_tensors
+        else:
+            cos, sin = ctx.saved_tensors
+            position_ids = None
         max_seqlen = None
         batch_size = None
         seq_num = None
@@ -352,11 +379,13 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             total_seqlen = grad.shape[0]
         else:
             seq_num = len(ctx.cu_seqlens_q) - 1
+            if ctx.has_position_ids:
+                grad = grad.contiguous()
             total_seqlen, nheads, headdim = grad.shape
         assert grad.stride(-1) == 1
 
         grid = lambda META: (total_seqlen, triton.cdiv(nheads, META["BLOCK_H"]))
-        _mla_rope_bwd_inplace_kernel[grid](
+        _autotuned_mla_rope_bwd_inplace_kernel[grid](
             grad,
             cos,
             sin,
@@ -366,6 +395,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
             batch_size,
             seq_num,
             ctx.cu_seqlens_q,
+            position_ids,
             grad.stride(0),
             grad.stride(1),
             cos.stride(0),
@@ -377,7 +407,7 @@ class _FusedMLARoPEInplace(torch.autograd.Function):
         )
         if ctx.cu_seqlens_q is None:
             grad = grad.view(max_seqlen, batch_size, nheads, headdim)
-        return grad, None, None, None, None, None, None, None, None, None, None
+        return grad, None, None, None, None, None, None, None, None, None, None, None
 
 
 def fused_mla_rope_inplace(
@@ -392,7 +422,8 @@ def fused_mla_rope_inplace(
     rotary_interleaved: bool = False,
     inverse: bool = False,
     remove_interleaving: bool = False,
-):
+    position_ids: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
     """
     Fused RoPE applied inplace to the trailing emb_dim elements of a tensor,
     leaving the first nope_dim elements unchanged.
@@ -413,6 +444,8 @@ def fused_mla_rope_inplace(
         rotary_interleaved: whether to apply RoPE interleaved, only supports False for now
         inverse: if True, apply the inverse rotation
         remove_interleaving: if True, output RoPE dims in non-interleaved layout
+        position_ids: optional THD row positions. When supplied, these positions
+            replace the built-in CP row-to-position mapping.
 
     Returns:
         t: inplace modified input tensor
@@ -429,6 +462,7 @@ def fused_mla_rope_inplace(
         rotary_interleaved,
         inverse,
         remove_interleaving,
+        position_ids,
     )
 
 
@@ -897,6 +931,7 @@ def fused_mla_rope_out_of_place(
     rotary_interleaved: bool = False,
     inverse: bool = False,
     remove_interleaving: bool = False,
+    position_ids: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Apply the fused RoPE kernel without modifying the input tensor.
 
@@ -916,4 +951,5 @@ def fused_mla_rope_out_of_place(
         rotary_interleaved=rotary_interleaved,
         inverse=inverse,
         remove_interleaving=remove_interleaving,
+        position_ids=position_ids,
     )

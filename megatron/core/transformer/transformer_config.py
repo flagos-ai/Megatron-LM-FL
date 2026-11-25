@@ -1509,6 +1509,15 @@ class TransformerConfig(ModelParallelConfig):
         ######## FlagScale Begin ########
         elif self.experimental_attention_variant == "dsa":
             _validate_dsa_kernel_backend_dependencies(self.dsa_kernel_backend)
+            if self.dsa_indexer_topk_freq < 1:
+                raise ValueError(
+                    f"dsa_indexer_topk_freq must be positive, got {self.dsa_indexer_topk_freq}."
+                )
+            if self.dsa_indexer_skip_topk_offset < 0:
+                raise ValueError(
+                    "dsa_indexer_skip_topk_offset must be non-negative, got "
+                    f"{self.dsa_indexer_skip_topk_offset}."
+                )
             # Expand indexer_type_rule into indexer_types list
             if self.indexer_type_rule is not None and self.indexer_types is None:
                 self.indexer_types = self._parse_indexer_type_rule(
@@ -2986,6 +2995,24 @@ class TransformerConfig(ModelParallelConfig):
             assert not self.use_kitchen
 
         if self.experimental_attention_variant == "dsa":
+            dsa_index_sharing = (
+                any(kind == "shared" for kind in self.indexer_types)
+                if self.indexer_types is not None
+                else self.dsa_indexer_topk_freq > 1
+            )
+            # TODO: Remove this guard and the matching test skip after per-microbatch
+            # index-sharing isolation is integrated here and output/gradient parity passes
+            # with seq_len > top-k and multiple outstanding microbatches.
+            # Upstream tracking: https://github.com/NVIDIA/Megatron-LM/pull/7107
+            assert not (
+                dsa_index_sharing
+                and self.recompute_granularity == "selective"
+                and "core_attn" in self.recompute_modules
+            ), (
+                "DSA index sharing with selective core_attn recomputation is not supported: "
+                "shared top-k indices can be overwritten by another microbatch. "
+                "Disable index sharing or use full recomputation."
+            )
             if self.context_parallel_size > 1:
                 cp_comm_types = (
                     self.cp_comm_type
@@ -3201,6 +3228,13 @@ class MLATransformerConfig(TransformerConfig):
                 logging.WARNING,
                 f"DSv4 hybrid mode is enabled, deriving qk_head_dim and kv_lora_rank from "
                 f"v_head_dim and qk_pos_emb_head_dim",
+            )
+            assert self.o_groups > 0, "DSv4 hybrid mode requires o_groups to be positive."
+            assert self.o_lora_rank > 0, "DSv4 hybrid mode requires o_lora_rank to be positive."
+            assert (
+                self.num_attention_heads * self.v_head_dim
+            ) % self.o_groups == 0, (
+                "num_attention_heads * v_head_dim must be divisible by o_groups."
             )
             derived = self.v_head_dim - self.qk_pos_emb_head_dim
             self.qk_head_dim = derived
