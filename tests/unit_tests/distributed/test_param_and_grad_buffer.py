@@ -2,6 +2,7 @@
 
 import contextlib
 import math
+import os
 from types import SimpleNamespace
 from typing import Optional
 from unittest import mock
@@ -23,6 +24,7 @@ from megatron.core.distributed.param_and_grad_buffer import (
 )
 from megatron.core.optimizer.distrib_optimizer import DistributedOptimizer
 from megatron.core.transformer import TransformerConfig
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import TestModel, Utils
 
 
@@ -1235,3 +1237,34 @@ def test_expert_parallel_params_get_separate_buffers(use_distributed_optimizer: 
             )
 
     Utils.destroy_model_parallel()
+
+
+@pytest.mark.skipif(int(os.environ.get('WORLD_SIZE', '1')) < 2, reason='requires two or more ranks')
+@pytest.mark.parametrize('overlap', [False, True])
+@pytest.mark.parametrize('middle_dtype', [torch.bfloat16, torch.float32, torch.uint8])
+def test_param_gather_preserves_bucket_values(overlap, middle_dtype):
+    if get_platform().device_name() != "npu":
+        pytest.skip("Ascend parameter all-gather")
+    Utils.initialize_distributed()
+    pg = torch.distributed.group.WORLD
+    platform = get_platform()
+    device = platform.device(platform.current_device())
+    buckets, expected = [], []
+    for idx, dtype in enumerate((torch.bfloat16, middle_dtype, torch.bfloat16)):
+        width = idx + 1
+        values = torch.arange(pg.size() * width, device=device).add(32 * idx).to(dtype)
+        data = torch.zeros_like(values)
+        shard_buffer(data, pg.size())[pg.rank()].copy_(shard_buffer(values, pg.size())[pg.rank()])
+        buckets.append(SimpleNamespace(params_list=[], params=set(), param_data=data))
+        expected.append(values)
+    config = DistributedDataParallelConfig(
+        use_distributed_optimizer=True, overlap_param_gather=overlap
+    )
+    group = _ParamAndGradBucketGroup(buckets, config, pg, pg.size())
+    group.start_param_sync()
+    if overlap:
+        assert group.param_gather_handle is not None
+        group.finish_param_sync()
+    assert group.param_gather_handle is None
+    for bucket, reference in zip(buckets, expected):
+        torch.testing.assert_close(bucket.param_data, reference, rtol=0, atol=0)

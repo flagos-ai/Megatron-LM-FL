@@ -48,6 +48,7 @@ except:
 import megatron.core.nccl_allocator as nccl_allocator
 
 ######## FlagScale Begin ########
+from megatron.plugin.decorators import overridable
 from megatron.plugin.platform import get_platform
 
 cur_platform = get_platform()
@@ -469,36 +470,33 @@ class _ParamAndGradBucketGroup:
                     bucket.grad_data.zero_()
                 self.param_gather_handle = None
         else:
-            # Standard distributed optimizer path: use _coalescing_manager.
-            # all_gather_into_tensor writes directly into a contiguous output buffer and
-            # does not need a copy-back step, so coalescing works correctly.
-            with _coalescing_manager(
-                self.intra_distributed_optimizer_instance_group, async_ops=async_op
-            ) as cm:
-                for idx, bucket in enumerate(self.buckets):
-                    if self.cached_param_buffer_shard_list[idx] is None:
-                        self.cached_param_buffer_shard_list[idx] = shard_buffer(
-                            bucket.param_data, self.intra_distributed_optimizer_instance_size
-                        )
-                    local_data_view = self.cached_param_buffer_shard_list[idx][
-                        self.intra_distributed_optimizer_instance_rank
-                    ]
-                    dist_all_gather_func(
-                        bucket.param_data,
-                        local_data_view,
-                        group=self.intra_distributed_optimizer_instance_group,
-                        async_op=async_op,
-                    )
-            if async_op:
-                self.param_gather_handle = cm
-            else:
-                # When using `_coalescing_manager`, even if a synchronous op
-                # (async_op=False) is used, `cm` is not None. Manually set to None for
-                # consistency with prior code.
-                self.param_gather_handle = None
+            self.param_gather_handle = self._gather_param_buckets(range(len(self.buckets)), async_op)
         if force_sync and self.ddp_config.overlap_param_gather:
             self._post_param_sync()
         self.param_gather_dispatched = True
+
+    @overridable
+    def _gather_param_buckets(self, indices, async_op):
+        """Gather the indexed parameter buckets in a single coalescing context."""
+        with _coalescing_manager(
+            self.intra_distributed_optimizer_instance_group, async_ops=async_op
+        ) as cm:
+            for idx in indices:
+                bucket = self.buckets[idx]
+                if self.cached_param_buffer_shard_list[idx] is None:
+                    self.cached_param_buffer_shard_list[idx] = shard_buffer(
+                        bucket.param_data, self.intra_distributed_optimizer_instance_size
+                    )
+                local_data_view = self.cached_param_buffer_shard_list[idx][
+                    self.intra_distributed_optimizer_instance_rank
+                ]
+                dist_all_gather_func(
+                    bucket.param_data,
+                    local_data_view,
+                    group=self.intra_distributed_optimizer_instance_group,
+                    async_op=async_op,
+                )
+        return cm if async_op else None
 
     def finish_param_sync(self, skip_next_bucket_dispatch: bool = False):
         """
