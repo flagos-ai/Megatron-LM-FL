@@ -141,6 +141,29 @@ class TestGatedDeltaNet:
             output.dtype == hidden_states.dtype
         ), f"Output dtype {output.dtype=} mismatch with {hidden_states.dtype=}"
 
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_output_gate_matches_native(self, dtype):
+        """Regress the shared SiLU gate with input, gate and norm-weight gradients."""
+        gdn = self.gdn.to(dtype=dtype)
+        x = torch.randn(
+            (7, 2, 3, gdn.config.linear_value_head_dim),
+            device=torch.cuda.current_device(),
+            dtype=dtype,
+            requires_grad=True,
+        )
+        gate = torch.randn_like(x, requires_grad=True)
+        ref_x = x.detach().clone().requires_grad_()
+        ref_gate = gate.detach().clone().requires_grad_()
+        actual = gdn._apply_gated_norm(x, gate)
+        expected = GatedDeltaNet._apply_gated_norm.__wrapped__(gdn, ref_x, ref_gate)
+        torch.testing.assert_close(actual, expected)
+        grad = torch.randn_like(actual)
+        weights = tuple(gdn.out_norm.parameters())
+        observed = torch.autograd.grad(actual, (x, gate, *weights), grad)
+        reference = torch.autograd.grad(expected, (ref_x, ref_gate, *weights), grad)
+        for result, target in zip(observed, reference):
+            torch.testing.assert_close(result, target)
+
     def test_jit_compiled_helpers(self):
         import torch._dynamo
 

@@ -185,6 +185,12 @@ register(
 )
 
 
+register(
+    target="megatron.core.transformer.attention.Attention._apply_output_gate",
+    impl="megatron.plugin.Ascend.transformer.attention.apply_output_gate",
+    vendor="npu",
+)
+
 # MUSA compatibility overrides follow the same lazy registration as Ascend.
 register(
     target="megatron.core.transformer.moe.moe_utils.permute",
@@ -214,4 +220,31 @@ register(
     target="megatron.core.distributed.fsdp.src.megatron_fsdp.param_and_grad_buffer._get_communication_stream",
     impl="megatron.plugin.metax.distributed.fsdp.param_and_grad_buffer._get_communication_stream",
     vendor="metax",
+)
+
+# =============================================================================
+# SSM - gated_delta_net (FLA kernels)
+# =============================================================================
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._normalize_qk",
+    impl="megatron.plugin.Ascend.ssm.chunk_gated_delta_rule.normalize_qk",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._gated_delta_rule",
+    impl="megatron.plugin.Ascend.ssm.chunk_gated_delta_rule.gated_delta_rule",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._causal_conv1d",
+    impl="megatron.plugin.Ascend.ssm.causal_conv1d.gated_delta_net_conv1d",
+    vendor="npu",
+)
+
+register(
+    target="megatron.core.ssm.gated_delta_net.GatedDeltaNet._apply_gated_norm",
+    impl="megatron.plugin.Ascend.ssm.gated_norm.apply_gated_norm",
+    vendor="npu",
 )
