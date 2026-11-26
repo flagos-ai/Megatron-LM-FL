@@ -283,7 +283,6 @@ class TestTop2Router:
         self.router.config.moe_token_drop_policy = "probs"
         self.router.config.moe_pad_expert_input_to_capacity = False
 
-
     @pytest.mark.internal
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.parametrize("with_padding_mask", [False, True])
@@ -563,7 +562,6 @@ class TestAuxLossFreeTop2Router:
 
             assert torch.equal(routing_ref, routing_fused)
             torch.testing.assert_close(scores_ref, scores_fused)
-
 
     def test_expert_bias_ignores_2d_padding_mask(self):
         self.router = self.router.cuda()

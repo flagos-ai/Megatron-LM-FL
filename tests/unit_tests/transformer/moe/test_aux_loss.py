@@ -870,4 +870,6 @@ def test_empty_router_aux_loss_and_history(monkeypatch, loss_type, fused, with_h
             torch.testing.assert_close(router.global_tokens_per_expert, counters)
     finally:
         Utils.destroy_model_parallel()
+
+
 ######## FlagScale End ########

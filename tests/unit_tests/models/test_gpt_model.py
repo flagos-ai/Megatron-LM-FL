@@ -89,6 +89,8 @@ def test_gpt_model_shards_hash_input_ids(monkeypatch):
         assert layer.get_layer_static_inputs(8, 2)["input_ids"].shape == (2, 4)
     finally:
         Utils.destroy_model_parallel()
+
+
 ######## FlagScale End ########
 
 

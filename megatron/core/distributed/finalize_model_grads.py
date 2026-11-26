@@ -453,7 +453,11 @@ def _update_router_expert_bias(
             # to avoid updating teacher's expert_bias.
             ######## FlagScale Begin ########
             # Hash routers have these attributes set to None and do not learn a bias.
-            if hasattr(module, 'expert_bias') and module.training and module.expert_bias is not None:
+            if (
+                hasattr(module, 'expert_bias')
+                and module.training
+                and module.expert_bias is not None
+            ):
                 tokens_per_expert_list.append(module.local_tokens_per_expert)
                 expert_bias_list.append(module.expert_bias)
             ######## FlagScale End ########

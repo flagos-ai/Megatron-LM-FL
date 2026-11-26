@@ -777,9 +777,7 @@ def test_inter_document_gpt_uses_per_sequence_balancing(tp, pp, monkeypatch):
             max_seqlen=torch.tensor([5], device='cuda', dtype=torch.int32),
         )
         batch = dict(zip(BATCH_KEYS, get_gpt_batch(iter([sample]))))
-        expected = (
-            [0, 1, 6, 7] if parallel_state.get_context_parallel_rank() == 0 else [2, 3, 4, 5]
-        )
+        expected = [0, 1, 6, 7] if parallel_state.get_context_parallel_rank() == 0 else [2, 3, 4, 5]
         assert batch['cu_seqlens'].tolist() == [[0, 3, 8]]
         if parallel_state.is_pipeline_first_stage():
             assert batch['tokens'].tolist() == [expected]
@@ -853,6 +851,8 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
         assert output.shape == (1, 256)
     finally:
         Utils.destroy_model_parallel()
+
+
 ######## FlagScale End ########
 
 
@@ -1304,4 +1304,6 @@ def test_router_padding_uses_real_lengths_and_physical_offsets(start, count):
     actual = get_packed_seq_padding_mask(_packed(), start, count)
     oracle = torch.tensor([False, False, False, True, False, False, False, False, True, True])
     torch.testing.assert_close(actual, oracle[start : start + count])
+
+
 ######## FlagScale End ########

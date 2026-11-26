@@ -2940,6 +2940,8 @@ def get_packed_seq_padding_mask(
     valid_lengths = (real[1:] - real[:-1]).clamp_min(0)
     valid_ends = physical[:-1] + valid_lengths
     return (rows >= valid_ends[seq]) | (rows >= physical[-1])
+
+
 ######## FlagScale End ########
 
 
@@ -3017,6 +3019,8 @@ def _validate_per_document_cp_lengths(cu_seqlens: torch.Tensor, cp_size: int) ->
             f"to be divisible by 2 * CP size ({2 * cp_size}); got "
             f"{document_lengths.tolist()}. Supply aligned cu_seqlens_padded or use CP=1."
         )
+
+
 ######## FlagScale End ########
 
 

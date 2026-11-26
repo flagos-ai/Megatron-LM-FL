@@ -354,8 +354,8 @@ class DSAIndexerLossLoggingHelper:
             pg_collection: Process groups used for pipeline and data-parallel reductions.
             num_layers: Total number of decoder and MTP layers. When provided, ranks without
                 local indexer losses contribute zeros to the pipeline-wide reduction.
-            calculate_per_token_loss: Fallback CP reduction policy on pipeline stages without a saved group.
-                None retains legacy saved-group reductions.
+            calculate_per_token_loss: Fallback CP reduction policy on pipeline stages without a
+                saved group. None retains legacy saved-group reductions.
         """
         tracker = DSAIndexerLossLoggingHelper.tracker
         pp_group = pg_collection.pp

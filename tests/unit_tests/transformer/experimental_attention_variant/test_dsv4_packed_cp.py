@@ -155,6 +155,8 @@ def _forward_backward_per_document(model, hidden, grad, physical, real):
             # Keep padding gradients explicitly zero in the reference input.
             outputs.append(hidden[start + length : end].detach() * 0)
     return torch.cat(outputs, dim=0)
+
+
 ######## FlagScale End ########
 
 

@@ -4096,6 +4096,7 @@ class TestDSAModuleSpecDispatch:
             else:
                 assert layer.self_attention.core_attention.skip_topk
 
+
 ##### FlagScale Begin #####
 
 
@@ -4131,5 +4132,6 @@ def test_indexer_logging_across_cp_and_empty_pipeline_stage(packed, per_token):
     finally:
         logger.tracker = old_tracker
         Utils.destroy_model_parallel()
+
 
 ##### FlagScale End #####

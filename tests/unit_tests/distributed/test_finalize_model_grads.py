@@ -109,6 +109,7 @@ class TestFinalizeModelGradsMoEExpertBias:
         if has_hash_router:
             assert model.hash_router.expert_bias is None
             assert model.hash_router.local_tokens_per_expert is None
+
     ######## FlagScale End ########
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
