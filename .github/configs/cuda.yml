@@ -77,7 +77,10 @@ test_matrix:
         path: tests/unit_tests/fusions/
         description: Fusion tests
       - name: transformer
-        path: tests/unit_tests/transformer/
+        path: >-
+          tests/unit_tests/transformer/
+          tests/unit_tests/context_parallel/
+          tests/unit_tests/determinism/
         description: Transformer tests
       - name: others
         path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
