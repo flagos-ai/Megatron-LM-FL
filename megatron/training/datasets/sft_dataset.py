@@ -1,6 +1,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
-import atexit, json
+import atexit
+import json
 from collections import Counter
 from typing import Any, Dict, Optional
 
@@ -117,7 +118,6 @@ class SFTDataset(MegatronDataset):
             tokens_list = tokens.tolist()
             targets_list = targets.tolist()
 
-
             pack_tokens.extend(tokens_list)
             pack_targets.extend(targets_list)
 
@@ -180,6 +180,14 @@ class SFTDataset(MegatronDataset):
         # effects of truncation and padding
         adjacent_diffs = cu_seqlens[1:] - cu_seqlens[:-1]
         max_seqlen = adjacent_diffs.max()  # max_seqlen is a 0-D tensor
+
+        ######## FlagScale Begin ########
+        if self.config.pad_sft_cu_seqlens:
+            # Repeat the physical endpoint so default_collate can stack samples.
+            padded_cu_seqlens = torch.full((pack_length + 1,), pack_length, dtype=torch.int32)
+            padded_cu_seqlens[: cu_seqlens.numel()] = cu_seqlens
+            cu_seqlens = padded_cu_seqlens
+        ######## FlagScale End ########
 
         return {
             'tokens': input_ids,

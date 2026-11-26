@@ -4095,3 +4095,43 @@ class TestDSAModuleSpecDispatch:
                 assert indexer.linear_wq_b.weight.grad is not None
             else:
                 assert layer.self_attention.core_attention.skip_topk
+
+
+##### FlagScale Begin #####
+
+
+@pytest.mark.parametrize("packed", [False, True])
+@pytest.mark.parametrize("per_token", [False, True])
+@pytest.mark.experimental
+def test_indexer_logging_across_cp_and_empty_pipeline_stage(packed, per_token):
+    from megatron.core.transformer.experimental_attention_variant.dsa import (
+        DSAIndexerLossLoggingHelper as logger,
+    )
+
+    if Utils.world_size % 4:
+        pytest.skip("requires two pipeline stages with two context ranks each")
+    Utils.initialize_model_parallel(
+        tensor_model_parallel_size=1, pipeline_model_parallel_size=2, context_parallel_size=2
+    )
+    old_tracker = logger.tracker
+    logger.tracker = {}
+    try:
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        if pg.pp.rank() == 0:
+            loss = torch.tensor(float(pg.cp.rank() + 1), device="cuda")
+            logger.save_loss_to_tracker(
+                loss,
+                1,
+                2,
+                reduce_group=pg.cp if packed or per_token else None,
+                avg_group=pg.cp if not (packed or per_token) else None,
+            )
+        logger.reduce_loss_in_tracker(pg, num_layers=2, calculate_per_token_loss=per_token)
+        expected = [3.0 if packed or per_token else 1.5, 0.0]
+        torch.testing.assert_close(logger.tracker["values"], torch.tensor(expected, device="cuda"))
+    finally:
+        logger.tracker = old_tracker
+        Utils.destroy_model_parallel()
+
+
+##### FlagScale End #####

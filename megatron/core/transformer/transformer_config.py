@@ -466,6 +466,9 @@ class TransformerConfig(ModelParallelConfig):
     path. FP32 uses a true FP32-output projection and is not compatible with the cuDNN DSA
     backend. The final index scores remain FP32 independently of this option."""
 
+    attention_cp_layout: Literal["zigzag", "contiguous"] = "zigzag"
+    """Physical attention token layout; DSv4 static CP uses contiguous shards."""
+
     ####################
     # linear attention
     ####################
@@ -1395,6 +1398,15 @@ class TransformerConfig(ModelParallelConfig):
         """
         super().__post_init__()
 
+        if (
+            self.context_parallel_size > 1
+            and self.attention_cp_layout == "contiguous"
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "attention_cp_layout='contiguous' is not yet supported with context parallelism."
+            )
+
         if self.dsa_kernel_backend is None:
             self.dsa_kernel_backend = (
                 "cudnn" if self.experimental_attention_variant == "dsv4_hybrid" else "none"
@@ -1549,6 +1561,12 @@ class TransformerConfig(ModelParallelConfig):
             assert (
                 self.tensor_model_parallel_size == 1
             ), "DSv4 Hybrid Attention only supports TP size 1."
+            if self.context_parallel_size > 1 and self.attention_cp_layout != "contiguous":
+                raise ValueError(
+                    "DSv4 context parallelism requires attention_cp_layout='contiguous'."
+                )
+            if self.hybrid_context_parallel:
+                raise ValueError("DSv4 dynamic context parallelism is not supported yet.")
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
             _validate_dsa_kernel_backend_dependencies(self.dsa_kernel_backend)
             if self.dsa_kernel_backend == "cudnn":
@@ -2806,7 +2824,7 @@ class TransformerConfig(ModelParallelConfig):
                         "full-iteration CUDA graphs"
                     )
 
-        if self.moe_token_dispatcher_type in ["allgather"]:
+        if self.num_moe_experts is not None and self.moe_token_dispatcher_type in ["allgather"]:
             if self.variable_seq_lengths is True:
                 raise ValueError(
                     f"Token dispatcher type: {self.moe_token_dispatcher_type} does not support "
@@ -3146,6 +3164,10 @@ class MLATransformerConfig(TransformerConfig):
     """Rank of Key and Value tensors' low rank representation.
        This is not used for DSv4 Hybrid Attention and will be overridden automatically."""
 
+    attention_latent_norm_epsilon: float | None = None
+    """Epsilon for the primary query and key-value latent norms in attention.
+       If unset, inherit ``layernorm_epsilon`` for backward compatibility."""
+
     qk_head_dim: int = 128
     """Dimension of the head in the QK projection. q_head_dim = qk_head_dim + qk_pos_emb_head_dim
        This is not used for DSv4 Hybrid Attention and will be overridden automatically."""
@@ -3205,6 +3227,9 @@ class MLATransformerConfig(TransformerConfig):
 
     def __post_init__(self):
         super().__post_init__()
+        if self.attention_latent_norm_epsilon is None:
+            self.attention_latent_norm_epsilon = self.layernorm_epsilon
+
         ######## FlagScale Begin ########
         if (
             self.multi_latent_attention

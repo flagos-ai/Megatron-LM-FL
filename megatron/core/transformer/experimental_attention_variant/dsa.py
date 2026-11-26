@@ -354,8 +354,8 @@ class DSAIndexerLossLoggingHelper:
             pg_collection: Process groups used for pipeline and data-parallel reductions.
             num_layers: Total number of decoder and MTP layers. When provided, ranks without
                 local indexer losses contribute zeros to the pipeline-wide reduction.
-            calculate_per_token_loss: Explicit CP reduction policy: sum per-token losses,
-                otherwise average across CP ranks. None retains legacy saved-group reductions.
+            calculate_per_token_loss: Fallback CP reduction policy on pipeline stages without a
+                saved group. None retains legacy saved-group reductions.
         """
         tracker = DSAIndexerLossLoggingHelper.tracker
         pp_group = pg_collection.pp
@@ -389,10 +389,12 @@ class DSAIndexerLossLoggingHelper:
             tracker["values"] = grown
         values = tracker["values"]
 
-        torch.distributed.all_reduce(values, group=pp_group)
+        ######## FlagScale Begin ########
         if calculate_per_token_loss is not None:
-            # Every pipeline stage now holds the PP-wide losses, including stages
-            # without a local indexer. Use explicit CP groups on all of them.
+            # Reduce each stage's contributions before PP redistributes them. Packed
+            # CSA saves a SUM group even for its mean over the global real tokens.
+            # Ordinary DSA saves an AVG group for its local mean.
+            sum_across_cp = tracker.get("reduce_group") is not None or calculate_per_token_loss
             cp_group = pg_collection.cp
             if get_pg_size(cp_group) > 1:
                 torch.distributed.all_reduce(
@@ -400,11 +402,13 @@ class DSAIndexerLossLoggingHelper:
                     group=cp_group,
                     op=(
                         torch.distributed.ReduceOp.SUM
-                        if calculate_per_token_loss
+                        if sum_across_cp
                         else torch.distributed.ReduceOp.AVG
                     ),
                 )
+            torch.distributed.all_reduce(values, group=pp_group)
         else:
+            torch.distributed.all_reduce(values, group=pp_group)
             # Compatibility for direct callers that supply reduction groups when
             # saving losses rather than an explicit logging policy.
             if tracker.get('reduce_group') is not None:
@@ -413,6 +417,7 @@ class DSAIndexerLossLoggingHelper:
                 torch.distributed.all_reduce(
                     values, group=tracker['avg_group'], op=torch.distributed.ReduceOp.AVG
                 )
+        ######## FlagScale End ########
         torch.distributed.all_reduce(
             values, group=pg_collection.dp, op=torch.distributed.ReduceOp.AVG
         )

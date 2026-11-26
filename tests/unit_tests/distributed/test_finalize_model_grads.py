@@ -18,7 +18,8 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
-from tests.unit_tests.test_utilities import Utils
+from megatron.plugin.platform import get_platform
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 
 class _RouterExpertBiasModel(torch.nn.Module):
@@ -77,16 +78,24 @@ class TestFinalizeModelGradsMoEExpertBias:
     def teardown_method(self, method):
         Utils.destroy_model_parallel()
 
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
-    def test_finalize_model_grads_updates_router_expert_bias_with_custom_group(self):
+    ######## FlagScale Begin ########
+    @pytest.mark.skipif(get_platform().device_count() == 0, reason="requires an accelerator")
+    @pytest.mark.parametrize("has_hash_router", [False, True])
+    def test_finalize_model_grads_updates_router_expert_bias_with_custom_group(
+        self, has_hash_router
+    ):
         assert not parallel_state.model_parallel_is_initialized()
 
         config = _router_expert_bias_config()
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = get_current_device()
         local_tokens = torch.tensor(
             [0.0, 2.0] if dist.get_rank() == 0 else [0.0, 0.0], device=device
         )
         model = _RouterExpertBiasModel(config, local_tokens)
+        if has_hash_router:
+            model.hash_router = torch.nn.Module()
+            model.hash_router.expert_bias = None
+            model.hash_router.local_tokens_per_expert = None
 
         finalize_model_grads(
             [model], pg_collection=_router_bias_pg_collection(tp_dp_cp=dist.group.WORLD)
@@ -98,6 +107,11 @@ class TestFinalizeModelGradsMoEExpertBias:
             model.router.local_tokens_per_expert, torch.zeros_like(local_tokens)
         )
         assert model.finish_grad_sync_calls == 1
+        if has_hash_router:
+            assert model.hash_router.expert_bias is None
+            assert model.hash_router.local_tokens_per_expert is None
+
+    ######## FlagScale End ########
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_finalize_model_grads_requires_custom_group_before_grad_sync(self):

@@ -1,10 +1,11 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
-from typing import Dict, Tuple, Optional
+import logging
 from dataclasses import dataclass, field
+from typing import Dict, Optional, Tuple
 
 import numpy as np
-import logging
+
 from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig
 from megatron.core.datasets.indexed_dataset import IndexedDataset
 from megatron.core.datasets.utils import Split
@@ -101,7 +102,7 @@ class GPTFIMDataset(GPTDataset):
             self.eod_tok_id,
         ) = fim_tokens_ids
 
-    def _query_document_sample_shuffle_indices(self, idx: int) -> Tuple[np.ndarray, np.ndarray]:
+    def _query_document_sample_shuffle_indices(self, idx: int) -> Tuple[np.ndarray, np.ndarray, list[int]]:
         """Get the text (token ids) and document ids for a given index
 
         Args:
@@ -179,7 +180,7 @@ class GPTFIMDataset(GPTDataset):
 
         assert sample.shape[0] == sample_len
 
-        return (np.array(sample, dtype=np.int64), np.array(document_ids, dtype=np.int64))
+        return (np.array(sample, dtype=np.int64), np.array(document_ids, dtype=np.int64), [sample_len])
 
     def _fim_permute_sequence(self, sequence, rate):
         return self._permute(

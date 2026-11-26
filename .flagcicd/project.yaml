@@ -114,7 +114,10 @@ test_groups:
   description: Transformer blocks, attention, and layer specifications.
   status: active
   paths:
+  - megatron/core/context_parallel/
   - megatron/core/transformer/
+  - tests/unit_tests/context_parallel/
+  - tests/unit_tests/determinism/
   - tests/unit_tests/transformer/
   depends_on:
   - models

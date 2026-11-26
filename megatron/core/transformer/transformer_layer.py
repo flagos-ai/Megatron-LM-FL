@@ -1174,7 +1174,9 @@ class TransformerLayer(GraphableMegatronModule, BaseTransformerLayer):
             and getattr(self.mlp.router, 'is_hash_layer', False)
         ):
             static_inputs["input_ids"] = torch.zeros(
-                (micro_batch_size, seq_length), dtype=torch.long, device=torch.cuda.current_device()
+                (micro_batch_size, static_inputs["hidden_states"].size(0)),  # FlagScale Modify
+                dtype=torch.long,
+                device=static_inputs["hidden_states"].device,  # FlagScale Modify
             )
 
         return static_inputs

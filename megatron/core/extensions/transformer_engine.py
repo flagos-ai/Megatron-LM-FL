@@ -1766,6 +1766,12 @@ class TEDotProductAttention(te.pytorch.DotProductAttention):
         # total_tokens and seq_idx are only for Mamba and should not be forwarded to TE attention.
         self.kept_packed_seq_params.discard("total_tokens")
         self.kept_packed_seq_params.discard("seq_idx")
+        ######## FlagScale Begin ########
+        self.kept_packed_seq_params.discard("tokens_per_sample")
+        self.kept_packed_seq_params.discard("cp_scatter_cache")
+        if get_te_version() < PkgVersion("2.2.0"):
+            self.kept_packed_seq_params.discard("pad_between_seqs")
+        ######## FlagScale End ########
 
         if config.qk_clip or config.log_max_attention_logit:
             # qk-clip is only supported in TE 2.9.0 and later

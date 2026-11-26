@@ -334,6 +334,7 @@ class GPTModel(LanguageModule):
 
         in_inference_mode = InferenceMode.is_active()
 
+        # TODO: Align padding masks on later PP stages with sequence-parallel activations.
         # Decoder embedding.
         if decoder_input is not None:
             pass
@@ -573,10 +574,21 @@ class GPTModel(LanguageModule):
 
         rotary_pos_cos_sin = preproc_output[6] if len(preproc_output) == 7 else None
 
+        ######## FlagScale Begin ########
         # Pass input_ids to decoder for hash-based MoE routing
-        decoder_extra_block_kwargs = extra_block_kwargs or {}
+        decoder_extra_block_kwargs = dict(extra_block_kwargs or {})
         if self.config.moe_n_hash_layers > 0 and input_ids is not None:
-            decoder_extra_block_kwargs['input_ids'] = input_ids
+            hash_input_ids = input_ids
+            if self.config.sequence_parallel:
+                hash_input_ids = (
+                    tensor_parallel.scatter_to_sequence_parallel_region(
+                        input_ids.transpose(0, 1).contiguous(), group=self.pg_collection.tp
+                    )
+                    .transpose(0, 1)
+                    .contiguous()
+                )
+            decoder_extra_block_kwargs['input_ids'] = hash_input_ids
+        ######## FlagScale End ########
 
         # Run decoder.
         decoder_output = self.decoder(

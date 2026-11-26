@@ -3,6 +3,8 @@
 import inspect
 import os
 from datetime import timedelta
+from functools import partial
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -26,10 +28,87 @@ from megatron.core.models.gpt.gpt_layer_specs import (
 from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+from megatron.core.transformer.identity_op import IdentityOp
 from megatron.core.transformer.module import Float16Module
+from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
+from megatron.core.transformer.transformer_layer import TransformerLayer
 from megatron.core.utils import is_fa_min_version, is_te_min_version
 from tests.unit_tests.test_utilities import Utils, get_current_device
+
+
+######## FlagScale Begin ########
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_gpt_model_shards_hash_input_ids(monkeypatch, tp_rank):
+    """GPT sends router-local IDs to the decoder while preserving the original IDs."""
+    tp_group = SimpleNamespace(size=lambda: 2, rank=lambda: tp_rank)
+    pg = ProcessGroupCollection(tp=tp_group, cp=None, tp_cp=None, tp_dp_cp=None)
+
+    # The SP forward only needs the group's rank and size to slice the IDs.
+    monkeypatch.setattr(
+        "megatron.core.tensor_parallel.mappings.get_tensor_model_parallel_group_if_none",
+        lambda group: group,
+    )
+    cpu = torch.device("cpu")
+    cpu_platform = SimpleNamespace(current_device=lambda: cpu, device=lambda device: device)
+    monkeypatch.setattr("megatron.core.transformer.module.cur_platform", cpu_platform)
+    monkeypatch.setattr("megatron.core.transformer.moe.router.cur_platform", cpu_platform)
+
+    config = TransformerConfig(
+        num_layers=1,
+        hidden_size=16,
+        num_attention_heads=2,
+        use_cpu_initialization=True,
+        tensor_model_parallel_size=2,
+        sequence_parallel=True,
+        num_moe_experts=4,
+        moe_router_topk=1,
+        moe_router_pre_softmax=True,
+        moe_n_hash_layers=1,
+        actual_vocab_size=16,
+        add_bias_linear=False,
+    )
+    router = TopKRouter(config, pg_collection=pg, layer_number=1)
+    original_ids = torch.arange(16, device=cpu).reshape(2, 8)
+    hidden = torch.zeros(4, 2, 16, device=cpu)
+    rows = slice(tp_rank * 4, (tp_rank + 1) * 4)
+    logits = torch.zeros(8, 4, device=cpu)
+
+    def decoder_forward(*, hidden_states, input_ids, **kwargs):
+        torch.testing.assert_close(input_ids, original_ids[:, rows])
+        _, routing_map = router._hash_routing(logits, input_ids)
+        expected_experts = router.tid2eid[original_ids[:, rows].T.reshape(-1)].flatten().long()
+        torch.testing.assert_close(routing_map.nonzero()[:, 1], expected_experts)
+        return hidden_states
+
+    def postprocess(*, hidden_states, input_ids, **kwargs):
+        assert input_ids is original_ids
+        return hidden_states
+
+    model = SimpleNamespace(
+        config=config,
+        pg_collection=pg,
+        position_embedding_type="learned_absolute",
+        mtp_process=False,
+        decoder=decoder_forward,
+        _postprocess=postprocess,
+    )
+    model._preprocess = partial(GPTModel._preprocess, model)
+    assert GPTModel.forward(model, original_ids, None, None, decoder_input=hidden) is hidden
+
+    # Static-input allocation only needs the layer's config and hash-router metadata.
+    layer = TransformerLayer.__new__(TransformerLayer)
+    torch.nn.Module.__init__(layer)
+    layer.config = config
+    layer.self_attention = IdentityOp()
+    layer.is_moe_layer = True
+    layer.mlp = SimpleNamespace(router=router)
+    static_inputs = layer.get_layer_static_inputs(8, 2)
+    assert static_inputs["input_ids"].shape == (2, 4)
+    assert static_inputs["input_ids"].device == static_inputs["hidden_states"].device == cpu
+
+
+######## FlagScale End ########
 
 
 class TestGPTModel:

@@ -200,7 +200,8 @@ class TopKRouter(Router):
             # only as a placeholder so the layer is runnable from scratch.
             vocab_size = self.config.actual_vocab_size
             num_experts = self.config.num_moe_experts
-            ids = torch.arange(vocab_size, device=torch.cuda.current_device())
+            device = cur_platform.device(cur_platform.current_device())  # FlagScale Modify
+            ids = torch.arange(vocab_size, device=device)
             tid2eid = torch.stack([(ids + k) % num_experts for k in range(self.topk)], dim=1).to(
                 torch.int32
             )
@@ -622,7 +623,13 @@ class TopKRouter(Router):
         if self.enable_expert_bias and torch.is_grad_enabled():
             with torch.no_grad():
                 if padding_mask is not None:
-                    routing_map = routing_map & (~padding_mask)
+                    ######## FlagScale Begin ########
+                    flat_mask = padding_mask.reshape(-1)
+                    assert (
+                        flat_mask.shape[0] == routing_map.shape[0]
+                    ), f"padding_mask flat {flat_mask.shape} vs routing_map {routing_map.shape}"
+                    routing_map = routing_map & (~flat_mask).unsqueeze(-1)
+                    ######## FlagScale End ########
                 self.local_tokens_per_expert += routing_map.sum(dim=0)
 
     def _hash_routing(self, logits: torch.Tensor, input_ids: torch.Tensor):
@@ -633,7 +640,7 @@ class TopKRouter(Router):
 
         Args:
             logits (torch.Tensor): Gating logits, shape [num_tokens, num_experts].
-            input_ids (torch.Tensor): Token IDs, shape [seq_length, bsz].
+            input_ids (torch.Tensor): Local token IDs, shape [bsz, seq_length].
 
         Returns:
             Tuple[torch.Tensor, torch.Tensor]: routing_probs and routing_map.
@@ -649,9 +656,12 @@ class TopKRouter(Router):
         else:
             raise ValueError(f"Invalid score_function: {self.score_function}")
 
-        # input_ids is [b, s] from the model, but hidden_states are [s, b, h]
-        # and get flattened to [s*b, h]. Transpose to match.
+        # Match the sequence-major row order of the flattened hidden states.
         flat_ids = input_ids.T.reshape(-1)
+        ######## FlagScale Begin ########
+        if flat_ids.numel() != num_tokens:
+            raise ValueError("HashRouter input_ids must match the local hidden-state token rows.")
+        ######## FlagScale End ########
         top_indices = self.tid2eid[flat_ids].long()  # [num_tokens, topk]
 
         probs = scores.gather(1, top_indices)
@@ -679,7 +689,7 @@ class TopKRouter(Router):
             padding_mask (torch.Tensor, optional): Boolean mask indicating non-padding tokens.
                                                    Shape [seq_length, bsz]. True for valid tokens,
                                                    False for padding tokens. Defaults to None.
-            input_ids (torch.Tensor, optional): The input IDs tensor. Shape [seq_length, bsz].
+            input_ids (torch.Tensor, optional): Local token IDs of shape [bsz, seq_length].
                                                 Defaults to None.
 
         Returns:
@@ -787,7 +797,7 @@ class TopKRouter(Router):
             padding_mask (torch.Tensor, optional): Boolean mask indicating non-padding tokens.
                                                    Shape [seq_length, bsz]. True for valid tokens,
                                                    False for padding tokens. Defaults to None.
-            input_ids (torch.Tensor, optional): The input IDs tensor. Shape [seq_length, bsz].
+            input_ids (torch.Tensor, optional): Local token IDs of shape [bsz, seq_length].
                                                 Defaults to None.
         """
         self._maintain_float32_expert_bias()

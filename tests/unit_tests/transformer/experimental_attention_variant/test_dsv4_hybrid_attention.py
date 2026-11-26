@@ -79,6 +79,12 @@ def _make_config(
     extra_config_kwargs.setdefault('experimental_attention_variant', 'dsv4_hybrid')
     # Native attention fixtures opt out of the DSv4 fused backend default.
     extra_config_kwargs.setdefault('dsa_kernel_backend', 'none')
+    ##### FlagScale Begin #####
+    if 'linear_cp_layout' in extra_config_kwargs:
+        # This fixture builds the standalone attention module with one CP layout.
+        linear_cp_layout = extra_config_kwargs.pop('linear_cp_layout')
+        assert linear_cp_layout == extra_config_kwargs['attention_cp_layout']
+    ##### FlagScale End #####
     return MLATransformerConfig(
         num_layers=num_layers,
         hidden_size=hidden_size,
@@ -118,6 +124,20 @@ def _make_attention_spec(config):
     )
 
     return get_experimental_attention_variant_module_spec(config=config, backend=TESpecProvider())
+
+
+def test_attention_latent_norm_epsilon_defaults_to_layernorm_epsilon():
+    """Existing DSv4 configs inherit the model-wide norm epsilon."""
+    config = _make_config(layernorm_epsilon=3e-6)
+
+    assert config.attention_latent_norm_epsilon == pytest.approx(3e-6)
+
+
+def test_attention_latent_norm_epsilon_accepts_override():
+    """DSv4 latent norms can use the model recipe's dedicated epsilon."""
+    config = _make_config(layernorm_epsilon=3e-6, attention_latent_norm_epsilon=1e-5)
+
+    assert config.attention_latent_norm_epsilon == pytest.approx(1e-5)
 
 
 def test_module_spec_is_built_from_explicit_backend():
@@ -372,6 +392,23 @@ class TestDSv4HybridAttentionConstructor:
         assert not any(
             key.startswith(("q_layernorm.", "kv_layernorm.")) for key in attn.state_dict()
         )
+
+    def test_latent_norm_epsilon_is_scoped_to_q_and_kv_latents(self):
+        """The dedicated epsilon must not change the compressor norm."""
+        config = _make_config(
+            layernorm_epsilon=1e-5,
+            attention_latent_norm_epsilon=1e-6,
+            qk_layernorm=True,
+            csa_compress_ratios=[4, 4, 128, 4],
+        )
+        pg = ProcessGroupCollection.use_mpu_process_groups()
+        attn = _build_attention(config, layer_number=1, pg_collection=pg)
+
+        assert attn.q_layernorm.eps == pytest.approx(1e-6)
+        assert attn.kv_layernorm.eps == pytest.approx(1e-6)
+        assert attn.state_dict()["q_layernorm.weight"].shape == (config.q_lora_rank,)
+        assert attn.state_dict()["kv_layernorm.weight"].shape == (config.v_head_dim,)
+        assert attn.core_attention.compressor.norm.eps == pytest.approx(1e-5)
 
     def test_q_head_dim_equals_v_head_dim(self):
         """q_head_dim must equal v_head_dim for DSv4 hybrid."""
@@ -904,3 +941,11 @@ class TestDSv4HybridRopeFusion:
 def test_config_rejects_invalid_output_projection_dimensions(kwargs, message):
     with pytest.raises(AssertionError, match=message):
         _make_config(**kwargs)
+
+
+def test_config_requires_contiguous_context_parallelism():
+    """Static packed CP uses the main-owned contiguous layout contract."""
+    with pytest.raises(ValueError, match="attention_cp_layout='contiguous'"):
+        _make_config(context_parallel_size=2)
+    config = _make_config(context_parallel_size=2, attention_cp_layout="contiguous")
+    assert config.context_parallel_size == 2
