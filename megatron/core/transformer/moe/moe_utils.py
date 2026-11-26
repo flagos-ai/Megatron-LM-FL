@@ -131,15 +131,18 @@ def switch_load_balancing_loss_func(
         mask_expanded = padding_mask.unsqueeze(-1)
         probs = probs * mask_expanded
 
+    ######## FlagScale Begin ########
     # Clamp only the normalization copy: retained routing counters must stay real.
     if isinstance(total_num_tokens, torch.Tensor):
         total_num_tokens = total_num_tokens.clamp_min(1)
     else:
         total_num_tokens = max(total_num_tokens, 1)
+    ######## FlagScale End ########
 
     if fused:
         if not HAVE_TE or fused_moe_aux_loss is None:
             raise ValueError("fused_moe_aux_loss is not available. Please install TE >= 2.7.0.")
+        ######## FlagScale Begin ########
         # TE requires a host token count. Restore device-count normalization on
         # GPU so padded/CP batches do not synchronize just to read this scalar.
         device_count = isinstance(total_num_tokens, torch.Tensor) and total_num_tokens.is_cuda
@@ -156,6 +159,7 @@ def switch_load_balancing_loss_func(
             normalization = (reference_count / total_num_tokens.float().reshape(())).square()
             aux_loss = aux_loss * normalization.to(dtype=aux_loss.dtype)
         return aux_loss
+        ######## FlagScale End ########
 
     aggregated_probs_per_expert = probs.sum(dim=0)
     aux_loss = torch.sum(aggregated_probs_per_expert * tokens_per_expert) * (

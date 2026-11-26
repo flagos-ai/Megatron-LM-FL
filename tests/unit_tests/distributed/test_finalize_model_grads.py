@@ -77,6 +77,7 @@ class TestFinalizeModelGradsMoEExpertBias:
     def teardown_method(self, method):
         Utils.destroy_model_parallel()
 
+    ######## FlagScale Begin ########
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     @pytest.mark.parametrize("has_hash_router", [False, True])
     def test_finalize_model_grads_updates_router_expert_bias_with_custom_group(
@@ -108,6 +109,7 @@ class TestFinalizeModelGradsMoEExpertBias:
         if has_hash_router:
             assert model.hash_router.expert_bias is None
             assert model.hash_router.local_tokens_per_expert is None
+    ######## FlagScale End ########
 
     @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
     def test_finalize_model_grads_requires_custom_group_before_grad_sync(self):

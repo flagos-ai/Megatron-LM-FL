@@ -419,12 +419,14 @@ def reset_model_temporary_tensors(config: TransformerConfig, model: List[torch.n
     """
     for model_chunk in model:
         for module in get_attr_wrapped_model(model_chunk, 'modules')():
+            ######## FlagScale Begin ########
             if (
                 config.moe_router_enable_expert_bias
                 and hasattr(module, 'expert_bias')
                 and module.expert_bias is not None
             ):
                 module.local_tokens_per_expert.zero_()
+            ######## FlagScale End ########
             if (
                 config.moe_router_load_balancing_type == "global_aux_loss"
                 or "global_aux_loss" in config.moe_router_load_balancing_type
@@ -449,10 +451,12 @@ def _update_router_expert_bias(
             # cases where only the student is in training mode but the teacher is in eval mode
             # when using online knoweldge-distillation with Model-Optimizer. In this case, we want
             # to avoid updating teacher's expert_bias.
+            ######## FlagScale Begin ########
             # Hash routers have these attributes set to None and do not learn a bias.
             if hasattr(module, 'expert_bias') and module.training and module.expert_bias is not None:
                 tokens_per_expert_list.append(module.local_tokens_per_expert)
                 expert_bias_list.append(module.expert_bias)
+            ######## FlagScale End ########
     # For hybrid models with both MoE and Dense layers, this list can be empty.
     if len(expert_bias_list) == 0:
         return

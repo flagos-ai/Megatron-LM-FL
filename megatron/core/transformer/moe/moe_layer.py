@@ -629,7 +629,7 @@ class MoELayer(BaseMoELayer):
                                                    Shape [seq_length, bsz]. True for valid tokens,
                                                    False for padding tokens. Defaults to None.
             ######## FlagScale Begin ########
-            input_ids (torch.Tensor, optional): The input IDs tensor. Shape [seq_length, bsz].
+            input_ids (torch.Tensor, optional): Local token IDs of shape [bsz, seq_length].
                                                 Defaults to None.
             ######## FlagScale End ########
         Returns:

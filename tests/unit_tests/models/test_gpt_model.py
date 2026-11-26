@@ -27,70 +27,69 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.module import Float16Module
-from megatron.core.transformer.moe.router import TopKRouter
 from megatron.core.transformer.transformer_config import TransformerConfig
 from megatron.core.utils import is_fa_min_version, is_te_min_version
 from tests.unit_tests.test_utilities import Utils, get_current_device
 
 
-@pytest.mark.parametrize("explicit_decoder_input", [False, True])
-@pytest.mark.parametrize("tp", [1, 2])
-def test_pipeline_preprocess_router_padding_mask(tp, explicit_decoder_input):
-    """Every GPT input path supplies an SP mask matching router tokens."""
-    if Utils.world_size < 2 * tp:
-        pytest.skip(f"requires {2 * tp} ranks")
-    Utils.initialize_model_parallel(tp, 2)
+######## FlagScale Begin ########
+def test_gpt_model_shards_hash_input_ids(monkeypatch):
+    """GPT sends router-local IDs to the decoder while preserving the original IDs."""
+    if Utils.world_size < 2 or Utils.world_size % 2:
+        pytest.skip("requires a multiple of two ranks")
+    Utils.initialize_model_parallel(tensor_model_parallel_size=2)
     try:
         model_parallel_cuda_manual_seed(123)
         pg = ProcessGroupCollection.use_mpu_process_groups()
-        first_stage = parallel_state.is_pipeline_first_stage()
         config = TransformerConfig(
-            num_layers=2,
-            hidden_size=8,
+            num_layers=1,
+            hidden_size=16,
             num_attention_heads=2,
             use_cpu_initialization=True,
-            tensor_model_parallel_size=tp,
-            pipeline_model_parallel_size=2,
-            pipeline_dtype=torch.float32,
-            sequence_parallel=tp > 1,
-            add_bias_linear=False,
+            tensor_model_parallel_size=2,
+            sequence_parallel=True,
             num_moe_experts=4,
-            moe_router_topk=2,
-            moe_aux_loss_coeff=0.01,
+            moe_router_topk=1,
+            moe_router_pre_softmax=True,
+            moe_n_hash_layers=1,
+            actual_vocab_size=16,
         )
         model = GPTModel(
             config=config,
-            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(),
+            transformer_layer_spec=get_gpt_layer_with_transformer_engine_spec(
+                num_experts=4, moe_grouped_gemm=False
+            ),
             vocab_size=16,
             max_sequence_length=8,
-            pre_process=first_stage,
-            post_process=not first_stage,
             position_embedding_type="learned_absolute",
             pg_collection=pg,
         ).cuda()
-        ids = torch.tensor([[1, 2, 3, 4, 5, 6, 0, 0]], device="cuda")
-        positions = torch.arange(8, device="cuda")[None]
-        full_mask = ids.eq(0)
-        hidden = torch.randn(8 // tp, 1, 8, device="cuda", requires_grad=True)
-        decoder_input = hidden if explicit_decoder_input else None
-        if not first_stage:
-            model.set_input_tensor(hidden)
-        processed = model._preprocess(
-            ids if not explicit_decoder_input else None,
-            positions if not explicit_decoder_input else None,
-            decoder_input=decoder_input,
-            padding_mask=full_mask,
-        )[-1]
-        rows = slice(pg.tp.rank() * 8 // tp, (pg.tp.rank() + 1) * 8 // tp)
-        assert torch.equal(processed, full_mask[:, rows])
+        input_ids = torch.arange(16, device="cuda").reshape(2, 8)
+        hidden = torch.zeros(4, 2, 16, device="cuda")
+        layer = model.decoder.layers[0]
+        router = layer.mlp.router
+        rows = slice(pg.tp.rank() * 4, (pg.tp.rank() + 1) * 4)
+        logits = torch.zeros(8, 4, device="cuda")
 
-        router = TopKRouter(config, pg_collection=pg).cuda()
-        probabilities, _ = router(hidden, padding_mask=processed.T.contiguous())
-        assert probabilities.shape[0] == hidden.shape[0]
-        assert torch.isfinite(probabilities).all()
-        assert torch.equal(full_mask, ids.eq(0))
+        def decoder_forward(*, input_ids, **kwargs):
+            torch.testing.assert_close(input_ids, expected_ids[:, rows])
+            _, routing_map = router._hash_routing(logits, input_ids)
+            expected_experts = router.tid2eid[input_ids.T.reshape(-1)].flatten().long()
+            torch.testing.assert_close(routing_map.nonzero()[:, 1], expected_experts)
+            return hidden
+
+        def postprocess(*, input_ids, **kwargs):
+            assert input_ids is expected_ids
+            return hidden
+
+        expected_ids = input_ids
+        monkeypatch.setattr(model.decoder, "forward", decoder_forward)
+        monkeypatch.setattr(model, "_postprocess", postprocess)
+        assert model(input_ids, None, None, decoder_input=hidden) is hidden
+        assert layer.get_layer_static_inputs(8, 2)["input_ids"].shape == (2, 4)
     finally:
         Utils.destroy_model_parallel()
+######## FlagScale End ########
 
 
 class TestGPTModel:
