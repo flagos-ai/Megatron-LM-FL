@@ -20,6 +20,7 @@ from megatron.core.transformer.cuda_graphs import (
     convert_schedule_table_to_order,
     get_overlap_moe_expert_parallel_comm_order,
 )
+from megatron.plugin.platform import get_platform
 from tests.unit_tests.test_utilities import Utils, get_current_device
 
 rank = Utils.rank
@@ -776,8 +777,6 @@ def test_forward_backward_no_pipelining_with_custom_pgs(mocker):
 @pytest.mark.parametrize("cp_size", [1, 2])
 @pytest.mark.parametrize("variant", ["dsa", "dsv4_hybrid"])
 def test_dsa_aux_gradient_scaling_with_context_parallel(per_token, cp_size, variant):
-    from types import SimpleNamespace
-
     from megatron.core.transformer.experimental_attention_variant.dsa import (
         DSAIndexerLossAutoScaler,
     )
@@ -789,8 +788,8 @@ def test_dsa_aux_gradient_scaling_with_context_parallel(per_token, cp_size, vari
         dsa_indexer_loss_coeff=1.0,
         grad_scale_func=None,
     )
-    activation = torch.ones(1, device="cuda", requires_grad=True)
-    aux_loss = torch.ones((), device="cuda", requires_grad=True)
+    activation = torch.ones(1, device="cpu", requires_grad=True)
+    aux_loss = torch.ones((), device="cpu", requires_grad=True)
     output = DSAIndexerLossAutoScaler.apply(activation, aux_loss)
     old_scale = DSAIndexerLossAutoScaler.main_loss_backward_scale
     DSAIndexerLossAutoScaler.main_loss_backward_scale = None
@@ -811,16 +810,21 @@ def test_dsa_aux_gradient_scaling_with_context_parallel(per_token, cp_size, vari
         # DSA uses a local mean. Packed CSA uses a global denominator before DDP averaging.
         cp_scale = cp_size if variant == "dsv4_hybrid" else 1
         torch.testing.assert_close(
-            aux_loss.grad, torch.tensor(1.0 if per_token else cp_scale / 4, device="cuda")
+            aux_loss.grad, aux_loss.new_tensor(1.0 if per_token else cp_scale / 4)
         )
     finally:
         DSAIndexerLossAutoScaler.main_loss_backward_scale = old_scale
 
 
 @pytest.mark.experimental
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_packed_dsv4_pp2_real_forward_backward():
+    if get_platform().platform_name() != "cuda" or torch.cuda.get_device_capability()[0] < 9:
+        pytest.skip("requires NVIDIA CUDA with SM90 or newer")
+    if Utils.world_size < 2 or Utils.world_size % 2:
+        pytest.skip("requires a multiple of two ranks")
+
     from megatron.core import parallel_state
+    from megatron.core.fusions.fused_mla_yarn_rope_apply import HAVE_TRITON
     from megatron.core.models.gpt import GPTModel
     from megatron.core.models.gpt.experimental_attention_variant_module_specs import (
         get_transformer_block_with_experimental_attention_variant_spec,
@@ -828,13 +832,20 @@ def test_packed_dsv4_pp2_real_forward_backward():
     from megatron.core.packed_seq_params import PackedSeqParams
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+    from megatron.core.utils import _missing_cudnn_dsa_kernel_dependencies
     from megatron.training.training import _get_pipeline_batch_shape
     from tests.unit_tests.transformer.experimental_attention_variant.test_dsv4_hybrid_attention import (
+        HAVE_HADAMARD,
+        HAVE_TE,
         _make_config,
     )
 
-    if Utils.world_size < 2 or Utils.world_size % 2:
-        pytest.skip("requires a multiple of two ranks")
+    missing = _missing_cudnn_dsa_kernel_dependencies()
+    if missing:
+        pytest.skip(f"requires fused DSA dependencies: {', '.join(missing)}")
+    pytest.importorskip("cudnn.deepseek_sparse_attention")
+    if not (HAVE_TE and HAVE_HADAMARD and HAVE_TRITON):
+        pytest.skip("requires Transformer Engine, fast Hadamard transform and Triton")
     Utils.initialize_model_parallel(tensor_model_parallel_size=1, pipeline_model_parallel_size=2)
     try:
         model_parallel_cuda_manual_seed(240)

@@ -770,8 +770,8 @@ class TestPaddingMaskAuxLoss:
 @pytest.mark.parametrize('history', [False, True])
 @pytest.mark.parametrize('valid_tokens', [0, 3])
 def test_aux_loss_safe_normalization(fused, device_count, history, valid_tokens, device):
-    if device == 'cpu' and (fused or device_count):
-        pytest.skip('TE fused and device-count rescaling require CUDA')
+    if device == 'cpu' and fused:
+        pytest.skip('TE fused auxiliary loss requires CUDA')
     if device == 'cuda' and not torch.cuda.is_available():
         pytest.skip('requires CUDA')
     if fused and moe_utils.fused_moe_aux_loss is None:
@@ -846,6 +846,7 @@ def test_empty_router_aux_loss_and_history(monkeypatch, loss_type, fused, with_h
         router = TopKRouter(
             config, pg_collection=ProcessGroupCollection.use_mpu_process_groups()
         ).cuda()
+        monkeypatch.setattr(MoEAuxLossAutoScaler, "main_loss_backward_scale", None)
         MoEAuxLossAutoScaler.set_loss_scale(torch.ones((), device='cuda'))
         hidden = torch.randn(8, 2, 16, device='cuda', requires_grad=True)
         if with_history:

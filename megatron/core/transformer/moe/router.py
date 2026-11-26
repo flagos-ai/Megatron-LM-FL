@@ -200,7 +200,8 @@ class TopKRouter(Router):
             # only as a placeholder so the layer is runnable from scratch.
             vocab_size = self.config.actual_vocab_size
             num_experts = self.config.num_moe_experts
-            ids = torch.arange(vocab_size, device=torch.cuda.current_device())
+            device = cur_platform.device(cur_platform.current_device())  # FlagScale Modify
+            ids = torch.arange(vocab_size, device=device)
             tid2eid = torch.stack([(ids + k) % num_experts for k in range(self.topk)], dim=1).to(
                 torch.int32
             )

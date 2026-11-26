@@ -25,8 +25,6 @@ from tests.unit_tests.transformer.experimental_attention_variant.test_dsv4_hybri
     _make_config,
 )
 
-pytestmark = pytest.mark.launch_on_gb200
-
 
 @pytest.fixture(autouse=True)
 def fresh_packed_compile_cache():
@@ -241,8 +239,8 @@ def _compare_results(actual, expected, label, failures, rows=None):
 def test_packed_cp_matches_full_attention_and_gradients(
     cp_size, ratio, sparse, coeff, recompute, rope_fusion
 ):
-    if Utils.world_size < cp_size:
-        pytest.skip(f"requires {cp_size} ranks")
+    if Utils.world_size % cp_size:
+        pytest.skip(f"requires a multiple of {cp_size} ranks")
     pytest.importorskip("flash_mla")
     pytest.importorskip("cudnn.deepseek_sparse_attention")
     # CI builds FlashMLA with FLASH_MLA_DISABLE_SM90=1.

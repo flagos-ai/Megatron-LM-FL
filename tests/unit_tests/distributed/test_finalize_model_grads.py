@@ -18,7 +18,8 @@ from megatron.core.models.gpt.gpt_model import GPTModel
 from megatron.core.process_groups_config import ProcessGroupCollection
 from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
 from megatron.core.transformer.transformer_config import TransformerConfig
-from tests.unit_tests.test_utilities import Utils
+from megatron.plugin.platform import get_platform
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 
 class _RouterExpertBiasModel(torch.nn.Module):
@@ -78,7 +79,7 @@ class TestFinalizeModelGradsMoEExpertBias:
         Utils.destroy_model_parallel()
 
     ######## FlagScale Begin ########
-    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.skipif(get_platform().device_count() == 0, reason="requires an accelerator")
     @pytest.mark.parametrize("has_hash_router", [False, True])
     def test_finalize_model_grads_updates_router_expert_bias_with_custom_group(
         self, has_hash_router
@@ -86,7 +87,7 @@ class TestFinalizeModelGradsMoEExpertBias:
         assert not parallel_state.model_parallel_is_initialized()
 
         config = _router_expert_bias_config()
-        device = torch.device("cuda", torch.cuda.current_device())
+        device = get_current_device()
         local_tokens = torch.tensor(
             [0.0, 2.0] if dist.get_rank() == 0 else [0.0, 0.0], device=device
         )

@@ -26,7 +26,7 @@ from megatron.training.arguments import parse_args, validate_args
 from megatron.training.global_vars import destroy_global_vars, set_global_variables
 from pretrain_gpt import BATCH_KEYS
 from pretrain_hybrid import get_batch
-from tests.unit_tests.test_utilities import Utils
+from tests.unit_tests.test_utilities import Utils, get_current_device
 
 cur_platform = get_platform()
 
@@ -754,27 +754,33 @@ def test_hybrid_cp_batch(tp_size, cp_size, seq_length, create_attention_mask):
 ######## FlagScale Begin ########
 @pytest.mark.parametrize('tp,pp', [(1, 1), (2, 1), (1, 2)])
 def test_inter_document_gpt_uses_per_sequence_balancing(tp, pp, monkeypatch):
-    if Utils.world_size % (tp * pp * 2):
+    model_parallel_size = tp * pp * 2
+    if Utils.world_size % model_parallel_size:
         pytest.skip('requires the requested TP/PP/CP topology')
     from pretrain_gpt import get_batch as get_gpt_batch
 
-    args = initialize_test_environment(tp, pp, 2, 8, 1, global_batch_size=4)
-    args.dataloader_inter_document_masking = True
+    args = initialize_test_environment(
+        tp, pp, 2, 8, 1, global_batch_size=Utils.world_size // model_parallel_size
+    )
     try:
-        from megatron.core import utils
+        args.dataloader_inter_document_masking = True
+        device = get_current_device()
 
-        def unexpected_te_call(*args, **kwargs):
-            pytest.fail('unaligned metadata reached the TE partition kernel')
+        def unexpected_per_document_split(*args, **kwargs):
+            pytest.fail('unaligned metadata reached the per-document sharder')
 
-        monkeypatch.setattr(utils.tex, 'thd_get_partitioned_indices', unexpected_te_call)
-        tokens = torch.arange(8, device='cuda').view(1, 8)
+        monkeypatch.setattr(
+            'megatron.core.utils._get_batch_on_this_cp_rank_per_document_balancing',
+            unexpected_per_document_split,
+        )
+        tokens = torch.arange(8, device=device).view(1, 8)
         sample = dict(
             tokens=tokens,
             labels=tokens.clone(),
             loss_mask=torch.ones_like(tokens, dtype=torch.float32),
             position_ids=tokens.clone(),
-            cu_seqlens=torch.tensor([[0, 3, 8]], device='cuda', dtype=torch.int32),
-            max_seqlen=torch.tensor([5], device='cuda', dtype=torch.int32),
+            cu_seqlens=torch.tensor([[0, 3, 8]], device=device, dtype=torch.int32),
+            max_seqlen=torch.tensor([5], device=device, dtype=torch.int32),
         )
         batch = dict(zip(BATCH_KEYS, get_gpt_batch(iter([sample]))))
         expected = [0, 1, 6, 7] if parallel_state.get_context_parallel_rank() == 0 else [2, 3, 4, 5]
@@ -795,6 +801,7 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
         pytest.skip("requires PP4/CP2 on eight ranks, including intermediate pipeline stages")
     args = initialize_test_environment(1, 4, 2, 512, 1, global_batch_size=4, sft=False)
     try:
+        device = get_current_device()
         args.experimental_attention_variant = "dsv4_hybrid"
         args.attention_cp_layout = "contiguous"
         args.multi_latent_attention = True
@@ -802,16 +809,17 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
         args.v_head_dim = 512
         args.qk_pos_emb_head_dim = 64
         args.q_lora_rank = 64
-        args.dsa_kernel_backend = "cudnn"
+        # The consumer only inspects GPT batch metadata, so it needs no attention kernel.
+        args.dsa_kernel_backend = "none"
         args.dataloader_inter_document_masking = True
-        built = torch.tensor(int(is_dataset_built_on_rank()), device="cuda")
+        built = torch.tensor(int(is_dataset_built_on_rank()), device=device)
         torch.distributed.all_reduce(built)
         assert (
             built.item() == Utils.world_size
         ), "packed pretraining omitted intermediate PP datasets"
-        real = torch.tensor([[0, 96, 216, 456]], dtype=torch.int32, device="cuda")
-        physical = torch.tensor([[0, 128, 256, 512]], dtype=torch.int32, device="cuda")
-        tokens = torch.arange(512, device="cuda").view(1, -1)
+        real = torch.tensor([[0, 96, 216, 456]], dtype=torch.int32, device=device)
+        physical = torch.tensor([[0, 128, 256, 512]], dtype=torch.int32, device=device)
+        tokens = torch.arange(512, device=device).view(1, -1)
         sample = dict(
             tokens=tokens,
             labels=tokens.clone(),
@@ -819,7 +827,7 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
             position_ids=tokens.clone(),
             cu_seqlens=real,
             cu_seqlens_padded=physical,
-            max_seqlen=torch.tensor([256], device="cuda", dtype=torch.int32),
+            max_seqlen=torch.tensor([256], device=device, dtype=torch.int32),
         )
         cp_rank = parallel_state.get_context_parallel_rank()
 
@@ -834,7 +842,7 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
                 assert packed.total_tokens == 512
                 assert packed.max_seqlen_q == 256
                 mask = kwargs["padding_mask"]
-                positions_local = torch.arange(cp_rank * 256, (cp_rank + 1) * 256, device="cuda")
+                positions_local = torch.arange(cp_rank * 256, (cp_rank + 1) * 256, device=device)
                 expected = (
                     ((positions_local >= 96) & (positions_local < 128))
                     | ((positions_local >= 248) & (positions_local < 256))
@@ -845,7 +853,7 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
                     assert torch.equal(tokens, positions_local.view(1, -1))
                 elif not parallel_state.is_pipeline_last_stage():
                     assert tokens is None and kwargs["labels"] is None
-                return torch.zeros((1, 256), device="cuda")
+                return torch.zeros((1, 256), device=device)
 
         output, _ = forward_step(iter([sample]), Consumer())
         assert output.shape == (1, 256)

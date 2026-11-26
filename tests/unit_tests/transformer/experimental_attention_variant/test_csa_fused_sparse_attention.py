@@ -8,11 +8,12 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_inplace
+from megatron.core.fusions.fused_mla_yarn_rope_apply import HAVE_TRITON, fused_mla_rope_inplace
 from megatron.core.transformer.experimental_attention_variant.csa_utils import (
     fused_sparse_attention as fused_csa,
 )
 from megatron.core.transformer.experimental_attention_variant.csa_utils.csa_teacher_lse import (
+    _TRITON_AVAILABLE,
     can_use_fused_csa_teacher_lse,
     fused_csa_teacher_lse,
 )
@@ -807,6 +808,7 @@ def test_real_fused_sbhd_forward_backward_matches_native_reference(num_heads):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+@pytest.mark.skipif(not (HAVE_TRITON and _TRITON_AVAILABLE), reason="requires Triton kernels")
 def test_contiguous_thd_rope_and_teacher_replay():
     """Replay explicit packed positions and the packed streaming teacher LSE."""
     seeded()
