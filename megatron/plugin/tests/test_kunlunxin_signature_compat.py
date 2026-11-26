@@ -46,7 +46,7 @@ class TestKunLunXinSignatureCompatibility(unittest.TestCase):
             "megatron.plugin.kunlunxin.fusions.fused_bias_swiglu.WeightedSwiGLUFunction.apply",
             return_value=torch.randn(2, 4),
         ) as apply_mock:
-            output = weighted_bias_swiglu_impl(input_tensor, None, weights, False, 0.5)
+            output = weighted_bias_swiglu_impl(input_tensor, None, weights, False, 0.0)
 
         self.assertEqual(output.shape, (2, 4))
         apply_mock.assert_called_once()
@@ -66,11 +66,7 @@ class TestKunLunXinSignatureCompatibility(unittest.TestCase):
             return_value=torch.randn(2, 4),
         ) as apply_mock:
             output = weighted_bias_swiglu_impl(
-                input_tensor,
-                None,
-                weights,
-                fp8_input_store=False,
-                clamp_value=0.5,
+                input_tensor, None, weights, fp8_input_store=False, clamp_value=0.0
             )
 
         self.assertEqual(output.shape, (2, 4))
@@ -112,9 +108,7 @@ def test_bias_swiglu_override_signature_matches_core():
 @pytest.mark.parametrize("with_bias", [False, True])
 def test_bias_swiglu_clamp_forward_and_backward(with_bias):
     # Exercise saturated and unsaturated values, avoiding clamp boundaries.
-    source = torch.tensor(
-        [[-2.0, -0.2, 0.2, 2.0, -2.0, -0.2, 0.2, 2.0]], requires_grad=True
-    )
+    source = torch.tensor([[-2.0, -0.2, 0.2, 2.0, -2.0, -0.2, 0.2, 2.0]], requires_grad=True)
     reference = source.detach().clone().requires_grad_(True)
     bias = torch.full((8,), 0.1, requires_grad=True) if with_bias else None
     ref_bias = bias.detach().clone().requires_grad_(True) if with_bias else None
@@ -132,6 +126,36 @@ def test_bias_swiglu_clamp_forward_and_backward(with_bias):
     torch.testing.assert_close(source.grad, reference.grad)
     if with_bias:
         torch.testing.assert_close(bias.grad, ref_bias.grad)
+
+
+@pytest.mark.parametrize("positional", [False, True])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32])
+def test_weighted_swiglu_positive_clamp_uses_core(positional, dtype):
+    """Check real Core fallback values and both gradients without requiring XPU kernels."""
+    from megatron.core.fusions import fused_bias_swiglu as core
+
+    source = torch.tensor([[-12, -0.2, 0.2, 12, -12, -0.2, 0.2, 12]], dtype=dtype)
+    source.requires_grad_()
+    reference = source.detach().clone().requires_grad_()
+    weights = torch.tensor([[0.371]], requires_grad=True)
+    ref_weights = weights.detach().clone().requires_grad_()
+    output = (
+        weighted_bias_swiglu_impl(source, None, weights, False, 10.0)
+        if positional
+        else weighted_bias_swiglu_impl(source, None, weights, clamp_value=10.0)
+    )
+    expected = core.weighted_bias_swiglu_impl.__wrapped__(
+        reference, None, ref_weights, clamp_value=10.0
+    )
+    grad = torch.linspace(-1, 1, output.numel()).to(dtype).view_as(output)
+    output.backward(grad)
+    expected.backward(grad)
+    for actual, baseline in [
+        (output, expected),
+        (source.grad, reference.grad),
+        (weights.grad, ref_weights.grad),
+    ]:
+        torch.testing.assert_close(actual, baseline, rtol=0, atol=0)
 
 
 if __name__ == "__main__":
