@@ -25,11 +25,11 @@ import torch
 
 from gpt_builders import gpt_builder
 from megatron.core import mpu
+from megatron.core.context_parallel.utils import _build_packed_seq_params
 from megatron.core.datasets.blended_megatron_dataset_builder import BlendedMegatronDatasetBuilder
 from megatron.core.datasets.gpt_dataset import GPTDataset, GPTDatasetConfig, MockGPTDataset
 from megatron.core.enums import ModelType
 from megatron.core.models.gpt import GPTModel
-from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.parallel_state import (
     get_context_parallel_group,
     get_hybrid_data_context_parallel_groups,
@@ -46,6 +46,7 @@ from megatron.core.utils import (
     get_attr_wrapped_model,
     get_batch_on_this_cp_rank,
     get_batch_on_this_tp_rank,
+    get_packed_seq_padding_mask,
 )
 from megatron.training import (
     get_args,
@@ -120,8 +121,6 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
         for key in BATCH_KEYS:
             batch[key] = batch[key].to(device, non_blocking=True) if key in batch and batch[key] is not None else None
 
-    if tp_rank == 0:
-        batch = flatten_batch_for_packed_sequences(batch)
     batch = get_batch_on_this_tp_rank(
         batch,
         broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(),
@@ -149,7 +148,13 @@ def get_batch(data_iterator, vp_stage: Optional[int] = None):
         is_hybrid_cp=is_hybrid_cp,
         cp_group=get_context_parallel_group(),
         hybrid_cp_group_func=get_hybrid_data_context_parallel_groups,
-        use_contiguous_cp=args.experimental_attention_variant == "dsv4_hybrid",
+        use_per_sequence_balancing=args.dataloader_inter_document_masking and not is_sft,
+        ######## FlagScale Begin ########
+        use_contiguous_cp=(
+            config.experimental_attention_variant == "dsv4_hybrid"
+            and config.attention_cp_layout == "contiguous"
+        ),
+        ######## FlagScale End ########
     )
 
     # Return values in BATCH_KEYS order so callers can unpack into the fixed
@@ -257,45 +262,34 @@ def forward_step(data_iterator, model: GPTModel, return_schedule_plan: bool = Fa
         ) = get_batch(data_iterator, vp_stage)
 
     packed_seq_params = None
+    is_dsv4 = args.experimental_attention_variant == "dsv4_hybrid"
     if cu_seqlens is not None:
-        # cu_seqlens / cu_seqlens_padded carry the dataloader's batch dim (1, n).
-        # PackedSeqParams (and TE attention) expect 1-D, so squeeze before use.
-        cu_seqlens = cu_seqlens[0]
-        if cu_seqlens_padded is not None:
-            cu_seqlens_padded = cu_seqlens_padded[0]
         # Use real (unpadded) cu_seqlens to feed the FLOPs accounting: varlen
         # attention only computes work for real tokens within each chunk.
-        update_seqlen_stats_from_cu_seqlens(cu_seqlens)
-        cu_seqlens_for_params = (
-            cu_seqlens
-            if args.experimental_attention_variant == "dsv4_hybrid"
-            else cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens
-        )
-        packed_seq_params = PackedSeqParams(
-            qkv_format="thd",
-            cu_seqlens_q=cu_seqlens_for_params,
-            cu_seqlens_kv=cu_seqlens_for_params,
-            cu_seqlens_q_padded=cu_seqlens_padded,
-            cu_seqlens_kv_padded=cu_seqlens_padded,
-            max_seqlen_q=int(max_seqlen.item()),
-            max_seqlen_kv=int(max_seqlen.item()),
-            local_cp_size=int(local_cp_size.item()) if local_cp_size is not None else None,
-            cp_group=hybrid_cp_group,
-            total_tokens=int(
-                (cu_seqlens_padded if cu_seqlens_padded is not None else cu_seqlens)[-1].item()
-            ),
+        update_seqlen_stats_from_cu_seqlens(cu_seqlens.squeeze(0))
+        packed_seq_params = _build_packed_seq_params(
+            {
+                'cu_seqlens': cu_seqlens,
+                'cu_seqlens_padded': cu_seqlens_padded,
+                'max_seqlen': max_seqlen,
+                'local_cp_size': local_cp_size,
+                'hybrid_cp_group': hybrid_cp_group,
+            },
+            layout=args.attention_cp_layout if is_dsv4 else "zigzag",
+            cp_size=args.context_parallel_size,
             tokens_per_sample=args.seq_length,
+            use_logical_qkv_seqlens=is_dsv4,  # FlagScale Modify
         )
 
+    ######## FlagScale Begin ########
     padding_mask = None
-    if packed_seq_params is not None:
-        from megatron.core.context_parallel.utils import get_packed_seq_padding_mask
-
-        if args.experimental_attention_variant == "dsv4_hybrid":
-            local_rows = args.seq_length * args.micro_batch_size // args.context_parallel_size
-            padding_mask = get_packed_seq_padding_mask(
-                packed_seq_params, get_context_parallel_group().rank() * local_rows, local_rows
-            ).view(1, -1)
+    if is_dsv4 and packed_seq_params is not None and cu_seqlens_padded is not None:
+        cp_group = get_context_parallel_group()
+        local_rows = packed_seq_params.total_tokens // cp_group.size()
+        padding_mask = get_packed_seq_padding_mask(
+            packed_seq_params, cp_group.rank() * local_rows, local_rows
+        ).view(1, -1)
+    ######## FlagScale End ########
 
     timers('batch-generator').stop()
 
@@ -333,10 +327,12 @@ def is_dataset_built_on_rank(vp_stage=None, is_packed_sequence=False):
     config = core_transformer_config_from_args(args)
     if mpu.get_tensor_model_parallel_rank() != 0:
         return False
+    ######## FlagScale Begin ########
     elif is_packed_sequence or args.dataloader_inter_document_masking:
         # Packed pretraining needs document metadata on intermediate PP/VPP
         # stages too, even though those stages do not consume token payloads.
         return True
+    ######## FlagScale End ########
     return (
         is_first_or_last_pipeline_stage(vp_stage)
         or mtp_on_this_rank_func(layout=config.pipeline_model_parallel_layout, mtp_num_layers=config.mtp_num_layers, ignore_virtual=False, vp_stage=vp_stage)
@@ -380,7 +376,7 @@ def core_gpt_dataset_config_from_args(args: Any) -> GPTDatasetConfig:
         "defer_npy_index_mmap": args.dataloader_defer_npy_index_mmap,
         "context_parallel_size": args.context_parallel_size,
         "inter_document_masking": args.dataloader_inter_document_masking,
-        "preserve_packed_sequence_lengths": args.experimental_attention_variant == "dsv4_hybrid",
+        "pad_sft_cu_seqlens": True,  # FlagScale Modify
         "data_parallel_size": args.data_parallel_size,
         "sequence_parallel_size": args.tensor_model_parallel_size * args.sequence_parallel,
         "hybrid_context_parallel": args.hybrid_context_parallel,

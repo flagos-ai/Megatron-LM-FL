@@ -225,7 +225,12 @@ from megatron.core.transformer.experimental_attention_variant.dsa import (
 from megatron.core.transformer.moe import upcycling_utils
 from megatron.core.transformer.moe.moe_logging import get_moe_metrics_tracker
 from megatron.core.transformer.multi_token_prediction import MTPLossLoggingHelper
-from megatron.core.utils import get_batch_on_this_cp_rank, get_batch_on_this_tp_rank, unwrap_model
+from megatron.core.utils import (
+    flatten_batch_for_packed_sequences,
+    get_batch_on_this_cp_rank,
+    get_batch_on_this_tp_rank,
+    unwrap_model,
+)
 from megatron.training.config import FaultInjectorConfig
 from megatron.training.datasets.data_samplers import build_pretraining_data_loader
 from megatron.training.initialize import (
@@ -2251,6 +2256,7 @@ def dummy_train_step(data_iterator):
     args = get_args()
     tp_rank = mpu.get_tensor_model_parallel_rank()
     is_sft = getattr(args, 'sft', False)
+    inter_document_masking = getattr(args, 'dataloader_inter_document_masking', False)
     is_hybrid_cp = args.hybrid_context_parallel
 
     BATCH_KEYS = [
@@ -2284,7 +2290,7 @@ def dummy_train_step(data_iterator):
                 batch,
                 broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(),
                 broadcast_group=mpu.get_tensor_model_parallel_group(),
-                is_sft=is_sft,
+                is_sft=is_sft or inter_document_masking,
                 is_hybrid_cp=is_hybrid_cp,
                 create_attention_mask_in_dataloader=args.create_attention_mask_in_dataloader,
                 cp_size=args.context_parallel_size,
@@ -2296,12 +2302,39 @@ def dummy_train_step(data_iterator):
                 is_pipeline_first_stage=mpu.is_pipeline_first_stage(),
                 is_pipeline_last_stage=mpu.is_pipeline_last_stage(),
             )
+            batch = flatten_batch_for_packed_sequences(batch)
             batch = get_batch_on_this_cp_rank(
                 batch,
                 is_hybrid_cp=is_hybrid_cp,
                 cp_group=get_context_parallel_group(),
                 hybrid_cp_group_func=get_hybrid_data_context_parallel_groups,
+                use_per_sequence_balancing=inter_document_masking and not is_sft,
+                ######## FlagScale Begin ########
+                use_contiguous_cp=(
+                    args.experimental_attention_variant == "dsv4_hybrid"
+                    and args.attention_cp_layout == "contiguous"
+                ),
+                ######## FlagScale End ########
             )
+
+
+######## FlagScale Begin ########
+def _get_pipeline_batch_shape(args, micro_batch_size: int) -> tuple[int, int, int | None]:
+    """Return schedule dimensions for a fixed-size microbatch."""
+    seq_length = args.seq_length
+    decoder_seq_length = args.decoder_seq_length
+    if (
+        args.pipeline_model_parallel_size > 1
+        and args.experimental_attention_variant == "dsv4_hybrid"
+        and (args.sft or args.dataloader_inter_document_masking)
+    ):
+        # GPT's packed batch has one flat token stream on every pipeline stage.
+        seq_length *= micro_batch_size
+        if decoder_seq_length is not None:
+            decoder_seq_length *= micro_batch_size
+        micro_batch_size = 1
+    return seq_length, micro_batch_size, decoder_seq_length
+######## FlagScale End ########
 
 
 def train_step(
@@ -2317,6 +2350,11 @@ def train_step(
     """Single training step."""
     args = get_args()
     timers = get_timers()
+    ######## FlagScale Begin ########
+    seq_length, micro_batch_size, decoder_seq_length = _get_pipeline_batch_shape(
+        args, args.micro_batch_size
+    )
+    ######## FlagScale End ########
 
     rerun_state_machine = get_rerun_state_machine()
     save_params_in_this_iteration = (
@@ -2348,9 +2386,11 @@ def train_step(
             # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
             adjust_tensor_shapes_fn = get_tensor_shapes_adjust_fn_for_distillation(
                 model,
-                seq_length=args.seq_length,
-                micro_batch_size=args.micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
+                ######## FlagScale Begin ########
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+                decoder_seq_length=decoder_seq_length,
+                ######## FlagScale End ########
             )
         else:
             adjust_tensor_shapes_fn = None
@@ -2390,9 +2430,11 @@ def train_step(
             data_iterator=data_iterator,
             model=model,
             num_microbatches=get_num_microbatches(),
-            seq_length=args.seq_length,
-            micro_batch_size=args.micro_batch_size,
-            decoder_seq_length=args.decoder_seq_length,
+            ######## FlagScale Begin ########
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
+            decoder_seq_length=decoder_seq_length,
+            ######## FlagScale End ########
             forward_only=False,
             adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
             force_all_reduce=save_wgrads_in_this_iteration,
@@ -4154,6 +4196,11 @@ def evaluate(
     eval_batch_size = args.eval_global_batch_size
     eval_micro_batch_size = args.eval_micro_batch_size
     eval_num_microbatches = eval_batch_size // (eval_micro_batch_size * args.data_parallel_size)
+    ######## FlagScale Begin ########
+    seq_length, micro_batch_size, decoder_seq_length = _get_pipeline_batch_shape(
+        args, eval_micro_batch_size
+    )
+    ######## FlagScale End ########
     forward_backward_func = get_forward_backward_func()
     if args.cuda_graph_impl == "full_iteration":
         forward_backward_func = FullCudaGraphWrapper(
@@ -4172,9 +4219,11 @@ def evaluate(
         # [ModelOpt]: Pipeline-parallel Distillation stacks student and teacher tensors
         adjust_tensor_shapes_fn = get_tensor_shapes_adjust_fn_for_distillation(
             model,
-            seq_length=args.seq_length,
-            micro_batch_size=eval_micro_batch_size,
-            decoder_seq_length=args.decoder_seq_length,
+            ######## FlagScale Begin ########
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
+            decoder_seq_length=decoder_seq_length,
+            ######## FlagScale End ########
         )
     else:
         adjust_tensor_shapes_fn = None
@@ -4199,9 +4248,11 @@ def evaluate(
                 data_iterator=data_iterator,
                 model=model,
                 num_microbatches=eval_num_microbatches,
-                seq_length=args.seq_length,
-                micro_batch_size=eval_micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
+                ######## FlagScale Begin ########
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+                decoder_seq_length=decoder_seq_length,
+                ######## FlagScale End ########
                 forward_only=True,
                 adjust_tensor_shapes_fn=adjust_tensor_shapes_fn,
             )
@@ -4275,9 +4326,11 @@ def evaluate(
                 data_iterator=data_iterator,
                 model=model,
                 num_microbatches=eval_num_microbatches,
-                seq_length=args.seq_length,
-                micro_batch_size=eval_micro_batch_size,
-                decoder_seq_length=args.decoder_seq_length,
+                ######## FlagScale Begin ########
+                seq_length=seq_length,
+                micro_batch_size=micro_batch_size,
+                decoder_seq_length=decoder_seq_length,
+                ######## FlagScale End ########
                 forward_only=True,
                 collect_non_loss_data=True,
             )

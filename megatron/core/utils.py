@@ -32,6 +32,7 @@ import torch
 from megatron.core import config
 from megatron.core._rank_utils import log_single_rank
 from megatron.core.package_info import __version__ as mcore_version
+from megatron.core.packed_seq_params import PackedSeqParams
 
 try:
     from torch.distributed._tensor import DTensor
@@ -2157,7 +2158,7 @@ def get_batch_on_this_tp_rank(
             if is_sft or is_hybrid_cp:
                 _broadcast_cu_seqlens(batch['cu_seqlens'])
                 _broadcast(batch['max_seqlen'])
-                _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
+                _broadcast_cu_seqlens(batch['cu_seqlens_padded'])  # FlagScale Modify
             if create_attention_mask_in_dataloader:
                 _broadcast(batch['attention_mask'])
             if is_hybrid_cp:
@@ -2178,7 +2179,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 _broadcast_cu_seqlens(batch['cu_seqlens'])
                 _broadcast(batch['max_seqlen'])
-                _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
+                _broadcast_cu_seqlens(batch['cu_seqlens_padded'])  # FlagScale Modify
             if create_attention_mask_in_dataloader:
                 _broadcast(batch['attention_mask'])
 
@@ -2191,7 +2192,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 _broadcast_cu_seqlens(batch['cu_seqlens'])
                 _broadcast(batch['max_seqlen'])
-                _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
+                _broadcast_cu_seqlens(batch['cu_seqlens_padded'])  # FlagScale Modify
             if create_attention_mask_in_dataloader:
                 _broadcast(batch['attention_mask'])
 
@@ -2205,7 +2206,7 @@ def get_batch_on_this_tp_rank(
 
             _broadcast_cu_seqlens(batch['cu_seqlens'])
             _broadcast(batch['max_seqlen'])
-            _broadcast_cu_seqlens(batch['cu_seqlens_padded'])
+            _broadcast_cu_seqlens(batch['cu_seqlens_padded'])  # FlagScale Modify
 
     else:
         if is_hybrid_cp:
@@ -2226,7 +2227,7 @@ def get_batch_on_this_tp_rank(
         local_cp_size = None
 
         if is_sft or is_hybrid_cp:
-            max_seqlen = torch.empty(1, dtype=torch.int32, device=device)
+            max_seqlen = torch.empty(micro_batch_size, dtype=torch.int32, device=device)
         if create_attention_mask_in_dataloader:
             attention_mask = torch.empty(
                 (micro_batch_size, 1, seq_length, seq_length), dtype=torch.bool, device=device
@@ -2243,17 +2244,14 @@ def get_batch_on_this_tp_rank(
             if n == 0:
                 return None
 
-            # cu_seqlens / cu_seqlens_padded carry the dataloader's batch dim
-            # throughout (mbs=1 for packed sequences). Allocate (1, n) so the
-            # shape on receiving ranks matches the (1, n) tensor TP rank 0 sent.
-            cu_seqlens = torch.empty((1, n), dtype=torch.int32, device=device)
+            # Preserve default_collate's per-sample rows for post-broadcast merging.
+            assert (
+                n % micro_batch_size == 0
+            ), f"cu_seqlens numel ({n}) is not divisible by micro_batch_size ({micro_batch_size})"
+            cu_seqlens = torch.empty(
+                (micro_batch_size, n // micro_batch_size), dtype=torch.int32, device=device
+            )
             _broadcast(cu_seqlens)
-            assert (
-                cu_seqlens.dim() == 2 and cu_seqlens.shape[0] == 1
-            ), f"Expected cu_seqlens shape (1, n), got {tuple(cu_seqlens.shape)}"
-            assert (
-                cu_seqlens.dtype == torch.int32
-            ), f"Expected cu_seqlens to be of type torch.int32, got {cu_seqlens.dtype}"
             return cu_seqlens
 
         if pipeline_model_parallel_size == 1 or mtp_on_this_rank:
@@ -2264,7 +2262,7 @@ def get_batch_on_this_tp_rank(
             if is_sft or is_hybrid_cp:
                 cu_seqlens = _broadcast_cu_seqlens()
                 _broadcast(max_seqlen)
-                cu_seqlens_padded = _broadcast_cu_seqlens()
+                cu_seqlens_padded = _broadcast_cu_seqlens()  # FlagScale Modify
             if create_attention_mask_in_dataloader:
                 _broadcast(attention_mask)
             if is_hybrid_cp:
@@ -2285,7 +2283,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 cu_seqlens = _broadcast_cu_seqlens()
                 _broadcast(max_seqlen)
-                cu_seqlens_padded = _broadcast_cu_seqlens()
+                cu_seqlens_padded = _broadcast_cu_seqlens()  # FlagScale Modify
             if create_attention_mask_in_dataloader:
                 _broadcast(attention_mask)
 
@@ -2298,7 +2296,7 @@ def get_batch_on_this_tp_rank(
             if is_sft:
                 cu_seqlens = _broadcast_cu_seqlens()
                 _broadcast(max_seqlen)
-                cu_seqlens_padded = _broadcast_cu_seqlens()
+                cu_seqlens_padded = _broadcast_cu_seqlens()  # FlagScale Modify
             if create_attention_mask_in_dataloader:
                 _broadcast(attention_mask)
 
@@ -2311,7 +2309,7 @@ def get_batch_on_this_tp_rank(
 
             cu_seqlens = _broadcast_cu_seqlens()
             _broadcast(max_seqlen)
-            cu_seqlens_padded = _broadcast_cu_seqlens()
+            cu_seqlens_padded = _broadcast_cu_seqlens()  # FlagScale Modify
 
         batch = {
             'tokens': tokens,
@@ -2907,33 +2905,15 @@ def flatten_batch_for_packed_sequences(batch: Dict[str, Any]) -> Dict[str, Any]:
     for key in ('tokens', 'labels', 'loss_mask', 'position_ids'):
         if batch.get(key) is not None:
             seq_length = batch[key].shape[1]
-            if cu_seqlens.shape[0] == 1:
-                seq_length *= batch[key].shape[0]
             break
-    physical = batch.get('cu_seqlens_padded')
     if seq_length is None:
-        # Metadata-only PP stages still need the physical stride between samples.
-        lengths = physical if physical is not None else cu_seqlens
-        seq_length = lengths[0, -1].item()
+        seq_length = cu_seqlens[0, -1].item()
 
-    if physical is None:
-        batch['cu_seqlens'] = _merge_cu_seqlens_across_micro_batch(
-            cu_seqlens, seq_length
+    batch['cu_seqlens'] = _merge_cu_seqlens_across_micro_batch(cu_seqlens, seq_length).unsqueeze(0)
+    if batch.get('cu_seqlens_padded') is not None:
+        batch['cu_seqlens_padded'] = _merge_cu_seqlens_across_micro_batch(
+            batch['cu_seqlens_padded'], seq_length
         ).unsqueeze(0)
-    else:
-        # Slice real and physical prefixes together: real endpoints need not
-        # equal the physical sample length when documents contain padding.
-        real_parts, physical_parts = [], []
-        real_offset = 0
-        for i, (real_row, physical_row) in enumerate(zip(cu_seqlens, physical)):
-            ends = (physical_row == seq_length).nonzero(as_tuple=True)[0]
-            count = int(ends[0].item()) + 1 if ends.numel() else physical_row.numel()
-            first = 0 if i == 0 else 1
-            real_parts.append(real_row[first:count] + real_offset)
-            physical_parts.append(physical_row[first:count] + i * seq_length)
-            real_offset += real_row[count - 1]
-        batch['cu_seqlens'] = torch.cat(real_parts).unsqueeze(0)
-        batch['cu_seqlens_padded'] = torch.cat(physical_parts).unsqueeze(0)
     if batch.get('max_seqlen') is not None:
         batch['max_seqlen'] = batch['max_seqlen'].max().unsqueeze(0)
 
@@ -2942,6 +2922,25 @@ def flatten_batch_for_packed_sequences(batch: Dict[str, Any]) -> Dict[str, Any]:
             batch[key] = batch[key].reshape(1, -1)
 
     return batch
+
+
+######## FlagScale Begin ########
+def get_packed_seq_padding_mask(
+    packed_seq_params: PackedSeqParams, global_start: int, local_rows: int
+) -> torch.Tensor:
+    """Return True for physical padding in a contiguous packed CP shard."""
+    real = packed_seq_params.cu_seqlens_q
+    physical = packed_seq_params.cu_seqlens_q_padded
+    if physical is None:
+        physical = real
+    rows = torch.arange(global_start, global_start + local_rows, device=real.device)
+    if real.numel() < 2:
+        return torch.ones_like(rows, dtype=torch.bool)
+    seq = torch.searchsorted(physical[1:], rows, right=True).clamp_max(real.numel() - 2)
+    valid_lengths = (real[1:] - real[:-1]).clamp_min(0)
+    valid_ends = physical[:-1] + valid_lengths
+    return (rows >= valid_ends[seq]) | (rows >= physical[-1])
+######## FlagScale End ########
 
 
 def _get_batch_on_this_cp_rank_per_sequence_balancing(
@@ -3006,6 +3005,7 @@ def _get_batch_on_this_cp_rank_per_sequence_balancing(
     return batch
 
 
+######## FlagScale Begin ########
 def _validate_per_document_cp_lengths(cu_seqlens: torch.Tensor, cp_size: int) -> None:
     """Reject physical document layouts that THD zigzag attention cannot represent."""
     # Equal front/back segments are required by both TE attention and THD RoPE.
@@ -3017,6 +3017,7 @@ def _validate_per_document_cp_lengths(cu_seqlens: torch.Tensor, cp_size: int) ->
             f"to be divisible by 2 * CP size ({2 * cp_size}); got "
             f"{document_lengths.tolist()}. Supply aligned cu_seqlens_padded or use CP=1."
         )
+######## FlagScale End ########
 
 
 def _get_batch_on_this_cp_rank_per_document_balancing(
@@ -3054,7 +3055,7 @@ def _get_batch_on_this_cp_rank_per_document_balancing(
             if batch["cu_seqlens_padded"] is not None
             else batch["cu_seqlens"]
         )[0]
-        _validate_per_document_cp_lengths(cu_seqlens_for_te, cp_size)
+        _validate_per_document_cp_lengths(cu_seqlens_for_te, cp_size)  # FlagScale Modify
         index = tex.thd_get_partitioned_indices(
             cu_seqlens_for_te,
             (

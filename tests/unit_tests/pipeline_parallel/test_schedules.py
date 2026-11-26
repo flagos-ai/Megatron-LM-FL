@@ -1,6 +1,7 @@
 # Copyright (c) 2025, NVIDIA CORPORATION.  All rights reserved.
 
 import os
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -770,6 +771,7 @@ def test_forward_backward_no_pipelining_with_custom_pgs(mocker):
     Utils.destroy_model_parallel()
 
 
+######## FlagScale Begin ########
 @pytest.mark.parametrize("per_token", [False, True])
 @pytest.mark.parametrize("cp_size", [1, 2])
 @pytest.mark.parametrize("variant", ["dsa", "dsv4_hybrid"])
@@ -826,6 +828,7 @@ def test_packed_dsv4_pp2_real_forward_backward():
     from megatron.core.packed_seq_params import PackedSeqParams
     from megatron.core.pipeline_parallel.schedules import get_forward_backward_func
     from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
+    from megatron.training.training import _get_pipeline_batch_shape
     from tests.unit_tests.transformer.experimental_attention_variant.test_dsv4_hybrid_attention import (
         _make_config,
     )
@@ -855,7 +858,7 @@ def test_packed_dsv4_pp2_real_forward_backward():
             apply_rope_fusion=True,
             pipeline_model_parallel_size=2,
             pipeline_dtype=torch.bfloat16,
-            variable_seq_lengths=True,
+            variable_seq_lengths=False,
             gradient_accumulation_fusion=False,
             hidden_dropout=0.0,
             attention_dropout=0.0,
@@ -908,13 +911,24 @@ def test_packed_dsv4_pp2_real_forward_backward():
             )
             return output, loss_func
 
+        seq_length, micro_batch_size, _ = _get_pipeline_batch_shape(
+            SimpleNamespace(
+                seq_length=64,
+                decoder_seq_length=None,
+                pipeline_model_parallel_size=2,
+                experimental_attention_variant="dsv4_hybrid",
+                sft=False,
+                dataloader_inter_document_masking=True,
+            ),
+            micro_batch_size=2,
+        )
         losses = get_forward_backward_func()(
             forward_step_func=forward_step,
             data_iterator=None,
             model=[model],
             num_microbatches=2,
-            seq_length=64,
-            micro_batch_size=2,
+            seq_length=seq_length,
+            micro_batch_size=micro_batch_size,
             forward_only=False,
         )
         gradients = [p.grad for p in model.parameters() if p.requires_grad]
@@ -925,3 +939,4 @@ def test_packed_dsv4_pp2_real_forward_backward():
             assert all(torch.isfinite(item['lm loss']).all() for item in losses)
     finally:
         Utils.destroy_model_parallel()
+######## FlagScale End ########

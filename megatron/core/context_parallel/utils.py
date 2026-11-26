@@ -312,17 +312,3 @@ def get_batches_on_this_cp_rank(
         batches_by_layout=batches_by_layout,
         packed_seq_params_by_layout=packed_seq_params_by_layout,
     )
-
-
-def get_packed_seq_padding_mask(
-    packed_seq_params: PackedSeqParams, global_start: int, local_rows: int
-) -> torch.Tensor:
-    """Return True for physical padding in a contiguous packed CP shard."""
-    real = packed_seq_params.cu_seqlens_q
-    physical = packed_seq_params.cu_seqlens_q_padded
-    if physical is None:
-        physical = real
-    rows = torch.arange(global_start, global_start + local_rows, device=real.device)
-    seq = torch.searchsorted(physical[1:], rows, right=True).clamp_max(real.numel() - 2)
-    end = physical[seq] + real[seq + 1] - real[seq]
-    return (rows >= end) | (rows >= physical[-1])

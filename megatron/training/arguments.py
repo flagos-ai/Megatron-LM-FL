@@ -1223,10 +1223,10 @@ def validate_args(args, defaults={}):
     # across batches/microbatches. Due to additional communication overhead
     # during pipeline parallelism, it should not be set if sequence length
     # is constant during training.
-    args.variable_seq_lengths = args.experimental_attention_variant == "dsv4_hybrid" and (
-        args.sft or args.dataloader_inter_document_masking
-    )
-    if args.dataloader_inter_document_masking or args.variable_seq_lengths:
+    args.variable_seq_lengths = False
+    if args.dataloader_inter_document_masking or (
+        args.sft and args.experimental_attention_variant == "dsv4_hybrid"  # FlagScale Modify
+    ):
         args.create_attention_mask_in_dataloader = False
 
     # Iteration-based training.

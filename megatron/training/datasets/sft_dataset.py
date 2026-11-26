@@ -106,7 +106,6 @@ class SFTDataset(MegatronDataset):
         pack_targets = []
         pack_positions = []
         cu_seqlens = [0]
-        real_seqlens = []
         eod = tokenizer.eod
         pad = tokenizer.pad
         # TODO(duncan): Track number of convs dropped and/or truncated and amount of end-padding
@@ -124,7 +123,6 @@ class SFTDataset(MegatronDataset):
 
             assert not self.config.reset_position_ids
             pack_positions.extend(range(len(tokens_list)))
-            real_seqlens.append(len(tokens_list))
 
             if self.config.context_parallel_size > 1:
                 pad_granularity = self.config.context_parallel_size * 2
@@ -183,15 +181,13 @@ class SFTDataset(MegatronDataset):
         adjacent_diffs = cu_seqlens[1:] - cu_seqlens[:-1]
         max_seqlen = adjacent_diffs.max()  # max_seqlen is a 0-D tensor
 
-        packed_metadata = {}
-        if self.config.preserve_packed_sequence_lengths:
-            packed_metadata['cu_seqlens_padded'] = cu_seqlens
-            real_lengths = torch.minimum(
-                torch.tensor(real_seqlens, dtype=torch.int32), adjacent_diffs
-            )
-            cu_seqlens = torch.cat(
-                [torch.zeros(1, dtype=torch.int32), real_lengths.cumsum(0, dtype=torch.int32)]
-            )
+        ######## FlagScale Begin ########
+        if self.config.pad_sft_cu_seqlens:
+            # Repeat the physical endpoint so default_collate can stack samples.
+            padded_cu_seqlens = torch.full((pack_length + 1,), pack_length, dtype=torch.int32)
+            padded_cu_seqlens[: cu_seqlens.numel()] = cu_seqlens
+            cu_seqlens = padded_cu_seqlens
+        ######## FlagScale End ########
 
         return {
             'tokens': input_ids,
@@ -201,5 +197,4 @@ class SFTDataset(MegatronDataset):
             'position_ids': position_ids,
             'cu_seqlens': cu_seqlens,
             'max_seqlen': max_seqlen,
-            **packed_metadata,
         }

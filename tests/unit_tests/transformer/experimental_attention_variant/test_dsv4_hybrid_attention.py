@@ -79,6 +79,12 @@ def _make_config(
     extra_config_kwargs.setdefault('experimental_attention_variant', 'dsv4_hybrid')
     # Native attention fixtures opt out of the DSv4 fused backend default.
     extra_config_kwargs.setdefault('dsa_kernel_backend', 'none')
+    ##### FlagScale Begin #####
+    if 'linear_cp_layout' in extra_config_kwargs:
+        # This fixture builds the standalone attention module with one CP layout.
+        linear_cp_layout = extra_config_kwargs.pop('linear_cp_layout')
+        assert linear_cp_layout == extra_config_kwargs['attention_cp_layout']
+    ##### FlagScale End #####
     return MLATransformerConfig(
         num_layers=num_layers,
         hidden_size=hidden_size,
@@ -904,3 +910,11 @@ class TestDSv4HybridRopeFusion:
 def test_config_rejects_invalid_output_projection_dimensions(kwargs, message):
     with pytest.raises(AssertionError, match=message):
         _make_config(**kwargs)
+
+
+def test_config_requires_contiguous_context_parallelism():
+    """Static packed CP uses the main-owned contiguous layout contract."""
+    with pytest.raises(ValueError, match="attention_cp_layout='contiguous'"):
+        _make_config(context_parallel_size=2)
+    config = _make_config(context_parallel_size=2, attention_cp_layout="contiguous")
+    assert config.context_parallel_size == 2

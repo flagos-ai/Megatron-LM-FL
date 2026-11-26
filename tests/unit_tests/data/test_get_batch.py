@@ -15,9 +15,11 @@ from megatron.core.context_parallel.utils import (
     _get_batch_on_this_cp_rank_contiguous,
 )
 from megatron.core.num_microbatches_calculator import destroy_num_microbatches_calculator
+from megatron.core.packed_seq_params import PackedSeqParams
 from megatron.core.utils import (
     _get_batch_on_this_cp_rank_per_sequence_balancing,
     flatten_batch_for_packed_sequences,
+    get_packed_seq_padding_mask,
 )
 from megatron.plugin.platform import get_platform
 from megatron.training.arguments import parse_args, validate_args
@@ -154,8 +156,7 @@ def create_sft_data_iterator(max_seq_length: int = 1024, cp_size: int = 1):
 
     # Add batch dimension to all per-sample tensors to mimic DataLoader default_collate.
     # The dataset emits cu_seqlens as 1-D (S+1,) and max_seqlen as 0-D; default_collate
-    # stacks them with a leading batch dim of 1. get_batch_on_this_tp_rank's sender is
-    # responsible for squeezing the batch dim of cu_seqlens before broadcast.
+    # stacks them with a leading batch dim of 1, preserved during TP broadcast.
     batch = {
         "tokens": tokens.unsqueeze(0),
         "labels": labels.unsqueeze(0),
@@ -750,13 +751,14 @@ def test_hybrid_cp_batch(tp_size, cp_size, seq_length, create_attention_mask):
     Utils.destroy_model_parallel()
 
 
+######## FlagScale Begin ########
 @pytest.mark.parametrize('tp,pp', [(1, 1), (2, 1), (1, 2)])
-def test_inter_document_gpt_rejects_unaligned_cp_documents(tp, pp, monkeypatch):
+def test_inter_document_gpt_uses_per_sequence_balancing(tp, pp, monkeypatch):
     if Utils.world_size % (tp * pp * 2):
         pytest.skip('requires the requested TP/PP/CP topology')
     from pretrain_gpt import get_batch as get_gpt_batch
 
-    args = initialize_test_environment(tp, pp, 2, 16, 1, global_batch_size=4)
+    args = initialize_test_environment(tp, pp, 2, 8, 1, global_batch_size=4)
     args.dataloader_inter_document_masking = True
     try:
         from megatron.core import utils
@@ -765,213 +767,24 @@ def test_inter_document_gpt_rejects_unaligned_cp_documents(tp, pp, monkeypatch):
             pytest.fail('unaligned metadata reached the TE partition kernel')
 
         monkeypatch.setattr(utils.tex, 'thd_get_partitioned_indices', unexpected_te_call)
-        tokens = torch.arange(16, device='cuda').view(1, 16)
+        tokens = torch.arange(8, device='cuda').view(1, 8)
         sample = dict(
             tokens=tokens,
             labels=tokens.clone(),
             loss_mask=torch.ones_like(tokens, dtype=torch.float32),
             position_ids=tokens.clone(),
-            cu_seqlens=torch.tensor([[0, 5, 16]], device='cuda', dtype=torch.int32),
-            max_seqlen=torch.tensor([11], device='cuda', dtype=torch.int32),
+            cu_seqlens=torch.tensor([[0, 3, 8]], device='cuda', dtype=torch.int32),
+            max_seqlen=torch.tensor([5], device='cuda', dtype=torch.int32),
         )
-        with pytest.raises(ValueError, match='physical document length.*divisible by 2'):
-            get_gpt_batch(iter([sample]))
-    finally:
-        Utils.destroy_model_parallel()
-
-
-@pytest.mark.parametrize('padded', [False, True])
-def test_per_document_cp_accepts_aligned_physical_offsets(padded):
-    from megatron.core.utils import get_batch_on_this_cp_rank, get_sft_batch_on_this_cp_rank
-
-    Utils.initialize_model_parallel(context_parallel_size=2)
-    try:
-        cp = parallel_state.get_context_parallel_group()
-        real = [0, 5, 5, 16] if padded else [0, 8, 8, 16]
-        physical = [0, 8, 8, 20] if padded else None
-        n = 20 if padded else 16
-        for sharder in (get_batch_on_this_cp_rank, get_sft_batch_on_this_cp_rank):
-            tokens = torch.arange(n, device='cuda').view(1, n)
-            batch = dict(
-                tokens=tokens,
-                labels=tokens.clone(),
-                position_ids=None,
-                loss_mask=None,
-                cu_seqlens=torch.tensor([real], device='cuda', dtype=torch.int32),
-                cu_seqlens_padded=(
-                    None
-                    if physical is None
-                    else torch.tensor([physical], device='cuda', dtype=torch.int32)
-                ),
-            )
-            kwargs = {'is_hybrid_cp': False} if sharder is get_batch_on_this_cp_rank else {}
-            result = sharder(batch, cp_group=cp, **kwargs)
-            all_ids = [None] * 2
-            torch.distributed.all_gather_object(
-                all_ids, result['tokens'].flatten().tolist(), group=cp
-            )
-            assert sorted(sum(all_ids, [])) == list(range(n))
-    finally:
-        Utils.destroy_model_parallel()
-
-
-def test_cp1_accepts_unaligned_documents():
-    from megatron.core.utils import get_batch_on_this_cp_rank
-
-    Utils.initialize_model_parallel()
-    try:
-        tokens = torch.arange(16, device='cuda').view(1, 16)
-        batch = dict(
-            tokens=tokens,
-            cu_seqlens=torch.tensor([[0, 5, 16]], device='cuda', dtype=torch.int32),
-            cu_seqlens_padded=None,
+        batch = dict(zip(BATCH_KEYS, get_gpt_batch(iter([sample]))))
+        expected = (
+            [0, 1, 6, 7] if parallel_state.get_context_parallel_rank() == 0 else [2, 3, 4, 5]
         )
-        actual = get_batch_on_this_cp_rank(
-            batch, is_hybrid_cp=False, cp_group=parallel_state.get_context_parallel_group()
-        )
-        torch.testing.assert_close(actual['tokens'], tokens)
-    finally:
-        Utils.destroy_model_parallel()
-
-
-def test_aligned_inter_document_cp_rope_and_attention(monkeypatch):
-    from megatron.core.extensions.transformer_engine import TEDotProductAttention
-    from megatron.core.models.common.embeddings.rope_utils import _apply_rotary_pos_emb_thd
-    from megatron.core.packed_seq_params import PackedSeqParams
-    from megatron.core.tensor_parallel.random import model_parallel_cuda_manual_seed
-    from megatron.core.transformer import TransformerConfig
-    from megatron.core.transformer.enums import AttnBackend
-    from pretrain_gpt import get_batch as get_gpt_batch
-
-    args = initialize_test_environment(1, 1, 2, 16, 1, global_batch_size=4)
-    args.dataloader_inter_document_masking = True
-    try:
-        from megatron.core.transformer.enums import AttnMaskType
-
-        cp = parallel_state.get_context_parallel_group()
-        ids = torch.arange(16, device='cuda').view(1, 16)
-        cu = torch.tensor([[0, 8, 16]], device='cuda', dtype=torch.int32)
-        sample = dict(
-            tokens=ids,
-            labels=ids.clone(),
-            loss_mask=torch.ones_like(ids, dtype=torch.float32),
-            position_ids=ids % 8,
-            cu_seqlens=cu,
-            max_seqlen=torch.tensor([8], device='cuda', dtype=torch.int32),
-        )
-        batch = get_gpt_batch(iter([sample]))
-        local_ids = batch[9].flatten()
-        config = TransformerConfig(
-            num_layers=1,
-            hidden_size=128,
-            num_attention_heads=2,
-            context_parallel_size=2,
-            attention_dropout=0.0,
-            attention_backend=AttnBackend.flash,
-        )
-        model_parallel_cuda_manual_seed(123)
-        monkeypatch.setenv('NVTE_FLASH_ATTN', '1')
-        monkeypatch.setenv('NVTE_FUSED_ATTN', '0')
-        monkeypatch.setenv('NVTE_UNFUSED_ATTN', '0')
-        attention = TEDotProductAttention(config, 1, AttnMaskType.causal, 'self')
-        torch.manual_seed(123)
-        q, k, v = [
-            torch.randn(16, 2, 64, device='cuda', dtype=torch.bfloat16) * 0.25 for _ in range(3)
-        ]
-        freqs = (
-            (torch.arange(32, device='cuda').float() * 0.1)[:, None, None, None]
-            .expand(32, 1, 1, 64)
-            .contiguous()
-        )
-
-        def rotate(x):
-            theta = ((torch.arange(16, device='cuda') % 8).float() * 0.1)[:, None, None]
-            half = torch.cat((-x[..., 32:], x[..., :32]), dim=-1)
-            return x * theta.cos().to(x.dtype) + half * theta.sin().to(x.dtype)
-
-        local_q = _apply_rotary_pos_emb_thd(q[local_ids], cu[0], freqs, cp_group=cp)
-        local_k = _apply_rotary_pos_emb_thd(k[local_ids], cu[0], freqs, cp_group=cp)
-        torch.testing.assert_close(local_q, rotate(q)[local_ids], rtol=0, atol=0)
-        torch.testing.assert_close(local_k, rotate(k)[local_ids], rtol=0, atol=0)
-        params = PackedSeqParams(
-            qkv_format='thd',
-            cu_seqlens_q=cu[0],
-            cu_seqlens_kv=cu[0],
-            max_seqlen_q=8,
-            max_seqlen_kv=8,
-        )
-        actual = attention(
-            local_q,
-            local_k,
-            v[local_ids],
-            attention_mask=None,
-            attn_mask_type=AttnMaskType.causal,
-            packed_seq_params=params,
-        )
-        expected = []
-        for start in (0, 8):
-            qs, ks, vs = [
-                x[start : start + 8].float().transpose(0, 1) for x in (rotate(q), rotate(k), v)
-            ]
-            expected.append(
-                torch.nn.functional.scaled_dot_product_attention(
-                    qs, ks, vs, is_causal=True
-                ).transpose(0, 1)
-            )
-        expected = torch.cat(expected)[local_ids].reshape_as(actual)
-        torch.testing.assert_close(actual.float(), expected, rtol=0.02, atol=0.002)
-    finally:
-        Utils.destroy_model_parallel()
-
-
-@pytest.mark.parametrize(
-    "tp,pp,cp,dsv4", [(2, 1, 1, False), (1, 2, 1, True), (1, 1, 2, True), (1, 2, 2, True)]
-)
-def test_packed_gpt_batch_keeps_real_and_physical_metadata(tp, pp, cp, dsv4):
-    from pretrain_gpt import get_batch as get_gpt_batch
-
-    if Utils.world_size % (tp * pp * cp):
-        pytest.skip("launch size does not support this TP/PP/CP topology")
-    data_parallel_size = Utils.world_size // (tp * pp * cp)
-    args = initialize_test_environment(
-        tp, pp, cp, 64, 2, global_batch_size=2 * data_parallel_size, sft=True
-    )
-    try:
-        if dsv4:
-            args.experimental_attention_variant = 'dsv4_hybrid'
-            args.multi_latent_attention = True
-            args.csa_compress_ratios = [0] * args.num_layers
-            args.v_head_dim = 512
-            args.qk_pos_emb_head_dim = 64
-            args.q_lora_rank = 64
-            args.dsa_kernel_backend = 'cudnn'
-        real = torch.tensor([[0, 30, 60], [0, 30, 60]], dtype=torch.int32, device='cuda')
-        physical = torch.tensor([[0, 32, 64], [0, 32, 64]], dtype=torch.int32, device='cuda')
-        tokens = torch.arange(128, device='cuda').view(2, 64)
-        sample = dict(
-            tokens=tokens,
-            labels=tokens.clone(),
-            loss_mask=torch.ones_like(tokens).float(),
-            position_ids=torch.arange(64, device='cuda').repeat(2, 1),
-            cu_seqlens=real,
-            cu_seqlens_padded=physical,
-            max_seqlen=torch.tensor([32, 32], device='cuda', dtype=torch.int32),
-        )
-        batch = get_gpt_batch(iter([sample]))
-        assert batch[1].tolist() == [[0, 30, 60, 90, 120]]
-        assert batch[2].tolist() == [[0, 32, 64, 96, 128]]
-        assert batch[7].tolist() == [32]
-        local_count = 128 // cp
+        assert batch['cu_seqlens'].tolist() == [[0, 3, 8]]
         if parallel_state.is_pipeline_first_stage():
-            assert batch[9].shape == (1, local_count)
-            expected = tokens.flatten().view(1, -1)
-            if dsv4:
-                rank = parallel_state.get_context_parallel_rank()
-                torch.testing.assert_close(
-                    batch[9], expected[:, rank * local_count : (rank + 1) * local_count]
-                )
+            assert batch['tokens'].tolist() == [expected]
         if parallel_state.is_pipeline_last_stage():
-            assert batch[4].shape == (1, local_count)
+            assert batch['labels'].tolist() == [expected]
     finally:
         Utils.destroy_model_parallel()
 
@@ -985,6 +798,7 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
     args = initialize_test_environment(1, 4, 2, 512, 1, global_batch_size=4, sft=False)
     try:
         args.experimental_attention_variant = "dsv4_hybrid"
+        args.attention_cp_layout = "contiguous"
         args.multi_latent_attention = True
         args.csa_compress_ratios = [0, 0, 4, 128]
         args.v_head_dim = 512
@@ -992,7 +806,6 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
         args.q_lora_rank = 64
         args.dsa_kernel_backend = "cudnn"
         args.dataloader_inter_document_masking = True
-        args.variable_seq_lengths = True
         built = torch.tensor(int(is_dataset_built_on_rank()), device="cuda")
         torch.distributed.all_reduce(built)
         assert (
@@ -1040,6 +853,7 @@ def test_pretraining_packed_metadata_reaches_intermediate_pipeline_stages():
         assert output.shape == (1, 256)
     finally:
         Utils.destroy_model_parallel()
+######## FlagScale End ########
 
 
 @pytest.mark.parametrize("micro_batch_size", [1, 2, 4])
@@ -1468,3 +1282,26 @@ def test_packed_seq_params_expose_actual_thd_lengths_for_contiguous_cp(
     assert torch.equal(packed_seq_params.cu_seqlens_kv, expected_cu_seqlens)
     assert torch.equal(packed_seq_params.cu_seqlens_q_padded, padded_cu_seqlens[0])
     assert packed_seq_params.total_tokens == 8
+
+
+######## FlagScale Begin ########
+def _packed():
+    real = torch.tensor([0, 3, 3, 7], dtype=torch.int32)
+    physical = torch.tensor([0, 4, 4, 10], dtype=torch.int32)
+    return PackedSeqParams(
+        qkv_format="thd",
+        cu_seqlens_q=real,
+        cu_seqlens_kv=real,
+        cu_seqlens_q_padded=physical,
+        cu_seqlens_kv_padded=physical,
+        max_seqlen_q=6,
+        max_seqlen_kv=6,
+    )
+
+
+@pytest.mark.parametrize("start,count", [(0, 10), (0, 5), (5, 5)])
+def test_router_padding_uses_real_lengths_and_physical_offsets(start, count):
+    actual = get_packed_seq_padding_mask(_packed(), start, count)
+    oracle = torch.tensor([False, False, False, True, False, False, False, False, True, True])
+    torch.testing.assert_close(actual, oracle[start : start + count])
+######## FlagScale End ########

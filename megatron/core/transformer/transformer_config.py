@@ -466,7 +466,7 @@ class TransformerConfig(ModelParallelConfig):
     path. FP32 uses a true FP32-output projection and is not compatible with the cuDNN DSA
     backend. The final index scores remain FP32 independently of this option."""
 
-    attention_cp_layout: str = "zigzag"
+    attention_cp_layout: Literal["zigzag", "contiguous"] = "zigzag"
     """Physical attention token layout; DSv4 static CP uses contiguous shards."""
 
     ####################
@@ -1398,6 +1398,15 @@ class TransformerConfig(ModelParallelConfig):
         """
         super().__post_init__()
 
+        if (
+            self.context_parallel_size > 1
+            and self.attention_cp_layout == "contiguous"
+            and self.experimental_attention_variant != "dsv4_hybrid"
+        ):
+            raise ValueError(
+                "attention_cp_layout='contiguous' is not yet supported with context parallelism."
+            )
+
         if self.dsa_kernel_backend is None:
             self.dsa_kernel_backend = (
                 "cudnn" if self.experimental_attention_variant == "dsv4_hybrid" else "none"
@@ -1552,6 +1561,12 @@ class TransformerConfig(ModelParallelConfig):
             assert (
                 self.tensor_model_parallel_size == 1
             ), "DSv4 Hybrid Attention only supports TP size 1."
+            if self.context_parallel_size > 1 and self.attention_cp_layout != "contiguous":
+                raise ValueError(
+                    "DSv4 context parallelism requires attention_cp_layout='contiguous'."
+                )
+            if self.hybrid_context_parallel:
+                raise ValueError("DSv4 dynamic context parallelism is not supported yet.")
             assert not self.qk_clip, "QK clipping is not supported with DSv4 Hybrid Attention."
             _validate_dsa_kernel_backend_dependencies(self.dsa_kernel_backend)
             if self.dsa_kernel_backend == "cudnn":
@@ -1573,8 +1588,6 @@ class TransformerConfig(ModelParallelConfig):
                         "because the cuDNN Frontend SM90 dense DSA kernels are not reliable for "
                         "this path. Use sparse indexer loss or set dsa_kernel_backend='none'."
                     )
-            if self.context_parallel_size > 1:
-                self.attention_cp_layout = "contiguous"
             self.hetereogenous_dist_checkpoint = True
 
         if self.fp8:

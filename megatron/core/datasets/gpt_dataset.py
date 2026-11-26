@@ -69,8 +69,10 @@ class GPTDatasetConfig(BlendedMegatronDatasetConfig):
     inter_document_masking: bool = False
     """Emit document boundaries for packed pretraining."""
 
-    preserve_packed_sequence_lengths: bool = False
-    """Emit separate real and physical packed offsets for DSv4 SFT attention."""
+    ######## FlagScale Begin ########
+    pad_sft_cu_seqlens: bool = False
+    """Pad SFT offsets to a uniform width for GPT microbatch collation."""
+    ######## FlagScale End ########
 
     sequences_per_dataset: Optional[Dict[str, int]] = None
     """If provided, the sequence and document counts for each dataset. 
@@ -300,7 +302,6 @@ class GPTDataset(MegatronDataset):
             # If the sample was padded (e.g., the last validation sample),
             # fold the padding into the last document so cu_seqlens[-1]
             # equals sequence_length.
-            real_document_lengths = list(packed_document_lengths)
             shortfall = self.config.sequence_length - sum(packed_document_lengths)
             if shortfall > 0:
                 if packed_document_lengths:
@@ -329,7 +330,7 @@ class GPTDataset(MegatronDataset):
             )
             padded_cu_seqlens[: cu_seqlens.numel()] = cu_seqlens
 
-            result = {
+            return {
                 "tokens": tokens,
                 "labels": labels,
                 "loss_mask": loss_mask,
@@ -337,13 +338,6 @@ class GPTDataset(MegatronDataset):
                 "cu_seqlens": padded_cu_seqlens,
                 "max_seqlen": max_seqlen,
             }
-            if self.config.preserve_packed_sequence_lengths:
-                real_cu = torch.tensor(numpy.cumsum([0] + real_document_lengths), dtype=torch.int32)
-                logical = torch.full_like(padded_cu_seqlens, int(real_cu[-1]))
-                logical[: real_cu.numel()] = real_cu
-                result['cu_seqlens_padded'] = padded_cu_seqlens
-                result['cu_seqlens'] = logical
-            return result
 
         if self.config.create_attention_mask:
             return {
