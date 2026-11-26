@@ -2892,7 +2892,7 @@ def training_log(
             num_layers=indexer_tracker_layers,
             num_indexer_layers=indexer_layer_count,
             preserve_groups=args.cuda_graph_impl != "none",
-            calculate_per_token_loss=args.calculate_per_token_loss,
+            calculate_per_token_loss=args.calculate_per_token_loss,  # FlagScale Modify
         )
 
     # Dump memory snapshot and print metrics to stdout.

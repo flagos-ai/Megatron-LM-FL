@@ -1227,10 +1227,6 @@ class CompressedSparseAttention(MegatronModule):
             return self._forward_packed(
                 query, key, x, qr, boundary_hidden, boundary_kv, packed_seq_params
             )
-        if self.pg_collection.cp.size() != 1:
-            raise ValueError(
-                "CompressedSparseAttention supports only context-parallel size 1 in the SBHD path."
-            )
         if attention_mask is not None:
             raise ValueError(
                 "CompressedSparseAttention supports only an implicit causal mask in the "

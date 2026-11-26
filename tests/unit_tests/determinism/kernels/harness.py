@@ -1,130 +1,39 @@
 # Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-"""Reference replay helpers used by packed CSA kernel tests."""
 
-import random
+"""Replay harness for operator-level bit-exact determinism tests.
+
+A kernel is deterministic when re-running it on identical inputs yields byte-identical
+outputs (and input gradients, for differentiable kernels). ``assert_replays_bit_exact``
+does exactly that: it materialises one set of inputs, runs the kernel ``replays`` times on
+fresh clones of them, and compares every output tensor and every input gradient against
+the first replay byte for byte (``bytes_equal``: same shape, same dtype, identical bit
+patterns -- signed zeros and NaN payloads must match too). Optional side-stream contention
+perturbs kernel scheduling between replays so ordering-dependent reductions surface as
+mismatches.
+
+Sizing matters more than replay count: a reduction with two contending blocks can be
+"deterministic" by accident. Pick shapes that put many blocks on the same output (see
+``CONTENTION_TOKENS``) -- ``test_ssm_conv1d.py`` documents the measurement behind this.
+"""
+
+from __future__ import annotations
+
+import contextlib
 from typing import Any, Callable, Dict, Optional, Tuple
 
-import numpy as np
 import torch
 
+from tests.unit_tests.determinism.utils import (
+    RacingStreams,
+    capture_rng_state,
+    collect_grads,
+    restore_rng_state,
+    zero_grads,
+)
 
-def capture_rng_state() -> dict:
-    """Snapshot every RNG that the framework consumes during a fwd+bwd pass.
-
-    Mirrors ``RerunStateMachine._save_state`` in
-    ``megatron/core/rerun_state_machine.py``. Also captures Megatron's own
-    ``CudaRNGStatesTracker`` (used for TP-aware dropout), which advances
-    independently of ``torch.cuda``'s RNG when any layer calls
-    ``get_cuda_rng_tracker().fork()``.
-    """
-    from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
-
-    return {
-        "random": random.getstate(),
-        "numpy": np.random.get_state(),
-        "torch_cpu": torch.get_rng_state(),
-        "torch_cuda": torch.cuda.get_rng_state(),
-        "mpu_tracker": get_cuda_rng_tracker().get_states(),
-    }
-
-
-def restore_rng_state(state: dict) -> None:
-    """Inverse of ``capture_rng_state``."""
-    from megatron.core.tensor_parallel.random import get_cuda_rng_tracker
-
-    random.setstate(state["random"])
-    np.random.set_state(state["numpy"])
-    torch.set_rng_state(state["torch_cpu"])
-    torch.cuda.set_rng_state(state["torch_cuda"])
-    if "mpu_tracker" in state:
-        get_cuda_rng_tracker().set_states(state["mpu_tracker"])
-
-
-class RacingStreams:
-    """Run side-stream GEMMs in parallel with the model to perturb scheduling.
-
-    Goal: force the CUDA scheduler to keep making different choices across
-    runs so that any kernel whose bit-output depends on dispatch order
-    surfaces as a bit-exact failure.
-
-    Three things make scheduling vary more than the default "all streams
-    do the same work" pattern:
-
-    * ranks open DIFFERENT numbers of side streams (rank N opens N % 4
-      more streams), so each rank presents different SM pressure → ranks
-      finish model fwd/bwd at different wall-clock times → NCCL
-      collectives race in different orders across runs.
-    * each side stream runs GEMMs of MIXED SIZES (1024 / 2048 / 3072),
-      picked from a per-rank-seeded CPU generator. Mixed sizes create
-      more scheduling decision points than a uniform chain.
-    * half the side streams have HIGHER priority than the default
-      (priority=-1 vs 0). The scheduler must arbitrate priority classes
-      under contention; the arbitration is hardware-state-dependent.
-
-    Notes:
-
-    * Effective only when ``CUDA_DEVICE_MAX_CONNECTIONS > 1``. Under ``=1``
-      (Hopper determinism default) all streams serialise into a single
-      hardware queue and this helper is a no-op. The
-      ``test_bit_exact_under_racing_streams`` test skips on ``=1``.
-    * Side-stream RNG uses a CPU ``torch.Generator`` — does NOT touch the
-      per-device CUDA RNG, so the model's input RNG state stays clean.
-    * Matrix contents are ``torch.ones`` because GEMM scheduling depends
-      on shape/dtype/launch order, not values.
-    """
-
-    # GEMM sizes the stream rotates through. Mixed → adjacent kernels have
-    # different completion latencies → more scheduling decision points.
-    _SIZE_CHOICES = (1024, 2048, 3072)
-    # Rank N opens this-many-extra streams, cycling. Smaller than world size
-    # so within a node neighbouring ranks differ but bounded.
-    _RANK_STREAM_CYCLE = 4
-    # Alternating priorities — half HIGH, half DEFAULT. Scheduler must
-    # arbitrate priority classes under contention.
-    _STREAM_PRIORITIES = (-1, 0)
-    # Per-rank generator seed = _BASE_SEED + rank. CPU generator, not CUDA,
-    # so the model's per-device RNG state is untouched.
-    _BASE_SEED = 0xC0FFEE
-
-    def __init__(self, num_streams: int = 4, num_iters: int = 200):
-        rank = torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
-        self.num_streams = num_streams + (rank % self._RANK_STREAM_CYCLE)
-        self.num_iters = num_iters
-        self._gen = torch.Generator()
-        self._gen.manual_seed(self._BASE_SEED + rank)
-        self.streams: list[torch.cuda.Stream] = []
-        self._noise: list[torch.Tensor] = []
-
-    def __enter__(self):
-        self.streams = [
-            torch.cuda.Stream(priority=self._STREAM_PRIORITIES[i % len(self._STREAM_PRIORITIES)])
-            for i in range(self.num_streams)
-        ]
-        for stream in self.streams:
-            with torch.cuda.stream(stream):
-                # One randint call instead of num_iters calls.
-                size_indices = torch.randint(
-                    0, len(self._SIZE_CHOICES), (self.num_iters,), generator=self._gen
-                ).tolist()
-                # Keep only the last matmul result alive — earlier ones get
-                # GC'd (PyTorch's caching allocator preserves storage while
-                # the in-flight kernel still references it). Otherwise we'd
-                # retain num_iters * num_streams tensors → multi-GB.
-                result = None
-                for idx in size_indices:
-                    sz = self._SIZE_CHOICES[idx]
-                    a = torch.ones(sz, sz, device="cuda", dtype=torch.bfloat16)
-                    b = torch.ones(sz, sz, device="cuda", dtype=torch.bfloat16)
-                    result = a @ b
-                if result is not None:
-                    self._noise.append(result)
-        return self
-
-    def __exit__(self, *args):
-        for stream in self.streams:
-            stream.synchronize()
-        self.streams.clear()
-        self._noise.clear()
+# Shapes that make many CTAs contend on shared outputs. A token count of a few thousand
+# with a hidden size of ~1-4k puts dozens of blocks on every reduction.
+CONTENTION_TOKENS = 4096
 
 
 def _clone_preserving_layout(t: torch.Tensor) -> torch.Tensor:
@@ -329,7 +238,111 @@ def _assert_replay_matches(i, ref_out, ref_grad, out, grad, what) -> None:
         )
 
 
+def count_differing_replays(
+    fn: Callable[..., Any], inputs: Any, *, replays: int = 8, backward: bool = True
+) -> int:
+    """Return how many of ``replays - 1`` re-runs differ from the first in any tensor.
+
+    For *negative controls*: a test that documents a known non-deterministic default path
+    asserts this is ``> 0`` so the paired deterministic assertion is known to be sensitive.
+    Size such controls generously -- hardware can serialise small problems.
+    """
+    ref_out, ref_grad = run_once(fn, inputs, None, backward)
+    differing = 0
+    for _ in range(replays - 1):
+        out, grad = run_once(fn, inputs, None, backward)
+        same = all(bytes_equal(ref_out[k], out[k]) for k in ref_out) and all(
+            bytes_equal(ref_grad[k], grad[k]) for k in ref_grad
+        )
+        differing += not same
+    return differing
+
+
 def seeded(seed: int = 1234) -> None:
     """Seed every RNG the kernels may consume so input construction is repeatable."""
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
+
+
+@contextlib.contextmanager
+def deterministic_algorithms(enabled: bool):
+    """Temporarily set ``torch.use_deterministic_algorithms`` (warn-only), then restore.
+
+    Kernel wrappers select branches on ``torch.are_deterministic_algorithms_enabled()``;
+    tests use this to exercise each branch explicitly instead of inheriting whatever an
+    earlier test left behind.
+    """
+    prev = torch.are_deterministic_algorithms_enabled()
+    prev_warn = torch.is_deterministic_algorithms_warn_only_enabled()
+    torch.use_deterministic_algorithms(enabled, warn_only=True)
+    try:
+        yield
+    finally:
+        torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
+
+
+def _zero_module_grads(module: torch.nn.Module) -> None:
+    zero_grads(module)
+    for p in module.parameters():
+        main_grad = getattr(p, "main_grad", None)
+        if main_grad is not None:
+            main_grad.zero_()
+
+
+def _module_fwd_bwd(module, inputs, grad_output, backward):
+    local = clone_inputs(inputs)
+    result = module(**local) if isinstance(local, dict) else module(*local)
+    outputs = flatten_tensors(result)
+    grads: Dict[str, torch.Tensor] = {}
+    if backward:
+        diff = [(n, t) for n, t in outputs.items() if t.requires_grad and t.is_floating_point()]
+        if not diff:
+            raise AssertionError("module produced no differentiable output")
+        name, tensor = diff[0]
+        g = grad_output if grad_output is not None else torch.ones_like(tensor)
+        tensor.backward(g)
+        grads = collect_grads([module])
+        for n, t in _leaf_inputs(local).items():
+            if t.grad is not None:
+                grads[n] = t.grad.detach().clone()
+    torch.cuda.synchronize()
+    return {k: v.detach().clone() for k, v in outputs.items()}, grads
+
+
+def assert_module_replays_bit_exact(
+    module: torch.nn.Module,
+    inputs: Any,
+    *,
+    replays: int = 3,
+    backward: bool = True,
+    grad_output: Optional[torch.Tensor] = None,
+    contention: bool = False,
+    restore_rng: bool = True,
+    what: str = "module",
+) -> Tuple[Dict[str, torch.Tensor], Dict[str, torch.Tensor]]:
+    """Module-level twin of ``assert_replays_bit_exact``.
+
+    Runs ``module(**inputs)`` (or ``module(*inputs)``) ``replays`` times from identical
+    parameters, RNG state and inputs; backward propagates ``grad_output`` (default: ones)
+    through the first differentiable output. Compares every output tensor, every parameter
+    gradient (``p.grad`` or ``p.main_grad``) and every input gradient bit-for-bit. Grads
+    (including ``main_grad`` buffers) are zeroed between replays; parameters are not
+    updated, so no optimizer state needs resetting.
+    """
+    if replays < 2:
+        raise ValueError("replays must be >= 2")
+    rng = capture_rng_state() if restore_rng else None
+    _zero_module_grads(module)
+    ref_out, ref_grad = _module_fwd_bwd(module, inputs, grad_output, backward)
+    for i in range(1, replays):
+        _zero_module_grads(module)
+        if rng is not None:
+            torch.cuda.synchronize()
+            restore_rng_state(rng)
+        if contention:
+            with RacingStreams():
+                out, grad = _module_fwd_bwd(module, inputs, grad_output, backward)
+        else:
+            out, grad = _module_fwd_bwd(module, inputs, grad_output, backward)
+        _assert_replay_matches(i, ref_out, ref_grad, out, grad, what)
+    return ref_out, ref_grad

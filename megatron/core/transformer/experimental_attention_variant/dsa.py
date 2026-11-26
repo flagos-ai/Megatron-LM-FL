@@ -389,6 +389,7 @@ class DSAIndexerLossLoggingHelper:
             tracker["values"] = grown
         values = tracker["values"]
 
+        ######## FlagScale Begin ########
         if calculate_per_token_loss is not None:
             # Reduce each stage's contributions before PP redistributes them. Packed
             # CSA saves a SUM group even for its mean over the global real tokens.
@@ -416,6 +417,7 @@ class DSAIndexerLossLoggingHelper:
                 torch.distributed.all_reduce(
                     values, group=tracker['avg_group'], op=torch.distributed.ReduceOp.AVG
                 )
+        ######## FlagScale End ########
         torch.distributed.all_reduce(
             values, group=pg_collection.dp, op=torch.distributed.ReduceOp.AVG
         )

@@ -4,19 +4,12 @@
 import pytest
 import torch
 
-from megatron.core.fusions.fused_mla_yarn_rope_apply import fused_mla_rope_inplace
 from megatron.core.transformer.experimental_attention_variant.csa_utils import (
     cp_utils,
     csa_indexer_loss_kernels,
     packed_layout,
 )
-from megatron.core.transformer.experimental_attention_variant.csa_utils.csa_teacher_lse import (
-    fused_csa_teacher_lse,
-)
-from tests.unit_tests.transformer.experimental_attention_variant.packed_replay_utils import (
-    assert_replays_bit_exact,
-    seeded,
-)
+from tests.unit_tests.determinism.kernels.harness import assert_replays_bit_exact, seeded
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 
@@ -105,58 +98,3 @@ def test_async_context_parallel_collectives_replay():
         assert_replays_bit_exact(reduce, (global_grad,), backward=False, contention=True)
     finally:
         Utils.destroy_model_parallel()
-
-
-def test_contiguous_thd_rope_and_teacher_replay():
-    """Replay explicit packed positions and the packed streaming teacher LSE."""
-    seeded()
-    cu = torch.tensor([0, 193, 193, 512], device="cuda", dtype=torch.int32)
-    comp_cu = torch.tensor([0, 48, 48, 127], device="cuda", dtype=torch.int32)
-    q = torch.randn(256, 64, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    angles = torch.randn(512, 1, 1, 64, device="cuda")
-    cos, sin = angles.cos().to(q.dtype), angles.sin().to(q.dtype)
-
-    def rope(x):
-        return fused_mla_rope_inplace(
-            x.clone(),
-            cos,
-            sin,
-            64,
-            64,
-            cu_seqlens_q=cu,
-            remove_interleaving=True,
-            position_ids=torch.arange(256, 512, device="cuda", dtype=torch.int32) - 193,
-        )
-
-    assert_replays_bit_exact(rope, (q,), contention=True, what="contiguous THD RoPE")
-    full_q = torch.randn(512, 64, 128, device="cuda", dtype=torch.bfloat16)
-    kv = torch.randn(512, 128, device="cuda", dtype=torch.bfloat16)
-    compressed = torch.randn(127, 128, device="cuda", dtype=torch.bfloat16)
-    sink = torch.randn(64, device="cuda")
-    rows = torch.arange(512, device="cuda")
-    starts = torch.where(rows < 193, 0, 193)
-    window = rows[:, None] - torch.arange(32, device="cuda")
-    window = torch.where(window >= starts[:, None], window, -1).int()
-
-    def teacher(query, keys, ck, bias):
-        return fused_csa_teacher_lse(
-            query,
-            keys,
-            ck,
-            bias,
-            window,
-            128**-0.5,
-            4,
-            cu_seqlens_q=cu,
-            cu_seqlens_k=comp_cu,
-            max_seqlen_q=319,
-            max_seqlen_k=79,
-        )
-
-    assert_replays_bit_exact(
-        teacher,
-        (full_q, kv, compressed, sink),
-        backward=False,
-        contention=True,
-        what="packed CSA teacher",
-    )

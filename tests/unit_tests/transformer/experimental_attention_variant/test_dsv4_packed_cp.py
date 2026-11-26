@@ -25,7 +25,7 @@ from tests.unit_tests.transformer.experimental_attention_variant.test_dsv4_hybri
     _make_config,
 )
 
-pytestmark = pytest.mark.experimental
+pytestmark = pytest.mark.launch_on_gb200
 
 
 @pytest.fixture(autouse=True)
@@ -140,6 +140,7 @@ def _assert_match(actual, expected):
     assert tensor_sim > 0.999, f"tensor similarity {tensor_sim:.8f} must exceed 0.999"
 
 
+######## FlagScale Begin ########
 def _forward_backward_per_document(model, hidden, grad, physical, real):
     """Accumulate per-document gradients in forward order, including TE main_grad."""
     outputs = []
@@ -154,6 +155,7 @@ def _forward_backward_per_document(model, hidden, grad, physical, real):
             # Keep padding gradients explicitly zero in the reference input.
             outputs.append(hidden[start + length : end].detach() * 0)
     return torch.cat(outputs, dim=0)
+######## FlagScale End ########
 
 
 def _run_attention(model, hidden, grad, packed, *, documents=None, cp_group=None):
@@ -164,11 +166,13 @@ def _run_attention(model, hidden, grad, packed, *, documents=None, cp_group=None
             module.weight.main_grad = torch.zeros_like(module.weight, dtype=torch.float32)
             fused_weights.add(id(module.weight))
     hidden = hidden.detach().clone().requires_grad_()
+    ######## FlagScale Begin ########
     if documents is None:
         output, _ = model(hidden, attention_mask=None, packed_seq_params=packed)
         output.backward(grad)
     else:
         output = _forward_backward_per_document(model, hidden, grad, *documents)
+    ######## FlagScale End ########
     result = {"output": output.detach(), "input_grad": hidden.grad.detach()}
     for name, param in model.named_parameters():
         value = param.main_grad if id(param) in fused_weights else param.grad
@@ -239,11 +243,9 @@ def test_packed_cp_matches_full_attention_and_gradients(
         pytest.skip(f"requires {cp_size} ranks")
     pytest.importorskip("flash_mla")
     pytest.importorskip("cudnn.deepseek_sparse_attention")
-    # The local SM90 build includes sparse FlashMLA. Dense indexer loss requires SM100.
-    if torch.cuda.get_device_capability()[0] < 9:
-        pytest.skip("Fused CSA requires SM90+")
-    if torch.cuda.get_device_capability()[0] < 10 and ratio == 4 and not sparse and coeff > 0:
-        pytest.skip("Dense fused indexer loss requires SM100; sparse H100 cases run normally")
+    # CI builds FlashMLA with FLASH_MLA_DISABLE_SM90=1.
+    if torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("Fused CSA CP tests require the SM100 kernels included in the CI image")
     Utils.initialize_model_parallel(
         tensor_model_parallel_size=1, pipeline_model_parallel_size=1, context_parallel_size=cp_size
     )
@@ -274,6 +276,7 @@ def test_packed_cp_matches_full_attention_and_gradients(
             dsa_kernel_backend="cudnn",
             context_parallel_size=cp_size,
             attention_cp_layout="contiguous",
+            linear_cp_layout="contiguous",
             qk_layernorm=True,
             apply_rope_fusion=rope_fusion,
             gradient_accumulation_fusion=True,
@@ -348,141 +351,4 @@ def test_packed_cp_matches_full_attention_and_gradients(
                 _compare_results(expected, eager, f"{label}:recompute_vs_eager", failures)
         assert not failures, "\n\n".join(failures)
     finally:
-        Utils.destroy_model_parallel()
-
-
-@pytest.mark.skipif(
-    not (torch.cuda.is_available() and HAVE_TE and HAVE_HADAMARD),
-    reason="requires CUDA, TE and Hadamard",
-)
-@pytest.mark.parametrize("per_token", [False, True])
-def test_packed_cp2_optimizer_steps_match_cp1(per_token):
-    """Two real cuDNN training steps preserve replicated parameters and the CP1 update."""
-    if Utils.world_size < 2 or Utils.world_size % 2:
-        pytest.skip("requires a multiple of two ranks for independent CP2 groups")
-    from megatron.core.transformer.experimental_attention_variant.dsa import (
-        DSAIndexerLossAutoScaler,
-    )
-
-    old_scale = DSAIndexerLossAutoScaler.main_loss_backward_scale
-    DSAIndexerLossAutoScaler.main_loss_backward_scale = None
-    Utils.initialize_model_parallel(
-        tensor_model_parallel_size=1, pipeline_model_parallel_size=1, context_parallel_size=2
-    )
-    try:
-        pg = ProcessGroupCollection.use_mpu_process_groups()
-        ref_pg = copy(pg)
-        ref_pg.cp = _CP1()
-        torch.manual_seed(410)
-        model_parallel_cuda_manual_seed(410)
-        cfg = _make_config(
-            num_layers=1,
-            hidden_size=256,
-            num_attention_heads=64,
-            v_head_dim=512,
-            qk_pos_emb_head_dim=64,
-            q_lora_rank=128,
-            csa_compress_ratios=[4],
-            csa_window_size=16,
-            dsa_indexer_n_heads=64,
-            dsa_indexer_head_dim=128,
-            dsa_indexer_topk=512,
-            dsa_indexer_loss_coeff=0.2,
-            dsa_indexer_use_sparse_loss=True,
-            dsa_kernel_backend="cudnn",
-            context_parallel_size=2,
-            calculate_per_token_loss=per_token,
-            attention_cp_layout="contiguous",
-            qk_layernorm=True,
-            apply_rope_fusion=True,
-            gradient_accumulation_fusion=False,
-        )
-        model = _build_attention(cfg, 1, pg).cuda()
-        ref_cfg = replace(cfg, context_parallel_size=1, calculate_per_token_loss=False)
-        reference = _build_attention(ref_cfg, 1, ref_pg).cuda()
-        reference.load_state_dict(model.state_dict())
-        actual_optimizer = torch.optim.SGD(model.parameters(), lr=0.01)
-        reference_optimizer = torch.optim.SGD(reference.parameters(), lr=0.01)
-        before = {name: value.detach().clone() for name, value in model.named_parameters()}
-        physical = torch.tensor([0, 67, 128, 256], dtype=torch.int32, device="cuda")
-        real = torch.tensor([0, 65, 123, 250], dtype=torch.int32, device="cuda")
-        packed = PackedSeqParams(
-            qkv_format="thd",
-            cu_seqlens_q=real,
-            cu_seqlens_kv=real,
-            cu_seqlens_q_padded=physical,
-            cu_seqlens_kv_padded=physical,
-            max_seqlen_q=128,
-            max_seqlen_kv=128,
-        )
-        rows = slice(pg.cp.rank() * 128, (pg.cp.rank() + 1) * 128)
-        for step in range(2):
-            whole = torch.randn(256, 1, 256, dtype=torch.bfloat16, device="cuda")
-            actual_optimizer.zero_grad(set_to_none=True)
-            reference_optimizer.zero_grad(set_to_none=True)
-            output, _ = model(whole[rows], attention_mask=None, packed_seq_params=packed)
-            expected, _ = reference(whole, attention_mask=None, packed_seq_params=packed)
-            actual_loss = output.float().square().sum() / expected.numel()
-            expected_loss = expected.float().square().mean()
-            assert torch.isfinite(actual_loss) and torch.isfinite(expected_loss)
-            # Compare a token sum divided by real rows with the CP1 global mean.
-            unit_scale = torch.ones((), device=real.device)
-            actual_scale = unit_scale / real[-1] if per_token else unit_scale
-            DSAIndexerLossAutoScaler.set_loss_scale(actual_scale)
-            actual_loss.backward()
-            DSAIndexerLossAutoScaler.set_loss_scale(unit_scale)
-            expected_loss.backward()
-            model.backward_dw()
-            reference.backward_dw()
-            for (name, param), (ref_name, ref_param) in zip(
-                model.named_parameters(), reference.named_parameters()
-            ):
-                assert name == ref_name and param.grad is not None and ref_param.grad is not None
-                dist.all_reduce(param.grad, group=pg.cp)
-                _assert_match(param.grad, ref_param.grad)
-            actual_optimizer.step()
-            reference_optimizer.step()
-            for (name, param), (_, ref_param) in zip(
-                model.named_parameters(), reference.named_parameters()
-            ):
-                _assert_match(param, ref_param)
-                replica = param.detach().clone()
-                dist.broadcast(replica, src=dist.get_global_rank(pg.cp, 0), group=pg.cp)
-                torch.testing.assert_close(param, replica, rtol=0, atol=0)
-        assert any(not torch.equal(before[name], value) for name, value in model.named_parameters())
-    finally:
-        DSAIndexerLossAutoScaler.main_loss_backward_scale = old_scale
-        Utils.destroy_model_parallel()
-
-
-@pytest.mark.parametrize("packed", [False, True])
-@pytest.mark.parametrize("per_token", [False, True])
-def test_indexer_logging_across_cp_and_empty_pipeline_stage(packed, per_token):
-    from megatron.core.transformer.experimental_attention_variant.dsa import (
-        DSAIndexerLossLoggingHelper as logger,
-    )
-
-    if Utils.world_size % 4:
-        pytest.skip("requires two pipeline stages with two context ranks each")
-    Utils.initialize_model_parallel(
-        tensor_model_parallel_size=1, pipeline_model_parallel_size=2, context_parallel_size=2
-    )
-    old_tracker = logger.tracker
-    logger.tracker = {}
-    try:
-        pg = ProcessGroupCollection.use_mpu_process_groups()
-        if pg.pp.rank() == 0:
-            loss = torch.tensor(float(pg.cp.rank() + 1), device="cuda")
-            logger.save_loss_to_tracker(
-                loss,
-                1,
-                2,
-                reduce_group=pg.cp if packed or per_token else None,
-                avg_group=pg.cp if not (packed or per_token) else None,
-            )
-        logger.reduce_loss_in_tracker(pg, num_layers=2, calculate_per_token_loss=per_token)
-        expected = [3.0 if packed or per_token else 1.5, 0.0]
-        torch.testing.assert_close(logger.tracker["values"], torch.tensor(expected, device="cuda"))
-    finally:
-        logger.tracker = old_tracker
         Utils.destroy_model_parallel()

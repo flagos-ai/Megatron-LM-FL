@@ -348,6 +348,7 @@ def forward_step_calc_loss(
         if config.calculate_per_token_loss:
             DSAIndexerLossAutoScaler.set_loss_scale(loss_scale)
         else:
+            ######## FlagScale Begin ########
             # Packed CSA normalizes by global real tokens; DSA uses a local mean.
             cp_scale = (
                 (cp_group_size or 1)
@@ -355,6 +356,7 @@ def forward_step_calc_loss(
                 else 1
             )
             DSAIndexerLossAutoScaler.set_loss_scale(loss_scale * cp_scale / num_microbatches)
+            ######## FlagScale End ########
 
     return output_tensor, num_tokens
 
