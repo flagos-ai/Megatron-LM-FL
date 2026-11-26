@@ -29,6 +29,31 @@ class TestReduceScatterWithFP32Accumulation:
         Utils.destroy_model_parallel()
 
     @pytest.mark.parametrize("async_op", [True, False])
+    @pytest.mark.parametrize("strided_output", [True, False])
+    def test_fp32_output_preserves_precision_and_storage(self, async_op, strided_output):
+        # The FP32 destination must preserve low bits that a BF16 sum would
+        # lose, and it must not be replaced or resized when used as an out.
+        rank, size = Utils.rank, Utils.world_size
+        generator = torch.Generator(device='cuda').manual_seed(724 + rank)
+        source = torch.randn(size * 257, generator=generator, device='cuda').bfloat16()
+        reference = source.float()
+        torch.distributed.all_reduce(reference)
+        expected = shard_buffer(reference, size)[rank]
+        storage = torch.full((514 if strided_output else 257,), float('nan'), device='cuda')
+        output = storage[::2] if strided_output else storage
+        original_ptr, original_stride = output.data_ptr(), output.stride()
+        handle = reduce_scatter_with_fp32_accumulation(
+            output, source, op=torch.distributed.ReduceOp.SUM, group=None, async_op=async_op
+        )
+        if async_op:
+            handle.wait()
+        torch.testing.assert_close(output, expected, atol=1e-6, rtol=1e-6)
+        assert output.shape == expected.shape
+        assert output.data_ptr() == original_ptr and output.stride() == original_stride
+        if strided_output:
+            assert torch.isnan(storage[1::2]).all()
+
+    @pytest.mark.parametrize("async_op", [True, False])
     @pytest.mark.parametrize("baseline_reduce_scatter_in_fp32", [True, False])
     def test_reduce_scatter_with_fp32_accumulation(
         self, async_op: bool, baseline_reduce_scatter_in_fp32: bool

@@ -1275,7 +1275,10 @@ class RouterGatingLinearFunction(torch.autograd.Function):
         inp = inp.view(-1, inp_shape[-1])
 
         if te_general_gemm is not None and router_dtype != torch.float64:
-            output = te_general_gemm(weight, inp, router_dtype, layout="TN", bias=bias)
+            output = te_general_gemm(
+                weight.to(router_dtype), inp.to(router_dtype), router_dtype,
+                layout="TN", bias=bias.to(router_dtype) if bias is not None else None,
+            )
             output = output[0]
         elif bias is None:
             output = torch.mm(inp.to(router_dtype), weight.to(router_dtype).t())

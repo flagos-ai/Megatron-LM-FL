@@ -464,6 +464,32 @@ def _update_router_expert_bias(
         expert_bias.copy_(updated_expert_bias)
 
 
+def get_tensor_parallel_gradient_reduction(name, param, config):
+    """Reduction required for a parameter replicated inside the TP domain.
+
+    Shared by resident and offloaded gradient buffers; storage placement must
+    not change Megatron's SP, QK-layernorm, or TP-average semantics.
+    """
+    if getattr(param, "average_gradients_across_tp_domain", False):
+        return "avg"
+    if (config.sequence_parallel and getattr(param, "sequence_parallel", False)) or (
+        config.qk_layernorm and ("q_layernorm" in name or "k_layernorm" in name)
+    ):
+        return "sum"
+    return None
+
+
+def get_global_num_tokens(num_tokens, pp_group, dp_cp_group):
+    """Broadcast the last stage's token count, then sum over DP/CP replicas."""
+    assert not isinstance(pp_group, list)
+    tokens = num_tokens.detach().clone()
+    if pp_group is not None:
+        torch.distributed.broadcast(tokens, src=get_pp_last_rank(pp_group), group=pp_group)
+    if dp_cp_group is not None:
+        torch.distributed.all_reduce(tokens, group=dp_cp_group)
+    return tokens
+
+
 def _allreduce_non_tensor_model_parallel_grads(
     model: List[torch.nn.Module],
     config: TransformerConfig,
@@ -488,7 +514,8 @@ def _allreduce_non_tensor_model_parallel_grads(
         for name, param in get_attr_wrapped_model(model_chunk, 'named_parameters')():
             if param.requires_grad:
                 # Check if this param needs average reduction (average_gradients_across_tp_domain)
-                if getattr(param, "average_gradients_across_tp_domain", False):
+                reduction = get_tensor_parallel_gradient_reduction(name, param, config)
+                if reduction == "avg":
                     grad_attr = _get_main_grad_attr(param)
                     grad = getattr(param, grad_attr)
                     if grad is None:
@@ -500,9 +527,7 @@ def _allreduce_non_tensor_model_parallel_grads(
                         grad = _unshard_if_dtensor(grad)
                         grads_avg.append(grad.data)
                 # Check if this param needs sum reduction (sequence parallel or qk_layernorm)
-                elif (config.sequence_parallel and getattr(param, "sequence_parallel", False)) or (
-                    config.qk_layernorm and ("q_layernorm" in name or "k_layernorm" in name)
-                ):
+                elif reduction == "sum":
                     grad_attr = _get_main_grad_attr(param)
                     grad = getattr(param, grad_attr)
                     if grad is None:

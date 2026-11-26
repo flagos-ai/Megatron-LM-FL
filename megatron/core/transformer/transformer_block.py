@@ -976,6 +976,12 @@ class TransformerBlock(GraphableMegatronModule, MegatronModule):
             hidden_states = make_viewless_tensor(
                 inp=hidden_states, requires_grad=True, keep_graph=True
             )
+        elif torch.is_tensor(hidden_states) and hidden_states._base is not None:
+            # Layer backward hooks (SlideFormer) wrap the last layer output in an aliasing
+            # autograd node; pipeline stage outputs must not be views (deallocate_output_tensor).
+            hidden_states = make_viewless_tensor(
+                inp=hidden_states, requires_grad=True, keep_graph=True
+            )
 
         # If this TransformerBlock is empty, input and output hidden states will be the same node
         # on the computational graph and will lead to unexpected errors in pipeline schedules.

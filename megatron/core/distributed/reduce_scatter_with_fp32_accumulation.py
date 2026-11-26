@@ -29,6 +29,23 @@ class _ReduceScatterWithFP32AccumulationWorkHandle:
         if self.all_to_all_handle is not None:
             self.all_to_all_handle.wait()
 
+        if (
+            self.output_tensor.dtype == torch.float32
+            and self.output_tensor.ndim == 1
+            and self.output_tensor.numel() * self.world_size
+            == self.all_to_all_output_tensor.numel()
+        ):
+            # FP32 consumers (including CPU-offloaded optimizer shards) need no
+            # downcast. Accumulate directly into their destination, avoiding a
+            # shard-sized temporary and a second device-to-device copy.
+            torch.sum(
+                self.all_to_all_output_tensor.view((self.world_size, -1)),
+                dim=0,
+                dtype=torch.float32,
+                out=self.output_tensor,
+            )
+            return
+
         # Accumulate into a fp32 sum.
         output_tensor_in_fp32 = torch.sum(
             self.all_to_all_output_tensor.view((self.world_size, -1)), dim=0, dtype=torch.float32
