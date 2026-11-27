@@ -29,11 +29,11 @@ MATRIX_SPEC.loader.exec_module(MATRIX)
 class UnitGroupTests(unittest.TestCase):
     evidence_command = (
         'mkdir -p "$CI_JUNIT_DIRECTORY"\n'
-        'for ((rank=0; rank<${CI_NPROC_PER_NODE:-1}; rank++)); do\n'
-        '\"$TEST_PYTHON_BIN\" -m pytest -c /dev/null -p no:cacheprovider '
+        "for ((rank=0; rank<${CI_NPROC_PER_NODE:-1}; rank++)); do\n"
+        '"$TEST_PYTHON_BIN" -m pytest -c /dev/null -p no:cacheprovider '
         '"$GITHUB_WORKSPACE/test_success.py" '
         '--junitxml="$CI_JUNIT_DIRECTORY/normal-$rank.xml" > /dev/null\n'
-        'done\n'
+        "done\n"
     )
 
     def record_evidence(self, env):
@@ -307,7 +307,7 @@ class UnitGroupTests(unittest.TestCase):
         for changes, content in (
             ({}, None),
             ({}, "invalid JSON"),
-            ({}, '[]'),
+            ({}, "[]"),
             ({}, original.replace('"exit_code": 0', '"exit_code": false')),
             ({}, original.replace('"schema_version": 1', '"schema_version": 0')),
             ({"GITHUB_RUN_ID": "456"}, original),
@@ -512,8 +512,8 @@ class UnitGroupTests(unittest.TestCase):
             '  echo partial > "$CI_COVERAGE_DIRECTORY/partial"\n'
             '  mkdir -p "$CI_JUNIT_DIRECTORY"\n'
             '  echo \'<testsuite><testcase><failure message="ReadTimeout"/></testcase></testsuite>\' > "$CI_JUNIT_DIRECTORY/normal-0.xml"\n'
-            '  echo ReadTimeout; exit 1\n'
-            'fi\n'
+            "  echo ReadTimeout; exit 1\n"
+            "fi\n"
             'test ! -e "$CI_COVERAGE_DIRECTORY/partial"\n'
             'echo final > "$CI_COVERAGE_DIRECTORY/final"\n' + self.evidence_command
         )
@@ -656,7 +656,23 @@ class UnitWorkflowTests(unittest.TestCase):
             with self.subTest(platform=path.stem):
                 platforms.append(path.stem)
                 config = yaml.safe_load(path.read_text())
-                groups = config["test_matrix"]["unit"]["groups"]
+                unit = config["test_matrix"]["unit"]
+                # Scope lives in the catalog; a platform only opts out.
+                self.assertNotIn("groups", unit)
+                resolved = subprocess.run(
+                    [
+                        sys.executable,
+                        str(ROOT / ".github/scripts/ci/resolve_unit_groups.py"),
+                        "--platform-config",
+                        str(path),
+                    ],
+                    cwd=ROOT,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                )
+                self.assertEqual(resolved.returncode, 0, resolved.stderr)
+                groups = json.loads(resolved.stdout)
                 self.assertGreater(len(groups), 1)
                 names = [group["name"] for group in groups]
                 self.assertEqual(len(names), len(set(names)))
@@ -672,6 +688,25 @@ class UnitWorkflowTests(unittest.TestCase):
                 self.assertTrue(job["with"].get("run_unit_tests", True))
                 self.assertIn("  unit_group)", (ROOT / config["setup_script"]).read_text())
         self.assertTrue(platforms)
+
+    def test_functional_cases_and_goldens_exist(self):
+        """The functional matrix must point at prepared cases and goldens."""
+        for path in sorted((ROOT / ".github/configs").glob("*.yml")):
+            if path.stem in MATRIX._NON_PLATFORM_STEMS:
+                continue
+            config = yaml.safe_load(path.read_text())
+            for entry in config["test_matrix"]["functional"]["train"]:
+                case = (
+                    ROOT / "tests/functional_tests/test_cases" / entry["model"] / entry["test_case"]
+                )
+                golden = (
+                    case
+                    / f"golden_values_{entry['golden_environment']}_{entry['golden_platform']}.json"
+                )
+                with self.subTest(platform=path.stem, case=entry["test_case"]):
+                    self.assertTrue(case.is_dir(), f"missing case directory: {case}")
+                    self.assertTrue((case / "model_config.yaml").is_file())
+                    self.assertTrue(golden.is_file(), f"missing golden values: {golden}")
 
     def test_one_job_prepares_once_and_calls_existing_group_runner(self):
         workflow = yaml.safe_load((ROOT / ".github/workflows/unit_tests_common.yml").read_text())
@@ -796,7 +831,7 @@ class UnitWorkflowTests(unittest.TestCase):
             self.assertNotIn("pip", hook)
             self.assertNotIn("setup_unit_environment", hook)
         musa = (ROOT / ".github/scripts/set_env_musa.sh").read_text()
-        self.assertIn("${CI_TEST_GROUP:-}\" = __all__", musa)
+        self.assertIn('${CI_TEST_GROUP:-}" = __all__', musa)
 
 
 if __name__ == "__main__":

@@ -41,19 +41,22 @@ python .github/scripts/ci/validate_flagcicd_contract.py
 python .github/scripts/ci/validate_unit_group_catalog.py
 ```
 
-The logical catalog defines logical groups, their source and
-test paths, dependencies, status (`active`, `planned`, or
-`unsupported`), and the groups required by each level. Platform configs remain
-authoritative: each declares the execution groups it runs and must declare every
-other active group in `unsupported_groups` with a reason. A platform may also
-declare an active group unsupported when its execution group exists but does not
-collect every test path of that group; the validator rejects a declaration only
-when the execution group already covers all of them. A group may set an
-`execution_group` alias (for example, `plugin` executes as `core`); the alias
-must target an existing active catalog group, and a required level is checked
-against that effective execution group. Catalog path ownership must be
-unambiguous: the validator fails when a tracked path matches more than one
-logical group.
+The logical catalog defines logical groups, their source and test paths,
+dependencies, status (`active`, `planned`, or `unsupported`), and the groups
+required by each level. It is the only place that declares scope, in two
+separate fields: `paths` trigger a group (implementation code) and `test_targets`
+are what the group runs (test code). A platform config lists no groups at all —
+every active group runs on every platform unless the platform declares it in
+`unsupported_groups` with a reason, so onboarding a group is a one-file change.
+Each execution group runs the union of its logical groups' `test_targets`, minus
+the logical groups the platform opted out of, in catalog order. A group may set
+an `execution_group` alias (for example, `plugin` executes as `core`); the alias
+must target an existing active catalog group, and opting out of the target also
+stops the alias. `resolve_unit_groups.py` turns the contract into the pytest
+paths passed to `run_unit_groups.py`, including the plan's `planned-<group>`
+temporary groups. The validator fails when a tracked path matches more than one
+logical group, when a group mixes test code into `paths` or implementation code
+into `test_targets`, and when every platform opts out of an active group.
 `generate_test_plan.py` combines the catalog with the platform router and each
 selected platform's config, writes `unit-test-plan.json` and an Actions summary,
 and emits the per-platform execution matrix consumed by `ci.yml`.

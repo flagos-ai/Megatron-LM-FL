@@ -69,7 +69,6 @@ test_groups:
   description: Model-parallel configuration, process groups, and root unit tests.
   status: active
   paths:
-  - tests/unit_tests/test_*.py
   - megatron/core/__init__.py
   - megatron/core/_rank_utils.py
   - megatron/core/_slurm_utils.py
@@ -101,37 +100,42 @@ test_groups:
   - megatron/core/timers.py
   - megatron/core/typed_torch.py
   - megatron/core/utils.py
+  test_targets:
+  - tests/unit_tests/test_*.py
   depends_on: []
 - name: models
   description: Model construction, configuration, and forward paths.
   status: active
   paths:
   - megatron/core/models/
+  test_targets:
   - tests/unit_tests/models/
   depends_on:
   - core
-- name: transformer
-  description: Transformer blocks, attention, and layer specifications.
-  status: active
-  paths:
-  - megatron/core/transformer/
-  - tests/unit_tests/transformer/
-  depends_on:
-  - models
 - name: distributed
   description: Distributed data parallel, gradient sync, and communication state.
   status: active
   paths:
   - megatron/core/distributed/
+  test_targets:
   - tests/unit_tests/distributed/
   depends_on:
   - pipeline_parallel
   - tensor_parallel
+- name: dist_checkpointing
+  description: Distributed checkpoint serialization and loading.
+  status: active
+  paths:
+  - megatron/core/dist_checkpointing/
+  test_targets:
+  - tests/unit_tests/dist_checkpointing/
+  depends_on: []
 - name: tensor_parallel
   description: Tensor-parallel mappings and parameter sharding.
   status: active
   paths:
   - megatron/core/tensor_parallel/
+  test_targets:
   - tests/unit_tests/tensor_parallel/
   depends_on:
   - models
@@ -140,22 +144,17 @@ test_groups:
   status: active
   paths:
   - megatron/core/pipeline_parallel/
+  test_targets:
   - tests/unit_tests/pipeline_parallel/
   depends_on:
   - models
-- name: dist_checkpointing
-  description: Distributed checkpoint serialization and loading.
-  status: active
-  paths:
-  - megatron/core/dist_checkpointing/
-  - tests/unit_tests/dist_checkpointing/
-  depends_on: []
 - name: data
   description: Dataset construction and data loading.
   status: active
   paths:
   - megatron/core/datasets/
   - megatron/training/datasets/
+  test_targets:
   - tests/unit_tests/data/
   depends_on:
   - core
@@ -164,9 +163,19 @@ test_groups:
   status: active
   paths:
   - megatron/core/fusions/
+  test_targets:
   - tests/unit_tests/fusions/
   depends_on:
   - transformer
+  - models
+- name: transformer
+  description: Transformer blocks, attention, and layer specifications.
+  status: active
+  paths:
+  - megatron/core/transformer/
+  test_targets:
+  - tests/unit_tests/transformer/
+  depends_on:
   - models
 - name: others
   description: Post-training, tokenizer, and utility tests grouped by the platform
@@ -177,6 +186,7 @@ test_groups:
   - megatron/core/tokenizers/
   - megatron/post_training/
   - megatron/training/utils/
+  test_targets:
   - tests/unit_tests/post_training/
   - tests/unit_tests/tokenizers/
   - tests/unit_tests/utils/
@@ -187,6 +197,7 @@ test_groups:
   status: active
   paths:
   - megatron/core/optimizer/
+  test_targets:
   - tests/unit_tests/optimizer/
   depends_on:
   - core
@@ -198,6 +209,7 @@ test_groups:
   - examples/inference/
   - megatron/core/inference/
   - megatron/inference/
+  test_targets:
   - tests/unit_tests/inference/
   depends_on:
   - models
@@ -209,6 +221,7 @@ test_groups:
   - train_rl.py
   - examples/rl/
   - megatron/rl/
+  test_targets:
   - tests/unit_tests/rl/
   depends_on:
   - core
@@ -233,6 +246,7 @@ test_groups:
   - megatron/training/*.py
   - megatron/training/config/
   - megatron/training/models/
+  test_targets:
   - tests/unit_tests/training/
   depends_on:
   - core
@@ -243,6 +257,7 @@ test_groups:
   reason: No platform declares an SSM execution group yet.
   paths:
   - megatron/core/ssm/
+  test_targets:
   - tests/unit_tests/ssm/
   depends_on:
   - models
@@ -253,6 +268,7 @@ test_groups:
   reason: No platform declares a resharding execution group yet.
   paths:
   - megatron/core/resharding/
+  test_targets:
   - tests/unit_tests/resharding/
   depends_on:
   - dist_checkpointing
@@ -264,6 +280,7 @@ test_groups:
   paths:
   - examples/export/
   - megatron/core/export/
+  test_targets:
   - tests/unit_tests/export/
   depends_on:
   - models
@@ -272,6 +289,7 @@ test_groups:
   status: active
   paths:
   - megatron/core/extensions/
+  test_targets:
   - tests/unit_tests/extension/
   depends_on:
   - core
@@ -279,7 +297,8 @@ test_groups:
 - name: a2a_overlap
   description: All-to-all overlap tests.
   status: active
-  paths:
+  paths: []
+  test_targets:
   - tests/unit_tests/a2a_overlap/
   depends_on:
   - distributed
@@ -289,6 +308,7 @@ test_groups:
   reason: No platform declares an elastic-training execution group yet.
   paths:
   - megatron/elastification/
+  test_targets:
   - tests/unit_tests/elastification/
   depends_on:
   - core
@@ -298,6 +318,7 @@ test_groups:
   execution_group: core
   paths:
   - megatron/plugin/
+  test_targets:
   - megatron/plugin/tests/
   depends_on:
   - core
@@ -306,7 +327,8 @@ test_groups:
     tree.
   status: planned
   reason: No SM90+ CI runner is available; onboard this group when Hopper-class hardware is provided.
-  paths:
+  paths: []
+  test_targets:
   - tests/unit_tests/plugin/
   depends_on:
   - core
@@ -319,7 +341,8 @@ test_groups:
   stages:
   - nightly
   - manual
-  paths:
+  paths: []
+  test_targets:
   - tests/unit_tests/flagcicd_cov/
   depends_on:
   - core
@@ -327,7 +350,8 @@ test_groups:
   description: Repository tooling tests.
   status: planned
   reason: No platform declares a CPU-only tools execution group yet.
-  paths:
+  paths: []
+  test_targets:
   - tests/unit_tests/tools/
   depends_on:
   - core

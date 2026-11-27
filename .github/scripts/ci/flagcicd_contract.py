@@ -44,6 +44,11 @@ def _check_keys(value: dict[str, Any], allowed: set[str], context: str) -> None:
         )
 
 
+def _is_test_path(path: str) -> bool:
+    """Return whether a path is test code rather than implementation code."""
+    return path.startswith("tests/") or "/tests/" in path
+
+
 def load_project(path: pathlib.Path) -> tuple[dict[str, Any], str]:
     """Load the project contract and perform schema-level validation."""
     project, digest = _read(path)
@@ -102,6 +107,7 @@ def load_project(path: pathlib.Path) -> tuple[dict[str, Any], str]:
                 "status",
                 "reason",
                 "paths",
+                "test_targets",
                 "depends_on",
                 "execution_group",
                 "stages",
@@ -117,8 +123,24 @@ def load_project(path: pathlib.Path) -> tuple[dict[str, Any], str]:
             raise ContractError(f"invalid status for test group {name}: {status!r}")
         if status != "active" and not str(group.get("reason", "")).strip():
             raise ContractError(f"test group {name} needs a reason for status {status}")
-        if not isinstance(group.get("paths"), list) or not group["paths"]:
-            raise ContractError(f"test group {name} must declare paths")
+        if not isinstance(group.get("paths"), list):
+            raise ContractError(f"test group {name} paths must be a list")
+        if not isinstance(group.get("test_targets"), list) or not group["test_targets"]:
+            raise ContractError(f"test group {name} must declare test_targets")
+        for path in [*group["paths"], *group["test_targets"]]:
+            if not isinstance(path, str) or not path.strip():
+                raise ContractError(f"test group {name} has an invalid path entry")
+        # Paths trigger the group; test_targets are what the group runs. Keeping
+        # them apart stops a change to the trigger scope from changing the
+        # executed scope (and the other way round).
+        for path in group["paths"]:
+            if _is_test_path(path):
+                raise ContractError(
+                    f"test group {name} path {path!r} is test code; " "declare it in test_targets"
+                )
+        for path in group["test_targets"]:
+            if not _is_test_path(path):
+                raise ContractError(f"test group {name} test target {path!r} is not test code")
         if not isinstance(group.get("depends_on", []), list):
             raise ContractError(f"test group {name} depends_on must be a list")
         if "stages" in group:

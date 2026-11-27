@@ -15,8 +15,10 @@ import unittest
 import flagcicd_contract
 import generate_matrix
 import generate_test_plan as planner
+import resolve_unit_groups as resolver
 import unit_group_routing as routing
 import validate_unit_group_catalog as validator
+import yaml
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 CONFIGS = ROOT / ".github/configs"
@@ -34,7 +36,13 @@ def write_project_fixture(path: pathlib.Path, catalog: dict) -> None:
     project["levels"] = {"L1": {"required_groups": []}}
     project["stages"] = {"pr": {"selection": "affected", "default_level": "L1"}}
     project["gate_policy"] = {"pr": project["gate_policy"]["pr"]}
-    project["test_groups"] = [dict(name=name, **entry) for name, entry in catalog["groups"].items()]
+    project["test_groups"] = []
+    for name, entry in catalog["groups"].items():
+        entry = dict(entry)
+        # Routing fixtures focus on trigger paths; give every group a test
+        # target so the contract stays valid.
+        entry.setdefault("test_targets", [f"tests/unit_tests/{name}/"])
+        project["test_groups"].append(dict(name=name, **entry))
     path.write_text(json.dumps(project))
 
 
@@ -115,7 +123,7 @@ class CatalogTests(unittest.TestCase):
 
     def test_every_platform_group_exists_in_the_catalog(self):
         for name, platform in self.platforms.items():
-            for group_name in platform.groups:
+            for group_name in routing.execution_groups(self.catalog, platform):
                 with self.subTest(platform=name, group=group_name):
                     self.assertIn(group_name, self.catalog.groups)
 
@@ -124,7 +132,7 @@ class CatalogTests(unittest.TestCase):
             effective = self.catalog.groups[group_name].execution_group or group_name
             for name, platform in self.platforms.items():
                 with self.subTest(platform=name, group=group_name):
-                    self.assertIn(effective, platform.groups)
+                    self.assertIn(effective, routing.execution_groups(self.catalog, platform))
 
     def test_dependency_graph_is_acyclic(self):
         errors = [error for error in self.catalog.validate(ROOT) if "cycle" in error]
@@ -162,10 +170,12 @@ class CatalogTests(unittest.TestCase):
         for name, group in self.catalog.groups.items():
             if group.status != "active":
                 continue
-            effective = group.execution_group or name
             with self.subTest(group=name):
                 self.assertTrue(
-                    any(effective in platform.groups for platform in self.platforms.values())
+                    any(
+                        name not in platform.unsupported_groups
+                        for platform in self.platforms.values()
+                    )
                 )
 
     def test_planned_groups_are_not_executable(self):
@@ -176,18 +186,27 @@ class CatalogTests(unittest.TestCase):
             with self.subTest(group=name):
                 self.assertTrue(group.reason)
                 self.assertFalse(
-                    any(effective in platform.groups for platform in self.platforms.values())
+                    any(
+                        effective in routing.execution_groups(self.catalog, platform)
+                        for platform in self.platforms.values()
+                    )
                 )
 
-    def test_every_active_group_is_mapped_or_declared_unsupported(self):
+    def test_test_targets_are_executed_exactly_unless_unsupported(self):
         for name, group in self.catalog.groups.items():
             if group.status != "active":
                 continue
             effective = group.execution_group or name
             for platform_name, platform in self.platforms.items():
                 with self.subTest(group=name, platform=platform_name):
-                    self.assertTrue(
-                        effective in platform.groups or name in platform.unsupported_groups
+                    executed = " ".join(routing.execution_paths(self.catalog, platform, effective))
+                    covered = all(
+                        routing.execution_covers(executed, path) for path in group.test_targets
+                    )
+                    self.assertEqual(
+                        covered,
+                        name not in platform.unsupported_groups,
+                        f"{name} on {platform_name} must run exactly when it is not unsupported",
                     )
 
     def test_platform_unsupported_groups_are_valid(self):
@@ -198,19 +217,16 @@ class CatalogTests(unittest.TestCase):
                 with self.subTest(platform=platform_name, group=name):
                     self.assertTrue(reason)
                     self.assertIn(group.status, {"active", "planned"})
-                    if effective in platform.groups:
-                        executed = platform.groups[effective]["path"]
-                        test_paths = [
-                            path
-                            for path in group.paths
-                            if path.startswith("tests/") or "/tests/" in path
-                        ]
-                        self.assertTrue(test_paths)
-                        self.assertFalse(
-                            all(routing.execution_covers(executed, path) for path in test_paths),
-                            "an unsupported declaration must cover at least one "
-                            "unexecuted test path",
-                        )
+                    if group.status != "active":
+                        continue
+                    executed = " ".join(routing.execution_paths(self.catalog, platform, effective))
+                    self.assertFalse(
+                        all(
+                            routing.execution_covers(executed, path) for path in group.test_targets
+                        ),
+                        "an unsupported declaration must cover at least one "
+                        "unexecuted test target",
+                    )
 
     def test_validator_accepts_the_catalog_and_platforms(self):
         self.assertEqual(
@@ -228,17 +244,18 @@ class CatalogTests(unittest.TestCase):
             [],
         )
 
-    def test_validator_rejects_fully_covered_unsupported_declaration(self):
-        platform = dataclasses.replace(
-            self.platforms["cuda"], unsupported_groups={"models": "temporarily disabled"}
-        )
-        errors = validator.collect_errors(
-            ROOT, CONFIGS, self.catalog, {**self.platforms, "cuda": platform}, "L1"
-        )
+    def test_validator_rejects_group_opted_out_everywhere(self):
+        platforms = {
+            name: dataclasses.replace(
+                platform,
+                unsupported_groups={**platform.unsupported_groups, "models": "not validated"},
+            )
+            for name, platform in self.platforms.items()
+        }
+        errors = validator.collect_errors(ROOT, CONFIGS, self.catalog, platforms, "L1")
         self.assertTrue(
             any(
-                "unsupported group 'models'" in error and "already covers every test path" in error
-                for error in errors
+                "Active group 'models' is not executed by any platform" in error for error in errors
             ),
             errors,
         )
@@ -255,22 +272,15 @@ class CatalogTests(unittest.TestCase):
             errors,
         )
 
-    def test_validator_rejects_execution_group_narrowed_to_one_file(self):
-        platform = self.platforms["cuda"]
-        groups = dict(platform.groups)
-        groups["models"] = {**groups["models"], "path": "tests/unit_tests/models/test_gpt_model.py"}
-        narrowed = dataclasses.replace(platform, groups=groups)
-        errors = validator.collect_errors(
-            ROOT, CONFIGS, self.catalog, {**self.platforms, "cuda": narrowed}, "L1"
-        )
-        self.assertTrue(
-            any(
-                "Active group 'models' test path 'tests/unit_tests/models/' "
-                "is not executed by platform cuda" in error
-                for error in errors
-            ),
-            errors,
-        )
+    def test_platform_config_rejects_group_list(self):
+        source = yaml.safe_load((CONFIGS / "cuda.yml").read_text(encoding="utf-8"))
+        source["test_matrix"]["unit"]["groups"] = [{"name": "core"}]
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "cuda.yml"
+            path.write_text(yaml.safe_dump(source), encoding="utf-8")
+            with self.assertRaises(routing.CatalogError) as raised:
+                routing.load_platform(path)
+        self.assertIn("no longer supported", str(raised.exception))
 
     def test_validator_rejects_overlapping_catalog_paths(self):
         groups = dict(self.catalog.groups)
@@ -295,10 +305,10 @@ class CatalogTests(unittest.TestCase):
         self.assertEqual(validator.collect_errors(ROOT, CONFIGS, catalog, platforms, "alias"), [])
 
     def test_validator_rejects_required_alias_without_execution_group(self):
-        platform = self.platforms["cuda"]
-        groups = dict(platform.groups)
-        groups.pop("core", None)
-        missing = dataclasses.replace(platform, groups=groups)
+        missing = dataclasses.replace(
+            self.platforms["cuda"],
+            unsupported_groups={"core": "core is unavailable on this platform"},
+        )
         levels = dict(self.catalog.levels)
         levels["alias"] = routing.Level(
             name="alias", description="alias test", required_groups=("plugin",)
@@ -532,7 +542,10 @@ class SelectionTests(unittest.TestCase):
         )
         self.assertEqual(platform["planned"], [])
         self.assertIn("inference", {group["name"] for group in platform["unsupported"]})
-        self.assertEqual(execution_names(plan, "cuda"), set(units["cuda"].groups) - PR_EXCLUDED)
+        self.assertEqual(
+            execution_names(plan, "cuda"),
+            set(routing.execution_groups(self.catalog, units["cuda"])) - PR_EXCLUDED,
+        )
         # Another selected platform still executes the temporary group.
         mixed = build_plan([path], platforms=["cuda", "ascend"], units=units)
         self.assertEqual(mixed["direct_gaps"], [])
@@ -583,7 +596,8 @@ class SelectionTests(unittest.TestCase):
         self.assertEqual(plan["global_groups"]["unmapped_paths"], [])
         self.assertEqual(plan["plan_status"], "partial")
         self.assertEqual(
-            execution_names(plan, "cuda"), set(load_platforms()["cuda"].groups) - PR_EXCLUDED
+            execution_names(plan, "cuda"),
+            set(routing.execution_groups(self.catalog, load_platforms()["cuda"])) - PR_EXCLUDED,
         )
 
     def test_planned_group_without_selected_executor_is_advisory(self):
@@ -641,10 +655,6 @@ class SelectionTests(unittest.TestCase):
             data={},
             device_types=("dev",),
             nproc_per_node=1,
-            groups={
-                "first": {"name": "first", "path": "megatron/core/"},
-                "second": {"name": "second", "path": "megatron/core/"},
-            },
         )
         path = "megatron/core/config.py"
         plan = build_plan(
@@ -675,8 +685,28 @@ class SelectionTests(unittest.TestCase):
         self.assertNotIn("**Plan blocked:", text)
         self.assertEqual(
             execution_names(plan, "cuda"),
-            (set(load_platforms()["cuda"].groups) - PR_EXCLUDED) | {"planned-inference"},
+            set(routing.execution_groups(self.catalog, load_platforms()["cuda"])) - PR_EXCLUDED
+            | {"planned-inference"},
         )
+
+    def test_training_source_keeps_shared_tests_and_scopes_msc_ignore(self):
+        platforms = load_platforms()
+        plan = build_plan(["pretrain_gpt.py"], platforms=list(platforms))
+        test_file = "tests/unit_tests/training/config/test_container_base.py"
+        msc_case = f"{test_file}::TestConfigContainer_ToYaml::test_to_yaml_with_msc_url"
+        training_files = {
+            file.relative_to(ROOT).as_posix()
+            for file in (ROOT / "tests/unit_tests/training").rglob("test_*.py")
+        }
+        self.assertIn(test_file, training_files)
+        for name, platform in platforms.items():
+            with self.subTest(platform=name):
+                identity = platform_plan(plan, name)["config_identity"]
+                resolved = resolver.resolve(self.catalog, platform, ["planned-training"], identity)
+                self.assertEqual(set(resolved[0]["path"].split()), training_files)
+                ignored = platform.data["test_matrix"]["unit"]["ignored_tests"]
+                self.assertNotIn(test_file, ignored)
+                self.assertEqual(msc_case in ignored, name in {"enflame", "hygon", "ppu"})
 
     def test_direct_unsupported_group_blocks_the_plan(self):
         plan = build_plan(["megatron/plugin/Ascend/ascend_plugin.py"], platforms=["musa"])
@@ -900,21 +930,17 @@ class MaterializationTests(unittest.TestCase):
         )
         self.assertIn("pipeline_parallel", selected_names(plan, "hygon"))
 
-    def test_missing_required_group_is_blocked(self):
-        unit = routing.PlatformUnit(
-            name="temp",
-            path=pathlib.Path("temp.yml"),
-            data={},
-            device_types=("dev",),
-            nproc_per_node=8,
-            groups={"models": {"name": "models", "path": "tests/unit_tests/models/"}},
+    def test_required_planned_group_is_blocked(self):
+        groups = dict(self.catalog.groups)
+        groups["core"] = dataclasses.replace(
+            groups["core"], status="planned", reason="not wired yet"
         )
+        catalog = dataclasses.replace(self.catalog, groups=groups)
         plan = build_plan(
-            ["megatron/core/models/gpt/gpt_model.py"], platforms=["temp"], units={"temp": unit}
+            ["megatron/core/models/gpt/gpt_model.py"], platforms=["cuda"], catalog=catalog
         )
-        blocked = [group["name"] for group in platform_plan(plan, "temp")["blocked"]]
-        self.assertEqual(blocked, ["core"])
-        self.assertEqual(selected_names(plan, "temp"), ["models"])
+        blocked = [group["name"] for group in platform_plan(plan, "cuda")["blocked"]]
+        self.assertIn("core", blocked)
 
     def test_required_group_declared_unsupported_is_blocked(self):
         unit = routing.PlatformUnit(
@@ -923,7 +949,6 @@ class MaterializationTests(unittest.TestCase):
             data={},
             device_types=("dev",),
             nproc_per_node=8,
-            groups={"models": {"name": "models", "path": "tests/unit_tests/models/"}},
             unsupported_groups={"core": "core is unavailable on this test platform"},
         )
         plan = build_plan(
@@ -932,7 +957,8 @@ class MaterializationTests(unittest.TestCase):
         platform = platform_plan(plan, "temp")
         self.assertEqual([group["name"] for group in platform["blocked"]], ["core"])
         self.assertEqual([group["name"] for group in platform["unsupported"]], [])
-        self.assertEqual(selected_names(plan, "temp"), ["models"])
+        self.assertIn("models", selected_names(plan, "temp"))
+        self.assertNotIn("core", selected_names(plan, "temp"))
 
     def test_platform_partial_unsupported_keeps_alias_execution(self):
         unit = routing.PlatformUnit(
@@ -941,7 +967,6 @@ class MaterializationTests(unittest.TestCase):
             data={},
             device_types=("dev",),
             nproc_per_node=8,
-            groups={"core": {"name": "core", "path": "tests/unit_tests/test_*.py"}},
             unsupported_groups={"plugin": "plugin tests are not run on this platform"},
         )
         plan = build_plan(
@@ -952,26 +977,19 @@ class MaterializationTests(unittest.TestCase):
         self.assertEqual(selected_names(plan, "temp"), ["core"])
         self.assertEqual(platform["blocked"], [])
 
+        # The alias still executes on this platform, just without plugin tests.
+        resolved = resolver.resolve(self.catalog, unit, ["core"])
+        self.assertEqual(resolved, [{"name": "core", "path": "tests/unit_tests/test_*.py"}])
+
     def test_planned_fallback_skips_platform_unsupported_groups(self):
-        unit = routing.PlatformUnit(
-            name="temp",
-            path=pathlib.Path("temp.yml"),
-            data={},
-            device_types=("dev",),
-            nproc_per_node=8,
-            groups={
-                "core": {"name": "core", "path": "tests/unit_tests/test_*.py"},
-                "models": {"name": "models", "path": "tests/unit_tests/models/"},
-            },
-            unsupported_groups={"plugin": "plugin tests are not run on this platform"},
+        plan = build_plan(["megatron/core/inference/engine.py"], platforms=["musa"])
+        platform = platform_plan(plan, "musa")
+        selected = execution_names(plan, "musa")
+        self.assertNotIn("plugin", selected)
+        self.assertEqual(
+            selected, (set(platform["configured_groups"]) - PR_EXCLUDED) | {"planned-inference"}
         )
-        plan = build_plan(
-            ["megatron/core/inference/engine.py"], platforms=["temp"], units={"temp": unit}
-        )
-        self.assertEqual(execution_names(plan, "temp"), {"core", "models", "planned-inference"})
-        self.assertNotIn(
-            "plugin", [group["name"] for group in platform_plan(plan, "temp")["selected_groups"]]
-        )
+        self.assertNotIn("plugin", [group["name"] for group in platform["selected_groups"]])
 
     def test_planned_fallback_records_excluded_groups(self):
         plan = build_plan(["megatron/core/inference/engine.py"], platforms=["musa"])
@@ -1007,25 +1025,6 @@ class MaterializationTests(unittest.TestCase):
                 for group in platform["selected_groups"]
             )
         )
-
-    def test_active_group_missing_without_declaration_is_unresolved(self):
-        unit = routing.PlatformUnit(
-            name="temp",
-            path=pathlib.Path("temp.yml"),
-            data={},
-            device_types=("dev",),
-            nproc_per_node=8,
-            groups={
-                "core": {"name": "core", "path": "tests/unit_tests/test_*.py"},
-                "models": {"name": "models", "path": "tests/unit_tests/models/"},
-            },
-        )
-        plan = build_plan(
-            ["megatron/core/datasets/foo.py"], platforms=["temp"], units={"temp": unit}
-        )
-        platform = platform_plan(plan, "temp")
-        self.assertEqual([group["name"] for group in platform["unresolved"]], ["data"])
-        self.assertEqual(selected_names(plan, "temp"), ["core"])
 
     def test_execution_matrix_deduplicates_aliases(self):
         plan = build_plan(["megatron/plugin/Ascend/ascend_plugin.py"], platforms=["cuda"])

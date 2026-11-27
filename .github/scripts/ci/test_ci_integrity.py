@@ -69,10 +69,14 @@ class RoutingIntegrityTests(unittest.TestCase):
             for step in workflow["jobs"]["checkout_and_config"]["steps"]
             if step.get("id") == "config"
         )
-        script = step["run"].split("<<'PY'\n")[1].split("\nPY")[0]
-        config = yaml.safe_load((ROOT / ".github/configs/cuda.yml").read_text())
+        self.assertIn(".github/scripts/ci/resolve_unit_groups.py", step["run"])
         run = subprocess.run(
-            [sys.executable, "-c", script, json.dumps(config["test_matrix"]["unit"]["groups"])],
+            [
+                sys.executable,
+                str(ROOT / ".github/scripts/ci/resolve_unit_groups.py"),
+                "--platform-config",
+                str(ROOT / ".github/configs/cuda.yml"),
+            ],
             cwd=ROOT,
             env={
                 **os.environ,
@@ -215,7 +219,7 @@ class EvidenceIntegrityTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "failures count mismatch"):
                 evidence.collect(root, ["normal-0.xml"])
-            (root / "normal-0.xml").write_text('<testsuite><testcase/></testsuite>')
+            (root / "normal-0.xml").write_text("<testsuite><testcase/></testsuite>")
             (root / "experimental-0.xml").write_text('<testsuite tests="0"/>')
             self.assertFalse(
                 evidence.validate(evidence.collect(root, ["normal-0.xml", "experimental-0.xml"]))
@@ -277,12 +281,12 @@ class CandidateConfigTests(unittest.TestCase):
                     group["status"] = "active"
                     group.pop("reason", None)
             project_path.write_text(yaml.safe_dump(project))
+            # Activating a group needs only the project contract: no platform
+            # file lists execution groups any more.
             config_path = root / ".github/configs/cuda.yml"
-            config = yaml.safe_load(config_path.read_text())
-            config["test_matrix"]["unit"]["groups"].append(
-                {"name": "inference", "path": "tests/unit_tests/inference/"}
+            self.assertNotIn(
+                "groups", yaml.safe_load(config_path.read_text())["test_matrix"]["unit"]
             )
-            config_path.write_text(yaml.safe_dump(config))
             for args in (
                 ["init", "-q"],
                 ["add", "."],
