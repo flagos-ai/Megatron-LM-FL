@@ -43,34 +43,6 @@ test_matrix:
       - --tb=short
       - -m
       - not experimental and not flaky_in_dev
-    groups:
-      - name: core
-        path: tests/unit_tests/test_*.py megatron/plugin/tests/
-        description: Core unit tests
-      - name: models
-        path: tests/unit_tests/models/
-        description: Model tests
-      - name: distributed
-        path: tests/unit_tests/distributed/
-        description: Distributed tests
-      - name: dist_checkpointing
-        path: tests/unit_tests/dist_checkpointing/
-        description: Distributed checkpointing tests
-      - name: tensor_parallel
-        path: tests/unit_tests/tensor_parallel/
-        description: Tensor parallel tests
-      - name: pipeline_parallel
-        path: tests/unit_tests/pipeline_parallel/
-        description: Pipeline parallel tests
-      - name: data
-        path: tests/unit_tests/data/
-        description: Data tests
-      - name: fusions
-        path: tests/unit_tests/fusions/
-        description: Fusion tests
-      - name: others
-        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: post-training, tokenizer, and utility tests
     unsupported_groups:
       optimizer: "Optimizer tests are not onboarded or validated in the enflame CI runtime; CUDA provides execution coverage."
       extensions: "Extension tests are not onboarded or validated in the enflame CI runtime; CUDA provides execution coverage."
@@ -281,6 +253,8 @@ test_matrix:
       # triggers ECCL communicator setup timeout (rank 0 fails broadcastUniqueECCLID, ranks 2-7 wait
       # 60s for ecclUniqueId); GCU device type is "gcu" not "cuda"; Enflame-specific
       - tests/unit_tests/dist_checkpointing/test_msc.py
+      # PR #240 exposed the missing MSC dependency when training sources trigger the suite.
+      - tests/unit_tests/training/config/test_container_base.py::TestConfigContainer_ToYaml::test_to_yaml_with_msc_url
 
       # tensor_parallel
       # ECCL allreduce SIGSEGV in cross_entropy

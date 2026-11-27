@@ -54,37 +54,6 @@ test_matrix:
       - -rfE
       - -m
       - not experimental and not flaky_in_dev
-    groups:
-      - name: core
-        path: tests/unit_tests/test_*.py megatron/plugin/tests/
-        description: Core unit tests
-      - name: models
-        path: tests/unit_tests/models/
-        description: Model tests
-      # The Hygon distributed group is temporarily omitted. After applying the
-      # backend exclusions below, only the reduce-scatter accumulation and
-      # Torch FSDP2 files remained; both fail before consistent process-group
-      # teardown on BW1000, so scheduling the group provides no valid coverage.
-      # Re-enable this group when either boundary is supported by the DTK stack.
-      - name: dist_checkpointing
-        path: tests/unit_tests/dist_checkpointing/
-        description: Distributed checkpointing tests
-      - name: tensor_parallel
-        path: tests/unit_tests/tensor_parallel/
-        description: Tensor parallel tests
-      - name: pipeline_parallel
-        path: tests/unit_tests/pipeline_parallel/
-        description: Pipeline parallel tests
-      # The Hygon data group is temporarily omitted. Existing backend and
-      # fixture exclusions leave only test_bin_reader.py, which starts ten
-      # preprocessing workers on each of the eight ranks and leaves one rank
-      # blocked until the unit-test hard timeout.
-      - name: fusions
-        path: tests/unit_tests/fusions/
-        description: Fusion tests
-      - name: others
-        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: post-training, tokenizer, and utility tests
     unsupported_groups:
       optimizer: "Optimizer tests are not onboarded or validated in the hygon CI runtime; CUDA provides execution coverage."
       extensions: "Extension tests are not onboarded or validated in the hygon CI runtime; CUDA provides execution coverage."
@@ -324,6 +293,8 @@ test_matrix:
       # PP=4 checkpoint group, and its synchronized temporary directory then
       # prevents the group from reaching clean teardown.
       - tests/unit_tests/dist_checkpointing/test_msc.py
+      # PR #240 exposed the missing MSC dependency when training sources trigger the suite.
+      - tests/unit_tests/training/config/test_container_base.py::TestConfigContainer_ToYaml::test_to_yaml_with_msc_url
       # The only executable legacy non-persistent checkpoint case fails on all
       # ranks. CUDA and MetaX also exclude this file.
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py

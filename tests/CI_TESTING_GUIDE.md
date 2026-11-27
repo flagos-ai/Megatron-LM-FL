@@ -139,7 +139,7 @@ workflow are:
 | `container_volumes` | Host-to-container mounts |
 | `container_options` | Runtime, device, shared-memory, and security options |
 | `device_types` | Device values used to expand the test matrix |
-| `test_matrix.unit.groups` | Named unit-test paths |
+| `test_matrix.unit.unsupported_groups` | Logical groups this runtime cannot execute, with a reason |
 | `test_matrix.unit.pytest_extra_args` | Additional pytest arguments |
 | `test_matrix.unit.ignored_tests` | Platform-specific file or node exclusions |
 | `test_matrix.functional.train` | Functional and benchmark cases |
@@ -178,7 +178,9 @@ silently replace that stack with packages from public PyPI.
 ## Adding a unit test
 
 There is no separate unit-test registry. A test enters CI when pytest discovers
-its name and a unit group in the target platform config selects its path.
+its name and the logical group that owns its directory is executed by the target
+platform. Test paths are declared once, in `.flagcicd/project.yaml`; a platform
+config can only opt a group out.
 
 Put the test under `tests/unit_tests/` in the directory that owns the behavior.
 Name files `test_*.py`, functions and methods `test_*`, and classes `Test*`.
@@ -190,27 +192,27 @@ unrelated root-level file.
 The complete unit-test selection path is:
 
 ```text
-.github/configs/<platform>.yml
-  test_matrix.unit.groups[].path
-    -> all_tests_common.yml reads the groups
+.flagcicd/project.yaml test_groups[].test_targets   # the only scope declaration
+  -> unsupported_groups in .github/configs/<platform>.yml   # the only opt-out
+    -> resolve_unit_groups.py builds the platform's execution groups
+    -> all_tests_common.yml publishes the resolved groups
     -> unit_tests_common.yml creates one job per device
     -> run_unit_groups.py iterates the configured groups in that job
-    -> CI_TEST_PATH=<group path>
+    -> CI_TEST_PATH=<resolved catalog paths>
     -> run_ci_unit_tests.sh expands paths and platform exclusions
     -> torch.distributed.run starts CI_NPROC_PER_NODE processes
     -> every rank runs the same pytest selection
 ```
 
+`paths` (implementation code) decides when a group is triggered; `test_targets`
+(test code) decides what it runs. Keeping them apart means adding or moving a
+test file never silently widens the trigger set, and changing a trigger path
+never changes what executes.
+
 For example, a new file at
-`tests/unit_tests/models/test_my_model.py` is automatically selected when the
-platform contains:
-
-```yaml
-- name: models
-  path: tests/unit_tests/models/
-```
-
-No workflow edit is needed in that case. The common directory mapping is:
+`tests/unit_tests/models/test_my_model.py` is automatically selected because the
+`models` group already declares that directory. Nothing is registered per
+platform. The common directory mapping is:
 
 | Test location | Group |
 | --- | --- |
@@ -228,33 +230,47 @@ No workflow edit is needed in that case. The common directory mapping is:
 Other directories under `tests/unit_tests/` have logical groups in the routing
 catalog but are not executed by any platform yet. They are marked
 `status: planned`; a change that directly matches one of them blocks the plan
-until a platform config adds the execution group. When a planned group is
+until the group is activated in the catalog. When a planned group is
 reached only through a shared-path fallback, the platform expands to every
 active group it can execute and records the rest under `fallback_excluded`.
 
-The platform config remains authoritative. A platform may omit a complete
-group when its runtime cannot execute that boundary. A root glob such as
-`tests/unit_tests/test_*.py` also does not include tests in subdirectories.
+The catalog remains authoritative. A platform that cannot execute a group
+declares it in `unsupported_groups` with a reason; it cannot narrow a path. A
+root glob such as `tests/unit_tests/test_*.py` also does not include tests in
+subdirectories.
 
 If a new top-level directory is not covered, add it to
-`.flagcicd/project.yaml` and register an execution group in every platform
-config that should run it. Then run both validators listed above:
+`.flagcicd/project.yaml`. That single edit makes it run on every platform; a
+platform that cannot run it opts out in its own config. Then run both validators
+listed above:
+
+```yaml
+test_groups:            # .flagcicd/project.yaml: the only scope declaration
+  - name: optimizer
+    paths:              # implementation code: what triggers the group
+      - megatron/core/optimizer/
+    test_targets:       # test code: what the group runs
+      - tests/unit_tests/optimizer/
+```
 
 ```yaml
 test_matrix:
   unit:
-    groups:
-      - name: optimizer
-        path: tests/unit_tests/optimizer/
-        description: Optimizer tests
+    unsupported_groups:  # .github/configs/<platform>.yml: opt out only
+      optimizer: "vendor kernels are not onboarded on this runtime"
 ```
 
-A group `path` may contain multiple repository-relative paths separated by
-spaces. Directory paths are collected recursively.
+A catalog group's `paths` and `test_targets` may each contain multiple
+repository-relative entries; directories are collected recursively. The contract
+rejects test code in `paths` and implementation code in `test_targets`, and a
+platform config that declares `test_matrix.unit.groups` fails validation, so the
+scope cannot be duplicated again.
 
 Before submitting a new test:
 
-1. Check the group paths in every applicable `.github/configs/<platform>.yml`.
+1. Check the owning group's `test_targets` in `.flagcicd/project.yaml`, then
+   confirm no platform lists the file in `ignored_tests` or the group in
+   `unsupported_groups`.
 2. Run `python3 -m pytest --collect-only <path>` in the platform container.
 3. Check that `test_matrix.unit.ignored_tests` does not exclude the file or
    node ID.
@@ -267,16 +283,16 @@ selects it. The group run is the final collection check.
 ### Logical groups and diff routing
 
 `.flagcicd/project.yaml` owns logical routing and is read directly. Each
-group declares `status: active|planned|unsupported`, and may declare an
+group declares `status: active|planned|unsupported`, `paths` (implementation
+code that triggers it) and `test_targets` (test code it runs), and may declare an
 `execution_group` alias (for example, `plugin` executes as `core`). An alias
 must target an existing active group, and required levels are checked through
-that effective execution group. Platform
-configs remain authoritative for execution: a platform runs a group only when
-it declares a matching unit group. For every other active group it must declare
-`unsupported_groups` with a reason; the validator rejects an active group that
-has no platform owner. A platform may also declare a group unsupported when the
-execution group exists but does not collect every test path of that group; the
-declaration is rejected only when all test paths are already covered.
+that effective execution group. A platform runs every active group except the
+ones it names in `unsupported_groups`; the entry removes that logical group's
+`test_targets` from the execution group that would otherwise collect them.
+Opting out of an alias target stops its aliases too. The validator fails only
+when every platform opts out of an active group, which keeps a group with no
+execution anywhere visible.
 
 `.github/scripts/ci/generate_test_plan.py` runs in the `generate-matrix` job. It
 combines the catalog, the platform router, and the selected platform configs,
@@ -575,8 +591,21 @@ Use `source`, not `bash`, for local setup so exported runtime variables remain
 in the current shell. GitHub Actions invokes the script with `bash` because
 `ci_export_env` writes the variables to `GITHUB_ENV` for the next step.
 
-Change `CI_TEST_GROUP` and `CI_TEST_PATH` together to select another group. A
-single test can be selected without changing the script:
+Change `CI_TEST_GROUP` and `CI_TEST_PATH` together to select another group. CI
+derives `CI_TEST_PATH` from `.flagcicd/project.yaml`; print the exact value
+instead of copying a path:
+
+```bash
+python3 .github/scripts/ci/resolve_unit_groups.py \
+  --platform-config .github/configs/hygon.yml --expected '["models"]'
+# [{"name":"models","path":"tests/unit_tests/models/"}]
+
+export CI_TEST_GROUP=models
+export CI_TEST_PATH=tests/unit_tests/models/
+tests/test_utils/runners/run_ci_unit_tests.sh
+```
+
+A single test can be selected without changing the script:
 
 ```bash
 export CI_TEST_GROUP=debug_one_test

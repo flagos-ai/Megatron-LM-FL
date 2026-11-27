@@ -39,6 +39,7 @@ class Group:
     reason: str
     execution_group: str | None
     paths: tuple[str, ...]
+    test_targets: tuple[str, ...]
     depends_on: tuple[str, ...]
     # Empty means every stage; otherwise the group runs only in these stages.
     stages: tuple[str, ...] = ()
@@ -69,12 +70,12 @@ class Catalog:
     digest: str
 
     def matches_all(self, path: str) -> list[str]:
-        """Return every logical group whose path patterns match the repository path."""
+        """Return every logical group whose trigger or test paths match the path."""
         return sorted(
             {
                 group.name
                 for group in self.groups.values()
-                for pattern in group.paths
+                for pattern in (*group.paths, *group.test_targets)
                 if _matches(path, pattern)
             }
         )
@@ -84,7 +85,7 @@ class Catalog:
         matches = [
             (len(pattern), group.name)
             for group in self.groups.values()
-            for pattern in group.paths
+            for pattern in (*group.paths, *group.test_targets)
             if _matches(path, pattern)
         ]
         if not matches:
@@ -171,13 +172,14 @@ class Catalog:
                             f"Group {name} execution_group targets {target.status} group: "
                             f"{group.execution_group}"
                         )
-            if not group.paths:
-                errors.append(f"Group {name} declares no paths")
-            for pattern in group.paths:
+            if not group.test_targets:
+                errors.append(f"Group {name} declares no test_targets")
+            for pattern in (*group.paths, *group.test_targets):
                 if not pattern:
                     errors.append(f"Group {name} declares an empty path")
                 elif root is not None and not path_exists(root, pattern):
-                    errors.append(f"Group {name} path does not exist: {pattern}")
+                    label = "test target" if pattern in group.test_targets else "path"
+                    errors.append(f"Group {name} {label} does not exist: {pattern}")
             for dependency in group.depends_on:
                 if dependency not in self.groups:
                     errors.append(f"Group {name} depends on unknown group: {dependency}")
@@ -236,9 +238,48 @@ class PlatformUnit:
     data: dict[str, Any]
     device_types: tuple[str, ...]
     nproc_per_node: int
-    groups: dict[str, dict[str, Any]]
     unsupported_groups: dict[str, str] = field(default_factory=dict)
     digest: str = ""
+
+
+def is_test_path(path: str) -> bool:
+    """Return whether a catalog path is test code rather than implementation code."""
+    return path.startswith("tests/") or "/tests/" in path
+
+
+def execution_groups(catalog: Catalog, platform: PlatformUnit) -> dict[str, tuple[str, ...]]:
+    """Return the execution groups one platform runs and their test paths.
+
+    The catalog owns the scope and the platform only opts out: every active
+    logical group runs unless the platform declares it unsupported, so adding a
+    group in ``.flagcicd/project.yaml`` reaches every platform without editing
+    nine files. An execution group collects all logical groups that resolve to
+    it, in catalog order, which is also the order the runner executes them.
+    """
+    groups: dict[str, list[str]] = {}
+    for name, group in catalog.groups.items():
+        if group.status != "active" or name in platform.unsupported_groups:
+            continue
+        # An alias runs only when its target execution group runs; opting out of
+        # the target must not leave the alias executing on its own.
+        if group.execution_group is not None:
+            target = catalog.groups.get(group.execution_group)
+            if target is None or target.status != "active":
+                continue
+            if group.execution_group in platform.unsupported_groups:
+                continue
+        paths = groups.setdefault(group.execution_group or name, [])
+        for path in group.test_targets:
+            if path not in paths:
+                paths.append(path)
+    return {name: tuple(paths) for name, paths in groups.items()}
+
+
+def execution_paths(
+    catalog: Catalog, platform: PlatformUnit, execution_group: str
+) -> tuple[str, ...]:
+    """Return the test paths one platform runs for an execution group."""
+    return execution_groups(catalog, platform).get(execution_group, ())
 
 
 def _matches(path: str, pattern: str) -> bool:
@@ -314,7 +355,7 @@ def load_catalog(path: pathlib.Path) -> Catalog:
             raise CatalogError(f"Invalid group name: {name!r}")
         if not isinstance(entry, dict):
             raise CatalogError(f"Group {name} must be a mapping")
-        paths = _string_tuple(entry, "paths", required=True)
+        paths = _string_tuple(entry, "paths")
         depends_on = _string_tuple(entry, "depends_on")
         status = entry.get("status", "active")
         if status not in _STATUSES:
@@ -336,6 +377,7 @@ def load_catalog(path: pathlib.Path) -> Catalog:
             reason=reason,
             execution_group=execution_group,
             paths=paths,
+            test_targets=_string_tuple(entry, "test_targets", required=True),
             depends_on=depends_on,
             stages=_string_tuple(entry, "stages"),
         )
@@ -389,21 +431,12 @@ def load_platform(config_path: pathlib.Path) -> PlatformUnit:
             f"test_matrix.unit.nproc_per_node must be a positive integer: {config_path}"
         )
 
-    groups: dict[str, dict[str, Any]] = {}
-    entries = unit.get("groups") or []
-    if not isinstance(entries, list):
-        raise CatalogError(f"test_matrix.unit.groups must be a list: {config_path}")
-    for entry in entries:
-        if not isinstance(entry, dict):
-            raise CatalogError(f"Each unit group must be a mapping: {config_path}")
-        name = entry.get("name")
-        if not isinstance(name, str) or not GROUP_NAME.fullmatch(name):
-            raise CatalogError(f"Invalid unit group name {name!r}: {config_path}")
-        if name in groups:
-            raise CatalogError(f"Duplicate unit group {name}: {config_path}")
-        if not isinstance(entry.get("path"), str) or not entry["path"].strip():
-            raise CatalogError(f"Unit group {name} has no test path: {config_path}")
-        groups[name] = entry
+    if "groups" in unit:
+        raise CatalogError(
+            "test_matrix.unit.groups is no longer supported: "
+            f"{config_path}. Execution groups come from .flagcicd/project.yaml; "
+            "opt out with unsupported_groups instead."
+        )
 
     unsupported_raw = unit.get("unsupported_groups") or {}
     if not isinstance(unsupported_raw, dict):
@@ -433,7 +466,6 @@ def load_platform(config_path: pathlib.Path) -> PlatformUnit:
         data=data,
         device_types=tuple(device_types),
         nproc_per_node=nproc,
-        groups=groups,
         unsupported_groups=unsupported_groups,
         digest="sha256:" + hashlib.sha256(raw).hexdigest(),
     )
@@ -622,6 +654,7 @@ def materialize_groups(
     run, so the plan never narrows coverage around a known gap.
     """
     stage_excluded = frozenset(stage_excluded)
+    executable_groups = execution_groups(catalog, platform)
     executable: list[dict[str, Any]] = []
     planned: list[dict[str, Any]] = []
     unsupported: list[dict[str, Any]] = []
@@ -664,7 +697,7 @@ def materialize_groups(
                 blocked.append(entry_for(name, group))
             else:
                 unsupported.append(entry_for(name, group, reason=platform.unsupported_groups[name]))
-        elif effective in platform.groups:
+        elif effective in executable_groups:
             executable.append(entry_for(name, group, effective))
         elif name in required:
             blocked.append(entry_for(name, group))
@@ -690,7 +723,7 @@ def materialize_groups(
                 else:
                     fallback_excluded.append(exclusion(name, "unsupported", detail))
                 continue
-            if effective not in platform.groups:
+            if effective not in executable_groups:
                 if name in required:
                     fallback_excluded.append(
                         exclusion(

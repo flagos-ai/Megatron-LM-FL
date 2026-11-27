@@ -38,10 +38,6 @@ test_matrix:
   unit:
     nproc_per_node: 8
     pytest_extra_args: []
-    groups:
-      - name: models
-        path: tests/unit_tests/models/
-        description: Model tests
     ignored_tests: []
     # Source directories excluded from this platform's reported coverage.
     coverage_omit: []

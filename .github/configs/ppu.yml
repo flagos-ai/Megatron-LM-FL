@@ -39,37 +39,8 @@ test_matrix:
     pytest_extra_args:
       - -m
       - not experimental and not flaky_in_dev
-      - --maxfail=1
     experimental_pytest_extra_args: []
     # Matches the nine groups attempted manually. Transformer is not onboarded yet.
-    groups:
-      - name: core
-        path: tests/unit_tests/test_*.py megatron/plugin/tests/
-        description: Core unit tests
-      - name: models
-        path: tests/unit_tests/models/
-        description: Model tests
-      - name: distributed
-        path: tests/unit_tests/distributed/
-        description: Distributed tests
-      - name: dist_checkpointing
-        path: tests/unit_tests/dist_checkpointing/
-        description: Distributed checkpointing tests
-      - name: tensor_parallel
-        path: tests/unit_tests/tensor_parallel/
-        description: Tensor parallel tests
-      - name: pipeline_parallel
-        path: tests/unit_tests/pipeline_parallel/
-        description: Pipeline parallel tests
-      - name: data
-        path: tests/unit_tests/data/
-        description: Data tests
-      - name: fusions
-        path: tests/unit_tests/fusions/
-        description: Fusion tests
-      - name: others
-        path: tests/unit_tests/post_training/ tests/unit_tests/tokenizers/ tests/unit_tests/utils/
-        description: Post-training, tokenizer, and utility tests
     # Temporary runtime-capability quarantine from the 2026-09-20 manual runs.
     # Re-enable after the matching dependency fix passes the affected tests.
     # Unknown timeouts and missing test assets must remain visible failures.
@@ -211,6 +182,8 @@ test_matrix:
       - tests/unit_tests/dist_checkpointing/test_global_metadata_reuse.py
       - tests/unit_tests/dist_checkpointing/test_layer_wise_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_msc.py
+      # PR #240 exposed the missing MSC dependency when training sources trigger the suite.
+      - tests/unit_tests/training/config/test_container_base.py::TestConfigContainer_ToYaml::test_to_yaml_with_msc_url
       - tests/unit_tests/dist_checkpointing/test_nonpersistent.py
       - tests/unit_tests/dist_checkpointing/test_optimizer.py
       - tests/unit_tests/dist_checkpointing/test_pipeline_parallel_layout.py
